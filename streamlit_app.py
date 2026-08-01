@@ -82,15 +82,97 @@ if referral_code:
 else:
     st.info("Вы открыли сайт без персональной партнёрской ссылки.")
 
-st.button(
-    "Продолжить регистрацию через Telegram",
-    use_container_width=True,
-    disabled=True,
+# Защищённый вход через Telegram
+import hashlib
+import hmac
+import html
+import time
+from urllib.parse import urlencode
+
+telegram_keys = (
+    "id",
+    "first_name",
+    "last_name",
+    "username",
+    "photo_url",
+    "auth_date",
 )
 
-st.caption(
-    "Подключение защищённого входа через Telegram будет активировано на следующем этапе."
-)
+telegram_data = {
+    key: str(st.query_params.get(key))
+    for key in telegram_keys
+    if st.query_params.get(key) is not None
+}
+
+received_hash = str(st.query_params.get("hash", ""))
+
+
+def telegram_auth_is_valid(data, received_hash):
+    if not data or not received_hash:
+        return False
+
+    try:
+        auth_date = int(data["auth_date"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    # Не принимаем устаревшие данные авторизации
+    if abs(time.time() - auth_date) > 86400:
+        return False
+
+    data_check_string = "\n".join(
+        f"{key}={data[key]}" for key in sorted(data)
+    )
+
+    secret_key = hashlib.sha256(
+        st.secrets["TELEGRAM_BOT_TOKEN"].encode("utf-8")
+    ).digest()
+
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    return hmac.compare_digest(calculated_hash, received_hash)
+
+
+if received_hash:
+    if telegram_auth_is_valid(telegram_data, received_hash):
+        first_name = telegram_data.get("first_name", "Пользователь")
+        telegram_id = telegram_data.get("id", "")
+
+        st.success(
+            f"Вход через Telegram подтверждён. Добро пожаловать, {first_name}!"
+        )
+        st.caption(f"Telegram ID: {telegram_id}")
+    else:
+        st.error(
+            "Не удалось подтвердить вход через Telegram. Попробуйте ещё раз."
+        )
+else:
+    bot_username = st.secrets["TELEGRAM_BOT_USERNAME"]
+
+    auth_url = "https://agency-w.streamlit.app/"
+    if referral_code:
+        auth_url += "?" + urlencode({"ref": referral_code})
+
+    st.html(
+        f"""
+        <div style="display:flex; justify-content:center; margin:0.5rem 0 1rem;">
+            <script async
+                src="https://telegram.org/js/telegram-widget.js?22"
+                data-telegram-login="{html.escape(bot_username, quote=True)}"
+                data-size="large"
+                data-radius="10"
+                data-auth-url="{html.escape(auth_url, quote=True)}">
+            </script>
+        </div>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+    st.caption("Подтвердите вход в безопасном окне Telegram.")
 
 st.divider()
 
