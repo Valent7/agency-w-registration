@@ -81,6 +81,60 @@ st.markdown(
             text-align: center;
             line-height: 1.6;
         }
+
+                /* Мобильная версия */
+        @media (max-width: 768px) {
+
+            .block-container {
+                padding-top: 1rem;
+                padding-left: 1rem;
+                padding-right: 1rem;
+                max-width: 100%;
+            }
+
+            .main-title {
+                font-size: clamp(1.7rem, 8vw, 2.3rem);
+                line-height: 1.15;
+                white-space: nowrap;
+                margin-bottom: 0.5rem;
+            }
+
+            .subtitle {
+                font-size: 1rem;
+                line-height: 1.4;
+                margin-bottom: 1.2rem;
+            }
+
+            .registration-card {
+                padding: 1.5rem 1rem;
+                border-radius: 1.25rem;
+            }
+
+            .registration-card h2 {
+                font-size: 2rem;
+                line-height: 1.15;
+                margin-bottom: 1rem;
+            }
+
+            .registration-card p {
+                font-size: 1rem;
+                line-height: 1.5;
+            }
+
+            div[data-testid="stCode"] pre {
+                white-space: pre-wrap !important;
+                overflow-wrap: anywhere;
+                word-break: break-all;
+                font-size: 0.85rem;
+            }
+        }
+
+        header[data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        #MainMenu,
+        footer {
+            display: none !important;
+        }
     </style>
     """,
     unsafe_allow_html=True,
