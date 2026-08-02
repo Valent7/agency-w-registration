@@ -146,6 +146,24 @@ div[data-testid="stAlert"] p {
         footer {
             display: none !important;
         }
+                /* Убираем нижний значок и плашку Streamlit */
+        div[class*="viewerBadge"],
+        div[class*="ViewerBadge"],
+        [data-testid="stViewerBadge"] {
+            display: none !important;
+        }
+
+        /* Делаем обычный текст читаемым на тёмном фоне */
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] strong {
+            color: #e7e0d4 !important;
+        }
+
+        /* Текст цветных уведомлений оставляем светлым */
+        div[data-testid="stAlert"] p {
+            color: #f5f5f5 !important;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -264,6 +282,7 @@ else:
                 data-telegram-login="{html.escape(bot_username, quote=True)}"
                 data-size="large"
                 data-radius="10"
+                data-lang="ru"
                 data-auth-url="{html.escape(auth_url, quote=True)}">
             </script>
         </div>
