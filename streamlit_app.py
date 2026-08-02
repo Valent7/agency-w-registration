@@ -108,6 +108,9 @@ st.markdown(
             .registration-card {
                 padding: 1.5rem 1rem;
                 border-radius: 1.25rem;
+                min-height: auto !important;
+                height: auto !important;
+                justify-content: flex-start !important;
             }
 
             .registration-card h2 {
@@ -120,7 +123,15 @@ st.markdown(
                 font-size: 1rem;
                 line-height: 1.5;
             }
+div[data-testid="stAlert"] {
+    padding: 0.9rem 1rem !important;
+}
 
+div[data-testid="stAlert"] p {
+    color: #f5f5f5 !important;
+    font-size: 0.95rem !important;
+    line-height: 1.4 !important;
+}
             div[data-testid="stCode"] pre {
                 white-space: pre-wrap !important;
                 overflow-wrap: anywhere;
