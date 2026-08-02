@@ -176,7 +176,10 @@ if received_hash:
         st.success(
             f"Вход через Telegram подтверждён. Добро пожаловать, {first_name}!"
         )
-        st.caption(f"Telegram ID: {telegram_id}")
+        partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
+        st.markdown(f"**Ваш партнёрский код:** `{member_code}`")
+        st.markdown("**Ваша персональная ссылка:**")
+        st.code(partner_link, language=None)
     else:
         st.error(
             "Не удалось подтвердить вход через Telegram. Попробуйте ещё раз."
