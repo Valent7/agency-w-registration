@@ -260,9 +260,96 @@ if received_hash:
             f"Вход через Telegram подтверждён. Добро пожаловать, {first_name}!"
         )
         partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
-        st.markdown(f"**Ваш партнёрский код:** `{member_code}`")
-        st.markdown("**Ваша персональная ссылка:**")
-        st.code(partner_link, language=None)
+        st.markdown(f"## Добро пожаловать, {first_name}!")
+        st.markdown("### 🟢 Мы строим своё будущее")
+
+        main_section = st.segmented_control(
+            "Главное меню",
+            ["☀️ День", "🤖 Агенты", "👥 Команда", "👤 Профиль"],
+            default="☀️ День",
+            required=True,
+            label_visibility="collapsed",
+            width="stretch",
+            key="main_section",
+        )
+
+        if main_section == "☀️ День":
+            st.markdown("### ☀️ Мой день")
+
+            st.info(
+                "Настрой дня: действуем спокойно, последовательно "
+                "и доводим начатое до результата."
+            )
+
+            with st.container(border=True):
+                st.markdown("**📅 Встречи**")
+                st.caption("Сегодняшние встречи появятся здесь.")
+
+            with st.container(border=True):
+                st.markdown("**✅ Задачи на сегодня**")
+                st.caption("Главные задачи дня появятся здесь.")
+
+            with st.container(border=True):
+                st.markdown("**📊 Итоги**")
+                st.caption("Здесь будут итоги недели и месяца.")
+
+        elif main_section == "🤖 Агенты":
+            st.markdown("### 🤖 Агенты")
+
+            selected_agent = st.selectbox(
+                "Выберите агента",
+                ["Стагирит", "Неония", "Неона", "Неола"],
+                key="selected_agent",
+            )
+
+            agent_descriptions = {
+                "Стагирит": (
+                    "Главный координатор и заместитель директора. "
+                    "Распределяет задачи между агентами и контролирует результат."
+                ),
+                "Неония": (
+                    "Анализирует проекты, сегментирует людей "
+                    "и находит подходящих кандидатов."
+                ),
+                "Неона": (
+                    "Ведёт диалог, отвечает по контексту "
+                    "и подводит человека к осознанной встрече."
+                ),
+                "Неола": (
+                    "Проводит онбординг, помогает новичку начать работу "
+                    "и сопровождает его после регистрации."
+                ),
+            }
+
+            with st.container(border=True):
+                st.markdown(f"#### {selected_agent}")
+                st.write(agent_descriptions[selected_agent])
+                st.caption("Подключение агента будет следующим этапом.")
+
+        elif main_section == "👥 Команда":
+            st.markdown("### 👥 Команда")
+
+            with st.container(border=True):
+                st.markdown("**Лично приглашённые партнёры**")
+                st.caption("Список партнёров появится после подключения базы.")
+
+            with st.container(border=True):
+                st.markdown("**Структура и активность**")
+                st.caption("Здесь будут новые регистрации и результаты команды.")
+
+        elif main_section == "👤 Профиль":
+            inviter_text = referral_code if referral_code else "не указан"
+
+            st.markdown("### 👤 Профиль")
+
+            with st.container(border=True):
+                st.markdown(f"**Имя:** {first_name}")
+                st.markdown(f"**Партнёрский код:** `{member_code}`")
+                st.markdown(f"**Пригласитель:** `{inviter_text}`")
+                st.markdown("**Статус:** 🟢 Активен")
+
+            st.markdown("**Персональная партнёрская ссылка:**")
+            st.code(partner_link, language=None)
     else:
         st.error(
             "Не удалось подтвердить вход через Telegram. Попробуйте ещё раз."
