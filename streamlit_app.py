@@ -12,26 +12,92 @@ st.set_page_config(
 # Получаем код пригласившего из ссылки вида:
 # https://agency-w.streamlit.app/?ref=W12345
 referral_code = st.query_params.get("ref", "").strip()
-def ask_openai(system_prompt, user_message):
+def ask_openai(
+    system_prompt,
+    user_message,
+    uploaded_files=None,
+    use_web_search=False,
+):
     api_key = st.secrets.get("OPENAI_API_KEY")
 
     if not api_key:
         return "Ключ OpenAI не найден в настройках приложения."
 
+    uploaded_files = uploaded_files or []
+
+    auth_headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+
     try:
+        input_content = [
+            {
+                "type": "input_text",
+                "text": user_message,
+            }
+        ]
+
+        for uploaded_file in uploaded_files:
+            upload_response = requests.post(
+                "https://api.openai.com/v1/files",
+                headers=auth_headers,
+                data={
+                    "purpose": "user_data",
+                    "expires_after[anchor]": "created_at",
+                    "expires_after[seconds]": "86400",
+                },
+                files={
+                    "file": (
+                        uploaded_file.name,
+                        uploaded_file.getvalue(),
+                        uploaded_file.type
+                        or "application/octet-stream",
+                    )
+                },
+                timeout=120,
+            )
+
+            upload_response.raise_for_status()
+            file_id = upload_response.json()["id"]
+
+            file_item = {
+                "type": "input_file",
+                "file_id": file_id,
+            }
+
+            if uploaded_file.name.lower().endswith(".pdf"):
+                file_item["detail"] = "high"
+
+            input_content.insert(0, file_item)
+
+        request_body = {
+            "model": "gpt-5-mini",
+            "instructions": system_prompt,
+            "input": [
+                {
+                    "role": "user",
+                    "content": input_content,
+                }
+            ],
+            "store": False,
+        }
+
+        if use_web_search:
+            request_body["tools"] = [
+                {
+                    "type": "web_search",
+                    "search_context_size": "medium",
+                }
+            ]
+
         response = requests.post(
             "https://api.openai.com/v1/responses",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                **auth_headers,
                 "Content-Type": "application/json",
             },
-            json={
-                "model": "gpt-5-mini",
-                "instructions": system_prompt,
-                "input": user_message,
-                "store": False,
-            },
-            timeout=90,
+            json=request_body,
+            timeout=180,
         )
 
         response.raise_for_status()
@@ -52,11 +118,22 @@ def ask_openai(system_prompt, user_message):
 
         return answer
 
+    except requests.exceptions.HTTPError as error:
+        if error.response is not None:
+            details = error.response.text[:500]
+            return f"Ошибка OpenAI: {details}"
+
+        return "OpenAI вернул ошибку без пояснения."
+
     except requests.exceptions.RequestException:
         return (
             "Не удалось связаться с ИИ. "
             "Проверьте подключение и повторите попытку."
         )
+
+    except (KeyError, ValueError):
+        return "Не удалось обработать ответ OpenAI."
+        
 def save_member_to_supabase(telegram_data, referral_code):
     telegram_id = int(telegram_data["id"])
     member_code = f"W{telegram_id}"
@@ -397,33 +474,50 @@ if received_hash:
                         "целевую аудиторию и конкретного человека."
                     )
 
-                    with st.form("neonia_analysis_form"):
-                        project_description = st.text_area(
-                            "Опишите проект или предложение",
+                    with st.form("neonia_source_form"):
+                        project_links = st.text_area(
+                            "🔗 Ссылки на проект",
                             placeholder=(
-                                "Что вы предлагаете людям, какую проблему "
-                                "решаете и какой результат они получают?"
+                                "Официальный сайт, страница продукта, "
+                                "презентация или ролик — каждая ссылка "
+                                "с новой строки."
                             ),
-                            height=150,
+                            height=120,
                         )
 
-                        person_description = st.text_area(
-                            "Опишите человека или вставьте информацию о нём",
-                            placeholder=(
-                                "Интересы, профессия, сообщения, описание профиля. "
-                                "Это поле можно пока оставить пустым."
+                        project_files = st.file_uploader(
+                            "📄 Загрузите материалы проекта",
+                            type=[
+                                "pdf",
+                                "docx",
+                                "pptx",
+                                "txt",
+                                "csv",
+                                "xlsx",
+                            ],
+                            accept_multiple_files=True,
+                            help=(
+                                "Можно загрузить сразу несколько документов."
                             ),
-                            height=150,
+                        )
+
+                        owner_note = st.text_area(
+                            "📝 Комментарий владельца — необязательно",
+                            placeholder=(
+                                "Например: отдельно проверь продукт, "
+                                "маркетинг, доходность и возможные риски."
+                            ),
+                            height=100,
                         )
 
                         neonia_submitted = st.form_submit_button(
-                            "🔎 Провести анализ"
+                            "🧭 Изучить проект и построить ЦА"
                         )
 
                         if neonia_submitted:
-                            if not project_description.strip():
+                            if not project_links.strip() and not project_files:
                                 st.warning(
-                                    "Сначала кратко опишите проект или предложение."
+                                    "Добавьте хотя бы одну ссылку или загрузите материал проекта."
                                 )
                             else:
                                 neonia_prompt = """
@@ -454,20 +548,39 @@ if received_hash:
     Чётко отделяй известную информацию от предположений.
     """
     
-                                neonia_request = f"""
-    ПРОЕКТ ИЛИ ПРЕДЛОЖЕНИЕ:
-    
-    {project_description}
-    
-    ИНФОРМАЦИЯ О ЧЕЛОВЕКЕ:
-    
-    {person_description or "Информация пока не предоставлена."}
-    """
+                                                           file_names = (
+                                ", ".join(
+                                    file.name for file in project_files
+                                )
+                                if project_files
+                                else "Файлы не загружены."
+                            )
+
+                            neonia_request = f"""
+ИСТОЧНИКИ ДЛЯ АНАЛИЗА ПРОЕКТА
+
+ССЫЛКИ:
+{project_links.strip() or "Ссылки не добавлены."}
+
+ЗАГРУЖЕННЫЕ ФАЙЛЫ:
+{file_names}
+
+КОММЕНТАРИЙ ВЛАДЕЛЬЦА:
+{owner_note.strip() or "Комментарий не добавлен."}
+
+Изучи приложенные документы и открытые источники по указанным ссылкам.
+Отделяй подтверждённые факты, заявления проекта, независимые данные,
+собственные выводы и информацию, которой недостаточно.
+"""
     
                                 with st.spinner("Неония проводит анализ..."):
                                     neonia_answer = ask_openai(
                                         neonia_prompt,
                                         neonia_request,
+                                        uploaded_files=project_files,
+                                        use_web_search=bool(
+                                            project_links.strip()
+                                        ),
                                     )
     
                                 st.markdown("#### 📋 Результат Неонии")
