@@ -171,32 +171,34 @@ div[data-testid="stAlert"] p {
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="main-title">🏛️ Агентство W</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="subtitle">ИИ-агентство нового поколения</div>',
-    unsafe_allow_html=True,
-)
+if not st.query_params.get("hash"):
+    st.markdown(
+        '<div class="main-title">🏛 Агентство W</div>',
+        unsafe_allow_html=True,
+    )
 
-st.markdown(
-    """
-    <div class="registration-card">
-        <h2>Добро пожаловать</h2>
-        <p>
-            Здесь вы сможете зарегистрироваться, получить личный кабинет
-            и подключить интеллектуальных помощников для развития своего проекта.
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+    st.markdown(
+        '<div class="subtitle">ИИ-агентство нового поколения</div>',
+        unsafe_allow_html=True,
+    )
 
-st.write("")
+    st.markdown(
+        """
+        <div class="registration-card">
+            <h2>Добро пожаловать</h2>
+            <p>
+                Здесь вы сможете зарегистрироваться, получить личный кабинет
+                и подключить интеллектуальных помощников для развития своего проекта.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-if referral_code:
-    st.success(f"Приглашение партнёра принято: {referral_code}")
-else:
-    st.info("Вы открыли сайт без персональной партнёрской ссылки.")
-
+    if referral_code:
+        st.success(f"Приглашение партнёра принято: {referral_code}")
+    else:
+        st.info("Вы открыли сайт без персональной партнёрской ссылки.")
 # Защищённый вход через Telegram
 import hashlib
 import hmac
@@ -258,9 +260,7 @@ if received_hash:
         telegram_id = telegram_data.get("id", "")
         member_code, created = save_member_to_supabase(telegram_data, referral_code)
 
-        st.success(
-            f"Вход через Telegram подтверждён. Добро пожаловать, {first_name}!"
-        )
+        
         partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
         st.markdown(f"## Добро пожаловать, {first_name}!")
         st.markdown("### 🟢 Мы строим своё будущее")
@@ -402,15 +402,16 @@ else:
 
     st.caption("Подтвердите вход в безопасном окне Telegram.")
 
-st.divider()
+if not st.query_params.get("hash"):
+    st.divider()
 
-st.markdown(
-    """
-    **После регистрации вы получите:**
+    st.markdown(
+        """
+        **После регистрации вы получите:**
 
-    🤖 доступ к ИИ-помощникам;  
-    🔗 собственную партнёрскую ссылку;  
-    🗂️ личный рабочий кабинет;  
-    📊 инструменты поиска, общения и сопровождения партнёров.
-    """
-)
+        🤖 доступ к ИИ-помощникам;  
+        🔗 собственную партнёрскую ссылку;  
+        🗂️ личный рабочий кабинет;  
+        📊 инструменты поиска, общения и сопровождения партнёров.
+        """
+    )
