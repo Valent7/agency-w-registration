@@ -548,13 +548,7 @@ if received_hash:
     Чётко отделяй известную информацию от предположений.
     """
     
-                                                           file_names = (
-                                ", ".join(
-                                    file.name for file in project_files
-                                )
-                                if project_files
-                                else "Файлы не загружены."
-                            )
+                            file_names = ", ".join(file.name for file in project_files) if project_files else "Файлы не загружены."
 
                             neonia_request = f"""
 ИСТОЧНИКИ ДЛЯ АНАЛИЗА ПРОЕКТА
