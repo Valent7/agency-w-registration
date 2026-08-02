@@ -12,7 +12,51 @@ st.set_page_config(
 # Получаем код пригласившего из ссылки вида:
 # https://agency-w.streamlit.app/?ref=W12345
 referral_code = st.query_params.get("ref", "").strip()
+def ask_openai(system_prompt, user_message):
+    api_key = st.secrets.get("OPENAI_API_KEY")
 
+    if not api_key:
+        return "Ключ OpenAI не найден в настройках приложения."
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-5-mini",
+                "instructions": system_prompt,
+                "input": user_message,
+                "store": False,
+            },
+            timeout=90,
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = []
+
+        for item in data.get("output", []):
+            if item.get("type") == "message":
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        text_parts.append(content.get("text", ""))
+
+        answer = "\n".join(text_parts).strip()
+
+        if not answer:
+            return "ИИ не сформировал ответ. Попробуйте ещё раз."
+
+        return answer
+
+    except requests.exceptions.RequestException:
+        return (
+            "Не удалось связаться с ИИ. "
+            "Проверьте подключение и повторите попытку."
+        )
 def save_member_to_supabase(telegram_data, referral_code):
     telegram_id = int(telegram_data["id"])
     member_code = f"W{telegram_id}"
@@ -347,7 +391,98 @@ if received_hash:
             with st.container(border=True):
                 st.markdown(f"#### {selected_agent}")
                 st.write(agent_descriptions[selected_agent])
-                st.caption("Подключение агента будет следующим этапом.")
+                if selected_agent == "Неония":
+                    st.caption(
+                        "Рабочая бета-версия: Неония анализирует проект, "
+                        "целевую аудиторию и конкретного человека."
+                    )
+
+                    with st.form("neonia_analysis_form"):
+                        project_description = st.text_area(
+                            "Опишите проект или предложение",
+                            placeholder=(
+                                "Что вы предлагаете людям, какую проблему "
+                                "решаете и какой результат они получают?"
+                            ),
+                            height=150,
+                        )
+
+                        person_description = st.text_area(
+                            "Опишите человека или вставьте информацию о нём",
+                            placeholder=(
+                                "Интересы, профессия, сообщения, описание профиля. "
+                                "Это поле можно пока оставить пустым."
+                            ),
+                            height=150,
+                        )
+
+                        neonia_submitted = st.form_submit_button(
+                            "🔎 Провести анализ"
+                        )
+
+                        if neonia_submitted:
+                            if not project_description.strip():
+                                st.warning(
+                                    "Сначала кратко опишите проект или предложение."
+                                )
+                            else:
+                                neonia_prompt = """
+    Ты — Неония, ИИ-аналитик Агентства W.
+    
+    Твоя задача:
+    — понять суть проекта и его реальную ценность для людей;
+    — определить подходящие сегменты целевой аудитории;
+    — оценить конкретного человека, если информация о нём предоставлена;
+    — не навязывать предложение и не манипулировать;
+    — находить естественные точки соприкосновения;
+    — готовить материал для передачи Неоне, которая продолжит диалог.
+    
+    Отвечай простым русским языком.
+    
+    Структура ответа:
+    
+    1. Суть предложения.
+    2. Какие проблемы людей оно может решать.
+    3. Подходящие сегменты аудитории.
+    4. Анализ человека и степень соответствия — если данные есть.
+    5. Что может его заинтересовать.
+    6. Возможные сомнения или возражения.
+    7. Лучший первый вопрос для начала разговора.
+    8. Что передать Неоне для продолжения диалога.
+    
+    Не придумывай факты о человеке.
+    Чётко отделяй известную информацию от предположений.
+    """
+    
+                                neonia_request = f"""
+    ПРОЕКТ ИЛИ ПРЕДЛОЖЕНИЕ:
+    
+    {project_description}
+    
+    ИНФОРМАЦИЯ О ЧЕЛОВЕКЕ:
+    
+    {person_description or "Информация пока не предоставлена."}
+    """
+    
+                                with st.spinner("Неония проводит анализ..."):
+                                    neonia_answer = ask_openai(
+                                        neonia_prompt,
+                                        neonia_request,
+                                    )
+    
+                                st.markdown("#### 📋 Результат Неонии")
+                                st.write(neonia_answer)
+    
+                elif selected_agent == "Неона":
+                    st.info(
+                        "Неону подключаем следующим шагом сегодня. "
+                        "Она будет вести диалог от первого сообщения до встречи."
+                    )
+
+                else:
+                    st.caption(
+                        "Подключение этого агента будет следующим этапом."
+                    )
 
         elif main_section == "👥 Команда":
             st.markdown("### 👥 Команда")
