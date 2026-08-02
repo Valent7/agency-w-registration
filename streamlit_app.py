@@ -1,4 +1,5 @@
 import streamlit as st
+import requests
 
 st.set_page_config(
     page_title="Агентство W",
@@ -9,6 +10,35 @@ st.set_page_config(
 # Получаем код пригласившего из ссылки вида:
 # https://agency-w.streamlit.app/?ref=W12345
 referral_code = st.query_params.get("ref", "").strip()
+
+def save_member_to_supabase(telegram_data, referral_code):
+    telegram_id = int(telegram_data["id"])
+    member_code = f"W{telegram_id}"
+
+    payload = {
+        "telegram_id": telegram_id,
+        "first_name": telegram_data.get("first_name", "Пользователь"),
+        "username": telegram_data.get("username") or None,
+        "member_code": member_code,
+        "referrer_code": referral_code or None,
+    }
+
+    response = requests.post(
+        f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_members",
+        headers={
+            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
+        json=payload,
+        timeout=10,
+    )
+
+    if response.status_code == 409:
+        return member_code, False
+
+    response.raise_for_status()
+    return member_code, True
 
 st.markdown(
     """
@@ -141,6 +171,7 @@ if received_hash:
     if telegram_auth_is_valid(telegram_data, received_hash):
         first_name = telegram_data.get("first_name", "Пользователь")
         telegram_id = telegram_data.get("id", "")
+        member_code, created = save_member_to_supabase(telegram_data, referral_code)
 
         st.success(
             f"Вход через Telegram подтверждён. Добро пожаловать, {first_name}!"
