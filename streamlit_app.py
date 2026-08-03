@@ -567,7 +567,7 @@ if received_hash:
 собственные выводы и информацию, которой недостаточно.
 """
     
-                                with st.spinner("Неония проводит анализ..."):
+                            with st.spinner("Неония проводит анализ..."):
                                     neonia_answer = ask_openai(
                                         neonia_prompt,
                                         neonia_request,
