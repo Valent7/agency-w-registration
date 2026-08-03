@@ -573,7 +573,8 @@ if received_hash:
 за независимо подтверждённую информацию.
     """
     
-                            
+                            file_names = ", ".join(file.name for file in project_files) if project_files else "Файлы не загружены."
+                            neonia_request = f"Ссылки на проект:\n{project_links.strip() or 'Ссылки не указаны.'}\n\nЗагруженные материалы:\n{file_names}\n\nКомментарий:\n{owner_note.strip() or 'Комментарий не указан.'}"
     
                             with st.spinner("Неония проводит анализ..."):
                                 neonia_answer = ask_openai(
