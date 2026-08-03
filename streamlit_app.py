@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
+from neonia_contacts import render_neonia_contacts
 st.set_page_config(
     page_title="Агентство W",
     page_icon="🏛️",
@@ -501,6 +501,9 @@ if received_hash:
                         ),
                         }
                         st.info(mode_messages[neonia_mode])
+                        if neonia_mode == "👥 Поиск контактов":
+                            render_neonia_contacts()
+
                         st.stop()
                     with st.form("neonia_source_form"):
                         project_links = st.text_area(
