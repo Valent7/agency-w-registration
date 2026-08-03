@@ -568,17 +568,15 @@ if received_hash:
 """
     
                             with st.spinner("Неония проводит анализ..."):
-                                    neonia_answer = ask_openai(
-                                        neonia_prompt,
-                                        neonia_request,
-                                        uploaded_files=project_files,
-                                        use_web_search=bool(
-                                            project_links.strip()
-                                        ),
-                                    )
-    
-                                st.markdown("#### 📋 Результат Неонии")
-                                st.write(neonia_answer)
+                                neonia_answer = ask_openai(
+                                    neonia_prompt,
+                                    neonia_request,
+                                    uploaded_files=project_files,
+                                    use_web_search=bool(project_links.strip()),
+                                )
+
+                            st.markdown("#### 📋 Результат Неонии")
+                            st.write(neonia_answer)
     
                 elif selected_agent == "Неона":
                     st.info(
