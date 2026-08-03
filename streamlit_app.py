@@ -470,9 +470,21 @@ if received_hash:
                 st.write(agent_descriptions[selected_agent])
                 if selected_agent == "Неония":
                     st.caption(
-                        "Рабочая бета-версия: Неония анализирует проект, "
-                        "целевую аудиторию и конкретного человека."
-                    )
+                "Неония работает по этапам: от анализа проекта "
+                "до передачи выбранных контактов Неоне."
+            )
+
+                    neonia_mode = st.radio(
+                "Выберите задачу Неонии:",
+                [
+                    "🎯 Анализ проекта и ЦА",
+                    "🔎 Поиск чатов",
+                    "👥 Поиск контактов",
+                    "🧠 Анализ контактов по ЦА",
+                ],
+                horizontal=True,
+                key="neonia_mode",
+            )
 
                     with st.form("neonia_source_form"):
                         project_links = st.text_area(
