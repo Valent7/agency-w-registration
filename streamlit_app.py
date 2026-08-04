@@ -256,6 +256,107 @@ def load_telegram_session_from_supabase(telegram_id):
 
     encrypted_session = rows[0].get("encrypted_session", "")
     return decrypt_telegram_session(encrypted_session)
+
+
+def run_telegram_async(coroutine):
+    return asyncio.run(coroutine)
+
+
+def get_telegram_api_credentials():
+    api_id = int(st.secrets["TELEGRAM_API_ID"])
+    api_hash = str(st.secrets["TELEGRAM_API_HASH"])
+    return api_id, api_hash
+
+
+async def request_telegram_login_code(phone):
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(StringSession(), api_id, api_hash)
+
+    await client.connect()
+
+    try:
+        sent_code = await client.send_code_request(phone)
+
+        return {
+            "pending_session": encrypt_telegram_session(
+                client.session.save()
+            ),
+            "phone_code_hash": sent_code.phone_code_hash,
+        }
+    finally:
+        await client.disconnect()
+
+
+async def verify_telegram_login_code(
+    phone,
+    code,
+    pending_session,
+    phone_code_hash,
+):
+    session_string = decrypt_telegram_session(pending_session)
+    api_id, api_hash = get_telegram_api_credentials()
+
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+
+    await client.connect()
+
+    try:
+        try:
+            await client.sign_in(
+                phone=phone,
+                code=code,
+                phone_code_hash=phone_code_hash,
+            )
+        except SessionPasswordNeededError:
+            return {
+                "needs_password": True,
+                "pending_session": encrypt_telegram_session(
+                    client.session.save()
+                ),
+            }
+
+        telegram_user = await client.get_me()
+
+        return {
+            "needs_password": False,
+            "telegram_id": int(telegram_user.id),
+            "session_string": client.session.save(),
+        }
+    finally:
+        await client.disconnect()
+
+
+async def verify_telegram_2fa_password(
+    pending_session,
+    password,
+):
+    session_string = decrypt_telegram_session(pending_session)
+    api_id, api_hash = get_telegram_api_credentials()
+
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+
+    await client.connect()
+
+    try:
+        await client.sign_in(password=password)
+        telegram_user = await client.get_me()
+
+        return {
+            "telegram_id": int(telegram_user.id),
+            "session_string": client.session.save(),
+        }
+    finally:
+        await client.disconnect()
+
+
 st.markdown(
     """
     <style>
