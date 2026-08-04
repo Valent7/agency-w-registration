@@ -201,6 +201,34 @@ def save_member_to_supabase(telegram_data, referral_code):
     response.raise_for_status()
     return member_code, True
 
+
+def save_telegram_session_to_supabase(telegram_id, session_string):
+    encrypted_session = encrypt_telegram_session(session_string)
+    secret_key = st.secrets["SUPABASE_SECRET_KEY"]
+
+    payload = {
+        "telegram_id": int(telegram_id),
+        "encrypted_session": encrypted_session,
+        "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+    }
+
+    response = requests.post(
+        (
+            f"{st.secrets['SUPABASE_URL']}"
+            "/rest/v1/telegram_sessions?on_conflict=telegram_id"
+        ),
+        headers={
+            "apikey": secret_key,
+            "Authorization": f"Bearer {secret_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=representation",
+        },
+        json=payload,
+        timeout=10,
+    )
+
+    response.raise_for_status()
+    return True
 st.markdown(
     """
     <style>
