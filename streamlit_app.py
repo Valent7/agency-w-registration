@@ -229,6 +229,33 @@ def save_telegram_session_to_supabase(telegram_id, session_string):
 
     response.raise_for_status()
     return True
+
+
+def load_telegram_session_from_supabase(telegram_id):
+    secret_key = st.secrets["SUPABASE_SECRET_KEY"]
+
+    response = requests.get(
+        f"{st.secrets['SUPABASE_URL']}/rest/v1/telegram_sessions",
+        headers={
+            "apikey": secret_key,
+            "Authorization": f"Bearer {secret_key}",
+        },
+        params={
+            "telegram_id": f"eq.{int(telegram_id)}",
+            "select": "encrypted_session",
+            "limit": 1,
+        },
+        timeout=10,
+    )
+
+    response.raise_for_status()
+    rows = response.json()
+
+    if not rows:
+        return ""
+
+    encrypted_session = rows[0].get("encrypted_session", "")
+    return decrypt_telegram_session(encrypted_session)
 st.markdown(
     """
     <style>
