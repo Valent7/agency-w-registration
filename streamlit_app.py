@@ -357,6 +357,172 @@ async def verify_telegram_2fa_password(
         await client.disconnect()
 
 
+def render_telegram_connection(expected_telegram_id):
+    expected_telegram_id = int(expected_telegram_id)
+
+    connected_key = f"telegram_connected_{expected_telegram_id}"
+    phone_key = f"telegram_phone_{expected_telegram_id}"
+    pending_key = f"telegram_pending_session_{expected_telegram_id}"
+    hash_key = f"telegram_phone_code_hash_{expected_telegram_id}"
+    password_step_key = f"telegram_needs_password_{expected_telegram_id}"
+
+    if connected_key not in st.session_state:
+        try:
+            existing_session = load_telegram_session_from_supabase(
+                expected_telegram_id
+            )
+        except Exception:
+            existing_session = ""
+
+        st.session_state[connected_key] = bool(existing_session)
+
+    if st.session_state[connected_key]:
+        st.success("🟢 Telegram подключён")
+        return True
+
+    st.subheader("Подключение Telegram")
+
+    st.write(
+        "Подключите Telegram один раз. "
+        "После этого Неония сможет работать с доступными контактами и чатами."
+    )
+
+    phone = st.text_input(
+        "Номер телефона Telegram",
+        placeholder="+49...",
+        key=phone_key,
+    )
+
+    if pending_key not in st.session_state:
+        if st.button(
+            "Получить код Telegram",
+            type="primary",
+            key=f"telegram_request_code_{expected_telegram_id}",
+        ):
+            if not phone.strip():
+                st.warning("Введите номер телефона вместе с кодом страны.")
+                return False
+
+            try:
+                result = run_telegram_async(
+                    request_telegram_login_code(phone.strip())
+                )
+
+                st.session_state[pending_key] = result["pending_session"]
+                st.session_state[hash_key] = result["phone_code_hash"]
+                st.rerun()
+
+            except PhoneNumberInvalidError:
+                st.error("Telegram не распознал номер телефона.")
+
+            except Exception as exc:
+                st.error(f"Не удалось отправить код: {exc}")
+
+        return False
+
+    if st.session_state.get(password_step_key, False):
+        password = st.text_input(
+            "Пароль двухэтапной защиты Telegram",
+            type="password",
+            key=f"telegram_2fa_password_{expected_telegram_id}",
+        )
+
+        if st.button(
+            "Подтвердить пароль",
+            type="primary",
+            key=f"telegram_confirm_password_{expected_telegram_id}",
+        ):
+            try:
+                result = run_telegram_async(
+                    verify_telegram_2fa_password(
+                        st.session_state[pending_key],
+                        password,
+                    )
+                )
+
+                if int(result["telegram_id"]) != expected_telegram_id:
+                    st.error(
+                        "Подключён другой Telegram-аккаунт. "
+                        "Используйте аккаунт, через который вы зарегистрировались."
+                    )
+                    return False
+
+                save_telegram_session_to_supabase(
+                    expected_telegram_id,
+                    result["session_string"],
+                )
+
+                st.session_state[connected_key] = True
+                st.session_state.pop(pending_key, None)
+                st.session_state.pop(hash_key, None)
+                st.session_state.pop(password_step_key, None)
+                st.rerun()
+
+            except PasswordHashInvalidError:
+                st.error("Неверный пароль двухэтапной защиты.")
+
+            except Exception as exc:
+                st.error(f"Не удалось подключить Telegram: {exc}")
+
+        return False
+
+    code = st.text_input(
+        "Код из Telegram",
+        placeholder="12345",
+        key=f"telegram_login_code_{expected_telegram_id}",
+    )
+
+    if st.button(
+        "Подтвердить код",
+        type="primary",
+        key=f"telegram_confirm_code_{expected_telegram_id}",
+    ):
+        try:
+            result = run_telegram_async(
+                verify_telegram_login_code(
+                    phone,
+                    code.strip(),
+                    st.session_state[pending_key],
+                    st.session_state[hash_key],
+                )
+            )
+
+            if result["needs_password"]:
+                st.session_state[pending_key] = result["pending_session"]
+                st.session_state[password_step_key] = True
+                st.rerun()
+
+            if int(result["telegram_id"]) != expected_telegram_id:
+                st.error(
+                    "Подключён другой Telegram-аккаунт. "
+                    "Используйте аккаунт, через который вы зарегистрировались."
+                )
+                return False
+
+            save_telegram_session_to_supabase(
+                expected_telegram_id,
+                result["session_string"],
+            )
+
+            st.session_state[connected_key] = True
+            st.session_state.pop(pending_key, None)
+            st.session_state.pop(hash_key, None)
+            st.rerun()
+
+        except PhoneCodeInvalidError:
+            st.error("Неверный код Telegram.")
+
+        except PhoneCodeExpiredError:
+            st.session_state.pop(pending_key, None)
+            st.session_state.pop(hash_key, None)
+            st.error("Срок действия кода закончился. Получите новый код.")
+
+        except Exception as exc:
+            st.error(f"Не удалось подтвердить код: {exc}")
+
+    return False
+
+
 st.markdown(
     """
     <style>
