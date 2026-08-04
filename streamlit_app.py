@@ -14,6 +14,8 @@ from telethon.errors import (
     PhoneNumberInvalidError,
     PasswordHashInvalidError,
 )
+from cryptography.fernet import Fernet, InvalidToken
+
 st.set_page_config(
     page_title="Агентство W",
     page_icon="🏛️",
