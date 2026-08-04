@@ -745,7 +745,10 @@ if received_hash:
         partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
         st.markdown(f"## Добро пожаловать, {first_name}!")
         st.markdown("### 🟢 Мы строим своё будущее")
+        telegram_connected = render_telegram_connection(telegram_id)
 
+        if not telegram_connected:
+            st.stop()
         main_section = st.segmented_control(
             "Главное меню",
             ["☀️ День", "🤖 Агенты", "👥 Команда", "👤 Профиль"],
