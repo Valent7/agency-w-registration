@@ -998,8 +998,8 @@ if received_hash:
                                 st.info(
                                     "В Telegram не найдено доступных контактов."
                                 )
-                                
-                         elif neonia_mode == "🧠 Анализ контактов по ЦА":
+
+                        elif neonia_mode == "🧠 Анализ контактов по ЦА":
                             passport_key = (
                                 f"neonia_target_audience_passport_{telegram_id}"
                             )
@@ -1032,7 +1032,7 @@ if received_hash:
                                     "✅ Паспорт ЦА и контакты готовы"
                                 )
                                 st.write(
-                                    f"Контактов для дальнейшей селекции: "
+                                    "Контактов для дальнейшей селекции: "
                                     f"{len(contacts)}"
                                 )
 
@@ -1050,6 +1050,7 @@ if received_hash:
                                         f"{telegram_id}"
                                     ),
                                 )
+
                         st.stop()
                     with st.form("neonia_source_form"):
                         project_links = st.text_area(
