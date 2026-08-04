@@ -3,6 +3,17 @@ import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
+import asyncio
+
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors import (
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    PhoneNumberInvalidError,
+    PasswordHashInvalidError,
+)
 st.set_page_config(
     page_title="Агентство W",
     page_icon="🏛️",
