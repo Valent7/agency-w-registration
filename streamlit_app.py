@@ -21,7 +21,32 @@ st.set_page_config(
     page_icon="🏛️",
     layout="centered",
 )
+def get_session_cipher():
+    key = st.secrets.get("FERNET_KEY")
 
+    if not key:
+        raise RuntimeError("FERNET_KEY не найден в Streamlit Secrets.")
+
+    return Fernet(str(key).encode())
+
+
+def encrypt_telegram_session(session_string):
+    if not session_string:
+        return ""
+
+    cipher = get_session_cipher()
+    return cipher.encrypt(session_string.encode()).decode()
+
+
+def decrypt_telegram_session(encrypted_session):
+    if not encrypted_session:
+        return ""
+
+    try:
+        cipher = get_session_cipher()
+        return cipher.decrypt(encrypted_session.encode()).decode()
+    except InvalidToken:
+        return ""
 # Получаем код пригласившего из ссылки вида:
 # https://agency-w.streamlit.app/?ref=W12345
 referral_code = st.query_params.get("ref", "").strip()
