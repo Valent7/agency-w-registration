@@ -238,7 +238,7 @@ def load_telegram_session_from_supabase(telegram_id):
         f"{st.secrets['SUPABASE_URL']}/rest/v1/telegram_sessions",
         headers={
             "apikey": secret_key,
-            "Authorization": f"Bearer {secret_key}",
+            
         },
         params={
             "telegram_id": f"eq.{int(telegram_id)}",
