@@ -219,7 +219,7 @@ def save_telegram_session_to_supabase(telegram_id, session_string):
         ),
         headers={
             "apikey": secret_key,
-            "Authorization": f"Bearer {secret_key}",
+            
             "Content-Type": "application/json",
             "Prefer": "resolution=merge-duplicates,return=representation",
         },
