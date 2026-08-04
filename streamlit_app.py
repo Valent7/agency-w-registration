@@ -746,6 +746,7 @@ if received_hash:
         st.markdown(f"## Добро пожаловать, {first_name}!")
         st.markdown("### 🟢 Мы строим своё будущее")
         telegram_connected = render_telegram_connection(telegram_id)
+        st.session_state["neonia_telegram_connected"] = telegram_connected
 
         if not telegram_connected:
             st.stop()
