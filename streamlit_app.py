@@ -381,7 +381,7 @@ if received_hash:
         telegram_id = telegram_data.get("id", "")
         member_code, created = save_member_to_supabase(telegram_data, referral_code)
 
-        
+
         partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
         st.markdown(f"## Добро пожаловать, {first_name}!")
         st.markdown("### 🟢 Мы строим своё будущее")
