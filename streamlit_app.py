@@ -1110,7 +1110,26 @@ if received_hash:
                                     use_web_search=bool(project_links.strip()),
                                 )
 
-                            st.markdown("#### 📋 Результат Неонии")
+                            passport_key = (
+                                f"neonia_target_audience_passport_{telegram_id}"
+                            )
+
+                            st.session_state[passport_key] = {
+                                "analysis": neonia_answer,
+                                "project_links": project_links.strip(),
+                                "file_names": file_names,
+                                "owner_note": owner_note.strip(),
+                                "saved_at": datetime.now(
+                                    ZoneInfo("Europe/Berlin")
+                                ).isoformat(),
+                            }
+
+                            st.success(
+                                "✅ Паспорт целевой аудитории сохранён"
+                            )
+                            st.markdown(
+                                "#### 📋 Результат Неонии"
+                            )
                             st.write(neonia_answer)
     
                 elif selected_agent == "Неона":
