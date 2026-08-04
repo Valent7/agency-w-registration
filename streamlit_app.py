@@ -931,7 +931,73 @@ if received_hash:
                         }
                         st.info(mode_messages[neonia_mode])
                         if neonia_mode == "👥 Поиск контактов":
-                            render_neonia_contacts()
+                            contacts_result = render_neonia_contacts()
+                        
+                            contacts_state_key = (
+                                f"neonia_telegram_contacts_{telegram_id}"
+                            )
+                            search_done_key = (
+                                f"neonia_contacts_search_done_{telegram_id}"
+                            )
+                        
+                            if contacts_result["find_contacts"]:
+                                with st.spinner(
+                                    "Неония получает контакты из Telegram..."
+                                ):
+                                    try:
+                                        contacts = run_telegram_async(
+                                            fetch_telegram_contacts(telegram_id)
+                                        )
+                        
+                                        st.session_state[
+                                            contacts_state_key
+                                        ] = contacts
+                        
+                                        st.session_state[
+                                            search_done_key
+                                        ] = True
+                        
+                                    except Exception as exc:
+                                        st.error(
+                                            f"Не удалось получить контакты: {exc}"
+                                        )
+                        
+                            contacts = st.session_state.get(
+                                contacts_state_key,
+                                [],
+                            )
+                        
+                            if contacts:
+                                st.success(
+                                    f"Найдено контактов: {len(contacts)}"
+                                )
+                        
+                                contacts_for_table = [
+                                    {
+                                        "Имя": contact["name"],
+                                        "Username": (
+                                            f"@{contact['username']}"
+                                            if contact["username"]
+                                            else "—"
+                                        ),
+                                        "Телефон": contact["phone"] or "—",
+                                    }
+                                    for contact in contacts
+                                ]
+                        
+                                st.dataframe(
+                                    contacts_for_table,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                        
+                            elif st.session_state.get(
+                                search_done_key,
+                                False,
+                            ):
+                                st.info(
+                                    "В Telegram не найдено доступных контактов."
+                                )
 
                         st.stop()
                     with st.form("neonia_source_form"):
