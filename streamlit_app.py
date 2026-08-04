@@ -7,6 +7,7 @@ import asyncio
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeInvalidError,
@@ -356,6 +357,70 @@ async def verify_telegram_2fa_password(
     finally:
         await client.disconnect()
 
+
+async def fetch_telegram_contacts(telegram_id):
+    session_string = load_telegram_session_from_supabase(
+        telegram_id
+    )
+
+    if not session_string:
+        return []
+
+    api_id, api_hash = get_telegram_api_credentials()
+
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            return []
+
+        result = await client(
+            GetContactsRequest(hash=0)
+        )
+
+        contacts = []
+
+        for user in result.users:
+            if getattr(user, "deleted", False):
+                continue
+
+            if getattr(user, "bot", False):
+                continue
+
+            first_name = (user.first_name or "").strip()
+            last_name = (user.last_name or "").strip()
+
+            full_name = " ".join(
+                part
+                for part in [first_name, last_name]
+                if part
+            ).strip()
+
+            contacts.append(
+                {
+                    "telegram_id": int(user.id),
+                    "name": full_name or "Без имени",
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": user.username or "",
+                    "phone": user.phone or "",
+                }
+            )
+
+        contacts.sort(
+            key=lambda contact: contact["name"].lower()
+        )
+
+        return contacts
+
+    finally:
+        await client.disconnect()
 
 def render_telegram_connection(expected_telegram_id):
     expected_telegram_id = int(expected_telegram_id)
