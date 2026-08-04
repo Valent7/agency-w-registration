@@ -998,7 +998,58 @@ if received_hash:
                                 st.info(
                                     "В Telegram не найдено доступных контактов."
                                 )
+                                
+                         elif neonia_mode == "🧠 Анализ контактов по ЦА":
+                            passport_key = (
+                                f"neonia_target_audience_passport_{telegram_id}"
+                            )
+                            contacts_state_key = (
+                                f"neonia_telegram_contacts_{telegram_id}"
+                            )
 
+                            passport = st.session_state.get(
+                                passport_key
+                            )
+                            contacts = st.session_state.get(
+                                contacts_state_key,
+                                [],
+                            )
+
+                            if not passport:
+                                st.warning(
+                                    "Сначала проведите анализ проекта "
+                                    "и создайте паспорт целевой аудитории."
+                                )
+
+                            elif not contacts:
+                                st.warning(
+                                    "Сначала откройте «Поиск контактов» "
+                                    "и загрузите контакты из Telegram."
+                                )
+
+                            else:
+                                st.success(
+                                    "✅ Паспорт ЦА и контакты готовы"
+                                )
+                                st.write(
+                                    f"Контактов для дальнейшей селекции: "
+                                    f"{len(contacts)}"
+                                )
+
+                                with st.expander(
+                                    "Посмотреть паспорт целевой аудитории"
+                                ):
+                                    st.write(
+                                        passport["analysis"]
+                                    )
+
+                                st.button(
+                                    "🧠 Начать селекцию контактов",
+                                    key=(
+                                        "neonia_start_contact_selection_"
+                                        f"{telegram_id}"
+                                    ),
+                                )
                         st.stop()
                     with st.form("neonia_source_form"):
                         project_links = st.text_area(
