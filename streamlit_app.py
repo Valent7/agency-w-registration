@@ -809,6 +809,142 @@ def generate_neona_first_messages(
 
     return result
 
+
+def search_known_contacts(contacts, query, limit=20):
+    """Ищет знакомого среди уже загруженных Telegram-контактов."""
+
+    query = (query or "").strip()
+    if len(query) < 2:
+        return []
+
+    lowered_query = query.lower().lstrip("@")
+    query_digits = "".join(
+        character
+        for character in query
+        if character.isdigit()
+    )
+
+    matches = []
+
+    for contact in contacts:
+        name = str(contact.get("name") or "").strip()
+        username = str(
+            contact.get("username") or ""
+        ).strip().lstrip("@")
+        phone = str(contact.get("phone") or "").strip()
+        phone_digits = "".join(
+            character
+            for character in phone
+            if character.isdigit()
+        )
+
+        name_match = lowered_query in name.lower()
+        username_match = (
+            bool(username)
+            and lowered_query in username.lower()
+        )
+        phone_match = (
+            len(query_digits) >= 3
+            and query_digits in phone_digits
+        )
+
+        if name_match or username_match or phone_match:
+            matches.append(contact)
+
+    matches.sort(
+        key=lambda contact: (
+            lowered_query
+            not in str(
+                contact.get("name") or ""
+            ).lower(),
+            str(contact.get("name") or "").lower(),
+        )
+    )
+
+    return matches[:limit]
+
+
+def generate_neona_first_message(
+    owner_name,
+    passport_analysis,
+    contact,
+):
+    """Создаёт одно первое сообщение выбранному контакту."""
+
+    is_known_contact = (
+        contact.get("source")
+        == "Знакомый — выбран владельцем"
+    )
+
+    system_prompt = f"""
+Ты — Неона, виртуальный секретарь-референт {owner_name}.
+
+Подготовь ОДНО первое персональное сообщение выбранному человеку.
+
+Правила:
+- верни только готовый текст сообщения, без пояснений и Markdown;
+- обращайся по имени, только если имя выглядит надёжным;
+- представься как виртуальный секретарь-референт {owner_name};
+- пиши естественно, тепло, уважительно и без давления;
+- не говори, что человека анализировал или выбирал ИИ;
+- не обещай доход, гарантированный результат или лёгкие деньги;
+- не отправляй ссылку в первом сообщении;
+- не выдумывай факты о человеке;
+- закончи одним простым вопросом, на который удобно ответить;
+- длина сообщения — до 650 знаков.
+
+Если это знакомый контакт, выбранный владельцем:
+- главным основанием являются набросок и пояснения владельца;
+- сохрани смысл, тон и границы, заданные владельцем;
+- не изображай холодное знакомство, если люди уже общались;
+- обязательно учти, что упомянуть и чего избегать.
+"""
+
+    safe_contact = {
+        "telegram_id": contact.get("telegram_id"),
+        "name": contact.get("name", ""),
+        "first_name": contact.get("first_name", ""),
+        "username": contact.get("username", ""),
+        "source": contact.get("source", "Рекомендация Неонии"),
+        "segment": contact.get("segment", ""),
+        "score": contact.get("score", 0),
+        "reasons": contact.get("reasons", []),
+        "message_angle": contact.get("message_angle", ""),
+        "familiarity_note": contact.get("familiarity_note", ""),
+        "owner_draft": contact.get("owner_draft", ""),
+        "must_mention": contact.get("must_mention", ""),
+        "avoid": contact.get("avoid", ""),
+        "known_contact": is_known_contact,
+    }
+
+    request = (
+        "ПАСПОРТ ЦА И ПРОЕКТА:\n"
+        f"{passport_analysis}\n\n"
+        "ДАННЫЕ О КОНТАКТЕ:\n"
+        f"{json.dumps(safe_contact, ensure_ascii=False)}"
+    )
+
+    answer = ask_openai(
+        system_prompt,
+        request,
+    ).strip()
+
+    if answer.startswith("Ошибка OpenAI:"):
+        raise RuntimeError(answer)
+
+    if not answer:
+        raise RuntimeError(
+            "Неона не сформировала сообщение."
+        )
+
+    if (
+        answer.startswith('"')
+        and answer.endswith('"')
+    ):
+        answer = answer[1:-1].strip()
+
+    return answer[:1000]
+
 def render_telegram_connection(expected_telegram_id):
     expected_telegram_id = int(expected_telegram_id)
 
@@ -1295,6 +1431,88 @@ if received_hash:
                 == "Пока не подходит"
             )
 
+            owner_contacts_key = (
+                f"neonia_owner_known_contacts_{telegram_id}"
+            )
+            known_search_results_key = (
+                f"neonia_known_search_results_{telegram_id}"
+            )
+            owner_contacts = st.session_state.get(
+                owner_contacts_key,
+                {},
+            )
+
+            def prepare_one_first_message(contact):
+                passport = st.session_state.get(
+                    passport_key
+                )
+
+                if not passport:
+                    st.warning(
+                        "Сначала создайте паспорт ЦА."
+                    )
+                    return
+
+                with st.spinner(
+                    "Неона готовит первое сообщение..."
+                ):
+                    try:
+                        message = generate_neona_first_message(
+                            first_name,
+                            passport["analysis"],
+                            contact,
+                        )
+
+                        drafts = st.session_state.get(
+                            neona_drafts_key,
+                            {},
+                        )
+                        contact_id = int(
+                            contact["telegram_id"]
+                        )
+                        drafts[contact_id] = {
+                            "message": message,
+                            "approved": False,
+                            "status": "Сообщение подготовлено",
+                        }
+                        st.session_state[
+                            neona_drafts_key
+                        ] = drafts
+
+                        if (
+                            contact.get("source")
+                            == "Знакомый — выбран владельцем"
+                        ):
+                            owner_contacts[
+                                contact_id
+                            ]["status"] = (
+                                "Сообщение подготовлено"
+                            )
+                            st.session_state[
+                                owner_contacts_key
+                            ] = owner_contacts
+                        else:
+                            for candidate_item in candidate_results:
+                                if int(
+                                    candidate_item[
+                                        "telegram_id"
+                                    ]
+                                ) == contact_id:
+                                    candidate_item["status"] = (
+                                        "Сообщение подготовлено"
+                                    )
+                            st.session_state[
+                                candidates_key
+                            ] = candidate_results
+
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось подготовить "
+                            f"сообщение: {exc}"
+                        )
+
             with st.container(border=True):
                 st.markdown(
                     "**🎯 10 кандидатов Неонии на сегодня**"
@@ -1325,8 +1543,8 @@ if received_hash:
                 else:
                     st.info(
                         "Неония предлагает до 10 лучших кандидатов "
-                        "из уже проанализированных. Выбор делает "
-                        "владелец кабинета: от 1 до 5 человек."
+                        "из уже проанализированных. Владелец может "
+                        "выбрать из них людей для первого сообщения."
                     )
                     if len(top_candidates) < 10:
                         st.warning(
@@ -1342,36 +1560,25 @@ if received_hash:
                     candidate_options = list(
                         candidate_by_id.keys()
                     )
+                    familiar_count = len(owner_contacts)
+                    recommended_limit = max(
+                        0,
+                        5 - familiar_count,
+                    )
                     previous_selection = [
                         contact_id
                         for contact_id in st.session_state.get(
                             selected_candidates_key,
                             [],
                         )
-                        if contact_id in candidate_by_id
-                    ]
+                        if (
+                            contact_id in candidate_by_id
+                            and contact_id not in owner_contacts
+                        )
+                    ][:recommended_limit]
 
-                    selected_ids = st.multiselect(
-                        "Выберите от 1 до 5 кандидатов из списка ниже",
-                        options=candidate_options,
-                        default=previous_selection,
-                        max_selections=5,
-                        format_func=lambda contact_id: (
-                            f"{candidate_by_id[contact_id]['name']} "
-                            f"— {candidate_by_id[contact_id]['score']}% "
-                            f"— {candidate_by_id[contact_id]['segment']}"
-                        ),
-                        key=(
-                            "neonia_candidate_multiselect_"
-                            f"{telegram_id}"
-                        ),
-                    )
-                    st.session_state[
-                        selected_candidates_key
-                    ] = selected_ids
-
-                    st.caption(
-                        f"Выбрано владельцем: {len(selected_ids)} из 5"
+                    st.markdown(
+                        "#### 📋 Кандидаты, предложенные Неонией"
                     )
 
                     for number, candidate in enumerate(
@@ -1407,78 +1614,392 @@ if received_hash:
                                 f"{candidate['message_angle']}"
                             )
 
-                    if not selected_ids:
-                        st.info(
-                            "Сначала выберите хотя бы одного кандидата. "
-                            "Неона не выбирает людей вместо владельца."
-                        )
-
-                    prepare_messages = st.button(
-                        "✍️ Неона: подготовить первые сообщения",
-                        type="primary",
-                        disabled=not selected_ids,
-                        key=(
-                            "neona_prepare_first_messages_"
-                            f"{telegram_id}"
-                        ),
+                    st.markdown("#### ✅ Выбор владельца")
+                    st.info(
+                        "Выберите кандидатов Неонии. Общий лимит "
+                        "вместе со знакомыми контактами — не более "
+                        "5 первых сообщений."
                     )
 
-                    if prepare_messages:
-                        passport = st.session_state.get(
-                            passport_key
+                    if recommended_limit > 0:
+                        selected_ids = st.multiselect(
+                            "Выберите кандидатов Неонии",
+                            options=candidate_options,
+                            default=previous_selection,
+                            max_selections=recommended_limit,
+                            placeholder=(
+                                "Нажмите и выберите кандидатов"
+                            ),
+                            format_func=lambda contact_id: (
+                                f"{candidate_by_id[contact_id]['name']} "
+                                f"— {candidate_by_id[contact_id]['score']}% "
+                                f"— {candidate_by_id[contact_id]['segment']}"
+                            ),
+                            key=(
+                                "neonia_candidate_multiselect_"
+                                f"{telegram_id}"
+                            ),
+                        )
+                    else:
+                        selected_ids = []
+                        st.warning(
+                            "Лимит 5 человек уже заполнен "
+                            "знакомыми контактами."
                         )
 
-                        if not passport:
-                            st.warning(
-                                "Сначала создайте паспорт ЦА."
-                            )
-                        else:
-                            selected_candidates = [
-                                candidate_by_id[contact_id]
-                                for contact_id in selected_ids
+                    st.session_state[
+                        selected_candidates_key
+                    ] = selected_ids
+
+                    total_selected = (
+                        len(selected_ids)
+                        + len(owner_contacts)
+                    )
+                    st.caption(
+                        f"Всего выбрано для работы: "
+                        f"{total_selected} из 5"
+                    )
+
+                    if selected_ids:
+                        st.markdown(
+                            "#### ✍️ Выбранные рекомендации Неонии"
+                        )
+
+                        for contact_id in selected_ids:
+                            candidate = candidate_by_id[
+                                contact_id
                             ]
+                            with st.container(border=True):
+                                st.markdown(
+                                    f"**{candidate['name']}**"
+                                )
+                                st.caption(
+                                    f"{candidate['score']}% · "
+                                    f"{candidate['segment']}"
+                                )
 
-                            with st.spinner(
-                                "Неона готовит персональные "
-                                "первые сообщения..."
+                                if st.button(
+                                    "✍️ Подготовить первое сообщение",
+                                    key=(
+                                        "neona_prepare_recommended_"
+                                        f"{telegram_id}_{contact_id}"
+                                    ),
+                                ):
+                                    prepare_one_first_message(
+                                        candidate
+                                    )
+
+                st.divider()
+                st.markdown("### 🤝 Найти знакомого")
+                st.write(
+                    "Найдите любого человека среди уже загруженных "
+                    "Telegram-контактов — даже если Неония не "
+                    "рекомендовала его по критериям ЦА."
+                )
+
+                if not all_contacts:
+                    st.warning(
+                        "Сначала загрузите контакты Telegram "
+                        "в разделе Неонии."
+                    )
+                else:
+                    known_query = st.text_input(
+                        "Имя, @username или номер телефона",
+                        placeholder=(
+                            "Например: Наталья, @username или +49..."
+                        ),
+                        key=f"known_contact_query_{telegram_id}",
+                    )
+
+                    if st.button(
+                        "🔎 Найти знакомого",
+                        key=f"known_contact_search_{telegram_id}",
+                    ):
+                        search_results = search_known_contacts(
+                            all_contacts,
+                            known_query,
+                        )
+                        st.session_state[
+                            known_search_results_key
+                        ] = search_results
+
+                        if not search_results:
+                            st.warning(
+                                "В загруженных Telegram-контактах "
+                                "совпадений не найдено."
+                            )
+
+                    known_results = st.session_state.get(
+                        known_search_results_key,
+                        [],
+                    )
+
+                    if known_results:
+                        known_by_id = {
+                            int(item["telegram_id"]): item
+                            for item in known_results
+                        }
+                        known_options = [None] + list(
+                            known_by_id.keys()
+                        )
+
+                        chosen_known_id = st.selectbox(
+                            "Выберите найденного человека",
+                            options=known_options,
+                            format_func=lambda contact_id: (
+                                "Выберите контакт"
+                                if contact_id is None
+                                else (
+                                    f"{known_by_id[contact_id]['name']} "
+                                    + (
+                                        f"@{known_by_id[contact_id]['username']}"
+                                        if known_by_id[
+                                            contact_id
+                                        ].get("username")
+                                        else ""
+                                    )
+                                )
+                            ),
+                            key=(
+                                "known_contact_select_"
+                                f"{telegram_id}"
+                            ),
+                        )
+
+                        if chosen_known_id is not None:
+                            chosen_contact = known_by_id[
+                                chosen_known_id
+                            ]
+                            already_added = (
+                                chosen_known_id
+                                in owner_contacts
+                            )
+                            already_recommended = (
+                                chosen_known_id
+                                in selected_ids
+                            )
+                            limit_reached = (
+                                len(selected_ids)
+                                + len(owner_contacts)
+                                >= 5
+                            )
+
+                            familiarity_note = st.text_area(
+                                "Откуда и как вы знакомы?",
+                                placeholder=(
+                                    "Например: вместе работали "
+                                    "в проекте два года назад."
+                                ),
+                                key=(
+                                    "known_familiarity_"
+                                    f"{telegram_id}_"
+                                    f"{chosen_known_id}"
+                                ),
+                            )
+                            owner_draft = st.text_area(
+                                "Ваш набросок первого сообщения",
+                                placeholder=(
+                                    "Напишите простыми словами, "
+                                    "что Вы хотите сказать."
+                                ),
+                                key=(
+                                    "known_owner_draft_"
+                                    f"{telegram_id}_"
+                                    f"{chosen_known_id}"
+                                ),
+                            )
+                            must_mention = st.text_input(
+                                "Что обязательно упомянуть?",
+                                key=(
+                                    "known_must_mention_"
+                                    f"{telegram_id}_"
+                                    f"{chosen_known_id}"
+                                ),
+                            )
+                            avoid = st.text_input(
+                                "Чего лучше не говорить?",
+                                key=(
+                                    "known_avoid_"
+                                    f"{telegram_id}_"
+                                    f"{chosen_known_id}"
+                                ),
+                            )
+
+                            if already_added:
+                                st.info(
+                                    "Этот знакомый уже добавлен "
+                                    "к сегодняшней работе."
+                                )
+                            elif already_recommended:
+                                st.info(
+                                    "Этот человек уже выбран среди "
+                                    "рекомендаций Неонии."
+                                )
+                            elif limit_reached:
+                                st.warning(
+                                    "Лимит 5 человек уже заполнен."
+                                )
+
+                            if st.button(
+                                "➕ Добавить знакомого к работе",
+                                disabled=(
+                                    already_added
+                                    or already_recommended
+                                    or limit_reached
+                                ),
+                                key=(
+                                    "add_known_contact_"
+                                    f"{telegram_id}_"
+                                    f"{chosen_known_id}"
+                                ),
                             ):
-                                try:
-                                    drafts = (
-                                        generate_neona_first_messages(
-                                            first_name,
-                                            passport["analysis"],
-                                            selected_candidates,
-                                        )
+                                if not owner_draft.strip():
+                                    st.warning(
+                                        "Добавьте хотя бы короткий "
+                                        "набросок первого сообщения."
+                                    )
+                                else:
+                                    owner_contacts[
+                                        chosen_known_id
+                                    ] = {
+                                        "telegram_id": int(
+                                            chosen_known_id
+                                        ),
+                                        "name": (
+                                            chosen_contact.get(
+                                                "name"
+                                            )
+                                            or "Без имени"
+                                        ),
+                                        "first_name": (
+                                            chosen_contact.get(
+                                                "first_name"
+                                            )
+                                            or ""
+                                        ),
+                                        "username": (
+                                            chosen_contact.get(
+                                                "username"
+                                            )
+                                            or ""
+                                        ),
+                                        "source": (
+                                            "Знакомый — выбран владельцем"
+                                        ),
+                                        "segment": (
+                                            "Выбран владельцем"
+                                        ),
+                                        "score": 0,
+                                        "confidence": (
+                                            "решение владельца"
+                                        ),
+                                        "reasons": [
+                                            familiarity_note.strip()
+                                            or (
+                                                "Добавлен владельцем "
+                                                "как знакомый контакт"
+                                            )
+                                        ],
+                                        "recommendation": (
+                                            "Добавлен владельцем"
+                                        ),
+                                        "message_angle": (
+                                            owner_draft.strip()
+                                        ),
+                                        "familiarity_note": (
+                                            familiarity_note.strip()
+                                        ),
+                                        "owner_draft": (
+                                            owner_draft.strip()
+                                        ),
+                                        "must_mention": (
+                                            must_mention.strip()
+                                        ),
+                                        "avoid": avoid.strip(),
+                                        "status": (
+                                            "Знакомый добавлен владельцем"
+                                        ),
+                                    }
+                                    st.session_state[
+                                        owner_contacts_key
+                                    ] = owner_contacts
+                                    st.rerun()
+
+                if owner_contacts:
+                    st.markdown(
+                        "#### 🤝 Знакомые, добавленные владельцем"
+                    )
+
+                    for contact_id, contact in list(
+                        owner_contacts.items()
+                    ):
+                        with st.container(border=True):
+                            username = (
+                                f"@{contact['username']}"
+                                if contact.get("username")
+                                else "без username"
+                            )
+                            st.markdown(
+                                f"**{contact['name']}** · {username}"
+                            )
+                            st.caption(
+                                "Добавлен владельцем — "
+                                "не является рекомендацией Неонии"
+                            )
+
+                            if contact.get("familiarity_note"):
+                                st.write(
+                                    "**Знакомство:** "
+                                    f"{contact['familiarity_note']}"
+                                )
+                            st.write(
+                                "**Ваш смысл сообщения:** "
+                                f"{contact['owner_draft']}"
+                            )
+
+                            left_column, right_column = st.columns(
+                                2
+                            )
+
+                            with left_column:
+                                if st.button(
+                                    "✍️ Подготовить первое сообщение",
+                                    key=(
+                                        "neona_prepare_known_"
+                                        f"{telegram_id}_{contact_id}"
+                                    ),
+                                ):
+                                    prepare_one_first_message(
+                                        contact
                                     )
 
-                                    if not drafts:
-                                        st.error(
-                                            "Неона не сформировала "
-                                            "сообщения. Повторите попытку."
-                                        )
-                                    else:
-                                        st.session_state[
-                                            neona_drafts_key
-                                        ] = drafts
-
-                                        for candidate in candidate_results:
-                                            if int(
-                                                candidate["telegram_id"]
-                                            ) in selected_ids:
-                                                candidate["status"] = (
-                                                    "Сообщение подготовлено"
-                                                )
-
-                                        st.session_state[
-                                            candidates_key
-                                        ] = candidate_results
-                                        st.rerun()
-
-                                except Exception as exc:
-                                    st.error(
-                                        "Не удалось подготовить "
-                                        f"сообщения: {exc}"
+                            with right_column:
+                                if st.button(
+                                    "Убрать из работы",
+                                    key=(
+                                        "remove_known_contact_"
+                                        f"{telegram_id}_{contact_id}"
+                                    ),
+                                ):
+                                    owner_contacts.pop(
+                                        contact_id,
+                                        None,
                                     )
+                                    drafts = st.session_state.get(
+                                        neona_drafts_key,
+                                        {},
+                                    )
+                                    drafts.pop(
+                                        int(contact_id),
+                                        None,
+                                    )
+                                    st.session_state[
+                                        owner_contacts_key
+                                    ] = owner_contacts
+                                    st.session_state[
+                                        neona_drafts_key
+                                    ] = drafts
+                                    st.rerun()
 
             neona_drafts = st.session_state.get(
                 neona_drafts_key,
@@ -1501,6 +2022,12 @@ if received_hash:
                         int(item["telegram_id"]): item
                         for item in candidate_results
                     }
+                    candidate_lookup.update(
+                        {
+                            int(item["telegram_id"]): item
+                            for item in owner_contacts.values()
+                        }
+                    )
 
                     for contact_id, draft in neona_drafts.items():
                         candidate = candidate_lookup.get(
@@ -1557,6 +2084,17 @@ if received_hash:
                             st.session_state[
                                 candidates_key
                             ] = candidate_results
+
+                            if int(contact_id) in owner_contacts:
+                                owner_contacts[
+                                    int(contact_id)
+                                ]["status"] = (
+                                    "Первое сообщение утверждено"
+                                )
+                                st.session_state[
+                                    owner_contacts_key
+                                ] = owner_contacts
+
                             st.success(
                                 "Первое сообщение утверждено. "
                                 "Отправка будет подключена "
