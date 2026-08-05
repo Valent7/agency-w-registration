@@ -430,6 +430,148 @@ async def fetch_telegram_contacts(telegram_id):
         await client.disconnect()
 
 
+
+async def send_telegram_first_message(
+    owner_telegram_id,
+    recipient_telegram_id,
+    recipient_username,
+    message,
+):
+    """Отправляет одно утверждённое первое сообщение от аккаунта владельца."""
+
+    message = str(message or "").strip()
+    if not message:
+        raise RuntimeError("Текст сообщения пуст.")
+
+    owner_telegram_id = int(owner_telegram_id)
+    recipient_telegram_id = int(recipient_telegram_id)
+
+    if owner_telegram_id == recipient_telegram_id:
+        raise RuntimeError(
+            "Нельзя отправить первое сообщение самому себе."
+        )
+
+    session_string = load_telegram_session_from_supabase(
+        owner_telegram_id
+    )
+    if not session_string:
+        raise RuntimeError(
+            "Сессия Telegram не найдена. Подключите Telegram заново."
+        )
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telegram-сессия больше не авторизована."
+            )
+
+        current_user = await client.get_me()
+        if int(current_user.id) != owner_telegram_id:
+            raise RuntimeError(
+                "Подключён другой Telegram-аккаунт."
+            )
+
+        entity = None
+        contacts_result = await client(
+            GetContactsRequest(hash=0)
+        )
+        for user in contacts_result.users:
+            if int(user.id) == recipient_telegram_id:
+                entity = user
+                break
+
+        if entity is None and recipient_username:
+            entity = await client.get_entity(
+                str(recipient_username).lstrip("@")
+            )
+
+        if entity is None:
+            raise RuntimeError(
+                "Контакт не найден в Telegram. Обновите список контактов."
+            )
+
+        sent_message = await client.send_message(
+            entity,
+            message,
+            parse_mode=None,
+            link_preview=False,
+        )
+
+        return {
+            "message_id": int(sent_message.id),
+            "sent_at": datetime.now(
+                ZoneInfo("Europe/Berlin")
+            ).isoformat(),
+        }
+    finally:
+        await client.disconnect()
+
+
+def friendly_telegram_send_error(error):
+    """Преобразует техническую ошибку Telegram в понятный текст."""
+
+    error_name = error.__class__.__name__
+
+    if error_name == "FloodWaitError":
+        seconds = getattr(error, "seconds", None)
+        if seconds:
+            return (
+                "Telegram временно ограничил отправку. "
+                f"Повторите через {seconds} секунд."
+            )
+        return "Telegram временно ограничил отправку. Повторите позже."
+
+    error_messages = {
+        "PeerFloodError": (
+            "Telegram ограничил новые обращения. "
+            "Сегодня больше не отправляйте первые сообщения."
+        ),
+        "UserPrivacyRestrictedError": (
+            "Настройки приватности этого человека не позволяют "
+            "отправить ему сообщение."
+        ),
+        "UserIsBlockedError": (
+            "Отправка невозможна: контакт заблокирован."
+        ),
+        "InputUserDeactivatedError": (
+            "Аккаунт этого человека удалён или деактивирован."
+        ),
+        "PeerIdInvalidError": (
+            "Telegram не смог определить получателя. "
+            "Обновите список контактов."
+        ),
+        "MessageTooLongError": (
+            "Сообщение слишком длинное. Сократите текст и повторите."
+        ),
+    }
+
+    return error_messages.get(
+        error_name,
+        f"Telegram не отправил сообщение: {error}",
+    )
+
+
+def count_first_messages_sent_today(sent_log):
+    """Считает первые сообщения, отправленные сегодня по Берлину."""
+
+    today = datetime.now(
+        ZoneInfo("Europe/Berlin")
+    ).date().isoformat()
+
+    return sum(
+        1
+        for event in sent_log
+        if str(event.get("sent_at", ""))[:10] == today
+    )
+
 def extract_json_array(answer):
     """Извлекает JSON-массив из ответа ИИ."""
 
@@ -877,7 +1019,7 @@ def search_known_contacts(contacts, query, limit=20):
 
 
 def ensure_neona_identity(message, owner_name):
-    """Гарантирует, что первое сообщение представлено от имени Неоны."""
+    """Гарантирует одно корректное представление Неоны без повторов."""
 
     message = str(message or "").strip()
     identity = (
@@ -885,37 +1027,51 @@ def ensure_neona_identity(message, owner_name):
         f"секретарь-референт {owner_name}."
     )
 
-    # Исправляем типичную ошибку:
-    # «Я — виртуальный секретарь-референт Валентины/Valentina».
-    owner_pattern = re.escape(str(owner_name).strip())
-    without_name_pattern = (
-        rf"\bя\s*[—–-]?\s*виртуальн(?:ый|ая)\s+"
-        rf"секретарь[\s‑-]*референт\s+{owner_pattern}\.?"
-    )
     message = re.sub(
-        without_name_pattern,
-        identity,
+        r"(?i)(?:\bменя\s+зовут\s+неона[\s,.;:…—–-]*){2,}",
+        "Меня зовут Неона, ",
         message,
-        count=1,
-        flags=re.IGNORECASE,
     )
 
-    # Если имя Неона всё равно отсутствует в начале,
-    # вставляем представление сразу после приветствия.
-    if "неона" not in message[:350].lower():
-        greeting_match = re.match(
-            r"^(.{1,140}?[!?.])\s*(.*)$",
-            message,
-            flags=re.DOTALL,
+    has_neona_identity = (
+        "меня зовут неона" in message[:350].lower()
+    )
+
+    if not has_neona_identity:
+        owner_pattern = re.escape(str(owner_name).strip())
+        without_name_pattern = (
+            rf"\bя\s*[—–-]?\s*виртуальн(?:ый|ая)\s+"
+            rf"секретарь[\s‑-]*референт\s+{owner_pattern}\.?"
         )
-        if greeting_match:
-            greeting = greeting_match.group(1).strip()
-            remainder = greeting_match.group(2).strip()
-            message = f"{greeting} {identity}"
-            if remainder:
-                message += f" {remainder}"
-        else:
-            message = f"{identity} {message}".strip()
+        message, replacements = re.subn(
+            without_name_pattern,
+            identity,
+            message,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+        if replacements == 0:
+            greeting_match = re.match(
+                r"^(.{1,140}?[!?.])\s*(.*)$",
+                message,
+                flags=re.DOTALL,
+            )
+            if greeting_match:
+                greeting = greeting_match.group(1).strip()
+                remainder = greeting_match.group(2).strip()
+                message = f"{greeting} {identity}"
+                if remainder:
+                    message += f" {remainder}"
+            else:
+                message = f"{identity} {message}".strip()
+
+    message = re.sub(
+        r"(?i)(?:\bменя\s+зовут\s+неона[\s,.;:…—–-]*){2,}",
+        "Меня зовут Неона, ",
+        message,
+    )
+    message = re.sub(r"\s{2,}", " ", message).strip()
 
     return message[:1000]
 
@@ -1474,6 +1630,9 @@ if received_hash:
             )
             neona_drafts_key = (
                 f"neona_first_message_drafts_{telegram_id}"
+            )
+            sent_log_key = (
+                f"neona_first_message_sent_log_{telegram_id}"
             )
             passport_key = (
                 f"neonia_target_audience_passport_{telegram_id}"
@@ -2166,6 +2325,10 @@ if received_hash:
                 neona_drafts_key,
                 {},
             )
+            sent_log = st.session_state.get(
+                sent_log_key,
+                [],
+            )
 
             if neona_drafts:
                 with st.container(border=True):
@@ -2190,23 +2353,55 @@ if received_hash:
                         }
                     )
 
-                    for contact_id, draft in neona_drafts.items():
+                    sent_today = count_first_messages_sent_today(
+                        sent_log
+                    )
+                    st.caption(
+                        f"Сегодня отправлено первых сообщений: "
+                        f"{sent_today} из 5"
+                    )
+
+                    for contact_id, draft in list(
+                        neona_drafts.items()
+                    ):
+                        contact_id = int(contact_id)
                         candidate = candidate_lookup.get(
-                            int(contact_id),
+                            contact_id,
                             {},
                         )
                         candidate_name = candidate.get(
                             "name",
                             "Кандидат",
                         )
-
-                        st.markdown(
-                            f"#### {candidate_name}"
+                        candidate_username = candidate.get(
+                            "username",
+                            "",
                         )
+
+                        normalized_message = ensure_neona_identity(
+                            draft.get("message", ""),
+                            first_name,
+                        )
+                        if normalized_message != draft.get(
+                            "message",
+                            "",
+                        ):
+                            draft["message"] = normalized_message
+                            neona_drafts[contact_id] = draft
+                            st.session_state[
+                                neona_drafts_key
+                            ] = neona_drafts
+                            persist_workspace_if_changed(
+                                telegram_id,
+                                force=True,
+                            )
+
+                        st.markdown(f"#### {candidate_name}")
                         edited_message = st.text_area(
                             "Текст первого сообщения",
                             value=draft["message"],
                             height=150,
+                            disabled=bool(draft.get("sent")),
                             key=(
                                 "neona_draft_text_"
                                 f"{telegram_id}_{contact_id}"
@@ -2214,16 +2409,18 @@ if received_hash:
                         )
 
                         if (
-                            edited_message.strip()
+                            not draft.get("sent")
+                            and edited_message.strip()
                             and edited_message.strip()
                             != str(draft.get("message", "")).strip()
                         ):
-                            draft["message"] = (
-                                edited_message.strip()
+                            draft["message"] = ensure_neona_identity(
+                                edited_message.strip(),
+                                first_name,
                             )
-                            neona_drafts[
-                                int(contact_id)
-                            ] = draft
+                            draft["approved"] = False
+                            draft["status"] = "Сообщение отредактировано"
+                            neona_drafts[contact_id] = draft
                             st.session_state[
                                 neona_drafts_key
                             ] = neona_drafts
@@ -2231,64 +2428,192 @@ if received_hash:
                                 telegram_id
                             )
 
-                        if st.button(
+                        if not draft.get("sent") and st.button(
                             "✅ Утвердить первое сообщение",
                             key=(
                                 "neona_approve_first_message_"
                                 f"{telegram_id}_{contact_id}"
                             ),
                         ):
-                            draft["message"] = (
-                                edited_message.strip()
+                            final_message = ensure_neona_identity(
+                                edited_message.strip(),
+                                first_name,
                             )
-                            draft["approved"] = True
-                            draft["status"] = (
-                                "Первое сообщение утверждено"
-                            )
-                            neona_drafts[
-                                int(contact_id)
-                            ] = draft
-                            st.session_state[
-                                neona_drafts_key
-                            ] = neona_drafts
-
-                            for candidate_item in candidate_results:
-                                if int(
-                                    candidate_item["telegram_id"]
-                                ) == int(contact_id):
-                                    candidate_item["status"] = (
-                                        "Первое сообщение утверждено"
-                                    )
-
-                            st.session_state[
-                                candidates_key
-                            ] = candidate_results
-
-                            if int(contact_id) in owner_contacts:
-                                owner_contacts[
-                                    int(contact_id)
-                                ]["status"] = (
+                            if not final_message:
+                                st.warning(
+                                    "Сначала заполните текст сообщения."
+                                )
+                            else:
+                                draft["message"] = final_message
+                                draft["approved"] = True
+                                draft["status"] = (
                                     "Первое сообщение утверждено"
                                 )
+                                neona_drafts[contact_id] = draft
                                 st.session_state[
-                                    owner_contacts_key
-                                ] = owner_contacts
+                                    neona_drafts_key
+                                ] = neona_drafts
 
-                            persist_workspace_if_changed(
-                                telegram_id,
-                                force=True,
+                                for candidate_item in candidate_results:
+                                    if int(
+                                        candidate_item["telegram_id"]
+                                    ) == contact_id:
+                                        candidate_item["status"] = (
+                                            "Первое сообщение утверждено"
+                                        )
+
+                                st.session_state[
+                                    candidates_key
+                                ] = candidate_results
+
+                                if contact_id in owner_contacts:
+                                    owner_contacts[
+                                        contact_id
+                                    ]["status"] = (
+                                        "Первое сообщение утверждено"
+                                    )
+                                    st.session_state[
+                                        owner_contacts_key
+                                    ] = owner_contacts
+
+                                persist_workspace_if_changed(
+                                    telegram_id,
+                                    force=True,
+                                )
+                                st.rerun()
+
+                        if draft.get("sent"):
+                            sent_at = str(
+                                draft.get("sent_at", "")
                             )
-
                             st.success(
-                                "Первое сообщение утверждено. "
-                                "Отправка будет подключена "
-                                "отдельным безопасным шагом."
+                                "📨 Первое сообщение отправлено"
+                                + (
+                                    f" · {sent_at[11:16]}"
+                                    if len(sent_at) >= 16
+                                    else ""
+                                )
                             )
-
-                        if draft.get("approved"):
+                        elif draft.get("approved"):
                             st.success(
                                 "✅ Первое сообщение утверждено"
                             )
+
+                            sent_today = (
+                                count_first_messages_sent_today(
+                                    sent_log
+                                )
+                            )
+                            already_sent_to_contact = any(
+                                int(event.get("telegram_id", 0))
+                                == contact_id
+                                for event in sent_log
+                            )
+
+                            if already_sent_to_contact:
+                                st.info(
+                                    "Первое сообщение этому контакту "
+                                    "уже было отправлено."
+                                )
+                            elif sent_today >= 5:
+                                st.warning(
+                                    "Дневной лимит достигнут: "
+                                    "сегодня уже отправлено 5 первых "
+                                    "сообщений."
+                                )
+                            else:
+                                st.caption(
+                                    "Сообщение уйдёт с подключённого "
+                                    "Telegram-аккаунта владельца."
+                                )
+                                if st.button(
+                                    "📨 Отправить первое сообщение",
+                                    type="primary",
+                                    key=(
+                                        "neona_send_first_message_"
+                                        f"{telegram_id}_{contact_id}"
+                                    ),
+                                ):
+                                    try:
+                                        with st.spinner(
+                                            "Отправляем сообщение "
+                                            "в Telegram..."
+                                        ):
+                                            send_result = (
+                                                run_telegram_async(
+                                                    send_telegram_first_message(
+                                                        telegram_id,
+                                                        contact_id,
+                                                        candidate_username,
+                                                        draft["message"],
+                                                    )
+                                                )
+                                            )
+
+                                        draft["sent"] = True
+                                        draft["approved"] = True
+                                        draft["sent_at"] = (
+                                            send_result["sent_at"]
+                                        )
+                                        draft["telegram_message_id"] = (
+                                            send_result["message_id"]
+                                        )
+                                        draft["status"] = (
+                                            "Первое сообщение отправлено"
+                                        )
+                                        neona_drafts[
+                                            contact_id
+                                        ] = draft
+                                        st.session_state[
+                                            neona_drafts_key
+                                        ] = neona_drafts
+
+                                        sent_log.append(
+                                            {
+                                                "telegram_id": contact_id,
+                                                "recipient_name": candidate_name,
+                                                "sent_at": send_result["sent_at"],
+                                                "message_id": send_result["message_id"],
+                                                "kind": "first_message",
+                                            }
+                                        )
+                                        st.session_state[
+                                            sent_log_key
+                                        ] = sent_log
+
+                                        for candidate_item in candidate_results:
+                                            if int(
+                                                candidate_item["telegram_id"]
+                                            ) == contact_id:
+                                                candidate_item["status"] = (
+                                                    "Первое сообщение отправлено"
+                                                )
+                                        st.session_state[
+                                            candidates_key
+                                        ] = candidate_results
+
+                                        if contact_id in owner_contacts:
+                                            owner_contacts[
+                                                contact_id
+                                            ]["status"] = (
+                                                "Первое сообщение отправлено"
+                                            )
+                                            st.session_state[
+                                                owner_contacts_key
+                                            ] = owner_contacts
+
+                                        persist_workspace_if_changed(
+                                            telegram_id,
+                                            force=True,
+                                        )
+                                        st.rerun()
+
+                                    except Exception as exc:
+                                        st.error(
+                                            friendly_telegram_send_error(
+                                                exc
+                                            )
+                                        )
 
             with st.container(border=True):
                 st.markdown("**📅 Встречи**")

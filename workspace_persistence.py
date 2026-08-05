@@ -44,6 +44,9 @@ def get_workspace_state_keys(telegram_id):
         "neona_drafts": (
             f"neona_first_message_drafts_{telegram_id}"
         ),
+        "sent_log": (
+            f"neona_first_message_sent_log_{telegram_id}"
+        ),
     }
 
 
@@ -58,9 +61,13 @@ def collect_workspace_state(telegram_id):
         keys["neona_drafts"],
         {},
     )
+    sent_log = st.session_state.get(
+        keys["sent_log"],
+        [],
+    )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -102,6 +109,11 @@ def collect_workspace_state(telegram_id):
                 **draft,
             }
             for contact_id, draft in drafts.items()
+        ],
+        "sent_log": [
+            event
+            for event in sent_log
+            if isinstance(event, dict)
         ],
     }
 
@@ -201,6 +213,25 @@ def _normalize_workspace_state(state):
     except (TypeError, ValueError):
         selection_offset = 0
 
+    sent_log_raw = state.get("sent_log", [])
+    if not isinstance(sent_log_raw, list):
+        sent_log_raw = []
+
+    sent_log = []
+    for event in sent_log_raw:
+        if not isinstance(event, dict):
+            continue
+        try:
+            event_contact_id = int(event.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        sent_log.append(
+            {
+                **event,
+                "telegram_id": event_contact_id,
+            }
+        )
+
     return {
         "passport": (
             state.get("passport")
@@ -216,6 +247,7 @@ def _normalize_workspace_state(state):
         "selected_candidates": selected_candidates,
         "owner_known_contacts": owner_contacts,
         "neona_drafts": drafts,
+        "sent_log": sent_log,
     }
 
 
@@ -366,6 +398,9 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["neona_drafts"]
         ] = state["neona_drafts"]
+        st.session_state[
+            keys["sent_log"]
+        ] = state["sent_log"]
 
         current_state = collect_workspace_state(
             telegram_id
