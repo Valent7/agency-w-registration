@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
 import asyncio
 import json
+import re
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -729,7 +730,8 @@ def generate_neona_first_messages(
 
 Обязательные правила:
 - обращайся по имени, если имя надёжно известно;
-- представься как виртуальный секретарь-референт {owner_name};
+- обязательно назови себя по имени: «Меня зовут Неона, я виртуальный секретарь-референт {owner_name}»;
+- никогда не представляйся именем владельца и не говори «я — виртуальный секретарь-референт {owner_name}» без имени Неона;
 - пиши уважительно, естественно и без давления;
 - не сообщай, что человек был проанализирован или отобран ИИ;
 - не обещай доход, гарантированный результат или лёгкие деньги;
@@ -801,6 +803,11 @@ def generate_neona_first_messages(
         if not message:
             continue
 
+        message = ensure_neona_identity(
+            message,
+            owner_name,
+        )
+
         result[contact_id] = {
             "message": message[:1000],
             "approved": False,
@@ -864,6 +871,50 @@ def search_known_contacts(contacts, query, limit=20):
     return matches[:limit]
 
 
+
+def ensure_neona_identity(message, owner_name):
+    """Гарантирует, что первое сообщение представлено от имени Неоны."""
+
+    message = str(message or "").strip()
+    identity = (
+        f"Меня зовут Неона, я виртуальный "
+        f"секретарь-референт {owner_name}."
+    )
+
+    # Исправляем типичную ошибку:
+    # «Я — виртуальный секретарь-референт Валентины/Valentina».
+    owner_pattern = re.escape(str(owner_name).strip())
+    without_name_pattern = (
+        rf"\bя\s*[—–-]?\s*виртуальн(?:ый|ая)\s+"
+        rf"секретарь[\s‑-]*референт\s+{owner_pattern}\.?"
+    )
+    message = re.sub(
+        without_name_pattern,
+        identity,
+        message,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    # Если имя Неона всё равно отсутствует в начале,
+    # вставляем представление сразу после приветствия.
+    if "неона" not in message[:350].lower():
+        greeting_match = re.match(
+            r"^(.{1,140}?[!?.])\s*(.*)$",
+            message,
+            flags=re.DOTALL,
+        )
+        if greeting_match:
+            greeting = greeting_match.group(1).strip()
+            remainder = greeting_match.group(2).strip()
+            message = f"{greeting} {identity}"
+            if remainder:
+                message += f" {remainder}"
+        else:
+            message = f"{identity} {message}".strip()
+
+    return message[:1000]
+
 def generate_neona_first_message(
     owner_name,
     passport_analysis,
@@ -884,7 +935,8 @@ def generate_neona_first_message(
 Правила:
 - верни только готовый текст сообщения, без пояснений и Markdown;
 - обращайся по имени, только если имя выглядит надёжным;
-- представься как виртуальный секретарь-референт {owner_name};
+- обязательно назови себя по имени: «Меня зовут Неона, я виртуальный секретарь-референт {owner_name}»;
+- никогда не представляйся именем владельца и не говори «я — виртуальный секретарь-референт {owner_name}» без имени Неона;
 - пиши естественно, тепло, уважительно и без давления;
 - не говори, что человека анализировал или выбирал ИИ;
 - не обещай доход, гарантированный результат или лёгкие деньги;
@@ -942,6 +994,11 @@ def generate_neona_first_message(
         and answer.endswith('"')
     ):
         answer = answer[1:-1].strip()
+
+    answer = ensure_neona_identity(
+        answer,
+        owner_name,
+    )
 
     return answer[:1000]
 
@@ -1557,95 +1614,138 @@ if received_hash:
                         int(candidate["telegram_id"]): candidate
                         for candidate in top_candidates
                     }
-                    candidate_options = list(
-                        candidate_by_id.keys()
-                    )
                     familiar_count = len(owner_contacts)
                     recommended_limit = max(
                         0,
                         5 - familiar_count,
                     )
+
+                    st.markdown(
+                        "#### ✅ Выбор владельца из списка Неонии"
+                    )
+                    st.info(
+                        "Неония только сформировала список до 10 "
+                        "подходящих кандидатов. Кого взять в работу, "
+                        "решает владелец: поставьте галочку прямо "
+                        "в карточке нужного человека."
+                    )
+
                     previous_selection = [
-                        contact_id
+                        int(contact_id)
                         for contact_id in st.session_state.get(
                             selected_candidates_key,
                             [],
                         )
                         if (
-                            contact_id in candidate_by_id
-                            and contact_id not in owner_contacts
+                            int(contact_id) in candidate_by_id
+                            and int(contact_id) not in owner_contacts
                         )
                     ][:recommended_limit]
 
+                    # Сохраняем состояние галочек между обновлениями страницы.
+                    for contact_id in candidate_by_id:
+                        checkbox_key = (
+                            "owner_select_candidate_"
+                            f"{telegram_id}_{contact_id}"
+                        )
+                        if checkbox_key not in st.session_state:
+                            st.session_state[checkbox_key] = (
+                                contact_id in previous_selection
+                            )
+
+                    current_checked_ids = [
+                        contact_id
+                        for contact_id in candidate_by_id
+                        if st.session_state.get(
+                            (
+                                "owner_select_candidate_"
+                                f"{telegram_id}_{contact_id}"
+                            ),
+                            False,
+                        )
+                    ]
+
                     st.markdown(
-                        "#### 📋 Кандидаты, предложенные Неонией"
+                        "#### 📋 Кандидаты, найденные Неонией"
                     )
 
                     for number, candidate in enumerate(
                         top_candidates,
                         start=1,
                     ):
+                        contact_id = int(
+                            candidate["telegram_id"]
+                        )
+                        checkbox_key = (
+                            "owner_select_candidate_"
+                            f"{telegram_id}_{contact_id}"
+                        )
+                        is_checked = st.session_state.get(
+                            checkbox_key,
+                            False,
+                        )
+                        limit_reached = (
+                            len(current_checked_ids)
+                            >= recommended_limit
+                            and not is_checked
+                        )
                         username = (
                             f"@{candidate['username']}"
                             if candidate.get("username")
                             else "без username"
                         )
-                        with st.expander(
-                            f"{number}. {candidate['name']} · "
-                            f"{candidate['score']}% · "
-                            f"{username}"
-                        ):
-                            st.write(
-                                f"**Сегмент:** "
-                                f"{candidate['segment']}"
+
+                        with st.container(border=True):
+                            st.checkbox(
+                                (
+                                    f"Выбрать: {candidate['name']} · "
+                                    f"{candidate['score']}% · "
+                                    f"{username}"
+                                ),
+                                key=checkbox_key,
+                                disabled=(
+                                    recommended_limit == 0
+                                    or limit_reached
+                                ),
                             )
-                            st.write(
-                                f"**Уверенность:** "
-                                f"{candidate['confidence']}"
-                            )
-                            st.write(
-                                "**Почему предложен:** "
-                                + "; ".join(
-                                    candidate.get("reasons", [])
+
+                            with st.expander(
+                                "Посмотреть карточку кандидата"
+                            ):
+                                st.write(
+                                    f"**Сегмент:** "
+                                    f"{candidate['segment']}"
                                 )
-                            )
-                            st.write(
-                                f"**Подход к знакомству:** "
-                                f"{candidate['message_angle']}"
-                            )
+                                st.write(
+                                    f"**Уверенность:** "
+                                    f"{candidate['confidence']}"
+                                )
+                                st.write(
+                                    "**Почему предложен:** "
+                                    + "; ".join(
+                                        candidate.get(
+                                            "reasons",
+                                            [],
+                                        )
+                                    )
+                                )
+                                st.write(
+                                    f"**Подход к знакомству:** "
+                                    f"{candidate['message_angle']}"
+                                )
 
-                    st.markdown("#### ✅ Выбор владельца")
-                    st.info(
-                        "Выберите кандидатов Неонии. Общий лимит "
-                        "вместе со знакомыми контактами — не более "
-                        "5 первых сообщений."
-                    )
-
-                    if recommended_limit > 0:
-                        selected_ids = st.multiselect(
-                            "Выберите кандидатов Неонии",
-                            options=candidate_options,
-                            default=previous_selection,
-                            max_selections=recommended_limit,
-                            placeholder=(
-                                "Нажмите и выберите кандидатов"
+                    # После отрисовки считываем окончательный выбор владельца.
+                    selected_ids = [
+                        contact_id
+                        for contact_id in candidate_by_id
+                        if st.session_state.get(
+                            (
+                                "owner_select_candidate_"
+                                f"{telegram_id}_{contact_id}"
                             ),
-                            format_func=lambda contact_id: (
-                                f"{candidate_by_id[contact_id]['name']} "
-                                f"— {candidate_by_id[contact_id]['score']}% "
-                                f"— {candidate_by_id[contact_id]['segment']}"
-                            ),
-                            key=(
-                                "neonia_candidate_multiselect_"
-                                f"{telegram_id}"
-                            ),
+                            False,
                         )
-                    else:
-                        selected_ids = []
-                        st.warning(
-                            "Лимит 5 человек уже заполнен "
-                            "знакомыми контактами."
-                        )
+                    ][:recommended_limit]
 
                     st.session_state[
                         selected_candidates_key
@@ -1656,13 +1756,24 @@ if received_hash:
                         + len(owner_contacts)
                     )
                     st.caption(
-                        f"Всего выбрано для работы: "
+                        f"Выбрано владельцем: "
                         f"{total_selected} из 5"
                     )
 
+                    if recommended_limit == 0:
+                        st.warning(
+                            "Лимит 5 человек уже заполнен "
+                            "знакомыми контактами."
+                        )
+                    elif not selected_ids:
+                        st.warning(
+                            "Пока никто не выбран. Поставьте галочку "
+                            "в карточке нужного кандидата."
+                        )
+
                     if selected_ids:
                         st.markdown(
-                            "#### ✍️ Выбранные рекомендации Неонии"
+                            "#### ✍️ Люди, выбранные владельцем"
                         )
 
                         for contact_id in selected_ids:
