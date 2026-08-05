@@ -3,6 +3,10 @@ import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
+from workspace_persistence import (
+    hydrate_workspace_state_once,
+    persist_workspace_if_changed,
+)
 import asyncio
 import json
 import re
@@ -1395,6 +1399,34 @@ if received_hash:
 
         if not telegram_connected:
             st.stop()
+
+        hydrate_workspace_state_once(telegram_id)
+
+        persistence_ready = st.session_state.get(
+            f"agency_workspace_persistence_ready_{telegram_id}",
+            False,
+        )
+
+        if persistence_ready:
+            st.caption(
+                "💾 Рабочее состояние сохраняется автоматически"
+            )
+        else:
+            load_error = st.session_state.get(
+                f"agency_workspace_load_error_{telegram_id}",
+                "",
+            )
+            st.warning(
+                "Постоянное сохранение ещё не подключено. "
+                "Создайте таблицу agency_workspace_states "
+                "в Supabase."
+                + (
+                    f" Техническая причина: {load_error}"
+                    if load_error
+                    else ""
+                )
+            )
+
         main_section = st.segmented_control(
             "Главное меню",
             ["☀️ День", "🤖 Агенты", "👥 Команда", "👤 Профиль"],
@@ -1562,6 +1594,10 @@ if received_hash:
                                 candidates_key
                             ] = candidate_results
 
+                        persist_workspace_if_changed(
+                            telegram_id,
+                            force=True,
+                        )
                         st.rerun()
 
                     except Exception as exc:
@@ -1750,6 +1786,10 @@ if received_hash:
                     st.session_state[
                         selected_candidates_key
                     ] = selected_ids
+
+                    persist_workspace_if_changed(
+                        telegram_id
+                    )
 
                     total_selected = (
                         len(selected_ids)
@@ -2034,6 +2074,11 @@ if received_hash:
                                     st.session_state[
                                         owner_contacts_key
                                     ] = owner_contacts
+
+                                    persist_workspace_if_changed(
+                                        telegram_id,
+                                        force=True,
+                                    )
                                     st.rerun()
 
                 if owner_contacts:
@@ -2110,6 +2155,11 @@ if received_hash:
                                     st.session_state[
                                         neona_drafts_key
                                     ] = drafts
+
+                                    persist_workspace_if_changed(
+                                        telegram_id,
+                                        force=True,
+                                    )
                                     st.rerun()
 
             neona_drafts = st.session_state.get(
@@ -2163,6 +2213,24 @@ if received_hash:
                             ),
                         )
 
+                        if (
+                            edited_message.strip()
+                            and edited_message.strip()
+                            != str(draft.get("message", "")).strip()
+                        ):
+                            draft["message"] = (
+                                edited_message.strip()
+                            )
+                            neona_drafts[
+                                int(contact_id)
+                            ] = draft
+                            st.session_state[
+                                neona_drafts_key
+                            ] = neona_drafts
+                            persist_workspace_if_changed(
+                                telegram_id
+                            )
+
                         if st.button(
                             "✅ Утвердить первое сообщение",
                             key=(
@@ -2205,6 +2273,11 @@ if received_hash:
                                 st.session_state[
                                     owner_contacts_key
                                 ] = owner_contacts
+
+                            persist_workspace_if_changed(
+                                telegram_id,
+                                force=True,
+                            )
 
                             st.success(
                                 "Первое сообщение утверждено. "
@@ -2319,6 +2392,11 @@ if received_hash:
                                         st.session_state[
                                             search_done_key
                                         ] = True
+
+                                        persist_workspace_if_changed(
+                                            telegram_id,
+                                            force=True,
+                                        )
                         
                                     except Exception as exc:
                                         st.error(
@@ -2496,6 +2574,11 @@ if received_hash:
                                                     offset_key
                                                 ]
                                             )
+
+                                            persist_workspace_if_changed(
+                                                telegram_id,
+                                                force=True,
+                                            )
                                             st.success(
                                                 "Партия обработана. "
                                                 f"Проверено: "
@@ -2638,6 +2721,11 @@ if received_hash:
                                             f"{telegram_id}",
                                             None,
                                         )
+
+                                        persist_workspace_if_changed(
+                                            telegram_id,
+                                            force=True,
+                                        )
                                         st.rerun()
 
                         st.stop()
@@ -2764,6 +2852,11 @@ if received_hash:
                                     ZoneInfo("Europe/Berlin")
                                 ).isoformat(),
                             }
+
+                            persist_workspace_if_changed(
+                                telegram_id,
+                                force=True,
+                            )
 
                             st.success(
                                 "✅ Паспорт целевой аудитории сохранён"
