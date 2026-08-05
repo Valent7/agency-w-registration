@@ -2,22 +2,16 @@ import streamlit as st
 
 
 def render_neonia_contacts():
-    """Показывает подключение Telegram и резервную загрузку файла."""
+    """Показывает поиск Telegram-контактов и резервную загрузку файла."""
 
     st.markdown("### 👥 Контакты")
-    st.write(
-        "Подключите Telegram один раз. "
-        "Неония сама подготовит доступные контакты к анализу."
-    )
 
     telegram_ready = (
         "TELEGRAM_API_ID" in st.secrets
         and "TELEGRAM_API_HASH" in st.secrets
     )
 
-    if telegram_ready:
-        st.success("Агентство W готово к подключению Telegram.")
-    else:
+    if not telegram_ready:
         st.error(
             "Не найдены TELEGRAM_API_ID и TELEGRAM_API_HASH "
             "в настройках приложения."
@@ -36,20 +30,13 @@ def render_neonia_contacts():
     )
 
     if telegram_connected:
-        st.success("Ваш Telegram подключён.")
-    elif st.button(
-        "🔗 Подключить мой Telegram",
-        key="neonia_connect_telegram",
-    ):
-        st.session_state["neonia_connect_requested"] = True
-
-    if (
-        st.session_state.get("neonia_connect_requested", False)
-        and not telegram_connected
-    ):
-        st.info(
-            "Кнопка подключения готова. "
-            "Следующим шагом добавим ввод номера и кода Telegram."
+        st.write(
+            "Telegram уже подключён. Неония может получить "
+            "доступные контакты для анализа."
+        )
+    else:
+        st.warning(
+            "Сначала подключите Telegram при входе в кабинет."
         )
 
     find_contacts = st.button(
@@ -57,11 +44,6 @@ def render_neonia_contacts():
         key="neonia_find_contacts",
         disabled=not telegram_connected,
     )
-
-    if not telegram_connected:
-        st.caption(
-            "Поиск станет доступен после подключения Telegram."
-        )
 
     contacts_file = None
     contacts_note = ""

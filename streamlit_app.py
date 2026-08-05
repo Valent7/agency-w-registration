@@ -1253,10 +1253,24 @@ if received_hash:
             passport_key = (
                 f"neonia_target_audience_passport_{telegram_id}"
             )
+            contacts_state_key = (
+                f"neonia_telegram_contacts_{telegram_id}"
+            )
+            offset_key = (
+                f"neonia_selection_offset_{telegram_id}"
+            )
 
             candidate_results = st.session_state.get(
                 candidates_key,
                 [],
+            )
+            all_contacts = st.session_state.get(
+                contacts_state_key,
+                [],
+            )
+            analyzed_count = min(
+                st.session_state.get(offset_key, 0),
+                len(all_contacts),
             )
             recommended_candidates = [
                 candidate
@@ -1267,21 +1281,63 @@ if received_hash:
             recommended_candidates.sort(
                 key=lambda item: -int(item.get("score", 0))
             )
+            top_candidates = recommended_candidates[:10]
+            insufficient_count = sum(
+                1
+                for candidate in candidate_results
+                if candidate.get("recommendation")
+                == "Нужно больше данных"
+            )
+            not_fit_count = sum(
+                1
+                for candidate in candidate_results
+                if candidate.get("recommendation")
+                == "Пока не подходит"
+            )
 
             with st.container(border=True):
                 st.markdown(
-                    "**🎯 Кандидаты Неонии на сегодня**"
+                    "**🎯 10 кандидатов Неонии на сегодня**"
                 )
 
-                if not recommended_candidates:
+                if all_contacts:
+                    st.write(
+                        f"Всего контактов: **{len(all_contacts)}** · "
+                        f"Проанализировано: **{analyzed_count}** · "
+                        f"Соответствует ЦА: "
+                        f"**{len(recommended_candidates)}**"
+                    )
+                    if analyzed_count < len(all_contacts):
+                        st.caption(
+                            "Результат предварительный: Неония ещё не "
+                            "проанализировала все контакты."
+                        )
+                else:
+                    st.caption(
+                        "Сначала загрузите контакты в разделе Неонии."
+                    )
+
+                if not top_candidates:
                     st.caption(
                         "Подходящих кандидатов пока нет. "
                         "Запустите селекцию в разделе Неонии."
                     )
                 else:
+                    st.info(
+                        "Неония предлагает до 10 лучших кандидатов "
+                        "из уже проанализированных. Выбор делает "
+                        "владелец кабинета: от 1 до 5 человек."
+                    )
+                    if len(top_candidates) < 10:
+                        st.warning(
+                            f"Пока найдено {len(top_candidates)} из 10 "
+                            "кандидатов. Продолжите анализ контактов "
+                            "в разделе Неонии."
+                        )
+
                     candidate_by_id = {
                         int(candidate["telegram_id"]): candidate
-                        for candidate in recommended_candidates
+                        for candidate in top_candidates
                     }
                     candidate_options = list(
                         candidate_by_id.keys()
@@ -1296,7 +1352,7 @@ if received_hash:
                     ]
 
                     selected_ids = st.multiselect(
-                        "Выберите до 5 кандидатов",
+                        "Выберите от 1 до 5 кандидатов из списка ниже",
                         options=candidate_options,
                         default=previous_selection,
                         max_selections=5,
@@ -1315,17 +1371,20 @@ if received_hash:
                     ] = selected_ids
 
                     st.caption(
-                        f"Выбрано: {len(selected_ids)} из 5"
+                        f"Выбрано владельцем: {len(selected_ids)} из 5"
                     )
 
-                    for candidate in recommended_candidates[:15]:
+                    for number, candidate in enumerate(
+                        top_candidates,
+                        start=1,
+                    ):
                         username = (
                             f"@{candidate['username']}"
                             if candidate.get("username")
                             else "без username"
                         )
                         with st.expander(
-                            f"{candidate['name']} · "
+                            f"{number}. {candidate['name']} · "
                             f"{candidate['score']}% · "
                             f"{username}"
                         ):
@@ -1338,7 +1397,7 @@ if received_hash:
                                 f"{candidate['confidence']}"
                             )
                             st.write(
-                                "**Почему выбран:** "
+                                "**Почему предложен:** "
                                 + "; ".join(
                                     candidate.get("reasons", [])
                                 )
@@ -1348,7 +1407,13 @@ if received_hash:
                                 f"{candidate['message_angle']}"
                             )
 
-                    if st.button(
+                    if not selected_ids:
+                        st.info(
+                            "Сначала выберите хотя бы одного кандидата. "
+                            "Неона не выбирает людей вместо владельца."
+                        )
+
+                    prepare_messages = st.button(
                         "✍️ Неона: подготовить первые сообщения",
                         type="primary",
                         disabled=not selected_ids,
@@ -1356,7 +1421,9 @@ if received_hash:
                             "neona_prepare_first_messages_"
                             f"{telegram_id}"
                         ),
-                    ):
+                    )
+
+                    if prepare_messages:
                         passport = st.session_state.get(
                             passport_key
                         )
@@ -1383,21 +1450,29 @@ if received_hash:
                                             selected_candidates,
                                         )
                                     )
-                                    st.session_state[
-                                        neona_drafts_key
-                                    ] = drafts
 
-                                    for candidate in candidate_results:
-                                        if int(
-                                            candidate["telegram_id"]
-                                        ) in selected_ids:
-                                            candidate["status"] = (
-                                                "Сообщение подготовлено"
-                                            )
+                                    if not drafts:
+                                        st.error(
+                                            "Неона не сформировала "
+                                            "сообщения. Повторите попытку."
+                                        )
+                                    else:
+                                        st.session_state[
+                                            neona_drafts_key
+                                        ] = drafts
 
-                                    st.session_state[
-                                        candidates_key
-                                    ] = candidate_results
+                                        for candidate in candidate_results:
+                                            if int(
+                                                candidate["telegram_id"]
+                                            ) in selected_ids:
+                                                candidate["status"] = (
+                                                    "Сообщение подготовлено"
+                                                )
+
+                                        st.session_state[
+                                            candidates_key
+                                        ] = candidate_results
+                                        st.rerun()
 
                                 except Exception as exc:
                                     st.error(
@@ -1785,43 +1860,76 @@ if received_hash:
                                                 f"{exc}"
                                             )
 
+                                analyzed_count = min(
+                                    current_offset,
+                                    len(contacts),
+                                )
+                                recommended_count = sum(
+                                    1
+                                    for item in candidate_results
+                                    if item.get(
+                                        "recommendation"
+                                    ) == "Передать Неоне"
+                                )
+                                more_data_count = sum(
+                                    1
+                                    for item in candidate_results
+                                    if item.get(
+                                        "recommendation"
+                                    ) == "Нужно больше данных"
+                                )
+                                not_fit_count = sum(
+                                    1
+                                    for item in candidate_results
+                                    if item.get(
+                                        "recommendation"
+                                    ) == "Пока не подходит"
+                                )
+
+                                st.markdown(
+                                    "#### 📊 Ход анализа контактов"
+                                )
+                                st.write(
+                                    f"Всего контактов: **{len(contacts)}** · "
+                                    f"Проанализировано: "
+                                    f"**{analyzed_count}** · "
+                                    f"Соответствует ЦА: "
+                                    f"**{recommended_count}** · "
+                                    f"Недостаточно данных: "
+                                    f"**{more_data_count}** · "
+                                    f"Не подходит: **{not_fit_count}**"
+                                )
+
+                                if contacts:
+                                    st.progress(
+                                        analyzed_count / len(contacts)
+                                    )
+
+                                if analyzed_count < len(contacts):
+                                    st.info(
+                                        "Это предварительный результат. "
+                                        "Чтобы узнать точное количество "
+                                        "подходящих людей из всех контактов, "
+                                        "продолжайте анализ партиями по 10."
+                                    )
+
+                                if (
+                                    recommended_count < 10
+                                    and analyzed_count < len(contacts)
+                                ):
+                                    st.warning(
+                                        f"Для рабочего стола нужно до 10 "
+                                        f"кандидатов. Сейчас найдено "
+                                        f"{recommended_count}. Нажмите "
+                                        "«Проанализировать следующие 10 "
+                                        "контактов»."
+                                    )
+
                                 if candidate_results:
-                                    recommended_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get(
-                                            "recommendation"
-                                        ) == "Передать Неоне"
-                                    )
-                                    more_data_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get(
-                                            "recommendation"
-                                        ) == "Нужно больше данных"
-                                    )
-                                    not_fit_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get(
-                                            "recommendation"
-                                        ) == "Пока не подходит"
-                                    )
-
                                     st.markdown(
-                                        "#### 📋 Результат селекции"
+                                        "#### 📋 Результаты уже "
+                                        "проанализированных контактов"
                                     )
-                                    st.write(
-                                        f"Проверено: "
-                                        f"{len(candidate_results)} · "
-                                        f"Кандидатов: "
-                                        f"{recommended_count} · "
-                                        f"Недостаточно данных: "
-                                        f"{more_data_count} · "
-                                        f"Пока не подходят: "
-                                        f"{not_fit_count}"
-                                    )
-
                                     results_for_table = [
                                         {
                                             "Имя": item["name"],
@@ -1851,9 +1959,10 @@ if received_hash:
                                     )
 
                                     st.info(
-                                        "Кандидаты с рекомендацией "
-                                        "«Передать Неоне» уже появились "
-                                        "на рабочем столе «Мой день»."
+                                        "На рабочем столе показываются "
+                                        "10 лучших кандидатов с рекомендацией "
+                                        "«Передать Неоне». Из них владелец "
+                                        "сам выбирает не более 5."
                                     )
 
                                     if st.button(
@@ -1870,6 +1979,16 @@ if received_hash:
                                         st.session_state[
                                             offset_key
                                         ] = 0
+                                        st.session_state.pop(
+                                            f"neonia_selected_candidates_"
+                                            f"{telegram_id}",
+                                            None,
+                                        )
+                                        st.session_state.pop(
+                                            f"neona_first_message_drafts_"
+                                            f"{telegram_id}",
+                                            None,
+                                        )
                                         st.rerun()
 
                         st.stop()
@@ -1910,7 +2029,7 @@ if received_hash:
                         )
 
                         neonia_submitted = st.form_submit_button(
-                            "🧭 Изучить проект и построить ЦА"
+                            "🎯 Изучить проект и определить ЦА"
                         )
 
                         if neonia_submitted:
@@ -1923,7 +2042,7 @@ if received_hash:
     Ты — Неония, ИИ-аналитик Агентства W.
 
 Сейчас ты работаешь только в разделе
-«Анализ проекта и построение целевой аудитории».
+«Анализ проекта и определение целевой аудитории».
 
 Твоя задача:
 — изучить предоставленные ссылки и документы;
@@ -1931,7 +2050,7 @@ if received_hash:
 — определить, какие реальные проблемы людей решает проект;
 — проверить основные заявления проекта;
 — выявить сильные стороны, ограничения и возможные риски;
-— построить отдельные портреты потенциального клиента и партнёра;
+— определить отдельные портреты потенциального клиента и партнёра;
 — сформировать критерии, по которым позже будут анализироваться
 контакты и участники чатов.
 
