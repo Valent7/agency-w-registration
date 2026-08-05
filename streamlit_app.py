@@ -4,10 +4,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
 import asyncio
+import json
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
+from telethon.tl.functions.users import GetFullUserRequest
 from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeInvalidError,
@@ -421,6 +423,391 @@ async def fetch_telegram_contacts(telegram_id):
 
     finally:
         await client.disconnect()
+
+
+def extract_json_array(answer):
+    """Извлекает JSON-массив из ответа ИИ."""
+
+    if not answer:
+        raise ValueError("ИИ вернул пустой ответ.")
+
+    cleaned = answer.strip()
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.replace("```json", "", 1)
+        cleaned = cleaned.replace("```", "")
+
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+
+    if start == -1 or end == -1 or end < start:
+        raise ValueError(
+            "ИИ не вернул структурированный список результатов."
+        )
+
+    return json.loads(cleaned[start:end + 1])
+
+
+async def fetch_telegram_contact_contexts(
+    telegram_id,
+    contacts_batch,
+):
+    """Получает минимум доступного контекста для партии контактов."""
+
+    session_string = load_telegram_session_from_supabase(
+        telegram_id
+    )
+
+    if not session_string:
+        return []
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+
+    await client.connect()
+    contexts = []
+
+    try:
+        if not await client.is_user_authorized():
+            return []
+
+        for contact in contacts_batch:
+            context = {
+                "telegram_id": int(contact["telegram_id"]),
+                "name": contact.get("name") or "Без имени",
+                "first_name": contact.get("first_name") or "",
+                "username": contact.get("username") or "",
+                "about": "",
+                "mutual_contact": False,
+                "verified": False,
+                "telegram_warning": False,
+                "recent_messages": [],
+            }
+
+            try:
+                entity = await client.get_entity(
+                    int(contact["telegram_id"])
+                )
+
+                context["mutual_contact"] = bool(
+                    getattr(entity, "mutual_contact", False)
+                )
+                context["verified"] = bool(
+                    getattr(entity, "verified", False)
+                )
+                context["telegram_warning"] = bool(
+                    getattr(entity, "scam", False)
+                    or getattr(entity, "fake", False)
+                )
+
+                try:
+                    full_user = await client(
+                        GetFullUserRequest(entity)
+                    )
+                    context["about"] = (
+                        getattr(
+                            full_user.full_user,
+                            "about",
+                            "",
+                        )
+                        or ""
+                    )[:700]
+                except Exception:
+                    pass
+
+                try:
+                    async for message in client.iter_messages(
+                        entity,
+                        limit=6,
+                    ):
+                        message_text = (
+                            getattr(message, "message", "")
+                            or ""
+                        ).strip()
+
+                        if not message_text:
+                            continue
+
+                        context["recent_messages"].append(
+                            {
+                                "direction": (
+                                    "от владельца"
+                                    if getattr(message, "out", False)
+                                    else "от контакта"
+                                ),
+                                "text": message_text[:500],
+                                "date": (
+                                    message.date.isoformat()
+                                    if getattr(message, "date", None)
+                                    else ""
+                                ),
+                            }
+                        )
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+            contexts.append(context)
+
+        return contexts
+
+    finally:
+        await client.disconnect()
+
+
+def analyze_contacts_for_target_audience(
+    passport_analysis,
+    contact_contexts,
+):
+    """Сравнивает партию контактов с паспортом ЦА."""
+
+    system_prompt = """
+Ты — Неония, аналитик и селектор Агентства W.
+
+Сравни контакты с паспортом целевой аудитории проекта.
+Используй только переданные данные. Не делай выводов по одному имени,
+национальности, полу, возрасту или фотографии. Не придумывай факты.
+
+Если сведений мало, прямо укажи:
+«Недостаточно данных».
+
+Для каждого контакта верни:
+- telegram_id;
+- segment;
+- score — целое число от 0 до 100;
+- confidence: «высокая», «средняя» или «низкая»;
+- reasons — список из 1–3 коротких оснований;
+- recommendation — строго одно из:
+  «Передать Неоне»,
+  «Нужно больше данных»,
+  «Пока не подходит»;
+- message_angle — безопасная тема первого обращения,
+  без обещаний дохода и давления.
+
+Оценка должна опираться прежде всего на bio, прежнюю переписку
+и явные интересы человека. Отсутствие username, телефона или bio
+не является отрицательным признаком.
+
+Верни ТОЛЬКО JSON-массив без пояснений и без Markdown.
+"""
+
+    request = (
+        "ПАСПОРТ ЦЕЛЕВОЙ АУДИТОРИИ:\n"
+        f"{passport_analysis}\n\n"
+        "КОНТАКТЫ ДЛЯ АНАЛИЗА:\n"
+        f"{json.dumps(contact_contexts, ensure_ascii=False)}"
+    )
+
+    answer = ask_openai(
+        system_prompt,
+        request,
+    )
+
+    if answer.startswith("Ошибка OpenAI:"):
+        raise RuntimeError(answer)
+
+    raw_results = extract_json_array(answer)
+    source_by_id = {
+        int(item["telegram_id"]): item
+        for item in contact_contexts
+    }
+    normalized = []
+
+    for item in raw_results:
+        try:
+            contact_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+
+        source = source_by_id.get(contact_id)
+        if not source:
+            continue
+
+        try:
+            score = int(item.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0
+
+        score = max(0, min(100, score))
+
+        reasons = item.get("reasons", [])
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        if not isinstance(reasons, list):
+            reasons = []
+
+        recommendation = item.get(
+            "recommendation",
+            "Нужно больше данных",
+        )
+        allowed_recommendations = {
+            "Передать Неоне",
+            "Нужно больше данных",
+            "Пока не подходит",
+        }
+        if recommendation not in allowed_recommendations:
+            recommendation = "Нужно больше данных"
+
+        normalized.append(
+            {
+                "telegram_id": contact_id,
+                "name": source.get("name") or "Без имени",
+                "first_name": source.get("first_name") or "",
+                "username": source.get("username") or "",
+                "segment": (
+                    str(item.get("segment") or "Не определён")
+                ),
+                "score": score,
+                "confidence": (
+                    str(item.get("confidence") or "низкая")
+                ),
+                "reasons": [
+                    str(reason)[:300]
+                    for reason in reasons[:3]
+                ] or ["Недостаточно данных"],
+                "recommendation": recommendation,
+                "message_angle": (
+                    str(
+                        item.get("message_angle")
+                        or "Нейтральное знакомство"
+                    )[:500]
+                ),
+                "status": "Новый кандидат",
+                "analyzed_at": datetime.now(
+                    ZoneInfo("Europe/Berlin")
+                ).isoformat(),
+            }
+        )
+
+    return normalized
+
+
+def merge_candidate_results(existing, new_results):
+    """Добавляет новые результаты без дублей."""
+
+    merged = {
+        int(item["telegram_id"]): item
+        for item in existing
+    }
+
+    for item in new_results:
+        contact_id = int(item["telegram_id"])
+        previous = merged.get(contact_id, {})
+        item["status"] = previous.get(
+            "status",
+            item.get("status", "Новый кандидат"),
+        )
+        merged[contact_id] = item
+
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            item.get("recommendation") != "Передать Неоне",
+            -int(item.get("score", 0)),
+            item.get("name", "").lower(),
+        ),
+    )
+
+
+def generate_neona_first_messages(
+    owner_name,
+    passport_analysis,
+    selected_candidates,
+):
+    """Создаёт первые сообщения для выбранных кандидатов."""
+
+    system_prompt = f"""
+Ты — Неона, виртуальный секретарь-референт {owner_name}.
+
+Подготовь первое персональное сообщение каждому выбранному кандидату.
+
+Обязательные правила:
+- обращайся по имени, если имя надёжно известно;
+- представься как виртуальный секретарь-референт {owner_name};
+- пиши уважительно, естественно и без давления;
+- не сообщай, что человек был проанализирован или отобран ИИ;
+- не обещай доход, гарантированный результат или лёгкие деньги;
+- не отправляй ссылки в первом сообщении;
+- не используй одинаковый текст для всех;
+- опирайся только на переданные сведения;
+- закончи одним простым вопросом, на который удобно ответить;
+- сообщение должно быть коротким: до 650 знаков.
+
+Верни ТОЛЬКО JSON-массив:
+[
+  {{
+    "telegram_id": 123,
+    "message": "готовый текст"
+  }}
+]
+Без пояснений и без Markdown.
+"""
+
+    safe_candidates = [
+        {
+            "telegram_id": item["telegram_id"],
+            "name": item.get("name", ""),
+            "first_name": item.get("first_name", ""),
+            "username": item.get("username", ""),
+            "segment": item.get("segment", ""),
+            "score": item.get("score", 0),
+            "reasons": item.get("reasons", []),
+            "message_angle": item.get(
+                "message_angle",
+                "",
+            ),
+        }
+        for item in selected_candidates
+    ]
+
+    request = (
+        "ПАСПОРТ ЦА:\n"
+        f"{passport_analysis}\n\n"
+        "ВЫБРАННЫЕ КАНДИДАТЫ:\n"
+        f"{json.dumps(safe_candidates, ensure_ascii=False)}"
+    )
+
+    answer = ask_openai(
+        system_prompt,
+        request,
+    )
+
+    if answer.startswith("Ошибка OpenAI:"):
+        raise RuntimeError(answer)
+
+    raw_messages = extract_json_array(answer)
+    allowed_ids = {
+        int(item["telegram_id"])
+        for item in selected_candidates
+    }
+    result = {}
+
+    for item in raw_messages:
+        try:
+            contact_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+
+        if contact_id not in allowed_ids:
+            continue
+
+        message = str(item.get("message") or "").strip()
+        if not message:
+            continue
+
+        result[contact_id] = {
+            "message": message[:1000],
+            "approved": False,
+            "status": "Сообщение подготовлено",
+        }
+
+    return result
 
 def render_telegram_connection(expected_telegram_id):
     expected_telegram_id = int(expected_telegram_id)
@@ -852,7 +1239,259 @@ if received_hash:
             mood_index = berlin_today.toordinal() % len(daily_moods)
             mood_of_the_day = daily_moods[mood_index]
     
-            st.info(f"Настрой дня: {mood_of_the_day}")  
+            st.info(f"Настрой дня: {mood_of_the_day}")
+
+            candidates_key = (
+                f"neonia_candidates_{telegram_id}"
+            )
+            selected_candidates_key = (
+                f"neonia_selected_candidates_{telegram_id}"
+            )
+            neona_drafts_key = (
+                f"neona_first_message_drafts_{telegram_id}"
+            )
+            passport_key = (
+                f"neonia_target_audience_passport_{telegram_id}"
+            )
+
+            candidate_results = st.session_state.get(
+                candidates_key,
+                [],
+            )
+            recommended_candidates = [
+                candidate
+                for candidate in candidate_results
+                if candidate.get("recommendation")
+                == "Передать Неоне"
+            ]
+            recommended_candidates.sort(
+                key=lambda item: -int(item.get("score", 0))
+            )
+
+            with st.container(border=True):
+                st.markdown(
+                    "**🎯 Кандидаты Неонии на сегодня**"
+                )
+
+                if not recommended_candidates:
+                    st.caption(
+                        "Подходящих кандидатов пока нет. "
+                        "Запустите селекцию в разделе Неонии."
+                    )
+                else:
+                    candidate_by_id = {
+                        int(candidate["telegram_id"]): candidate
+                        for candidate in recommended_candidates
+                    }
+                    candidate_options = list(
+                        candidate_by_id.keys()
+                    )
+                    previous_selection = [
+                        contact_id
+                        for contact_id in st.session_state.get(
+                            selected_candidates_key,
+                            [],
+                        )
+                        if contact_id in candidate_by_id
+                    ]
+
+                    selected_ids = st.multiselect(
+                        "Выберите до 5 кандидатов",
+                        options=candidate_options,
+                        default=previous_selection,
+                        max_selections=5,
+                        format_func=lambda contact_id: (
+                            f"{candidate_by_id[contact_id]['name']} "
+                            f"— {candidate_by_id[contact_id]['score']}% "
+                            f"— {candidate_by_id[contact_id]['segment']}"
+                        ),
+                        key=(
+                            "neonia_candidate_multiselect_"
+                            f"{telegram_id}"
+                        ),
+                    )
+                    st.session_state[
+                        selected_candidates_key
+                    ] = selected_ids
+
+                    st.caption(
+                        f"Выбрано: {len(selected_ids)} из 5"
+                    )
+
+                    for candidate in recommended_candidates[:15]:
+                        username = (
+                            f"@{candidate['username']}"
+                            if candidate.get("username")
+                            else "без username"
+                        )
+                        with st.expander(
+                            f"{candidate['name']} · "
+                            f"{candidate['score']}% · "
+                            f"{username}"
+                        ):
+                            st.write(
+                                f"**Сегмент:** "
+                                f"{candidate['segment']}"
+                            )
+                            st.write(
+                                f"**Уверенность:** "
+                                f"{candidate['confidence']}"
+                            )
+                            st.write(
+                                "**Почему выбран:** "
+                                + "; ".join(
+                                    candidate.get("reasons", [])
+                                )
+                            )
+                            st.write(
+                                f"**Подход к знакомству:** "
+                                f"{candidate['message_angle']}"
+                            )
+
+                    if st.button(
+                        "✍️ Неона: подготовить первые сообщения",
+                        type="primary",
+                        disabled=not selected_ids,
+                        key=(
+                            "neona_prepare_first_messages_"
+                            f"{telegram_id}"
+                        ),
+                    ):
+                        passport = st.session_state.get(
+                            passport_key
+                        )
+
+                        if not passport:
+                            st.warning(
+                                "Сначала создайте паспорт ЦА."
+                            )
+                        else:
+                            selected_candidates = [
+                                candidate_by_id[contact_id]
+                                for contact_id in selected_ids
+                            ]
+
+                            with st.spinner(
+                                "Неона готовит персональные "
+                                "первые сообщения..."
+                            ):
+                                try:
+                                    drafts = (
+                                        generate_neona_first_messages(
+                                            first_name,
+                                            passport["analysis"],
+                                            selected_candidates,
+                                        )
+                                    )
+                                    st.session_state[
+                                        neona_drafts_key
+                                    ] = drafts
+
+                                    for candidate in candidate_results:
+                                        if int(
+                                            candidate["telegram_id"]
+                                        ) in selected_ids:
+                                            candidate["status"] = (
+                                                "Сообщение подготовлено"
+                                            )
+
+                                    st.session_state[
+                                        candidates_key
+                                    ] = candidate_results
+
+                                except Exception as exc:
+                                    st.error(
+                                        "Не удалось подготовить "
+                                        f"сообщения: {exc}"
+                                    )
+
+            neona_drafts = st.session_state.get(
+                neona_drafts_key,
+                {},
+            )
+
+            if neona_drafts:
+                with st.container(border=True):
+                    st.markdown(
+                        "**✍️ Первые сообщения Неоны "
+                        "на утверждение**"
+                    )
+                    st.caption(
+                        "Владелец утверждает только первое "
+                        "сообщение. После ответа человека Неона "
+                        "ведёт диалог самостоятельно по правилам."
+                    )
+
+                    candidate_lookup = {
+                        int(item["telegram_id"]): item
+                        for item in candidate_results
+                    }
+
+                    for contact_id, draft in neona_drafts.items():
+                        candidate = candidate_lookup.get(
+                            int(contact_id),
+                            {},
+                        )
+                        candidate_name = candidate.get(
+                            "name",
+                            "Кандидат",
+                        )
+
+                        st.markdown(
+                            f"#### {candidate_name}"
+                        )
+                        edited_message = st.text_area(
+                            "Текст первого сообщения",
+                            value=draft["message"],
+                            height=150,
+                            key=(
+                                "neona_draft_text_"
+                                f"{telegram_id}_{contact_id}"
+                            ),
+                        )
+
+                        if st.button(
+                            "✅ Утвердить первое сообщение",
+                            key=(
+                                "neona_approve_first_message_"
+                                f"{telegram_id}_{contact_id}"
+                            ),
+                        ):
+                            draft["message"] = (
+                                edited_message.strip()
+                            )
+                            draft["approved"] = True
+                            draft["status"] = (
+                                "Первое сообщение утверждено"
+                            )
+                            neona_drafts[
+                                int(contact_id)
+                            ] = draft
+                            st.session_state[
+                                neona_drafts_key
+                            ] = neona_drafts
+
+                            for candidate_item in candidate_results:
+                                if int(
+                                    candidate_item["telegram_id"]
+                                ) == int(contact_id):
+                                    candidate_item["status"] = (
+                                        "Первое сообщение утверждено"
+                                    )
+
+                            st.session_state[
+                                candidates_key
+                            ] = candidate_results
+                            st.success(
+                                "Первое сообщение утверждено. "
+                                "Отправка будет подключена "
+                                "отдельным безопасным шагом."
+                            )
+
+                        if draft.get("approved"):
+                            st.success(
+                                "✅ Первое сообщение утверждено"
+                            )
 
             with st.container(border=True):
                 st.markdown("**📅 Встречи**")
@@ -1043,13 +1682,195 @@ if received_hash:
                                         passport["analysis"]
                                     )
 
-                                st.button(
-                                    "🧠 Начать селекцию контактов",
+                                candidates_key = (
+                                    f"neonia_candidates_{telegram_id}"
+                                )
+                                offset_key = (
+                                    f"neonia_selection_offset_{telegram_id}"
+                                )
+
+                                current_offset = st.session_state.get(
+                                    offset_key,
+                                    0,
+                                )
+                                candidate_results = (
+                                    st.session_state.get(
+                                        candidates_key,
+                                        [],
+                                    )
+                                )
+
+                                st.caption(
+                                    "Для оценки ИИ получает имя, "
+                                    "username, bio и несколько последних "
+                                    "текстовых сообщений. Номер телефона "
+                                    "в анализ не передаётся."
+                                )
+
+                                button_label = (
+                                    "🧠 Начать селекцию контактов"
+                                    if current_offset == 0
+                                    else "🧠 Проанализировать "
+                                    "следующие 10 контактов"
+                                )
+
+                                analyze_batch = st.button(
+                                    button_label,
+                                    type="primary",
+                                    disabled=(
+                                        current_offset >= len(contacts)
+                                    ),
                                     key=(
                                         "neonia_start_contact_selection_"
-                                        f"{telegram_id}"
+                                        f"{telegram_id}_{current_offset}"
                                     ),
                                 )
+
+                                if analyze_batch:
+                                    batch = contacts[
+                                        current_offset:
+                                        current_offset + 10
+                                    ]
+
+                                    with st.spinner(
+                                        "Неония изучает доступный "
+                                        "контекст и сравнивает контакты "
+                                        "с паспортом ЦА..."
+                                    ):
+                                        try:
+                                            contact_contexts = (
+                                                run_telegram_async(
+                                                    fetch_telegram_contact_contexts(
+                                                        telegram_id,
+                                                        batch,
+                                                    )
+                                                )
+                                            )
+                                            batch_results = (
+                                                analyze_contacts_for_target_audience(
+                                                    passport["analysis"],
+                                                    contact_contexts,
+                                                )
+                                            )
+                                            candidate_results = (
+                                                merge_candidate_results(
+                                                    candidate_results,
+                                                    batch_results,
+                                                )
+                                            )
+                                            st.session_state[
+                                                candidates_key
+                                            ] = candidate_results
+                                            st.session_state[
+                                                offset_key
+                                            ] = (
+                                                current_offset
+                                                + len(batch)
+                                            )
+                                            current_offset = (
+                                                st.session_state[
+                                                    offset_key
+                                                ]
+                                            )
+                                            st.success(
+                                                "Партия обработана. "
+                                                f"Проверено: "
+                                                f"{current_offset} из "
+                                                f"{len(contacts)}."
+                                            )
+
+                                        except Exception as exc:
+                                            st.error(
+                                                "Селекция не выполнена: "
+                                                f"{exc}"
+                                            )
+
+                                if candidate_results:
+                                    recommended_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get(
+                                            "recommendation"
+                                        ) == "Передать Неоне"
+                                    )
+                                    more_data_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get(
+                                            "recommendation"
+                                        ) == "Нужно больше данных"
+                                    )
+                                    not_fit_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get(
+                                            "recommendation"
+                                        ) == "Пока не подходит"
+                                    )
+
+                                    st.markdown(
+                                        "#### 📋 Результат селекции"
+                                    )
+                                    st.write(
+                                        f"Проверено: "
+                                        f"{len(candidate_results)} · "
+                                        f"Кандидатов: "
+                                        f"{recommended_count} · "
+                                        f"Недостаточно данных: "
+                                        f"{more_data_count} · "
+                                        f"Пока не подходят: "
+                                        f"{not_fit_count}"
+                                    )
+
+                                    results_for_table = [
+                                        {
+                                            "Имя": item["name"],
+                                            "Username": (
+                                                f"@{item['username']}"
+                                                if item.get("username")
+                                                else "—"
+                                            ),
+                                            "Сегмент": item["segment"],
+                                            "Соответствие": (
+                                                f"{item['score']}%"
+                                            ),
+                                            "Уверенность": (
+                                                item["confidence"]
+                                            ),
+                                            "Рекомендация": (
+                                                item["recommendation"]
+                                            ),
+                                        }
+                                        for item in candidate_results
+                                    ]
+
+                                    st.dataframe(
+                                        results_for_table,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+
+                                    st.info(
+                                        "Кандидаты с рекомендацией "
+                                        "«Передать Неоне» уже появились "
+                                        "на рабочем столе «Мой день»."
+                                    )
+
+                                    if st.button(
+                                        "Сбросить результаты и "
+                                        "начать заново",
+                                        key=(
+                                            "neonia_reset_selection_"
+                                            f"{telegram_id}"
+                                        ),
+                                    ):
+                                        st.session_state[
+                                            candidates_key
+                                        ] = []
+                                        st.session_state[
+                                            offset_key
+                                        ] = 0
+                                        st.rerun()
 
                         st.stop()
                     with st.form("neonia_source_form"):
