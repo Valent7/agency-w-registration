@@ -1084,7 +1084,7 @@ def generate_neona_first_message(
 
     is_known_contact = (
         contact.get("source")
-        == "Знакомый — выбран владельцем"
+        == "Знакомый — выбран директором"
     )
 
     system_prompt = f"""
@@ -1548,8 +1548,42 @@ if received_hash:
 
 
         partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
-        st.markdown(f"## Добро пожаловать, {first_name}!")
-        st.markdown("### 🟢 Мы строим своё будущее")
+
+        berlin_hour = datetime.now(
+            ZoneInfo("Europe/Berlin")
+        ).hour
+        if berlin_hour < 12:
+            greeting = "Доброе утро"
+            greeting_icon = "☀️"
+        elif berlin_hour < 18:
+            greeting = "Добрый день"
+            greeting_icon = "🌤️"
+        else:
+            greeting = "Добрый вечер"
+            greeting_icon = "🌙"
+
+        st.markdown(
+            f"## {greeting}, {first_name}! {greeting_icon}"
+        )
+        st.markdown(
+            f"""
+            <div class="registration-card">
+                <h2>🏛 Директор цифрового Агентства W</h2>
+                <p>
+                    <strong>{first_name}</strong>, сегодня под вашим
+                    руководством работает команда ИИ-агентов.
+                </p>
+                <p>
+                    🧭 Стагирит — координатор &nbsp;·&nbsp;
+                    🔎 Неония — аналитик &nbsp;·&nbsp;
+                    💬 Неона — секретарь-референт &nbsp;·&nbsp;
+                    🌱 Неола — наставник
+                </p>
+                <p><strong>🟢 Команда готова к работе.</strong></p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         telegram_connected = render_telegram_connection(telegram_id)
         st.session_state["neonia_telegram_connected"] = telegram_connected
 
@@ -1729,7 +1763,7 @@ if received_hash:
 
                         if (
                             contact.get("source")
-                            == "Знакомый — выбран владельцем"
+                            == "Знакомый — выбран директором"
                         ):
                             owner_contacts[
                                 contact_id
@@ -1795,7 +1829,7 @@ if received_hash:
                 else:
                     st.info(
                         "Неония предлагает до 10 лучших кандидатов "
-                        "из уже проанализированных. Владелец может "
+                        f"из уже проанализированных. {first_name} может "
                         "выбрать из них людей для первого сообщения."
                     )
                     if len(top_candidates) < 10:
@@ -1816,12 +1850,12 @@ if received_hash:
                     )
 
                     st.markdown(
-                        "#### ✅ Выбор владельца из списка Неонии"
+                        f"#### ✅ Выбор {first_name} из списка Неонии"
                     )
                     st.info(
                         "Неония только сформировала список до 10 "
                         "подходящих кандидатов. Кого взять в работу, "
-                        "решает владелец: поставьте галочку прямо "
+                        f"решает {first_name}: поставьте галочку прямо "
                         "в карточке нужного человека."
                     )
 
@@ -1955,7 +1989,7 @@ if received_hash:
                         + len(owner_contacts)
                     )
                     st.caption(
-                        f"Выбрано владельцем: "
+                        f"Выбрано — {first_name}: "
                         f"{total_selected} из 5"
                     )
 
@@ -1972,7 +2006,7 @@ if received_hash:
 
                     if selected_ids:
                         st.markdown(
-                            "#### ✍️ Люди, выбранные владельцем"
+                            f"#### ✍️ Люди, выбранные — {first_name}"
                         )
 
                         for contact_id in selected_ids:
@@ -2194,10 +2228,10 @@ if received_hash:
                                             or ""
                                         ),
                                         "source": (
-                                            "Знакомый — выбран владельцем"
+                                            "Знакомый — выбран директором"
                                         ),
                                         "segment": (
-                                            "Выбран владельцем"
+                                            "Выбран директором"
                                         ),
                                         "score": 0,
                                         "confidence": (
@@ -2211,7 +2245,7 @@ if received_hash:
                                             )
                                         ],
                                         "recommendation": (
-                                            "Добавлен владельцем"
+                                            "Добавлен директором"
                                         ),
                                         "message_angle": (
                                             owner_draft.strip()
@@ -2227,7 +2261,7 @@ if received_hash:
                                         ),
                                         "avoid": avoid.strip(),
                                         "status": (
-                                            "Знакомый добавлен владельцем"
+                                            "Знакомый добавлен директором"
                                         ),
                                     }
                                     st.session_state[
@@ -2258,7 +2292,7 @@ if received_hash:
                                 f"**{contact['name']}** · {username}"
                             )
                             st.caption(
-                                "Добавлен владельцем — "
+                                f"Добавлен — {{first_name}} — "
                                 "не является рекомендацией Неонии"
                             )
 
@@ -2337,7 +2371,7 @@ if received_hash:
                         "на утверждение**"
                     )
                     st.caption(
-                        "Владелец утверждает только первое "
+                        f"{first_name} утверждает только первое "
                         "сообщение. После ответа человека Неона "
                         "ведёт диалог самостоятельно по правилам."
                     )
@@ -3018,8 +3052,8 @@ if received_hash:
                                     st.info(
                                         "На рабочем столе показываются "
                                         "10 лучших кандидатов с рекомендацией "
-                                        "«Передать Неоне». Из них владелец "
-                                        "сам выбирает не более 5."
+                                        f"«Передать Неоне». Из них {first_name} "
+                                        "самостоятельно выбирает не более 5."
                                     )
 
                                     if st.button(
