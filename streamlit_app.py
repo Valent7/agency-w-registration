@@ -1035,6 +1035,23 @@ Telegram-предупреждение scam/fake является основан�
                     source.get("source_chat_title")
                     or "Без названия"
                 ),
+                "profile_about": str(
+                    source.get("about") or ""
+                )[:700],
+                "public_messages": [
+                    {
+                        "text": str(message.get("text") or "")[:600],
+                        "date": str(message.get("date") or ""),
+                    }
+                    for message in (
+                        source.get("recent_public_messages") or []
+                    )[:5]
+                    if str(message.get("text") or "").strip()
+                ],
+                "mutual_contact": bool(
+                    source.get("mutual_contact", False)
+                ),
+                "verified": bool(source.get("verified", False)),
                 "analyzed_at": datetime.now(
                     ZoneInfo("Europe/Berlin")
                 ).isoformat(),
@@ -3810,6 +3827,12 @@ if received_hash:
                             global_candidates_key = (
                                 f"neonia_candidates_{telegram_id}"
                             )
+                            selected_candidates_key = (
+                                f"neonia_selected_candidates_{telegram_id}"
+                            )
+                            owner_contacts_key = (
+                                f"neonia_owner_known_contacts_{telegram_id}"
+                            )
 
                             passport = st.session_state.get(passport_key)
                             chats = st.session_state.get(
@@ -4179,41 +4202,339 @@ if received_hash:
                                     )
 
                                     if suitable_candidates:
+                                        top_chat_candidates = suitable_candidates[:10]
                                         st.markdown(
                                             "#### ⭐ 10 лучших кандидатов из чата"
                                         )
                                         st.caption(
-                                            "Неония рекомендует людей, но не "
-                                            "выбирает их вместо владельца. "
-                                            "Кандидаты уже добавлены в общий пул."
+                                            "Неония рекомендует людей, но окончательный "
+                                            "выбор делает владелец кабинета. Откройте "
+                                            "карточку, изучите основания и отметьте нужных "
+                                            "людей. Общий лимит — не более 5 человек."
                                         )
-                                        top_candidates_table = [
-                                            {
-                                                "Имя": item["name"],
-                                                "Username": (
-                                                    f"@{item['username']}"
-                                                    if item.get("username")
-                                                    else "—"
-                                                ),
-                                                "Сегмент": item["segment"],
-                                                "Соответствие": (
-                                                    f"{item['score']}%"
-                                                ),
-                                                "Основания": "; ".join(
-                                                    item.get("reasons", [])
-                                                ),
-                                                "Чат": item.get(
-                                                    "source_chat_title",
-                                                    selected_chat["title"],
-                                                ),
-                                            }
-                                            for item in suitable_candidates[:10]
+
+                                        global_candidates = st.session_state.get(
+                                            global_candidates_key,
+                                            [],
+                                        )
+                                        global_candidate_by_id = {
+                                            int(item["telegram_id"]): item
+                                            for item in global_candidates
+                                            if item.get("telegram_id") is not None
+                                        }
+                                        owner_contacts = st.session_state.get(
+                                            owner_contacts_key,
+                                            {},
+                                        )
+                                        if not isinstance(owner_contacts, dict):
+                                            owner_contacts = {}
+                                        known_contact_ids = {
+                                            int(contact_id)
+                                            for contact_id in owner_contacts
+                                        }
+                                        recommended_limit = max(
+                                            0,
+                                            5 - len(owner_contacts),
+                                        )
+
+                                        existing_selected_ids = []
+                                        for contact_id in st.session_state.get(
+                                            selected_candidates_key,
+                                            [],
+                                        ):
+                                            try:
+                                                contact_id = int(contact_id)
+                                            except (TypeError, ValueError):
+                                                continue
+                                            if (
+                                                contact_id in global_candidate_by_id
+                                                and contact_id not in known_contact_ids
+                                                and contact_id not in existing_selected_ids
+                                            ):
+                                                existing_selected_ids.append(contact_id)
+                                        existing_selected_ids = existing_selected_ids[
+                                            :recommended_limit
                                         ]
-                                        st.dataframe(
-                                            top_candidates_table,
-                                            use_container_width=True,
-                                            hide_index=True,
+
+                                        top_candidate_by_id = {
+                                            int(item["telegram_id"]): item
+                                            for item in top_chat_candidates
+                                        }
+                                        top_candidate_ids = list(top_candidate_by_id)
+                                        selected_elsewhere_ids = [
+                                            contact_id
+                                            for contact_id in existing_selected_ids
+                                            if contact_id not in top_candidate_by_id
+                                        ]
+                                        current_chat_limit = max(
+                                            0,
+                                            recommended_limit
+                                            - len(selected_elsewhere_ids),
                                         )
+
+                                        for contact_id in top_candidate_ids:
+                                            checkbox_key = (
+                                                "chat_candidate_select_"
+                                                f"{telegram_id}_{selected_chat_id}_"
+                                                f"{contact_id}"
+                                            )
+                                            if checkbox_key not in st.session_state:
+                                                st.session_state[checkbox_key] = (
+                                                    contact_id in existing_selected_ids
+                                                )
+
+                                        currently_checked = [
+                                            contact_id
+                                            for contact_id in top_candidate_ids
+                                            if st.session_state.get(
+                                                "chat_candidate_select_"
+                                                f"{telegram_id}_{selected_chat_id}_"
+                                                f"{contact_id}",
+                                                False,
+                                            )
+                                        ]
+
+                                        if selected_elsewhere_ids:
+                                            st.info(
+                                                "В других источниках уже выбрано: "
+                                                f"{len(selected_elsewhere_ids)}. "
+                                                "Для этого чата осталось мест: "
+                                                f"{current_chat_limit}."
+                                            )
+
+                                        for number, candidate in enumerate(
+                                            top_chat_candidates,
+                                            start=1,
+                                        ):
+                                            contact_id = int(
+                                                candidate["telegram_id"]
+                                            )
+                                            checkbox_key = (
+                                                "chat_candidate_select_"
+                                                f"{telegram_id}_{selected_chat_id}_"
+                                                f"{contact_id}"
+                                            )
+                                            is_checked = bool(
+                                                st.session_state.get(
+                                                    checkbox_key,
+                                                    False,
+                                                )
+                                            )
+                                            limit_reached = (
+                                                len(currently_checked)
+                                                >= current_chat_limit
+                                                and not is_checked
+                                            )
+                                            username = (
+                                                f"@{candidate['username']}"
+                                                if candidate.get("username")
+                                                else "без username"
+                                            )
+
+                                            with st.container(border=True):
+                                                st.checkbox(
+                                                    (
+                                                        f"Выбрать кандидата №{number}: "
+                                                        f"{candidate['name']}"
+                                                    ),
+                                                    key=checkbox_key,
+                                                    disabled=(
+                                                        current_chat_limit == 0
+                                                        or limit_reached
+                                                    ),
+                                                )
+                                                st.markdown(
+                                                    f"**{candidate['score']}% соответствия** "
+                                                    f"· {candidate['segment']}"
+                                                )
+                                                st.caption(
+                                                    f"{username} · источник: "
+                                                    f"{candidate.get('source_chat_title') or selected_chat['title']}"
+                                                )
+
+                                                with st.expander(
+                                                    "📋 Открыть карточку кандидата"
+                                                ):
+                                                    st.write(
+                                                        f"**Уверенность Неонии:** "
+                                                        f"{candidate.get('confidence', '—')}"
+                                                    )
+                                                    st.write(
+                                                        "**Почему соответствует ЦА:**"
+                                                    )
+                                                    for reason in candidate.get(
+                                                        "reasons",
+                                                        [],
+                                                    ):
+                                                        st.write(f"• {reason}")
+
+                                                    profile_about = str(
+                                                        candidate.get(
+                                                            "profile_about",
+                                                            "",
+                                                        )
+                                                        or ""
+                                                    ).strip()
+                                                    if profile_about:
+                                                        st.write("**Bio профиля:**")
+                                                        st.write(profile_about)
+
+                                                    public_messages = candidate.get(
+                                                        "public_messages",
+                                                        [],
+                                                    )
+                                                    if public_messages:
+                                                        st.write(
+                                                            "**Публичные сообщения, "
+                                                            "учтённые при анализе:**"
+                                                        )
+                                                        for message in public_messages[:3]:
+                                                            message_text = str(
+                                                                message.get("text") or ""
+                                                            ).strip()
+                                                            if message_text:
+                                                                st.markdown(
+                                                                    f"> {message_text}"
+                                                                )
+
+                                                    facts = []
+                                                    if candidate.get("mutual_contact"):
+                                                        facts.append(
+                                                            "есть взаимный контакт"
+                                                        )
+                                                    if candidate.get("verified"):
+                                                        facts.append(
+                                                            "профиль подтверждён Telegram"
+                                                        )
+                                                    if facts:
+                                                        st.caption(
+                                                            "Дополнительно: "
+                                                            + "; ".join(facts)
+                                                        )
+
+                                                    st.write(
+                                                        "**Безопасная тема первого "
+                                                        "обращения:**"
+                                                    )
+                                                    st.write(
+                                                        candidate.get(
+                                                            "message_angle",
+                                                            "Нейтральное знакомство",
+                                                        )
+                                                    )
+
+                                        checked_current_ids = [
+                                            contact_id
+                                            for contact_id in top_candidate_ids
+                                            if st.session_state.get(
+                                                "chat_candidate_select_"
+                                                f"{telegram_id}_{selected_chat_id}_"
+                                                f"{contact_id}",
+                                                False,
+                                            )
+                                        ]
+                                        if len(checked_current_ids) > current_chat_limit:
+                                            overflow_ids = checked_current_ids[
+                                                current_chat_limit:
+                                            ]
+                                            for contact_id in overflow_ids:
+                                                st.session_state[
+                                                    "chat_candidate_select_"
+                                                    f"{telegram_id}_{selected_chat_id}_"
+                                                    f"{contact_id}"
+                                                ] = False
+                                            checked_current_ids = checked_current_ids[
+                                                :current_chat_limit
+                                            ]
+
+                                        final_selected_ids = (
+                                            selected_elsewhere_ids
+                                            + checked_current_ids
+                                        )[:recommended_limit]
+                                        st.session_state[
+                                            selected_candidates_key
+                                        ] = final_selected_ids
+                                        persist_workspace_if_changed(telegram_id)
+
+                                        selected_total = (
+                                            len(final_selected_ids)
+                                            + len(owner_contacts)
+                                        )
+                                        st.markdown(
+                                            f"**Выбрано владельцем: "
+                                            f"{selected_total} из 5**"
+                                        )
+
+                                        selected_from_this_chat = [
+                                            top_candidate_by_id[contact_id]
+                                            for contact_id in checked_current_ids
+                                            if contact_id in top_candidate_by_id
+                                        ]
+                                        if selected_from_this_chat:
+                                            st.markdown(
+                                                "#### ✅ Выбраны из этого чата"
+                                            )
+                                            for candidate in selected_from_this_chat:
+                                                st.write(
+                                                    f"• **{candidate['name']}** · "
+                                                    f"{candidate['score']}% · "
+                                                    f"{candidate['segment']}"
+                                                )
+
+                                        confirm_selection = st.button(
+                                            "✅ Сохранить выбор и передать Неоне",
+                                            type="primary",
+                                            disabled=not final_selected_ids,
+                                            key=(
+                                                "confirm_chat_candidates_"
+                                                f"{telegram_id}_{selected_chat_id}"
+                                            ),
+                                        )
+                                        if confirm_selection:
+                                            selected_id_set = set(
+                                                final_selected_ids
+                                            )
+                                            for item in global_candidates:
+                                                try:
+                                                    item_id = int(
+                                                        item.get("telegram_id")
+                                                    )
+                                                except (TypeError, ValueError):
+                                                    continue
+                                                if item_id in selected_id_set:
+                                                    item["status"] = (
+                                                        "Выбран владельцем"
+                                                    )
+                                            st.session_state[
+                                                global_candidates_key
+                                            ] = global_candidates
+                                            for item in candidate_results:
+                                                try:
+                                                    item_id = int(
+                                                        item.get("telegram_id")
+                                                    )
+                                                except (TypeError, ValueError):
+                                                    continue
+                                                if item_id in selected_id_set:
+                                                    item["status"] = (
+                                                        "Выбран владельцем"
+                                                    )
+                                            chat_candidates_map[
+                                                chat_map_id
+                                            ] = candidate_results
+                                            st.session_state[
+                                                chat_candidates_map_key
+                                            ] = chat_candidates_map
+                                            persist_workspace_if_changed(
+                                                telegram_id,
+                                                force=True,
+                                            )
+                                            st.success(
+                                                "Выбор сохранён. Неона получила "
+                                                "выбранных кандидатов для следующего "
+                                                "этапа — подготовки персональных "
+                                                "первых сообщений."
+                                            )
 
                                     if candidate_results:
                                         with st.expander(
