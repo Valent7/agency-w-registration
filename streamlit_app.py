@@ -10,6 +10,7 @@ from workspace_persistence import (
 import asyncio
 import json
 import re
+import base64
 from pathlib import Path
 
 from PIL import Image
@@ -28,8 +29,8 @@ from cryptography.fernet import Fernet, InvalidToken
 
 APP_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = APP_DIR / "assets"
-LOGO_PATH = ASSETS_DIR / "agency_w_logo.png"
 ICON_PATH = ASSETS_DIR / "agency_w_icon.png"
+WAVE_PATH = ASSETS_DIR / "agency_w_wave.png"
 
 page_icon = (
     Image.open(ICON_PATH)
@@ -42,20 +43,58 @@ st.set_page_config(
     page_icon=page_icon,
     layout="centered",
 )
+def _image_data_uri(path):
+    """Возвращает PNG как data URI для точного HTML-размещения."""
+
+    if not path.exists():
+        return ""
+
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def render_agency_w_logo(compact=False):
-    """Показывает единый логотип Агентства W."""
+    """Рисует фирменную шапку: графика отдельно, текст — текстом сайта."""
 
-    if not LOGO_PATH.exists():
-        st.markdown(
-            '<div class="main-title">Агентство W</div>',
-            unsafe_allow_html=True,
-        )
-        return
+    emblem_uri = _image_data_uri(ICON_PATH)
+    wave_uri = _image_data_uri(WAVE_PATH)
+    mode_class = "agency-brand--compact" if compact else "agency-brand--full"
 
-    side = 0.24 if compact else 0.02
-    left, center, right = st.columns([side, 1, side])
-    with center:
-        st.image(str(LOGO_PATH), use_container_width=True)
+    emblem_html = (
+        f'<img class="agency-brand__emblem" src="{emblem_uri}" '
+        'alt="Эмблема Агентства W">'
+        if emblem_uri
+        else '<div class="agency-brand__emblem-fallback">W</div>'
+    )
+    wave_html = (
+        f'<img class="agency-brand__wave" src="{wave_uri}" alt="">'
+        if wave_uri
+        else ""
+    )
+
+    st.markdown(
+        f"""
+        <section class="agency-brand {mode_class}" aria-label="Агентство W">
+            <div class="agency-brand__top">
+                <div class="agency-brand__emblem-wrap">
+                    {emblem_html}
+                </div>
+                <div class="agency-brand__wordmark">
+                    <div class="agency-brand__name">Агентство <span>W</span></div>
+                    <div class="agency-brand__rule"></div>
+                    <div class="agency-brand__latin">Acta, non verba.</div>
+                    <div class="agency-brand__translation">Дела, а не слова.</div>
+                </div>
+            </div>
+            <div class="agency-brand__present">Мы создаём своё настоящее</div>
+            <div class="agency-brand__ornament" aria-hidden="true">
+                <span></span><b>◇</b><span></span>
+            </div>
+            {wave_html}
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def get_session_cipher():
@@ -1373,6 +1412,176 @@ st.markdown(
             margin-top: 2rem;
         }
 
+
+        .agency-brand {
+            width: 100%;
+            margin: 0 auto 1.5rem;
+            text-align: center;
+            color: #d9b45b;
+        }
+
+        .agency-brand--full {
+            max-width: 1080px;
+        }
+
+        .agency-brand--compact {
+            max-width: 800px;
+            margin-bottom: 1.1rem;
+        }
+
+        .agency-brand__top {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: clamp(1rem, 3vw, 2.5rem);
+        }
+
+        .agency-brand__emblem-wrap {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .agency-brand__emblem {
+            display: block;
+            width: clamp(150px, 19vw, 220px);
+            height: auto;
+            object-fit: contain;
+            filter: drop-shadow(0 0 12px rgba(213, 171, 74, 0.20));
+        }
+
+        .agency-brand--compact .agency-brand__emblem {
+            width: clamp(105px, 14vw, 150px);
+        }
+
+        .agency-brand__emblem-fallback {
+            width: 150px;
+            height: 150px;
+            display: grid;
+            place-items: center;
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 5rem;
+            color: #d9b45b;
+        }
+
+        .agency-brand__wordmark {
+            min-width: 0;
+            text-align: center;
+        }
+
+        .agency-brand__name {
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: clamp(2.4rem, 5vw, 4.6rem);
+            line-height: 1;
+            font-weight: 500;
+            letter-spacing: 0.01em;
+            color: #d9b45b;
+            text-shadow: 0 0 16px rgba(217, 180, 91, 0.10);
+            white-space: nowrap;
+        }
+
+        .agency-brand--compact .agency-brand__name {
+            font-size: clamp(2rem, 3.7vw, 3.1rem);
+        }
+
+        .agency-brand__name span {
+            font-size: 1.08em;
+        }
+
+        .agency-brand__rule {
+            width: 92%;
+            height: 1px;
+            margin: 0.65rem auto 0.65rem;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                rgba(217, 180, 91, 0.72),
+                transparent
+            );
+        }
+
+        .agency-brand__latin {
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: clamp(1.15rem, 2vw, 1.55rem);
+            line-height: 1.25;
+            font-style: italic;
+            color: #d9b45b;
+        }
+
+        .agency-brand--compact .agency-brand__latin {
+            font-size: clamp(1rem, 1.6vw, 1.25rem);
+        }
+
+        .agency-brand__translation {
+            margin-top: 0.22rem;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: clamp(1rem, 1.65vw, 1.3rem);
+            line-height: 1.3;
+            font-weight: 500;
+            color: #ffffff;
+        }
+
+        .agency-brand--compact .agency-brand__translation {
+            font-size: clamp(0.95rem, 1.4vw, 1.12rem);
+        }
+
+        .agency-brand__present {
+            margin-top: clamp(0.8rem, 2vw, 1.35rem);
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: clamp(1.75rem, 3.4vw, 3rem);
+            line-height: 1.15;
+            font-weight: 500;
+            color: #d9b45b;
+            letter-spacing: 0.005em;
+        }
+
+        .agency-brand--compact .agency-brand__present {
+            margin-top: 0.75rem;
+            font-size: clamp(1.35rem, 2.6vw, 2rem);
+        }
+
+        .agency-brand__ornament {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.35rem;
+            width: min(280px, 44%);
+            margin: 0.65rem auto 0.15rem;
+            color: #d9b45b;
+        }
+
+        .agency-brand__ornament span {
+            height: 1px;
+            flex: 1;
+            background: linear-gradient(90deg, transparent, #d9b45b);
+        }
+
+        .agency-brand__ornament span:last-child {
+            background: linear-gradient(90deg, #d9b45b, transparent);
+        }
+
+        .agency-brand__ornament b {
+            font-size: 0.95rem;
+            font-weight: 400;
+        }
+
+        .agency-brand__wave {
+            display: block;
+            width: 100%;
+            height: auto;
+            max-height: 138px;
+            object-fit: fill;
+            margin: -0.15rem auto 0;
+            opacity: 0.96;
+            filter: drop-shadow(0 0 7px rgba(217, 180, 91, 0.10));
+        }
+
+        .agency-brand--compact .agency-brand__wave {
+            max-height: 86px;
+            opacity: 0.88;
+        }
+
         .registration-card {
             padding: 2rem;
             border: 1px solid rgba(224, 205, 171, 0.25);
@@ -1394,6 +1603,57 @@ st.markdown(
 
                 /* Мобильная версия */
         @media (max-width: 768px) {
+
+
+            .agency-brand {
+                margin-bottom: 1rem;
+            }
+
+            .agency-brand__top {
+                flex-direction: column;
+                gap: 0.2rem;
+            }
+
+            .agency-brand__emblem,
+            .agency-brand--compact .agency-brand__emblem {
+                width: clamp(105px, 31vw, 145px);
+            }
+
+            .agency-brand__name,
+            .agency-brand--compact .agency-brand__name {
+                font-size: clamp(2rem, 10vw, 2.75rem);
+            }
+
+            .agency-brand__rule {
+                margin-top: 0.45rem;
+                margin-bottom: 0.45rem;
+            }
+
+            .agency-brand__latin,
+            .agency-brand--compact .agency-brand__latin {
+                font-size: clamp(1rem, 4.7vw, 1.22rem);
+            }
+
+            .agency-brand__translation,
+            .agency-brand--compact .agency-brand__translation {
+                font-size: clamp(0.95rem, 4.2vw, 1.1rem);
+            }
+
+            .agency-brand__present,
+            .agency-brand--compact .agency-brand__present {
+                margin-top: 0.8rem;
+                font-size: clamp(1.45rem, 7vw, 2rem);
+            }
+
+            .agency-brand__ornament {
+                width: 58%;
+                margin-top: 0.5rem;
+            }
+
+            .agency-brand__wave,
+            .agency-brand--compact .agency-brand__wave {
+                max-height: 70px;
+            }
 
             .block-container {
                 padding-top: 1rem;
