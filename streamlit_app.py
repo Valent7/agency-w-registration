@@ -1544,6 +1544,10 @@ def generate_neona_first_messages(
                 "message_angle",
                 "",
             ),
+            "source": item.get("source", "Рекомендация Неонии"),
+            "source_chat_title": item.get("source_chat_title", ""),
+            "profile_about": item.get("profile_about", ""),
+            "public_messages": item.get("public_messages", [])[:3],
         }
         for item in selected_candidates
     ]
@@ -1736,6 +1740,8 @@ def generate_neona_first_message(
 - не обещай доход, гарантированный результат или лёгкие деньги;
 - не отправляй ссылку в первом сообщении;
 - не выдумывай факты о человеке;
+- если человек найден в Telegram-чате, можно мягко опереться на общий чат, bio или его публичную тему, но нельзя говорить об анализе, рейтинге или отборе;
+- не приписывай человеку должность, интерес или мнение как достоверный факт, если это только предположение Неонии;
 - закончи одним простым вопросом, на который удобно ответить;
 - длина сообщения — до 650 знаков.
 
@@ -1756,6 +1762,9 @@ def generate_neona_first_message(
         "score": contact.get("score", 0),
         "reasons": contact.get("reasons", []),
         "message_angle": contact.get("message_angle", ""),
+        "source_chat_title": contact.get("source_chat_title", ""),
+        "profile_about": contact.get("profile_about", ""),
+        "public_messages": contact.get("public_messages", [])[:3],
         "familiarity_note": contact.get("familiarity_note", ""),
         "owner_draft": contact.get("owner_draft", ""),
         "must_mention": contact.get("must_mention", ""),
@@ -5081,10 +5090,460 @@ if received_hash:
                             st.write(neonia_answer)
     
                 elif selected_agent == "Неона":
-                    st.info(
-                        "Неону подключаем следующим шагом сегодня. "
-                        "Она будет вести диалог от первого сообщения до встречи."
+                    st.caption(
+                        "Неона получает только тех людей, которых выбрал владелец "
+                        "кабинета. Она готовит отдельное первое сообщение каждому "
+                        "человеку, но ничего не отправляет без решения владельца."
                     )
+
+                    candidates_key = (
+                        f"neonia_candidates_{telegram_id}"
+                    )
+                    selected_candidates_key = (
+                        f"neonia_selected_candidates_{telegram_id}"
+                    )
+                    owner_contacts_key = (
+                        f"neonia_owner_known_contacts_{telegram_id}"
+                    )
+                    passport_key = (
+                        f"neonia_target_audience_passport_{telegram_id}"
+                    )
+                    neona_drafts_key = (
+                        f"neona_first_message_drafts_{telegram_id}"
+                    )
+
+                    candidate_results = st.session_state.get(
+                        candidates_key,
+                        [],
+                    )
+                    owner_contacts = st.session_state.get(
+                        owner_contacts_key,
+                        {},
+                    )
+                    if not isinstance(owner_contacts, dict):
+                        owner_contacts = {}
+
+                    candidate_by_id = {}
+                    for candidate in candidate_results:
+                        try:
+                            candidate_id = int(
+                                candidate.get("telegram_id")
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                        candidate_by_id[candidate_id] = candidate
+
+                    for contact_id, contact in owner_contacts.items():
+                        try:
+                            normalized_id = int(contact_id)
+                        except (TypeError, ValueError):
+                            continue
+                        candidate_by_id[normalized_id] = contact
+
+                    selected_ids = []
+                    for contact_id in st.session_state.get(
+                        selected_candidates_key,
+                        [],
+                    ):
+                        try:
+                            normalized_id = int(contact_id)
+                        except (TypeError, ValueError):
+                            continue
+                        if (
+                            normalized_id in candidate_by_id
+                            and normalized_id not in selected_ids
+                        ):
+                            selected_ids.append(normalized_id)
+
+                    # Знакомые, добавленные владельцем вручную, также входят
+                    # в общий дневной лимит и передаются Неоне.
+                    for contact_id in owner_contacts:
+                        try:
+                            normalized_id = int(contact_id)
+                        except (TypeError, ValueError):
+                            continue
+                        if normalized_id not in selected_ids:
+                            selected_ids.append(normalized_id)
+
+                    selected_ids = selected_ids[:5]
+                    selected_contacts = [
+                        candidate_by_id[contact_id]
+                        for contact_id in selected_ids
+                        if contact_id in candidate_by_id
+                    ]
+
+                    drafts = st.session_state.get(
+                        neona_drafts_key,
+                        {},
+                    )
+                    if not isinstance(drafts, dict):
+                        drafts = {}
+
+                    prepared_count = sum(
+                        1
+                        for contact_id in selected_ids
+                        if int(contact_id) in drafts
+                        or str(contact_id) in drafts
+                    )
+                    approved_count = sum(
+                        1
+                        for contact_id in selected_ids
+                        if bool(
+                            drafts.get(
+                                int(contact_id),
+                                drafts.get(str(contact_id), {}),
+                            ).get("approved")
+                        )
+                    )
+
+                    metric_columns = st.columns(3)
+                    metric_columns[0].metric(
+                        "Выбрано владельцем",
+                        len(selected_contacts),
+                    )
+                    metric_columns[1].metric(
+                        "Сообщения подготовлены",
+                        prepared_count,
+                    )
+                    metric_columns[2].metric(
+                        "Утверждено",
+                        approved_count,
+                    )
+
+                    if not selected_contacts:
+                        st.warning(
+                            "Неона пока не получила выбранных людей. "
+                            "Вернитесь к Неонии, отметьте до 5 кандидатов и "
+                            "нажмите «Сохранить выбор и передать Неоне»."
+                        )
+                    else:
+                        passport = st.session_state.get(passport_key)
+                        if not passport:
+                            st.warning(
+                                "Паспорт ЦА не найден. Сначала сохраните анализ "
+                                "проекта и целевой аудитории у Неонии."
+                            )
+                        else:
+                            st.markdown(
+                                "#### ✍️ Формирование первых сообщений"
+                            )
+                            st.info(
+                                "Каждый текст создаётся персонально. Владелец "
+                                "может изменить сообщение и только затем утвердить его."
+                            )
+
+                            missing_contacts = []
+                            for contact in selected_contacts:
+                                contact_id = int(contact["telegram_id"])
+                                existing_draft = drafts.get(
+                                    contact_id,
+                                    drafts.get(str(contact_id)),
+                                )
+                                if not existing_draft:
+                                    missing_contacts.append(contact)
+
+                            if missing_contacts and st.button(
+                                "✨ Подготовить сообщения всем выбранным",
+                                type="primary",
+                                key=(
+                                    "neona_prepare_all_selected_"
+                                    f"{telegram_id}"
+                                ),
+                            ):
+                                with st.spinner(
+                                    "Неона готовит отдельное сообщение каждому "
+                                    "выбранному человеку..."
+                                ):
+                                    try:
+                                        generated = generate_neona_first_messages(
+                                            first_name,
+                                            passport["analysis"],
+                                            missing_contacts,
+                                        )
+                                        for contact_id, draft in generated.items():
+                                            previous = drafts.get(
+                                                int(contact_id),
+                                                drafts.get(str(contact_id), {}),
+                                            )
+                                            if previous.get("sent"):
+                                                continue
+                                            drafts[int(contact_id)] = draft
+
+                                        st.session_state[
+                                            neona_drafts_key
+                                        ] = drafts
+
+                                        generated_ids = set(generated)
+                                        for candidate in candidate_results:
+                                            try:
+                                                candidate_id = int(
+                                                    candidate.get("telegram_id")
+                                                )
+                                            except (TypeError, ValueError):
+                                                continue
+                                            if candidate_id in generated_ids:
+                                                candidate["status"] = (
+                                                    "Сообщение подготовлено"
+                                                )
+                                        st.session_state[
+                                            candidates_key
+                                        ] = candidate_results
+
+                                        for contact_id in generated_ids:
+                                            if contact_id in owner_contacts:
+                                                owner_contacts[contact_id][
+                                                    "status"
+                                                ] = "Сообщение подготовлено"
+                                        st.session_state[
+                                            owner_contacts_key
+                                        ] = owner_contacts
+
+                                        persist_workspace_if_changed(
+                                            telegram_id,
+                                            force=True,
+                                        )
+                                        st.rerun()
+                                    except Exception as exc:
+                                        st.error(
+                                            "Не удалось подготовить сообщения: "
+                                            f"{exc}"
+                                        )
+
+                            for number, contact in enumerate(
+                                selected_contacts,
+                                start=1,
+                            ):
+                                contact_id = int(contact["telegram_id"])
+                                draft = drafts.get(
+                                    contact_id,
+                                    drafts.get(str(contact_id)),
+                                )
+                                username = (
+                                    f"@{contact['username']}"
+                                    if contact.get("username")
+                                    else "без username"
+                                )
+                                source_title = (
+                                    contact.get("source_chat_title")
+                                    or contact.get("source")
+                                    or "Рекомендация Неонии"
+                                )
+
+                                with st.container(border=True):
+                                    st.markdown(
+                                        f"#### {number}. {contact.get('name', 'Кандидат')}"
+                                    )
+                                    st.caption(
+                                        f"{username} · {contact.get('score', 0)}% · "
+                                        f"{contact.get('segment', 'Сегмент не указан')} · "
+                                        f"источник: {source_title}"
+                                    )
+
+                                    with st.expander(
+                                        "Контекст для персонализации"
+                                    ):
+                                        reasons = contact.get("reasons", [])
+                                        if reasons:
+                                            st.write("**Почему выбран:**")
+                                            for reason in reasons:
+                                                st.write(f"• {reason}")
+                                        st.write(
+                                            "**Безопасная тема обращения:**"
+                                        )
+                                        st.write(
+                                            contact.get(
+                                                "message_angle",
+                                                "Нейтральное знакомство",
+                                            )
+                                        )
+                                        profile_about = str(
+                                            contact.get("profile_about") or ""
+                                        ).strip()
+                                        if profile_about:
+                                            st.write("**Bio:**")
+                                            st.write(profile_about)
+
+                                    if not draft:
+                                        if st.button(
+                                            "✍️ Подготовить сообщение",
+                                            key=(
+                                                "neona_prepare_one_"
+                                                f"{telegram_id}_{contact_id}"
+                                            ),
+                                        ):
+                                            with st.spinner(
+                                                "Неона готовит персональный текст..."
+                                            ):
+                                                try:
+                                                    message = (
+                                                        generate_neona_first_message(
+                                                            first_name,
+                                                            passport["analysis"],
+                                                            contact,
+                                                        )
+                                                    )
+                                                    drafts[contact_id] = {
+                                                        "message": message,
+                                                        "approved": False,
+                                                        "status": (
+                                                            "Сообщение подготовлено"
+                                                        ),
+                                                    }
+                                                    st.session_state[
+                                                        neona_drafts_key
+                                                    ] = drafts
+                                                    contact["status"] = (
+                                                        "Сообщение подготовлено"
+                                                    )
+                                                    st.session_state[
+                                                        candidates_key
+                                                    ] = candidate_results
+                                                    persist_workspace_if_changed(
+                                                        telegram_id,
+                                                        force=True,
+                                                    )
+                                                    st.rerun()
+                                                except Exception as exc:
+                                                    st.error(
+                                                        "Не удалось подготовить "
+                                                        f"сообщение: {exc}"
+                                                    )
+                                    else:
+                                        message_key = (
+                                            "neona_agent_message_text_"
+                                            f"{telegram_id}_{contact_id}"
+                                        )
+                                        edited_message = st.text_area(
+                                            "Первое сообщение",
+                                            value=str(
+                                                draft.get("message") or ""
+                                            ),
+                                            height=180,
+                                            disabled=bool(draft.get("sent")),
+                                            key=message_key,
+                                        )
+                                        st.caption(
+                                            f"{len(edited_message.strip())} знаков. "
+                                            "Рекомендуемая длина — до 650 знаков."
+                                        )
+
+                                        action_columns = st.columns(2)
+                                        save_message = action_columns[0].button(
+                                            "💾 Сохранить изменения",
+                                            disabled=bool(draft.get("sent")),
+                                            key=(
+                                                "neona_save_agent_draft_"
+                                                f"{telegram_id}_{contact_id}"
+                                            ),
+                                        )
+                                        approve_message = action_columns[1].button(
+                                            "✅ Утвердить сообщение",
+                                            type="primary",
+                                            disabled=bool(draft.get("sent")),
+                                            key=(
+                                                "neona_approve_agent_draft_"
+                                                f"{telegram_id}_{contact_id}"
+                                            ),
+                                        )
+
+                                        if save_message or approve_message:
+                                            normalized_message = (
+                                                ensure_neona_identity(
+                                                    edited_message.strip(),
+                                                    first_name,
+                                                )
+                                            )
+                                            if not normalized_message:
+                                                st.warning(
+                                                    "Текст сообщения пуст."
+                                                )
+                                            else:
+                                                draft["message"] = (
+                                                    normalized_message
+                                                )
+                                                draft["approved"] = bool(
+                                                    approve_message
+                                                )
+                                                draft["status"] = (
+                                                    "Первое сообщение утверждено"
+                                                    if approve_message
+                                                    else "Сообщение отредактировано"
+                                                )
+                                                drafts[contact_id] = draft
+                                                st.session_state[
+                                                    neona_drafts_key
+                                                ] = drafts
+
+                                                for candidate in candidate_results:
+                                                    try:
+                                                        candidate_id = int(
+                                                            candidate.get(
+                                                                "telegram_id"
+                                                            )
+                                                        )
+                                                    except (
+                                                        TypeError,
+                                                        ValueError,
+                                                    ):
+                                                        continue
+                                                    if candidate_id == contact_id:
+                                                        candidate["status"] = (
+                                                            draft["status"]
+                                                        )
+                                                st.session_state[
+                                                    candidates_key
+                                                ] = candidate_results
+
+                                                if contact_id in owner_contacts:
+                                                    owner_contacts[contact_id][
+                                                        "status"
+                                                    ] = draft["status"]
+                                                    st.session_state[
+                                                        owner_contacts_key
+                                                    ] = owner_contacts
+
+                                                persist_workspace_if_changed(
+                                                    telegram_id,
+                                                    force=True,
+                                                )
+                                                st.rerun()
+
+                                        if draft.get("approved"):
+                                            st.success(
+                                                "✅ Сообщение утверждено владельцем"
+                                            )
+                                        else:
+                                            st.warning(
+                                                "Черновик ещё не утверждён."
+                                            )
+
+                            latest_drafts = st.session_state.get(
+                                neona_drafts_key,
+                                {},
+                            )
+                            all_approved = all(
+                                bool(
+                                    latest_drafts.get(
+                                        int(contact["telegram_id"]),
+                                        latest_drafts.get(
+                                            str(contact["telegram_id"]),
+                                            {},
+                                        ),
+                                    ).get("approved")
+                                )
+                                for contact in selected_contacts
+                            )
+                            if all_approved:
+                                st.success(
+                                    "Все выбранные сообщения утверждены. "
+                                    "Следующий этап — отправка первых сообщений "
+                                    "и работа Неоны с ответами людей."
+                                )
+                            else:
+                                st.caption(
+                                    "На этом этапе сообщения только формируются "
+                                    "и утверждаются. Автоматической отправки нет."
+                                )
 
                 else:
                     st.caption(
