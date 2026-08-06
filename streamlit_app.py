@@ -3,6 +3,7 @@ import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
+from neonia_chats import render_neonia_chats
 from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
@@ -497,6 +498,116 @@ async def fetch_telegram_contacts(telegram_id):
     finally:
         await client.disconnect()
 
+
+
+async def fetch_telegram_chats(telegram_id):
+    """Получает доступные группы, супергруппы и каналы владельца."""
+
+    session_string = load_telegram_session_from_supabase(
+        telegram_id
+    )
+
+    if not session_string:
+        return []
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            return []
+
+        chats = []
+
+        async for dialog in client.iter_dialogs(limit=500):
+            is_group = bool(
+                getattr(dialog, "is_group", False)
+            )
+            is_channel = bool(
+                getattr(dialog, "is_channel", False)
+            )
+
+            # Личные диалоги с людьми здесь не показываем.
+            if not (is_group or is_channel):
+                continue
+
+            entity = dialog.entity
+            if getattr(entity, "left", False):
+                continue
+
+            try:
+                chat_id = int(getattr(entity, "id"))
+            except (TypeError, ValueError):
+                continue
+
+            if getattr(entity, "broadcast", False):
+                chat_type = "Канал"
+            elif getattr(entity, "megagroup", False):
+                chat_type = "Супергруппа"
+            elif is_group:
+                chat_type = "Группа"
+            else:
+                chat_type = "Чат"
+
+            username = str(
+                getattr(entity, "username", "") or ""
+            ).strip()
+
+            try:
+                participants_count = int(
+                    getattr(entity, "participants_count", 0)
+                    or 0
+                )
+            except (TypeError, ValueError):
+                participants_count = 0
+
+            try:
+                unread_count = int(
+                    getattr(dialog, "unread_count", 0)
+                    or 0
+                )
+            except (TypeError, ValueError):
+                unread_count = 0
+
+            folder_id = getattr(dialog, "folder_id", None)
+
+            chats.append(
+                {
+                    "chat_id": chat_id,
+                    "title": (
+                        str(dialog.name or "").strip()
+                        or "Без названия"
+                    ),
+                    "type": chat_type,
+                    "username": username,
+                    "is_public": bool(username),
+                    "participants_count": participants_count,
+                    "unread_count": unread_count,
+                    "is_archived": folder_id == 1,
+                    "is_pinned": bool(
+                        getattr(dialog, "pinned", False)
+                    ),
+                }
+            )
+
+        chats.sort(
+            key=lambda item: (
+                item.get("is_archived", False),
+                item.get("type", ""),
+                item.get("title", "").lower(),
+            )
+        )
+
+        return chats
+
+    finally:
+        await client.disconnect()
 
 
 async def send_telegram_first_message(
@@ -2988,8 +3099,9 @@ if received_hash:
                     if neonia_mode != "🎯 Анализ проекта и ЦА":
                         mode_messages = {
                         "🔎 Поиск чатов": (
-                            "Здесь Неония будет находить подходящие чаты "
-                            "по критериям целевой аудитории."
+                            "Здесь Неония загружает доступные Telegram-группы "
+                            "и каналы. Анализ по критериям ЦА будет следующим "
+                            "этапом."
                         ),
                         "👥 Поиск контактов": (
                             "Здесь Неония будет работать с доступными контактами "
@@ -3001,7 +3113,204 @@ if received_hash:
                         ),
                         }
                         st.info(mode_messages[neonia_mode])
-                        if neonia_mode == "👥 Поиск контактов":
+                        if neonia_mode == "🔎 Поиск чатов":
+                            chats_result = render_neonia_chats()
+
+                            chats_state_key = (
+                                f"neonia_telegram_chats_{telegram_id}"
+                            )
+                            chats_search_done_key = (
+                                f"neonia_chats_search_done_{telegram_id}"
+                            )
+
+                            if chats_result["find_chats"]:
+                                with st.spinner(
+                                    "Неония получает список групп и каналов..."
+                                ):
+                                    try:
+                                        chats = run_telegram_async(
+                                            fetch_telegram_chats(telegram_id)
+                                        )
+                                        st.session_state[
+                                            chats_state_key
+                                        ] = chats
+                                        st.session_state[
+                                            chats_search_done_key
+                                        ] = True
+
+                                        persist_workspace_if_changed(
+                                            telegram_id,
+                                            force=True,
+                                        )
+
+                                    except Exception as exc:
+                                        st.error(
+                                            "Не удалось получить чаты: "
+                                            f"{exc}"
+                                        )
+
+                            chats = st.session_state.get(
+                                chats_state_key,
+                                [],
+                            )
+
+                            if chats:
+                                group_count = sum(
+                                    1
+                                    for chat in chats
+                                    if chat.get("type")
+                                    in {"Группа", "Супергруппа"}
+                                )
+                                channel_count = sum(
+                                    1
+                                    for chat in chats
+                                    if chat.get("type") == "Канал"
+                                )
+                                public_count = sum(
+                                    1
+                                    for chat in chats
+                                    if chat.get("is_public", False)
+                                )
+
+                                metric_columns = st.columns(4)
+                                metric_columns[0].metric(
+                                    "Всего",
+                                    len(chats),
+                                )
+                                metric_columns[1].metric(
+                                    "Группы",
+                                    group_count,
+                                )
+                                metric_columns[2].metric(
+                                    "Каналы",
+                                    channel_count,
+                                )
+                                metric_columns[3].metric(
+                                    "Публичные",
+                                    public_count,
+                                )
+
+                                filter_columns = st.columns([2, 1])
+                                chat_query = filter_columns[0].text_input(
+                                    "Найти чат по названию или username",
+                                    key=(
+                                        "neonia_chat_query_"
+                                        f"{telegram_id}"
+                                    ),
+                                    placeholder="Например: бизнес или @username",
+                                )
+
+                                available_types = sorted(
+                                    {
+                                        chat.get("type", "Чат")
+                                        for chat in chats
+                                    }
+                                )
+                                selected_types = filter_columns[1].multiselect(
+                                    "Тип",
+                                    available_types,
+                                    default=available_types,
+                                    key=(
+                                        "neonia_chat_types_"
+                                        f"{telegram_id}"
+                                    ),
+                                )
+
+                                show_archived = st.checkbox(
+                                    "Показывать архивные чаты",
+                                    value=False,
+                                    key=(
+                                        "neonia_show_archived_chats_"
+                                        f"{telegram_id}"
+                                    ),
+                                )
+
+                                normalized_query = (
+                                    chat_query.strip().lower().lstrip("@")
+                                )
+                                filtered_chats = []
+
+                                for chat in chats:
+                                    if (
+                                        selected_types
+                                        and chat.get("type")
+                                        not in selected_types
+                                    ):
+                                        continue
+
+                                    if (
+                                        not show_archived
+                                        and chat.get("is_archived", False)
+                                    ):
+                                        continue
+
+                                    if normalized_query:
+                                        title = str(
+                                            chat.get("title", "")
+                                        ).lower()
+                                        username = str(
+                                            chat.get("username", "")
+                                        ).lower().lstrip("@")
+                                        if (
+                                            normalized_query not in title
+                                            and normalized_query not in username
+                                        ):
+                                            continue
+
+                                    filtered_chats.append(chat)
+
+                                if filtered_chats:
+                                    chats_for_table = [
+                                        {
+                                            "Название": chat["title"],
+                                            "Тип": chat["type"],
+                                            "Username": (
+                                                f"@{chat['username']}"
+                                                if chat["username"]
+                                                else "—"
+                                            ),
+                                            "Участников": (
+                                                chat["participants_count"]
+                                                or "—"
+                                            ),
+                                            "Непрочитано": chat[
+                                                "unread_count"
+                                            ],
+                                            "Архив": (
+                                                "Да"
+                                                if chat["is_archived"]
+                                                else "Нет"
+                                            ),
+                                        }
+                                        for chat in filtered_chats
+                                    ]
+
+                                    st.dataframe(
+                                        chats_for_table,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+                                    st.caption(
+                                        "Показано: "
+                                        f"{len(filtered_chats)} из "
+                                        f"{len(chats)}. Личные диалоги "
+                                        "с людьми в этот список не входят."
+                                    )
+                                else:
+                                    st.info(
+                                        "По выбранным фильтрам чаты не найдены."
+                                    )
+
+                            elif st.session_state.get(
+                                chats_search_done_key,
+                                False,
+                            ):
+                                st.info(
+                                    "В Telegram не найдено доступных "
+                                    "групп или каналов."
+                                )
+
+                        elif neonia_mode == "👥 Поиск контактов":
                             contacts_result = render_neonia_contacts()
                         
                             contacts_state_key = (

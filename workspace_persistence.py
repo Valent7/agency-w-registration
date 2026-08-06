@@ -29,6 +29,12 @@ def get_workspace_state_keys(telegram_id):
         "contacts_search_done": (
             f"neonia_contacts_search_done_{telegram_id}"
         ),
+        "chats": (
+            f"neonia_telegram_chats_{telegram_id}"
+        ),
+        "chats_search_done": (
+            f"neonia_chats_search_done_{telegram_id}"
+        ),
         "candidates": (
             f"neonia_candidates_{telegram_id}"
         ),
@@ -67,7 +73,7 @@ def collect_workspace_state(telegram_id):
     )
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -78,6 +84,16 @@ def collect_workspace_state(telegram_id):
         "contacts_search_done": bool(
             st.session_state.get(
                 keys["contacts_search_done"],
+                False,
+            )
+        ),
+        "chats": st.session_state.get(
+            keys["chats"],
+            [],
+        ),
+        "chats_search_done": bool(
+            st.session_state.get(
+                keys["chats_search_done"],
                 False,
             )
         ),
@@ -134,6 +150,29 @@ def _normalize_workspace_state(state):
                 )
             except (TypeError, ValueError):
                 pass
+
+    chats = (
+        state.get("chats")
+        if isinstance(state.get("chats"), list)
+        else []
+    )
+    for chat in chats:
+        if not isinstance(chat, dict):
+            continue
+        try:
+            chat["chat_id"] = int(chat.get("chat_id"))
+        except (TypeError, ValueError):
+            pass
+        for numeric_key in (
+            "participants_count",
+            "unread_count",
+        ):
+            try:
+                chat[numeric_key] = int(
+                    chat.get(numeric_key, 0) or 0
+                )
+            except (TypeError, ValueError):
+                chat[numeric_key] = 0
 
     candidates = (
         state.get("candidates")
@@ -241,6 +280,10 @@ def _normalize_workspace_state(state):
         "contacts": contacts,
         "contacts_search_done": bool(
             state.get("contacts_search_done", False)
+        ),
+        "chats": chats,
+        "chats_search_done": bool(
+            state.get("chats_search_done", False)
         ),
         "candidates": candidates,
         "selection_offset": max(0, selection_offset),
@@ -383,6 +426,12 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["contacts_search_done"]
         ] = state["contacts_search_done"]
+        st.session_state[
+            keys["chats"]
+        ] = state["chats"]
+        st.session_state[
+            keys["chats_search_done"]
+        ] = state["chats_search_done"]
         st.session_state[
             keys["candidates"]
         ] = state["candidates"]
