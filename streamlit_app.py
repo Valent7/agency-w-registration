@@ -4,6 +4,14 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
 from neonia_chats import render_neonia_chats
+from neona_reglament import (
+    NEONA_FIRST_MESSAGE_MAX_LENGTH,
+    NEONA_FORBIDDEN_CLAIMS,
+    build_neona_first_message_system_prompt,
+    build_neona_first_messages_system_prompt,
+    neona_identity,
+    neona_reglament_markdown,
+)
 from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
@@ -1496,6 +1504,133 @@ def merge_candidate_results(existing, new_results):
     )
 
 
+NEONA_FIRST_MESSAGE_FORBIDDEN = NEONA_FORBIDDEN_CLAIMS
+
+
+def candidate_first_name(contact):
+    """Возвращает безопасное короткое имя для обращения."""
+
+    first_name = str(contact.get("first_name") or "").strip()
+    if first_name and len(first_name) <= 40:
+        return first_name
+
+    full_name = str(contact.get("name") or "").strip()
+    if not full_name:
+        return ""
+
+    first_word = full_name.split()[0].strip(" ,.!?;:()[]{}\"'")
+    if not first_word or len(first_word) > 40:
+        return ""
+
+    if any(character.isdigit() for character in first_word):
+        return ""
+
+    return first_word
+
+
+def build_neona_safe_first_message(owner_name, contact):
+    """Правдивый запасной текст о реально работающих возможностях."""
+
+    first_name = candidate_first_name(contact)
+    greeting = (
+        f"{first_name}, здравствуйте!"
+        if first_name
+        else "Здравствуйте!"
+    )
+
+    return (
+        f"{greeting} {neona_identity(owner_name)} "
+        f"{owner_name} создаёт команду ИИ-помощников, которая помогает "
+        "не тратить часы на поиск людей и подготовку первых сообщений. "
+        "Один помощник находит подходящих кандидатов, другой готовит для "
+        "каждого личное первое сообщение. Со временем команда будет "
+        "расширяться. Вам интересно посмотреть, как это уже работает?"
+    )
+
+
+def validate_neona_first_message(message, owner_name):
+    """Проверяет жёсткие рамки первого сообщения Неоны."""
+
+    message = str(message or "").strip()
+    lowered = message.lower()
+    errors = []
+
+    identity = neona_identity(owner_name).lower()
+
+    if identity not in lowered:
+        errors.append("нет корректного представления Неоны")
+
+    if len(message) > NEONA_FIRST_MESSAGE_MAX_LENGTH:
+        errors.append("сообщение слишком длинное")
+
+    if message.count("?") != 1:
+        errors.append("должен быть ровно один вопрос")
+
+    if "команду ии-помощников" not in lowered:
+        errors.append("не сказано о команде ИИ-помощников")
+
+    has_search_value = any(
+        phrase in lowered
+        for phrase in (
+            "поиск людей",
+            "находит подходящих кандидатов",
+            "ищет подходящих людей",
+        )
+    )
+    if not has_search_value:
+        errors.append("не показана реальная функция поиска людей")
+
+    has_message_value = any(
+        phrase in lowered
+        for phrase in (
+            "подготовку первых сообщений",
+            "готовит для каждого личное первое сообщение",
+            "готовит персональное первое сообщение",
+        )
+    )
+    if not has_message_value:
+        errors.append("не показана реальная функция первого сообщения")
+
+    if not any(
+        phrase in lowered
+        for phrase in (
+            "интересно посмотреть",
+            "интересно увидеть",
+            "показать, как это уже работает",
+        )
+    ):
+        errors.append("нет лёгкого приглашения узнать больше")
+
+    if "\n" in message or "•" in message:
+        errors.append("нельзя использовать списки")
+
+    if "(" in message or ")" in message:
+        errors.append("нельзя перегружать пояснениями в скобках")
+
+    for phrase in NEONA_FIRST_MESSAGE_FORBIDDEN:
+        if phrase in lowered:
+            errors.append(f"запрещённая формулировка: {phrase}")
+
+    sentence_marks = sum(message.count(mark) for mark in ".!?")
+    if sentence_marks > 6:
+        errors.append("слишком много предложений")
+
+    return errors
+
+
+def finalize_neona_first_message(message, owner_name, contact):
+    """Нормализует текст и заменяет небезопасный вариант шаблоном."""
+
+    message = ensure_neona_identity(message, owner_name)
+    message = re.sub(r"\s+", " ", message).strip()
+    errors = validate_neona_first_message(message, owner_name)
+
+    if errors:
+        return build_neona_safe_first_message(owner_name, contact)
+
+    return message[:NEONA_FIRST_MESSAGE_MAX_LENGTH]
+
+
 def generate_neona_first_messages(
     owner_name,
     passport_analysis,
@@ -1503,33 +1638,9 @@ def generate_neona_first_messages(
 ):
     """Создаёт первые сообщения для выбранных кандидатов."""
 
-    system_prompt = f"""
-Ты — Неона, виртуальный секретарь-референт {owner_name}.
-
-Подготовь первое персональное сообщение каждому выбранному кандидату.
-
-Обязательные правила:
-- обращайся по имени, если имя надёжно известно;
-- обязательно назови себя по имени: «Меня зовут Неона, я виртуальный секретарь-референт {owner_name}»;
-- никогда не представляйся именем владельца и не говори «я — виртуальный секретарь-референт {owner_name}» без имени Неона;
-- пиши уважительно, естественно и без давления;
-- не сообщай, что человек был проанализирован или отобран ИИ;
-- не обещай доход, гарантированный результат или лёгкие деньги;
-- не отправляй ссылки в первом сообщении;
-- не используй одинаковый текст для всех;
-- опирайся только на переданные сведения;
-- закончи одним простым вопросом, на который удобно ответить;
-- сообщение должно быть коротким: до 650 знаков.
-
-Верни ТОЛЬКО JSON-массив:
-[
-  {{
-    "telegram_id": 123,
-    "message": "готовый текст"
-  }}
-]
-Без пояснений и без Markdown.
-"""
+    system_prompt = build_neona_first_messages_system_prompt(
+        owner_name
+    )
 
     safe_candidates = [
         {
@@ -1540,10 +1651,7 @@ def generate_neona_first_messages(
             "segment": item.get("segment", ""),
             "score": item.get("score", 0),
             "reasons": item.get("reasons", []),
-            "message_angle": item.get(
-                "message_angle",
-                "",
-            ),
+            "message_angle": item.get("message_angle", ""),
             "source": item.get("source", "Рекомендация Неонии"),
             "source_chat_title": item.get("source_chat_title", ""),
             "profile_about": item.get("profile_about", ""),
@@ -1559,10 +1667,7 @@ def generate_neona_first_messages(
         f"{json.dumps(safe_candidates, ensure_ascii=False)}"
     )
 
-    answer = ask_openai(
-        system_prompt,
-        request,
-    )
+    answer = ask_openai(system_prompt, request)
 
     if answer.startswith("Ошибка OpenAI:"):
         raise RuntimeError(answer)
@@ -1570,6 +1675,10 @@ def generate_neona_first_messages(
     raw_messages = extract_json_array(answer)
     allowed_ids = {
         int(item["telegram_id"])
+        for item in selected_candidates
+    }
+    candidate_lookup = {
+        int(item["telegram_id"]): item
         for item in selected_candidates
     }
     result = {}
@@ -1587,19 +1696,34 @@ def generate_neona_first_messages(
         if not message:
             continue
 
-        message = ensure_neona_identity(
+        contact = candidate_lookup.get(contact_id, {})
+        message = finalize_neona_first_message(
             message,
             owner_name,
+            contact,
         )
 
         result[contact_id] = {
-            "message": message[:1000],
+            "message": message,
+            "approved": False,
+            "status": "Сообщение подготовлено",
+        }
+
+    # Даже если модель пропустила кандидата, создаём безопасный черновик.
+    for contact_id in allowed_ids:
+        if contact_id in result:
+            continue
+        contact = candidate_lookup.get(contact_id, {})
+        result[contact_id] = {
+            "message": build_neona_safe_first_message(
+                owner_name,
+                contact,
+            ),
             "approved": False,
             "status": "Сообщение подготовлено",
         }
 
     return result
-
 
 def search_known_contacts(contacts, query, limit=20):
     """Ищет знакомого среди уже загруженных Telegram-контактов."""
@@ -1657,36 +1781,40 @@ def search_known_contacts(contacts, query, limit=20):
 
 
 def ensure_neona_identity(message, owner_name):
-    """Гарантирует одно корректное представление Неоны без повторов."""
+    """Гарантирует одно простое представление Неоны без повторов."""
 
     message = str(message or "").strip()
-    identity = (
-        f"Меня зовут Неона, я виртуальный "
-        f"секретарь-референт {owner_name}."
-    )
+    identity = neona_identity(owner_name)
 
+    # Старое представление из предыдущих версий заменяем новым.
+    old_identity_patterns = (
+        r"(?i)меня\s+зовут\s+неона,?\s+я\s+виртуальн(?:ый|ая)\s+"
+        r"секретарь[\s‑-]*референт\s+[^.!?]+[.]?",
+        r"(?i)я\s*[—–-]?\s*виртуальн(?:ый|ая)\s+"
+        r"секретарь[\s‑-]*референт\s+[^.!?]+[.]?",
+    )
+    for pattern in old_identity_patterns:
+        message = re.sub(pattern, identity, message, count=1)
+
+    # Убираем возможные повторы имени Неоны.
     message = re.sub(
         r"(?i)(?:\bменя\s+зовут\s+неона[\s,.;:…—–-]*){2,}",
         "Меня зовут Неона, ",
         message,
     )
 
-    has_neona_identity = (
-        "меня зовут неона" in message[:350].lower()
-    )
-
-    if not has_neona_identity:
-        owner_pattern = re.escape(str(owner_name).strip())
-        without_name_pattern = (
-            rf"\bя\s*[—–-]?\s*виртуальн(?:ый|ая)\s+"
-            rf"секретарь[\s‑-]*референт\s+{owner_pattern}\.?"
+    has_identity = identity.lower() in message[:350].lower()
+    if not has_identity:
+        # Если есть другое короткое представление как помощницы, нормализуем его.
+        helper_pattern = (
+            rf"(?i)меня\s+зовут\s+неона,?\s+я\s+помощница\s+"
+            rf"{re.escape(str(owner_name).strip())}[.]?"
         )
         message, replacements = re.subn(
-            without_name_pattern,
+            helper_pattern,
             identity,
             message,
             count=1,
-            flags=re.IGNORECASE,
         )
 
         if replacements == 0:
@@ -1704,14 +1832,9 @@ def ensure_neona_identity(message, owner_name):
             else:
                 message = f"{identity} {message}".strip()
 
-    message = re.sub(
-        r"(?i)(?:\bменя\s+зовут\s+неона[\s,.;:…—–-]*){2,}",
-        "Меня зовут Неона, ",
-        message,
-    )
     message = re.sub(r"\s{2,}", " ", message).strip()
-
     return message[:1000]
+
 
 def generate_neona_first_message(
     owner_name,
@@ -1725,32 +1848,9 @@ def generate_neona_first_message(
         == "Знакомый — выбран директором"
     )
 
-    system_prompt = f"""
-Ты — Неона, виртуальный секретарь-референт {owner_name}.
-
-Подготовь ОДНО первое персональное сообщение выбранному человеку.
-
-Правила:
-- верни только готовый текст сообщения, без пояснений и Markdown;
-- обращайся по имени, только если имя выглядит надёжным;
-- обязательно назови себя по имени: «Меня зовут Неона, я виртуальный секретарь-референт {owner_name}»;
-- никогда не представляйся именем владельца и не говори «я — виртуальный секретарь-референт {owner_name}» без имени Неона;
-- пиши естественно, тепло, уважительно и без давления;
-- не говори, что человека анализировал или выбирал ИИ;
-- не обещай доход, гарантированный результат или лёгкие деньги;
-- не отправляй ссылку в первом сообщении;
-- не выдумывай факты о человеке;
-- если человек найден в Telegram-чате, можно мягко опереться на общий чат, bio или его публичную тему, но нельзя говорить об анализе, рейтинге или отборе;
-- не приписывай человеку должность, интерес или мнение как достоверный факт, если это только предположение Неонии;
-- закончи одним простым вопросом, на который удобно ответить;
-- длина сообщения — до 650 знаков.
-
-Если это знакомый контакт, выбранный владельцем:
-- главным основанием являются набросок и пояснения владельца;
-- сохрани смысл, тон и границы, заданные владельцем;
-- не изображай холодное знакомство, если люди уже общались;
-- обязательно учти, что упомянуть и чего избегать.
-"""
+    system_prompt = build_neona_first_message_system_prompt(
+        owner_name
+    )
 
     safe_contact = {
         "telegram_id": contact.get("telegram_id"),
@@ -1779,31 +1879,25 @@ def generate_neona_first_message(
         f"{json.dumps(safe_contact, ensure_ascii=False)}"
     )
 
-    answer = ask_openai(
-        system_prompt,
-        request,
-    ).strip()
+    answer = ask_openai(system_prompt, request).strip()
 
     if answer.startswith("Ошибка OpenAI:"):
         raise RuntimeError(answer)
 
     if not answer:
-        raise RuntimeError(
-            "Неона не сформировала сообщение."
+        return build_neona_safe_first_message(
+            owner_name,
+            contact,
         )
 
-    if (
-        answer.startswith('"')
-        and answer.endswith('"')
-    ):
+    if answer.startswith('"') and answer.endswith('"'):
         answer = answer[1:-1].strip()
 
-    answer = ensure_neona_identity(
+    return finalize_neona_first_message(
         answer,
         owner_name,
+        contact,
     )
-
-    return answer[:1000]
 
 def render_telegram_connection(expected_telegram_id):
     expected_telegram_id = int(expected_telegram_id)
@@ -5092,9 +5186,22 @@ if received_hash:
                 elif selected_agent == "Неона":
                     st.caption(
                         "Неона получает только тех людей, которых выбрал владелец "
-                        "кабинета. Она готовит отдельное первое сообщение каждому "
-                        "человеку, но ничего не отправляет без решения владельца."
+                        "кабинета. Её задача — правдиво заинтересовать человека "
+                        "и постепенно привести к осознанной встрече с владельцем. "
+                        "Первое сообщение она готовит, но не отправляет без "
+                        "утверждения владельца."
                     )
+
+                    with st.expander("📜 Задача и регламент Неоны"):
+                        st.markdown(
+                            neona_reglament_markdown(first_name)
+                        )
+                        st.caption(
+                            "Правила согласования встречи уже закреплены в "
+                            "регламенте. Автоматическая проверка календаря, "
+                            "пересчёт часовых поясов и создание встречи будут "
+                            "подключены отдельным техническим этапом."
+                        )
 
                     candidates_key = (
                         f"neonia_candidates_{telegram_id}"
@@ -5424,7 +5531,7 @@ if received_hash:
                                         )
                                         st.caption(
                                             f"{len(edited_message.strip())} знаков. "
-                                            "Рекомендуемая длина — до 650 знаков."
+                                            f"Максимальная длина по регламенту — {NEONA_FIRST_MESSAGE_MAX_LENGTH} знаков."
                                         )
 
                                         action_columns = st.columns(2)
