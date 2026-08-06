@@ -2405,24 +2405,24 @@ div[data-testid="stAlert"] p {
         button[kind="primary"],
         div.stButton > button[kind="primary"],
         div[data-testid="stFormSubmitButton"] > button[kind="primary"] {
-            background: linear-gradient(180deg, #2fcb72 0%, #1fa85a 100%) !important;
+            background: linear-gradient(180deg, #275d3b 0%, #1f4d31 100%) !important;
             color: #ffffff !important;
-            border: 1px solid rgba(102, 255, 170, 0.35) !important;
-            box-shadow: 0 10px 22px rgba(31, 168, 90, 0.22) !important;
+            border: 1px solid rgba(151, 190, 164, 0.28) !important;
+            box-shadow: 0 7px 16px rgba(7, 34, 19, 0.26) !important;
         }
 
         button[kind="primary"]:hover,
         div.stButton > button[kind="primary"]:hover,
         div[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
-            background: linear-gradient(180deg, #35d87b 0%, #239f5b 100%) !important;
-            border-color: rgba(134, 255, 188, 0.55) !important;
+            background: linear-gradient(180deg, #316c47 0%, #275d3b 100%) !important;
+            border-color: rgba(177, 211, 187, 0.42) !important;
             color: #ffffff !important;
         }
 
         button[kind="primary"]:active,
         div.stButton > button[kind="primary"]:active,
         div[data-testid="stFormSubmitButton"] > button[kind="primary"]:active {
-            background: linear-gradient(180deg, #239f5b 0%, #1b824a 100%) !important;
+            background: linear-gradient(180deg, #1f4d31 0%, #183d27 100%) !important;
             color: #ffffff !important;
         }
 
@@ -2430,8 +2430,8 @@ div[data-testid="stAlert"] p {
         div.stButton > button[kind="primary"]:focus,
         div[data-testid="stFormSubmitButton"] > button[kind="primary"]:focus {
             outline: none !important;
-            border-color: rgba(160, 255, 205, 0.75) !important;
-            box-shadow: 0 0 0 0.2rem rgba(61, 220, 127, 0.18) !important;
+            border-color: rgba(177, 211, 187, 0.52) !important;
+            box-shadow: 0 0 0 0.18rem rgba(66, 116, 82, 0.22) !important;
         }
     </style>
     """,
