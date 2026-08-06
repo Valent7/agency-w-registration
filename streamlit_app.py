@@ -52,7 +52,7 @@ def render_agency_w_logo(compact=False):
         )
         return
 
-    side = 0.18 if compact else 0.04
+    side = 0.36 if compact else 0.02
     left, center, right = st.columns([side, 1, side])
     with center:
         st.image(str(LOGO_PATH), use_container_width=True)
@@ -1373,14 +1373,13 @@ st.markdown(
             margin-top: 2rem;
         }
 
-        .brand-translation {
+        .present-motto {
             text-align: center;
-            color: #d8c9b0;
-            font-size: 1.05rem;
-            font-style: italic;
-            letter-spacing: 0.03em;
-            margin-top: -0.35rem;
-            margin-bottom: 1.4rem;
+            color: #d7b66b;
+            font-size: 1.18rem;
+            font-weight: 700;
+            letter-spacing: 0.025em;
+            margin: 0.35rem 0 1.25rem 0;
         }
 
         .registration-card {
@@ -1419,10 +1418,10 @@ st.markdown(
                 margin-bottom: 0.5rem;
             }
 
-            .brand-translation {
-                font-size: 0.95rem;
-                margin-top: -0.2rem;
-                margin-bottom: 1rem;
+            .present-motto {
+                font-size: 1rem;
+                line-height: 1.35;
+                margin: 0.25rem 0 1rem 0;
             }
 
             .registration-card {
@@ -1491,11 +1490,6 @@ div[data-testid="stAlert"] p {
 
 if not st.query_params.get("hash"):
     render_agency_w_logo()
-
-    st.markdown(
-        '<div class="brand-translation">«Дела, а не слова».</div>',
-        unsafe_allow_html=True,
-    )
 
     st.markdown(
         """
@@ -1603,6 +1597,10 @@ if received_hash:
             f"## {greeting}, {first_name}! {greeting_icon}"
         )
         st.markdown(
+            '<div class="present-motto">🟢 Мы создаём своё настоящее</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
             f"""
             <div class="registration-card">
                 <h2>Директор Агентства W</h2>
@@ -1670,7 +1668,7 @@ if received_hash:
             daily_moods = [
                 "Сегодня важно сделать один конкретный шаг, который приблизит вас к цели.",
                 "Не стремитесь сделать всё сразу. Главное — двигаться вперёд каждый день.",
-                "Ваше будущее создаётся решениями, которые вы принимаете сегодня.",
+                "Своё настоящее мы создаём решениями, которые принимаем сегодня.",
                 "Спокойствие, ясность и последовательность сильнее суеты.",
                 "Сегодня хороший день, чтобы завершить то, что давно откладывалось.",
                 "Большой результат начинается с одного простого действия.",
