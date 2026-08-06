@@ -10,7 +10,9 @@ from workspace_persistence import (
 import asyncio
 import json
 import re
+from pathlib import Path
 
+from PIL import Image
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
@@ -24,11 +26,38 @@ from telethon.errors import (
 )
 from cryptography.fernet import Fernet, InvalidToken
 
+APP_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = APP_DIR / "assets"
+LOGO_PATH = ASSETS_DIR / "agency_w_logo.png"
+ICON_PATH = ASSETS_DIR / "agency_w_icon.png"
+
+page_icon = (
+    Image.open(ICON_PATH)
+    if ICON_PATH.exists()
+    else "W"
+)
+
 st.set_page_config(
     page_title="Агентство W",
-    page_icon="🏛️",
+    page_icon=page_icon,
     layout="centered",
 )
+def render_agency_w_logo(compact=False):
+    """Показывает единый логотип Агентства W."""
+
+    if not LOGO_PATH.exists():
+        st.markdown(
+            '<div class="main-title">Агентство W</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    side = 0.18 if compact else 0.04
+    left, center, right = st.columns([side, 1, side])
+    with center:
+        st.image(str(LOGO_PATH), use_container_width=True)
+
+
 def get_session_cipher():
     key = st.secrets.get("FERNET_KEY")
 
@@ -1344,11 +1373,14 @@ st.markdown(
             margin-top: 2rem;
         }
 
-        .subtitle {
+        .brand-translation {
             text-align: center;
-            font-size: 1.25rem;
             color: #d8c9b0;
-            margin-bottom: 2rem;
+            font-size: 1.05rem;
+            font-style: italic;
+            letter-spacing: 0.03em;
+            margin-top: -0.35rem;
+            margin-bottom: 1.4rem;
         }
 
         .registration-card {
@@ -1387,10 +1419,10 @@ st.markdown(
                 margin-bottom: 0.5rem;
             }
 
-            .subtitle {
-                font-size: 1rem;
-                line-height: 1.4;
-                margin-bottom: 1.2rem;
+            .brand-translation {
+                font-size: 0.95rem;
+                margin-top: -0.2rem;
+                margin-bottom: 1rem;
             }
 
             .registration-card {
@@ -1458,23 +1490,26 @@ div[data-testid="stAlert"] p {
 )
 
 if not st.query_params.get("hash"):
-    st.markdown(
-        '<div class="main-title">🏛 Агентство W</div>',
-        unsafe_allow_html=True,
-    )
+    render_agency_w_logo()
 
     st.markdown(
-        '<div class="subtitle">ИИ-агентство нового поколения</div>',
+        '<div class="brand-translation">«Дела, а не слова».</div>',
         unsafe_allow_html=True,
     )
 
     st.markdown(
         """
         <div class="registration-card">
-            <h2>Добро пожаловать</h2>
+            <h2>Добро пожаловать!</h2>
             <p>
-                Здесь вы сможете зарегистрироваться, получить личный кабинет
-                и подключить интеллектуальных помощников для развития своего проекта.
+                Сегодня искусственный интеллект способен взять на себя
+                тысячи часов рутинной работы.
+            </p>
+            <p>
+                Агентство W создаёт для каждого человека команду цифровых
+                помощников, которые помогают искать людей, вести первые
+                диалоги, анализировать информацию и освобождать время для
+                самого главного — жизни, семьи и развития.
             </p>
         </div>
         """,
@@ -1562,13 +1597,15 @@ if received_hash:
             greeting = "Добрый вечер"
             greeting_icon = "🌙"
 
+        render_agency_w_logo(compact=True)
+
         st.markdown(
             f"## {greeting}, {first_name}! {greeting_icon}"
         )
         st.markdown(
             f"""
             <div class="registration-card">
-                <h2>🏛 Директор цифрового Агентства W</h2>
+                <h2>Директор Агентства W</h2>
                 <p>
                     <strong>{first_name}</strong>, сегодня под вашим
                     руководством работает команда ИИ-агентов.
