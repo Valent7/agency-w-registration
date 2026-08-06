@@ -52,7 +52,7 @@ def render_agency_w_logo(compact=False):
         )
         return
 
-    side = 0.36 if compact else 0.02
+    side = 0.24 if compact else 0.02
     left, center, right = st.columns([side, 1, side])
     with center:
         st.image(str(LOGO_PATH), use_container_width=True)
@@ -1373,15 +1373,6 @@ st.markdown(
             margin-top: 2rem;
         }
 
-        .present-motto {
-            text-align: center;
-            color: #d7b66b;
-            font-size: 1.18rem;
-            font-weight: 700;
-            letter-spacing: 0.025em;
-            margin: 0.35rem 0 1.25rem 0;
-        }
-
         .registration-card {
             padding: 2rem;
             border: 1px solid rgba(224, 205, 171, 0.25);
@@ -1416,12 +1407,6 @@ st.markdown(
                 line-height: 1.15;
                 white-space: nowrap;
                 margin-bottom: 0.5rem;
-            }
-
-            .present-motto {
-                font-size: 1rem;
-                line-height: 1.35;
-                margin: 0.25rem 0 1rem 0;
             }
 
             .registration-card {
@@ -1595,10 +1580,6 @@ if received_hash:
 
         st.markdown(
             f"## {greeting}, {first_name}! {greeting_icon}"
-        )
-        st.markdown(
-            '<div class="present-motto">🟢 Мы создаём своё настоящее</div>',
-            unsafe_allow_html=True,
         )
         st.markdown(
             f"""
