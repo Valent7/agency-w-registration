@@ -12,6 +12,10 @@ from neona_reglament import (
     neona_identity,
     neona_reglament_markdown,
 )
+from agency_calendar import (
+    render_agency_calendar,
+    render_today_meetings_compact,
+)
 from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
@@ -2600,7 +2604,7 @@ if received_hash:
 
         main_section = st.segmented_control(
             "Главное меню",
-            ["☀️ День", "🤖 Агенты", "👥 Команда", "👤 Профиль"],
+            ["☀️ День", "📅 Календарь", "🤖 Агенты", "👥 Команда", "👤 Профиль"],
             default="☀️ День",
             required=True,
             label_visibility="collapsed",
@@ -3668,7 +3672,7 @@ if received_hash:
 
             with st.container(border=True):
                 st.markdown("**📅 Встречи**")
-                st.caption("Сегодняшние встречи появятся здесь.")
+                render_today_meetings_compact(int(telegram_id))
 
             with st.container(border=True):
                 st.markdown("**✅ Задачи на сегодня**")
@@ -3677,6 +3681,12 @@ if received_hash:
             with st.container(border=True):
                 st.markdown("**📊 Итоги**")
                 st.caption("Здесь будут итоги недели и месяца.")
+
+        elif main_section == "📅 Календарь":
+            render_agency_calendar(
+                owner_telegram_id=int(telegram_id),
+                owner_name=first_name,
+            )
 
         elif main_section == "🤖 Агенты":
             st.markdown("### 🤖 Агенты")
@@ -5233,10 +5243,9 @@ if received_hash:
                             neona_reglament_markdown(first_name)
                         )
                         st.caption(
-                            "Правила согласования встречи уже закреплены в "
-                            "регламенте. Автоматическая проверка календаря, "
-                            "пересчёт часовых поясов и создание встречи будут "
-                            "подключены отдельным техническим этапом."
+                            "Согласованные встречи сохраняются во внутреннем "
+                            "календаре Агентства W. Основное время — МСК; "
+                            "местное время человека рассчитывается на дату встречи."
                         )
 
                     candidates_key = (
