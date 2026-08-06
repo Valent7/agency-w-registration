@@ -19,12 +19,16 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.tl.functions.users import GetFullUserRequest
+from telethon.tl.types import InputPeerUser
 from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeInvalidError,
     PhoneCodeExpiredError,
     PhoneNumberInvalidError,
     PasswordHashInvalidError,
+    ChatAdminRequiredError,
+    ChannelPrivateError,
+    FloodWaitError,
 )
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -608,6 +612,440 @@ async def fetch_telegram_chats(telegram_id):
 
     finally:
         await client.disconnect()
+
+
+async def resolve_telegram_chat_entity(client, chat):
+    """Находит Telegram-сущность чата по username или сохранённому ID."""
+
+    username = str(chat.get("username") or "").strip().lstrip("@")
+    if username:
+        try:
+            return await client.get_entity(username)
+        except Exception:
+            pass
+
+    try:
+        expected_chat_id = int(chat.get("chat_id"))
+    except (TypeError, ValueError):
+        expected_chat_id = 0
+
+    if expected_chat_id:
+        async for dialog in client.iter_dialogs(limit=500):
+            entity = dialog.entity
+            try:
+                entity_id = int(getattr(entity, "id"))
+            except (TypeError, ValueError):
+                continue
+
+            if entity_id == expected_chat_id:
+                return entity
+
+    raise RuntimeError(
+        "Чат не найден в подключённом Telegram. "
+        "Обновите список чатов и повторите попытку."
+    )
+
+
+async def fetch_telegram_chat_members(
+    telegram_id,
+    chat,
+    limit=200,
+):
+    """Получает доступных участников выбранной группы без ботов."""
+
+    session_string = load_telegram_session_from_supabase(
+        telegram_id
+    )
+    if not session_string:
+        return []
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(10, min(500, limit))
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            return []
+
+        chat_entity = await resolve_telegram_chat_entity(
+            client,
+            chat,
+        )
+        current_user = await client.get_me()
+        owner_id = int(current_user.id)
+        members = []
+
+        async for user in client.iter_participants(
+            chat_entity,
+            limit=limit,
+        ):
+            if getattr(user, "deleted", False):
+                continue
+            if getattr(user, "bot", False):
+                continue
+            if int(user.id) == owner_id:
+                continue
+
+            first_name = str(
+                getattr(user, "first_name", "") or ""
+            ).strip()
+            last_name = str(
+                getattr(user, "last_name", "") or ""
+            ).strip()
+            full_name = " ".join(
+                part
+                for part in (first_name, last_name)
+                if part
+            ).strip()
+
+            access_hash = getattr(user, "access_hash", None)
+            try:
+                access_hash = (
+                    int(access_hash)
+                    if access_hash is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                access_hash = None
+
+            members.append(
+                {
+                    "telegram_id": int(user.id),
+                    "access_hash": access_hash,
+                    "name": full_name or "Без имени",
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": str(
+                        getattr(user, "username", "") or ""
+                    ).strip(),
+                    "mutual_contact": bool(
+                        getattr(user, "mutual_contact", False)
+                    ),
+                    "verified": bool(
+                        getattr(user, "verified", False)
+                    ),
+                    "telegram_warning": bool(
+                        getattr(user, "scam", False)
+                        or getattr(user, "fake", False)
+                    ),
+                    "source_chat_id": int(chat["chat_id"]),
+                    "source_chat_title": str(
+                        chat.get("title") or "Без названия"
+                    ),
+                }
+            )
+
+        members.sort(
+            key=lambda item: item["name"].lower()
+        )
+        return members
+
+    except ChatAdminRequiredError as exc:
+        raise RuntimeError(
+            "Telegram не разрешил получить список участников этого чата. "
+            "Возможно, список скрыт или доступен только администраторам."
+        ) from exc
+    except ChannelPrivateError as exc:
+        raise RuntimeError(
+            "Этот чат закрыт или больше недоступен подключённому аккаунту."
+        ) from exc
+    except FloodWaitError as exc:
+        raise RuntimeError(
+            "Telegram временно ограничил запросы. Повторите попытку через "
+            f"{getattr(exc, 'seconds', 60)} секунд."
+        ) from exc
+    finally:
+        await client.disconnect()
+
+
+def build_chat_member_peer(member):
+    """Создаёт InputPeerUser из сохранённого ID и access_hash."""
+
+    try:
+        user_id = int(member.get("telegram_id"))
+        access_hash = member.get("access_hash")
+        if access_hash is None:
+            return None
+        return InputPeerUser(
+            user_id=user_id,
+            access_hash=int(access_hash),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+async def fetch_chat_member_contexts(
+    telegram_id,
+    chat,
+    members_batch,
+):
+    """Получает bio и публичные сообщения участников в выбранном чате."""
+
+    session_string = load_telegram_session_from_supabase(
+        telegram_id
+    )
+    if not session_string:
+        return []
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+    await client.connect()
+
+    contexts = []
+
+    try:
+        if not await client.is_user_authorized():
+            return []
+
+        chat_entity = await resolve_telegram_chat_entity(
+            client,
+            chat,
+        )
+
+        for member in members_batch:
+            context = {
+                "telegram_id": int(member["telegram_id"]),
+                "name": member.get("name") or "Без имени",
+                "first_name": member.get("first_name") or "",
+                "username": member.get("username") or "",
+                "about": "",
+                "mutual_contact": bool(
+                    member.get("mutual_contact", False)
+                ),
+                "verified": bool(member.get("verified", False)),
+                "telegram_warning": bool(
+                    member.get("telegram_warning", False)
+                ),
+                "source_chat_id": int(chat["chat_id"]),
+                "source_chat_title": str(
+                    chat.get("title") or "Без названия"
+                ),
+                "recent_public_messages": [],
+            }
+
+            member_peer = build_chat_member_peer(member)
+            member_entity = None
+
+            if member_peer is not None:
+                try:
+                    member_entity = await client.get_entity(member_peer)
+                except Exception:
+                    member_entity = None
+
+            if member_entity is None and member.get("username"):
+                try:
+                    member_entity = await client.get_entity(
+                        str(member["username"]).lstrip("@")
+                    )
+                except Exception:
+                    member_entity = None
+
+            if member_entity is not None:
+                try:
+                    full_user = await client(
+                        GetFullUserRequest(member_entity)
+                    )
+                    context["about"] = (
+                        getattr(
+                            full_user.full_user,
+                            "about",
+                            "",
+                        )
+                        or ""
+                    )[:700]
+                except Exception:
+                    pass
+
+                try:
+                    async for message in client.iter_messages(
+                        chat_entity,
+                        from_user=member_entity,
+                        limit=5,
+                    ):
+                        message_text = str(
+                            getattr(message, "message", "") or ""
+                        ).strip()
+                        if not message_text:
+                            continue
+
+                        context["recent_public_messages"].append(
+                            {
+                                "text": message_text[:600],
+                                "date": (
+                                    message.date.isoformat()
+                                    if getattr(message, "date", None)
+                                    else ""
+                                ),
+                            }
+                        )
+                except Exception:
+                    pass
+
+            contexts.append(context)
+
+        return contexts
+
+    except FloodWaitError as exc:
+        raise RuntimeError(
+            "Telegram временно ограничил запросы. Повторите попытку через "
+            f"{getattr(exc, 'seconds', 60)} секунд."
+        ) from exc
+    finally:
+        await client.disconnect()
+
+
+def analyze_chat_members_for_target_audience(
+    passport_analysis,
+    member_contexts,
+):
+    """Сравнивает участников выбранного чата с паспортом ЦА."""
+
+    system_prompt = """
+Ты — Неония, аналитик и селектор Агентства W.
+
+Сравни участников Telegram-чата с паспортом целевой аудитории проекта.
+Используй только переданные сведения: имя, username, bio и публичные
+сообщения человека в выбранном чате. Не используй личную переписку.
+Не делай выводов по имени, полу, возрасту, национальности, фотографии,
+языку или иным чувствительным признакам. Не придумывай факты.
+
+Если данных мало, прямо укажи: «Недостаточно данных».
+
+Для каждого человека верни:
+- telegram_id;
+- segment;
+- score — целое число от 0 до 100;
+- confidence: «высокая», «средняя» или «низкая»;
+- reasons — список из 1–3 коротких оснований;
+- recommendation — строго одно из:
+  «Передать Неоне»,
+  «Нужно больше данных»,
+  «Пока не подходит»;
+- message_angle — безопасная тема возможного знакомства,
+  без обещаний дохода, давления и массовой рассылки.
+
+Отсутствие username или bio не является отрицательным признаком.
+Telegram-предупреждение scam/fake является основанием не рекомендовать
+человека для обращения.
+
+Верни ТОЛЬКО JSON-массив без пояснений и без Markdown.
+"""
+
+    request = (
+        "ПАСПОРТ ЦЕЛЕВОЙ АУДИТОРИИ:\n"
+        f"{passport_analysis}\n\n"
+        "УЧАСТНИКИ ВЫБРАННОГО ЧАТА:\n"
+        f"{json.dumps(member_contexts, ensure_ascii=False)}"
+    )
+
+    answer = ask_openai(system_prompt, request)
+    if answer.startswith("Ошибка OpenAI:"):
+        raise RuntimeError(answer)
+
+    raw_results = extract_json_array(answer)
+    source_by_id = {
+        int(item["telegram_id"]): item
+        for item in member_contexts
+    }
+    normalized = []
+
+    for item in raw_results:
+        try:
+            member_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+
+        source = source_by_id.get(member_id)
+        if not source:
+            continue
+
+        try:
+            score = int(item.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0
+        score = max(0, min(100, score))
+
+        reasons = item.get("reasons", [])
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        if not isinstance(reasons, list):
+            reasons = []
+
+        recommendation = item.get(
+            "recommendation",
+            "Нужно больше данных",
+        )
+        allowed_recommendations = {
+            "Передать Неоне",
+            "Нужно больше данных",
+            "Пока не подходит",
+        }
+        if recommendation not in allowed_recommendations:
+            recommendation = "Нужно больше данных"
+
+        if source.get("telegram_warning"):
+            recommendation = "Пока не подходит"
+            score = min(score, 20)
+            reasons = [
+                "В Telegram есть предупреждение о профиле."
+            ]
+
+        normalized.append(
+            {
+                "telegram_id": member_id,
+                "name": source.get("name") or "Без имени",
+                "first_name": source.get("first_name") or "",
+                "username": source.get("username") or "",
+                "segment": str(
+                    item.get("segment") or "Не определён"
+                ),
+                "score": score,
+                "confidence": str(
+                    item.get("confidence") or "низкая"
+                ),
+                "reasons": [
+                    str(reason)[:300]
+                    for reason in reasons[:3]
+                ] or ["Недостаточно данных"],
+                "recommendation": recommendation,
+                "message_angle": str(
+                    item.get("message_angle")
+                    or "Нейтральное знакомство"
+                )[:500],
+                "status": "Новый кандидат",
+                "source": "Участник Telegram-чата",
+                "source_chat_id": int(
+                    source.get("source_chat_id") or 0
+                ),
+                "source_chat_title": str(
+                    source.get("source_chat_title")
+                    or "Без названия"
+                ),
+                "analyzed_at": datetime.now(
+                    ZoneInfo("Europe/Berlin")
+                ).isoformat(),
+            }
+        )
+
+    normalized.sort(
+        key=lambda item: item.get("score", 0),
+        reverse=True,
+    )
+    return normalized
 
 
 async def send_telegram_first_message(
@@ -2061,6 +2499,12 @@ if received_hash:
             contacts_state_key = (
                 f"neonia_telegram_contacts_{telegram_id}"
             )
+            chat_members_map_key = (
+                f"neonia_chat_members_{telegram_id}"
+            )
+            chat_offsets_map_key = (
+                f"neonia_chat_offsets_{telegram_id}"
+            )
             offset_key = (
                 f"neonia_selection_offset_{telegram_id}"
             )
@@ -2073,9 +2517,37 @@ if received_hash:
                 contacts_state_key,
                 [],
             )
-            analyzed_count = min(
+            chat_members_map = st.session_state.get(
+                chat_members_map_key,
+                {},
+            )
+            if not isinstance(chat_members_map, dict):
+                chat_members_map = {}
+            chat_offsets_map = st.session_state.get(
+                chat_offsets_map_key,
+                {},
+            )
+            if not isinstance(chat_offsets_map, dict):
+                chat_offsets_map = {}
+
+            personal_analyzed_count = min(
                 st.session_state.get(offset_key, 0),
                 len(all_contacts),
+            )
+            chat_members_count = sum(
+                len(members)
+                for members in chat_members_map.values()
+                if isinstance(members, list)
+            )
+            chat_analyzed_count = sum(
+                max(0, int(offset or 0))
+                for offset in chat_offsets_map.values()
+            )
+            total_people_count = (
+                len(all_contacts) + chat_members_count
+            )
+            analyzed_count = (
+                personal_analyzed_count + chat_analyzed_count
             )
             recommended_candidates = [
                 candidate
@@ -2191,21 +2663,23 @@ if received_hash:
                     "**🎯 10 кандидатов Неонии на сегодня**"
                 )
 
-                if all_contacts:
+                if total_people_count:
                     st.write(
-                        f"Всего контактов: **{len(all_contacts)}** · "
+                        f"Личные контакты: **{len(all_contacts)}** · "
+                        f"Участники чатов: **{chat_members_count}** · "
                         f"Проанализировано: **{analyzed_count}** · "
                         f"Соответствует ЦА: "
                         f"**{len(recommended_candidates)}**"
                     )
-                    if analyzed_count < len(all_contacts):
+                    if analyzed_count < total_people_count:
                         st.caption(
                             "Результат предварительный: Неония ещё не "
-                            "проанализировала все контакты."
+                            "проанализировала всех загруженных людей."
                         )
                 else:
                     st.caption(
-                        "Сначала загрузите контакты в разделе Неонии."
+                        "Сначала загрузите личные контакты или участников "
+                        "выбранного чата в разделе Неонии."
                     )
 
                 if not top_candidates:
@@ -2222,7 +2696,7 @@ if received_hash:
                     if len(top_candidates) < 10:
                         st.warning(
                             f"Пока найдено {len(top_candidates)} из 10 "
-                            "кандидатов. Продолжите анализ контактов "
+                            "кандидатов. Продолжите поиск и анализ "
                             "в разделе Неонии."
                         )
 
@@ -3090,6 +3564,7 @@ if received_hash:
                 [
                     "🎯 Анализ проекта и ЦА",
                     "🔎 Поиск чатов",
+                    "🎯 Поиск контактов в чатах по ЦА",
                     "👥 Поиск контактов",
                     "🧠 Анализ контактов по ЦА",
                 ],
@@ -3100,12 +3575,15 @@ if received_hash:
                         mode_messages = {
                         "🔎 Поиск чатов": (
                             "Здесь Неония загружает доступные Telegram-группы "
-                            "и каналы. Анализ по критериям ЦА будет следующим "
-                            "этапом."
+                            "и каналы. Затем выберите «Поиск контактов в чатах "
+                            "по ЦА»."
+                        ),
+                        "🎯 Поиск контактов в чатах по ЦА": (
+                            "Здесь Неония выбирает найденную группу, получает "
+                            "доступных участников и сравнивает их с паспортом ЦА."
                         ),
                         "👥 Поиск контактов": (
-                            "Здесь Неония будет работать с доступными контактами "
-                            "и выделять потенциальных клиентов и партнёров."
+                            "Здесь Неония работает с личной адресной книгой Telegram."
                         ),
                         "🧠 Анализ контактов по ЦА": (
                             "Здесь Неония будет анализировать найденных людей, "
@@ -3309,6 +3787,477 @@ if received_hash:
                                     "В Telegram не найдено доступных "
                                     "групп или каналов."
                                 )
+
+                        elif neonia_mode == "🎯 Поиск контактов в чатах по ЦА":
+                            passport_key = (
+                                f"neonia_target_audience_passport_{telegram_id}"
+                            )
+                            chats_state_key = (
+                                f"neonia_telegram_chats_{telegram_id}"
+                            )
+                            selected_chat_key = (
+                                f"neonia_selected_source_chat_{telegram_id}"
+                            )
+                            members_map_key = (
+                                f"neonia_chat_members_{telegram_id}"
+                            )
+                            chat_candidates_map_key = (
+                                f"neonia_chat_candidates_{telegram_id}"
+                            )
+                            chat_offsets_map_key = (
+                                f"neonia_chat_offsets_{telegram_id}"
+                            )
+                            global_candidates_key = (
+                                f"neonia_candidates_{telegram_id}"
+                            )
+
+                            passport = st.session_state.get(passport_key)
+                            chats = st.session_state.get(
+                                chats_state_key,
+                                [],
+                            )
+                            eligible_chats = [
+                                chat
+                                for chat in chats
+                                if chat.get("type")
+                                in {"Группа", "Супергруппа"}
+                            ]
+
+                            if not passport:
+                                st.warning(
+                                    "Сначала откройте «Анализ проекта и ЦА» "
+                                    "и создайте паспорт целевой аудитории."
+                                )
+                            elif not eligible_chats:
+                                st.warning(
+                                    "Сначала откройте «Поиск чатов» и загрузите "
+                                    "Telegram-группы. Каналы на этом этапе не "
+                                    "используются, потому что нужен список людей."
+                                )
+                            else:
+                                chat_by_id = {
+                                    int(chat["chat_id"]): chat
+                                    for chat in eligible_chats
+                                }
+                                chat_ids = list(chat_by_id)
+                                saved_chat_id = st.session_state.get(
+                                    selected_chat_key
+                                )
+                                try:
+                                    saved_chat_id = int(saved_chat_id)
+                                except (TypeError, ValueError):
+                                    saved_chat_id = None
+
+                                default_index = 0
+                                if saved_chat_id in chat_ids:
+                                    default_index = chat_ids.index(
+                                        saved_chat_id
+                                    )
+
+                                selected_chat_id = st.selectbox(
+                                    "Выберите чат для поиска контактов",
+                                    chat_ids,
+                                    index=default_index,
+                                    format_func=lambda value: (
+                                        f"{chat_by_id[value]['title']} · "
+                                        f"{chat_by_id[value]['type']} · "
+                                        f"{chat_by_id[value].get('participants_count') or '—'} участников"
+                                    ),
+                                    key=(
+                                        "neonia_target_chat_select_"
+                                        f"{telegram_id}"
+                                    ),
+                                )
+                                selected_chat = chat_by_id[
+                                    int(selected_chat_id)
+                                ]
+                                st.session_state[selected_chat_key] = int(
+                                    selected_chat_id
+                                )
+
+                                st.caption(
+                                    "Неония использует только доступные Telegram-профили "
+                                    "и публичные сообщения в выбранной группе. Личная "
+                                    "переписка и номера телефонов не анализируются."
+                                )
+
+                                pass_limit = st.selectbox(
+                                    "Сколько доступных участников проверить на первом проходе",
+                                    [100, 200, 500],
+                                    index=1,
+                                    key=(
+                                        "neonia_chat_members_limit_"
+                                        f"{telegram_id}_{selected_chat_id}"
+                                    ),
+                                )
+
+                                members_map = st.session_state.get(
+                                    members_map_key,
+                                    {},
+                                )
+                                if not isinstance(members_map, dict):
+                                    members_map = {}
+
+                                chat_candidates_map = st.session_state.get(
+                                    chat_candidates_map_key,
+                                    {},
+                                )
+                                if not isinstance(chat_candidates_map, dict):
+                                    chat_candidates_map = {}
+
+                                chat_offsets_map = st.session_state.get(
+                                    chat_offsets_map_key,
+                                    {},
+                                )
+                                if not isinstance(chat_offsets_map, dict):
+                                    chat_offsets_map = {}
+
+                                chat_map_id = str(int(selected_chat_id))
+                                members = members_map.get(
+                                    chat_map_id,
+                                    [],
+                                )
+                                candidate_results = chat_candidates_map.get(
+                                    chat_map_id,
+                                    [],
+                                )
+                                try:
+                                    current_offset = int(
+                                        chat_offsets_map.get(
+                                            chat_map_id,
+                                            0,
+                                        )
+                                        or 0
+                                    )
+                                except (TypeError, ValueError):
+                                    current_offset = 0
+
+                                load_members = st.button(
+                                    "👥 Загрузить участников выбранного чата",
+                                    type="primary",
+                                    key=(
+                                        "neonia_load_chat_members_"
+                                        f"{telegram_id}_{selected_chat_id}"
+                                    ),
+                                )
+
+                                if load_members:
+                                    with st.spinner(
+                                        "Неония получает доступных участников чата..."
+                                    ):
+                                        try:
+                                            members = run_telegram_async(
+                                                fetch_telegram_chat_members(
+                                                    telegram_id,
+                                                    selected_chat,
+                                                    limit=pass_limit,
+                                                )
+                                            )
+                                            members_map[chat_map_id] = members
+                                            chat_candidates_map[chat_map_id] = []
+                                            chat_offsets_map[chat_map_id] = 0
+                                            candidate_results = []
+                                            current_offset = 0
+
+                                            st.session_state[
+                                                members_map_key
+                                            ] = members_map
+                                            st.session_state[
+                                                chat_candidates_map_key
+                                            ] = chat_candidates_map
+                                            st.session_state[
+                                                chat_offsets_map_key
+                                            ] = chat_offsets_map
+
+                                            persist_workspace_if_changed(
+                                                telegram_id,
+                                                force=True,
+                                            )
+
+                                            if members:
+                                                st.success(
+                                                    f"Получено участников для проверки: "
+                                                    f"{len(members)}."
+                                                )
+                                            else:
+                                                st.info(
+                                                    "Telegram не вернул доступных "
+                                                    "участников этого чата."
+                                                )
+
+                                        except Exception as exc:
+                                            st.error(
+                                                "Не удалось получить участников: "
+                                                f"{exc}"
+                                            )
+
+                                if members:
+                                    analyzed_count = min(
+                                        current_offset,
+                                        len(members),
+                                    )
+                                    recommended_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get("recommendation")
+                                        == "Передать Неоне"
+                                    )
+                                    more_data_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get("recommendation")
+                                        == "Нужно больше данных"
+                                    )
+                                    not_fit_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get("recommendation")
+                                        == "Пока не подходит"
+                                    )
+
+                                    metric_columns = st.columns(4)
+                                    metric_columns[0].metric(
+                                        "Загружено",
+                                        len(members),
+                                    )
+                                    metric_columns[1].metric(
+                                        "Проанализировано",
+                                        analyzed_count,
+                                    )
+                                    metric_columns[2].metric(
+                                        "Соответствует ЦА",
+                                        recommended_count,
+                                    )
+                                    metric_columns[3].metric(
+                                        "Недостаточно данных",
+                                        more_data_count,
+                                    )
+
+                                    if analyzed_count < len(members):
+                                        button_label = (
+                                            "🧠 Начать поиск по критериям ЦА"
+                                            if analyzed_count == 0
+                                            else "🧠 Проверить следующие 10 участников"
+                                        )
+                                        analyze_members = st.button(
+                                            button_label,
+                                            type="primary",
+                                            key=(
+                                                "neonia_analyze_chat_members_"
+                                                f"{telegram_id}_{selected_chat_id}_"
+                                                f"{current_offset}"
+                                            ),
+                                        )
+                                    else:
+                                        analyze_members = False
+                                        st.success(
+                                            "Все загруженные участники проверены."
+                                        )
+
+                                    if analyze_members:
+                                        batch = members[
+                                            current_offset:
+                                            current_offset + 10
+                                        ]
+                                        with st.spinner(
+                                            "Неония изучает профили и публичные "
+                                            "сообщения, затем сравнивает людей "
+                                            "с паспортом ЦА..."
+                                        ):
+                                            try:
+                                                member_contexts = (
+                                                    run_telegram_async(
+                                                        fetch_chat_member_contexts(
+                                                            telegram_id,
+                                                            selected_chat,
+                                                            batch,
+                                                        )
+                                                    )
+                                                )
+                                                batch_results = (
+                                                    analyze_chat_members_for_target_audience(
+                                                        passport["analysis"],
+                                                        member_contexts,
+                                                    )
+                                                )
+                                                candidate_results = (
+                                                    merge_candidate_results(
+                                                        candidate_results,
+                                                        batch_results,
+                                                    )
+                                                )
+                                                current_offset += len(batch)
+
+                                                chat_candidates_map[
+                                                    chat_map_id
+                                                ] = candidate_results
+                                                chat_offsets_map[
+                                                    chat_map_id
+                                                ] = current_offset
+                                                st.session_state[
+                                                    chat_candidates_map_key
+                                                ] = chat_candidates_map
+                                                st.session_state[
+                                                    chat_offsets_map_key
+                                                ] = chat_offsets_map
+
+                                                global_candidates = (
+                                                    st.session_state.get(
+                                                        global_candidates_key,
+                                                        [],
+                                                    )
+                                                )
+                                                st.session_state[
+                                                    global_candidates_key
+                                                ] = merge_candidate_results(
+                                                    global_candidates,
+                                                    batch_results,
+                                                )
+
+                                                persist_workspace_if_changed(
+                                                    telegram_id,
+                                                    force=True,
+                                                )
+                                                st.success(
+                                                    "Партия обработана. "
+                                                    f"Проверено: {current_offset} "
+                                                    f"из {len(members)}."
+                                                )
+
+                                            except Exception as exc:
+                                                st.error(
+                                                    "Поиск по критериям ЦА "
+                                                    f"не выполнен: {exc}"
+                                                )
+
+                                    analyzed_count = min(
+                                        current_offset,
+                                        len(members),
+                                    )
+                                    recommended_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get("recommendation")
+                                        == "Передать Неоне"
+                                    )
+                                    more_data_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get("recommendation")
+                                        == "Нужно больше данных"
+                                    )
+                                    not_fit_count = sum(
+                                        1
+                                        for item in candidate_results
+                                        if item.get("recommendation")
+                                        == "Пока не подходит"
+                                    )
+
+                                    st.write(
+                                        f"Всего загружено: **{len(members)}** · "
+                                        f"Проанализировано: **{analyzed_count}** · "
+                                        f"Соответствует ЦА: **{recommended_count}** · "
+                                        f"Недостаточно данных: **{more_data_count}** · "
+                                        f"Не подходит: **{not_fit_count}**"
+                                    )
+                                    st.progress(
+                                        analyzed_count / len(members)
+                                    )
+
+                                    suitable_candidates = sorted(
+                                        [
+                                            item
+                                            for item in candidate_results
+                                            if item.get("recommendation")
+                                            == "Передать Неоне"
+                                        ],
+                                        key=lambda item: item.get(
+                                            "score",
+                                            0,
+                                        ),
+                                        reverse=True,
+                                    )
+
+                                    if suitable_candidates:
+                                        st.markdown(
+                                            "#### ⭐ 10 лучших кандидатов из чата"
+                                        )
+                                        st.caption(
+                                            "Неония рекомендует людей, но не "
+                                            "выбирает их вместо владельца. "
+                                            "Кандидаты уже добавлены в общий пул."
+                                        )
+                                        top_candidates_table = [
+                                            {
+                                                "Имя": item["name"],
+                                                "Username": (
+                                                    f"@{item['username']}"
+                                                    if item.get("username")
+                                                    else "—"
+                                                ),
+                                                "Сегмент": item["segment"],
+                                                "Соответствие": (
+                                                    f"{item['score']}%"
+                                                ),
+                                                "Основания": "; ".join(
+                                                    item.get("reasons", [])
+                                                ),
+                                                "Чат": item.get(
+                                                    "source_chat_title",
+                                                    selected_chat["title"],
+                                                ),
+                                            }
+                                            for item in suitable_candidates[:10]
+                                        ]
+                                        st.dataframe(
+                                            top_candidates_table,
+                                            use_container_width=True,
+                                            hide_index=True,
+                                        )
+
+                                    if candidate_results:
+                                        with st.expander(
+                                            "Все результаты по выбранному чату"
+                                        ):
+                                            all_results_table = [
+                                                {
+                                                    "Имя": item["name"],
+                                                    "Username": (
+                                                        f"@{item['username']}"
+                                                        if item.get("username")
+                                                        else "—"
+                                                    ),
+                                                    "Сегмент": item["segment"],
+                                                    "Соответствие": (
+                                                        f"{item['score']}%"
+                                                    ),
+                                                    "Уверенность": item[
+                                                        "confidence"
+                                                    ],
+                                                    "Рекомендация": item[
+                                                        "recommendation"
+                                                    ],
+                                                }
+                                                for item in sorted(
+                                                    candidate_results,
+                                                    key=lambda value: value.get(
+                                                        "score",
+                                                        0,
+                                                    ),
+                                                    reverse=True,
+                                                )
+                                            ]
+                                            st.dataframe(
+                                                all_results_table,
+                                                use_container_width=True,
+                                                hide_index=True,
+                                            )
+
+                                else:
+                                    st.info(
+                                        "Выберите чат и нажмите «Загрузить "
+                                        "участников выбранного чата»."
+                                    )
 
                         elif neonia_mode == "👥 Поиск контактов":
                             contacts_result = render_neonia_contacts()

@@ -35,6 +35,18 @@ def get_workspace_state_keys(telegram_id):
         "chats_search_done": (
             f"neonia_chats_search_done_{telegram_id}"
         ),
+        "selected_source_chat": (
+            f"neonia_selected_source_chat_{telegram_id}"
+        ),
+        "chat_members": (
+            f"neonia_chat_members_{telegram_id}"
+        ),
+        "chat_candidates": (
+            f"neonia_chat_candidates_{telegram_id}"
+        ),
+        "chat_offsets": (
+            f"neonia_chat_offsets_{telegram_id}"
+        ),
         "candidates": (
             f"neonia_candidates_{telegram_id}"
         ),
@@ -73,7 +85,7 @@ def collect_workspace_state(telegram_id):
     )
 
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -96,6 +108,21 @@ def collect_workspace_state(telegram_id):
                 keys["chats_search_done"],
                 False,
             )
+        ),
+        "selected_source_chat": st.session_state.get(
+            keys["selected_source_chat"]
+        ),
+        "chat_members": st.session_state.get(
+            keys["chat_members"],
+            {},
+        ),
+        "chat_candidates": st.session_state.get(
+            keys["chat_candidates"],
+            {},
+        ),
+        "chat_offsets": st.session_state.get(
+            keys["chat_offsets"],
+            {},
         ),
         "candidates": st.session_state.get(
             keys["candidates"],
@@ -173,6 +200,84 @@ def _normalize_workspace_state(state):
                 )
             except (TypeError, ValueError):
                 chat[numeric_key] = 0
+
+    selected_source_chat = state.get("selected_source_chat")
+    try:
+        selected_source_chat = (
+            int(selected_source_chat)
+            if selected_source_chat is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        selected_source_chat = None
+
+    chat_members_raw = state.get("chat_members", {})
+    if not isinstance(chat_members_raw, dict):
+        chat_members_raw = {}
+    chat_members = {}
+    for chat_id, members in chat_members_raw.items():
+        if not isinstance(members, list):
+            continue
+        normalized_members = []
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            try:
+                member["telegram_id"] = int(
+                    member.get("telegram_id")
+                )
+            except (TypeError, ValueError):
+                continue
+            try:
+                member["source_chat_id"] = int(
+                    member.get("source_chat_id", chat_id)
+                )
+            except (TypeError, ValueError):
+                pass
+            access_hash = member.get("access_hash")
+            if access_hash is not None:
+                try:
+                    member["access_hash"] = int(access_hash)
+                except (TypeError, ValueError):
+                    member["access_hash"] = None
+            normalized_members.append(member)
+        chat_members[str(chat_id)] = normalized_members
+
+    chat_candidates_raw = state.get("chat_candidates", {})
+    if not isinstance(chat_candidates_raw, dict):
+        chat_candidates_raw = {}
+    chat_candidates = {}
+    for chat_id, items in chat_candidates_raw.items():
+        if not isinstance(items, list):
+            continue
+        normalized_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item["telegram_id"] = int(
+                    item.get("telegram_id")
+                )
+            except (TypeError, ValueError):
+                continue
+            try:
+                item["source_chat_id"] = int(
+                    item.get("source_chat_id", chat_id)
+                )
+            except (TypeError, ValueError):
+                pass
+            normalized_items.append(item)
+        chat_candidates[str(chat_id)] = normalized_items
+
+    chat_offsets_raw = state.get("chat_offsets", {})
+    if not isinstance(chat_offsets_raw, dict):
+        chat_offsets_raw = {}
+    chat_offsets = {}
+    for chat_id, offset in chat_offsets_raw.items():
+        try:
+            chat_offsets[str(chat_id)] = max(0, int(offset or 0))
+        except (TypeError, ValueError):
+            chat_offsets[str(chat_id)] = 0
 
     candidates = (
         state.get("candidates")
@@ -285,6 +390,10 @@ def _normalize_workspace_state(state):
         "chats_search_done": bool(
             state.get("chats_search_done", False)
         ),
+        "selected_source_chat": selected_source_chat,
+        "chat_members": chat_members,
+        "chat_candidates": chat_candidates,
+        "chat_offsets": chat_offsets,
         "candidates": candidates,
         "selection_offset": max(0, selection_offset),
         "selected_candidates": selected_candidates,
@@ -432,6 +541,18 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["chats_search_done"]
         ] = state["chats_search_done"]
+        st.session_state[
+            keys["selected_source_chat"]
+        ] = state["selected_source_chat"]
+        st.session_state[
+            keys["chat_members"]
+        ] = state["chat_members"]
+        st.session_state[
+            keys["chat_candidates"]
+        ] = state["chat_candidates"]
+        st.session_state[
+            keys["chat_offsets"]
+        ] = state["chat_offsets"]
         st.session_state[
             keys["candidates"]
         ] = state["candidates"]
