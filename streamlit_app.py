@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
 from neonia_chats import render_neonia_chats
 from neona_reglament import (
-    NEONA_FIRST_MESSAGE_MAX_LENGTH,
+    NEONA_FORBIDDEN_AI_LABELS,
     NEONA_FORBIDDEN_CLAIMS,
     build_neona_first_message_system_prompt,
     build_neona_first_messages_system_prompt,
@@ -1540,33 +1540,40 @@ def build_neona_safe_first_message(owner_name, contact):
 
     return (
         f"{greeting} {neona_identity(owner_name)} "
-        f"{owner_name} создаёт команду ИИ-помощников, которая помогает "
-        "не тратить часы на поиск людей и подготовку первых сообщений. "
-        "Один помощник находит подходящих кандидатов, другой помогает "
-        "начать с каждым личный разговор. Со временем команда будет "
-        "расширяться. Вам интересно посмотреть, как это уже работает?"
+        f"{owner_name} создаёт команду ИИ-помощников, где каждый отвечает "
+        "за свою часть работы. Один находит подходящих людей, другой готовит "
+        "для каждого персональное первое сообщение, а окончательное решение "
+        "всегда остаётся за человеком. Уже сейчас они работают как единая "
+        "команда, и со временем она будет расти. Хотите увидеть, как это "
+        "выглядит на реальном примере?"
     )
 
 
 def validate_neona_first_message(message, owner_name):
-    """Проверяет жёсткие рамки первого сообщения Неоны."""
+    """Проверяет смысловые и этические рамки первого сообщения Неоны."""
 
     message = str(message or "").strip()
     lowered = message.lower()
     errors = []
+
+    if not message:
+        return ["сообщение пустое"]
 
     identity = neona_identity(owner_name).lower()
 
     if identity not in lowered:
         errors.append("нет корректного представления Неоны")
 
-    if len(message) > NEONA_FIRST_MESSAGE_MAX_LENGTH:
-        errors.append("сообщение слишком длинное")
-
     if message.count("?") != 1:
         errors.append("должен быть ровно один вопрос")
 
-    if "команду ии-помощников" not in lowered:
+    if not any(
+        phrase in lowered
+        for phrase in (
+            "команду ии-помощников",
+            "команда ии-помощников",
+        )
+    ):
         errors.append("не сказано о команде ИИ-помощников")
 
     has_search_value = any(
@@ -1574,6 +1581,7 @@ def validate_neona_first_message(message, owner_name):
         for phrase in (
             "поиск людей",
             "находит подходящих кандидатов",
+            "находит подходящих людей",
             "ищет подходящих людей",
         )
     )
@@ -1585,8 +1593,8 @@ def validate_neona_first_message(message, owner_name):
         for phrase in (
             "подготовку первых сообщений",
             "готовит для каждого личное первое сообщение",
+            "готовит для каждого персональное первое сообщение",
             "готовит персональное первое сообщение",
-            "помогает начать с каждым личный разговор",
         )
     )
     if not has_message_value:
@@ -1597,10 +1605,13 @@ def validate_neona_first_message(message, owner_name):
         for phrase in (
             "интересно посмотреть",
             "интересно увидеть",
+            "хотите посмотреть",
+            "хотите увидеть",
             "показать, как это уже работает",
+            "как это выглядит на реальном примере",
         )
     ):
-        errors.append("нет лёгкого приглашения узнать больше")
+        errors.append("нет лёгкого приглашения увидеть систему в работе")
 
     if "\n" in message or "•" in message:
         errors.append("нельзя использовать списки")
@@ -1608,13 +1619,18 @@ def validate_neona_first_message(message, owner_name):
     if "(" in message or ")" in message:
         errors.append("нельзя перегружать пояснениями в скобках")
 
+    message_words = set(
+        re.findall(r"[a-zа-яё]+(?:-[a-zа-яё]+)?", lowered)
+    )
+    forbidden_ai_labels = set(NEONA_FORBIDDEN_AI_LABELS)
+    if message_words.intersection(forbidden_ai_labels):
+        errors.append(
+            "ИИ-помощников нельзя называть ботами или чат-ботами"
+        )
+
     for phrase in NEONA_FIRST_MESSAGE_FORBIDDEN:
         if phrase in lowered:
             errors.append(f"запрещённая формулировка: {phrase}")
-
-    sentence_marks = sum(message.count(mark) for mark in ".!?")
-    if sentence_marks > 6:
-        errors.append("слишком много предложений")
 
     return errors
 
@@ -1629,7 +1645,7 @@ def finalize_neona_first_message(message, owner_name, contact):
     if errors:
         return build_neona_safe_first_message(owner_name, contact)
 
-    return message[:NEONA_FIRST_MESSAGE_MAX_LENGTH]
+    return message
 
 
 def generate_neona_first_messages(
@@ -5709,11 +5725,6 @@ if received_hash:
                                             disabled=bool(draft.get("sent")),
                                             key=message_key,
                                         )
-                                        st.caption(
-                                            f"{len(edited_message.strip())} знаков. "
-                                            f"Максимальная длина по регламенту — {NEONA_FIRST_MESSAGE_MAX_LENGTH} знаков."
-                                        )
-
                                         current_rule_errors = (
                                             validate_neona_first_message(
                                                 edited_message.strip(),
