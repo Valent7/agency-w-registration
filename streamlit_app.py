@@ -2400,6 +2400,39 @@ div[data-testid="stAlert"] p {
         div[data-testid="stAlert"] p {
             color: #f5f5f5 !important;
         }
+
+        /* Все основные (красные) кнопки делаем зелёными */
+        button[kind="primary"],
+        div.stButton > button[kind="primary"],
+        div[data-testid="stFormSubmitButton"] > button[kind="primary"] {
+            background: linear-gradient(180deg, #2fcb72 0%, #1fa85a 100%) !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(102, 255, 170, 0.35) !important;
+            box-shadow: 0 10px 22px rgba(31, 168, 90, 0.22) !important;
+        }
+
+        button[kind="primary"]:hover,
+        div.stButton > button[kind="primary"]:hover,
+        div[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
+            background: linear-gradient(180deg, #35d87b 0%, #239f5b 100%) !important;
+            border-color: rgba(134, 255, 188, 0.55) !important;
+            color: #ffffff !important;
+        }
+
+        button[kind="primary"]:active,
+        div.stButton > button[kind="primary"]:active,
+        div[data-testid="stFormSubmitButton"] > button[kind="primary"]:active {
+            background: linear-gradient(180deg, #239f5b 0%, #1b824a 100%) !important;
+            color: #ffffff !important;
+        }
+
+        button[kind="primary"]:focus,
+        div.stButton > button[kind="primary"]:focus,
+        div[data-testid="stFormSubmitButton"] > button[kind="primary"]:focus {
+            outline: none !important;
+            border-color: rgba(160, 255, 205, 0.75) !important;
+            box-shadow: 0 0 0 0.2rem rgba(61, 220, 127, 0.18) !important;
+        }
     </style>
     """,
     unsafe_allow_html=True,
