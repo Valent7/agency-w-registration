@@ -1550,7 +1550,13 @@ def build_neona_safe_first_message(owner_name, contact):
 
 
 def validate_neona_first_message(message, owner_name):
-    """Проверяет смысловые и этические рамки первого сообщения Неоны."""
+    """Проверяет только существенные рамки первого сообщения Неоны.
+
+    Валидатор не считает знаки и предложения и не требует точного совпадения
+    с шаблонными фразами. Он блокирует только действительно опасные случаи:
+    отсутствие представления, несколько вопросов, запрещённые обещания,
+    слово «бот» и ссылки в первом сообщении.
+    """
 
     message = str(message or "").strip()
     lowered = message.lower()
@@ -1559,68 +1565,22 @@ def validate_neona_first_message(message, owner_name):
     if not message:
         return ["сообщение пустое"]
 
-    identity = neona_identity(owner_name).lower()
-
-    if identity not in lowered:
-        errors.append("нет корректного представления Неоны")
+    has_neona_name = "меня зовут неона" in lowered
+    has_helper_role = "помощниц" in lowered
+    if not (has_neona_name and has_helper_role):
+        errors.append("нет понятного представления Неоны как помощницы владельца")
 
     if message.count("?") != 1:
-        errors.append("должен быть ровно один вопрос")
+        errors.append("в первом сообщении должен быть один простой вопрос")
 
-    if not any(
-        phrase in lowered
-        for phrase in (
-            "команду ии-помощников",
-            "команда ии-помощников",
-        )
-    ):
+    if "ии-помощник" not in lowered and "ии‑помощник" not in lowered:
         errors.append("не сказано о команде ИИ-помощников")
 
-    has_search_value = any(
-        phrase in lowered
-        for phrase in (
-            "поиск людей",
-            "находит подходящих кандидатов",
-            "находит подходящих людей",
-            "ищет подходящих людей",
-        )
-    )
-    if not has_search_value:
-        errors.append("не показана реальная функция поиска людей")
-
-    has_message_value = any(
-        phrase in lowered
-        for phrase in (
-            "подготовку первых сообщений",
-            "готовит для каждого личное первое сообщение",
-            "готовит для каждого персональное первое сообщение",
-            "готовит персональное первое сообщение",
-        )
-    )
-    if not has_message_value:
-        errors.append("не показана реальная функция первого сообщения")
-
-    if not any(
-        phrase in lowered
-        for phrase in (
-            "интересно посмотреть",
-            "интересно увидеть",
-            "хотите посмотреть",
-            "хотите увидеть",
-            "показать, как это уже работает",
-            "как это выглядит на реальном примере",
-        )
-    ):
-        errors.append("нет лёгкого приглашения увидеть систему в работе")
-
-    if "\n" in message or "•" in message:
-        errors.append("нельзя использовать списки")
-
-    if "(" in message or ")" in message:
-        errors.append("нельзя перегружать пояснениями в скобках")
+    if "http://" in lowered or "https://" in lowered or "www." in lowered:
+        errors.append("в первом сообщении нельзя отправлять ссылку")
 
     message_words = set(
-        re.findall(r"[a-zа-яё]+(?:-[a-zа-яё]+)?", lowered)
+        re.findall(r"[a-zа-яё]+(?:[-‑][a-zа-яё]+)?", lowered)
     )
     forbidden_ai_labels = set(NEONA_FORBIDDEN_AI_LABELS)
     if message_words.intersection(forbidden_ai_labels):
@@ -1633,7 +1593,6 @@ def validate_neona_first_message(message, owner_name):
             errors.append(f"запрещённая формулировка: {phrase}")
 
     return errors
-
 
 def finalize_neona_first_message(message, owner_name, contact):
     """Нормализует текст и заменяет небезопасный вариант шаблоном."""
@@ -5933,14 +5892,38 @@ if received_hash:
                                                 ):
                                                     st.rerun()
 
-                                        if draft.get("approved"):
+                                        # Ошибка регламента всегда важнее старого
+                                        # сохранённого статуса «утверждено».
+                                        if current_rule_errors:
+                                            if draft.get("approved"):
+                                                draft["approved"] = False
+                                                draft["status"] = (
+                                                    "Нужно исправить перед утверждением"
+                                                )
+                                                draft["validation_errors"] = (
+                                                    current_rule_errors
+                                                )
+                                                drafts[contact_id] = draft
+                                                drafts.pop(str(contact_id), None)
+                                                st.session_state[
+                                                    neona_drafts_key
+                                                ] = drafts
+                                                persist_workspace_if_changed(
+                                                    telegram_id,
+                                                    force=True,
+                                                )
+                                            st.warning(
+                                                "Черновик пока не утверждён. "
+                                                "Исправьте текст или сформируйте его заново."
+                                            )
+                                            with st.expander(
+                                                "Почему текст пока не утверждается"
+                                            ):
+                                                for rule_error in current_rule_errors:
+                                                    st.write(f"• {rule_error}")
+                                        elif draft.get("approved"):
                                             st.success(
                                                 "✅ Сообщение утверждено владельцем"
-                                            )
-                                        elif current_rule_errors:
-                                            st.warning(
-                                                "Старый черновик больше не считается "
-                                                "утверждённым. Сформируйте новый текст."
                                             )
                                         else:
                                             st.warning(
