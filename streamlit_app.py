@@ -5379,6 +5379,67 @@ if received_hash:
                     if not isinstance(owner_contacts, dict):
                         owner_contacts = {}
 
+                    # История знакомых хранится постоянно, но "сегодняшняя работа"
+                    # должна начинаться заново каждый день.
+                    today_work_date = datetime.now(
+                        ZoneInfo("Europe/Berlin")
+                    ).date().isoformat()
+                    drafts_for_today = st.session_state.get(
+                        neona_drafts_key,
+                        {},
+                    )
+                    if not isinstance(drafts_for_today, dict):
+                        drafts_for_today = {}
+                    sent_log_for_today = st.session_state.get(
+                        sent_log_key,
+                        [],
+                    )
+                    if not isinstance(sent_log_for_today, list):
+                        sent_log_for_today = []
+
+                    def known_contact_is_active_today(contact_id, contact):
+                        try:
+                            normalized_contact_id = int(contact_id)
+                        except (TypeError, ValueError):
+                            return False
+
+                        if str(contact.get("work_date") or "") == today_work_date:
+                            return True
+
+                        previous_draft = drafts_for_today.get(
+                            normalized_contact_id,
+                            drafts_for_today.get(str(normalized_contact_id), {}),
+                        )
+                        if isinstance(previous_draft, dict):
+                            sent_at = str(previous_draft.get("sent_at") or "")
+                            if sent_at[:10] == today_work_date:
+                                return True
+
+                        for event in sent_log_for_today:
+                            if not isinstance(event, dict):
+                                continue
+                            try:
+                                event_contact_id = int(
+                                    event.get("telegram_id")
+                                )
+                            except (TypeError, ValueError):
+                                continue
+                            if (
+                                event_contact_id == normalized_contact_id
+                                and str(event.get("sent_at") or "")[:10]
+                                == today_work_date
+                            ):
+                                return True
+
+                        return False
+
+                    active_owner_contacts = {
+                        int(contact_id): contact
+                        for contact_id, contact in owner_contacts.items()
+                        if isinstance(contact, dict)
+                        and known_contact_is_active_today(contact_id, contact)
+                    }
+
                     all_contacts = st.session_state.get(
                         contacts_state_key,
                         [],
@@ -5418,9 +5479,9 @@ if received_hash:
                         ):
                             selected_ids.append(normalized_id)
 
-                    # Знакомые, добавленные владельцем вручную, также входят
-                    # в общий дневной лимит и передаются Неоне.
-                    for contact_id in owner_contacts:
+                    # В дневной лимит входят только знакомые,
+                    # которых владелец выбрал для работы именно сегодня.
+                    for contact_id in active_owner_contacts:
                         try:
                             normalized_id = int(contact_id)
                         except (TypeError, ValueError):
@@ -5515,8 +5576,22 @@ if received_hash:
                                     chosen_known_id
                                 ]
                                 already_added = (
+                                    chosen_known_id in active_owner_contacts
+                                )
+                                known_before = (
                                     chosen_known_id in owner_contacts
                                     or str(chosen_known_id) in owner_contacts
+                                )
+                                previous_known_draft = drafts_for_today.get(
+                                    int(chosen_known_id),
+                                    drafts_for_today.get(
+                                        str(chosen_known_id),
+                                        {},
+                                    ),
+                                )
+                                dialog_already_started = bool(
+                                    isinstance(previous_known_draft, dict)
+                                    and previous_known_draft.get("sent")
                                 )
                                 already_selected = (
                                     chosen_known_id in selected_ids
@@ -5569,6 +5644,18 @@ if received_hash:
                                         "Этот знакомый уже добавлен "
                                         "к сегодняшней работе."
                                     )
+                                elif known_before and dialog_already_started:
+                                    st.info(
+                                        "С этим человеком диалог уже начинался ранее. "
+                                        "Повторное первое сообщение не нужно. "
+                                        "Можно снова добавить его к работе сегодня: "
+                                        "после нового входящего Неона продолжит диалог."
+                                    )
+                                elif known_before:
+                                    st.info(
+                                        "Этот знакомый уже есть в истории, но сегодня "
+                                        "ещё не добавлен к работе."
+                                    )
                                 elif already_selected:
                                     st.info(
                                         "Этот человек уже выбран "
@@ -5598,22 +5685,36 @@ if received_hash:
                                             "набросок первого сообщения."
                                         )
                                     else:
+                                        previous_known = owner_contacts.get(
+                                            chosen_known_id,
+                                            owner_contacts.get(
+                                                str(chosen_known_id),
+                                                {},
+                                            ),
+                                        )
+                                        if not isinstance(previous_known, dict):
+                                            previous_known = {}
+
                                         owner_contacts[
                                             chosen_known_id
                                         ] = {
+                                            **previous_known,
                                             "telegram_id": int(
                                                 chosen_known_id
                                             ),
                                             "name": (
                                                 chosen_contact.get("name")
+                                                or previous_known.get("name")
                                                 or "Без имени"
                                             ),
                                             "first_name": (
                                                 chosen_contact.get("first_name")
+                                                or previous_known.get("first_name")
                                                 or ""
                                             ),
                                             "username": (
                                                 chosen_contact.get("username")
+                                                or previous_known.get("username")
                                                 or ""
                                             ),
                                             "source": (
@@ -5639,6 +5740,12 @@ if received_hash:
                                             "owner_draft": owner_draft.strip(),
                                             "must_mention": must_mention.strip(),
                                             "avoid": avoid.strip(),
+                                            "work_date": today_work_date,
+                                            "status": (
+                                                "Диалог уже начат"
+                                                if dialog_already_started
+                                                else "Выбран владельцем"
+                                            ),
                                         }
                                         st.session_state[
                                             owner_contacts_key
@@ -5647,10 +5754,18 @@ if received_hash:
                                             telegram_id,
                                             force=True,
                                         )
-                                        st.success(
-                                            "Знакомый добавлен. "
-                                            "Неона получила его для работы."
-                                        )
+                                        if dialog_already_started:
+                                            st.success(
+                                                "Знакомый снова добавлен к работе сегодня. "
+                                                "Первое сообщение уже отправлялось ранее, "
+                                                "поэтому Неона ждёт нового входящего и "
+                                                "продолжит существующий диалог."
+                                            )
+                                        else:
+                                            st.success(
+                                                "Знакомый добавлен. "
+                                                "Неона получила его для работы."
+                                            )
                                         st.rerun()
 
                     drafts = st.session_state.get(
@@ -6348,6 +6463,17 @@ if received_hash:
                                                     else ""
                                                 )
                                             )
+                                            if (
+                                                contact.get("source")
+                                                == "Знакомый — выбран директором"
+                                            ):
+                                                st.info(
+                                                    "Первое сообщение уже является частью "
+                                                    "истории и не редактируется. "
+                                                    "Повторно формировать его не нужно: "
+                                                    "после нового входящего сообщения "
+                                                    "Неона продолжает диалог сама."
+                                                )
                                         elif (
                                             draft.get("approved")
                                             and not current_rule_errors

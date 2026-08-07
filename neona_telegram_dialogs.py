@@ -193,9 +193,42 @@ def _load_workspace(config: Config, owner_id: int) -> dict[str, Any]:
 
 
 def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]]:
+    """Все люди, с которыми Агентство W уже реально начало диалог.
+
+    Основной источник — sent_log. Дополнительная страховка — сохранённые
+    черновики с sent=True. Это важно для старых контактов: если человек
+    ответил через день или неделю, Неона всё равно должна продолжить
+    диалог после входящего сообщения.
+    """
     workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
-    for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
+
+    contact_names: dict[int, str] = {}
+    for collection_name in ("owner_known_contacts", "contacts", "candidates"):
+        collection = workspace.get(collection_name, [])
+        if isinstance(collection, dict):
+            collection = list(collection.values())
+        if not isinstance(collection, list):
+            continue
+        for contact in collection:
+            if not isinstance(contact, dict):
+                continue
+            try:
+                contact_id = int(contact.get("telegram_id"))
+            except (TypeError, ValueError):
+                continue
+            contact_names[contact_id] = str(
+                contact.get("first_name")
+                or contact.get("name")
+                or ""
+            )
+
+    sent_log = (
+        workspace.get("sent_log", [])
+        if isinstance(workspace.get("sent_log"), list)
+        else []
+    )
+    for event in sent_log:
         if not isinstance(event, dict) or event.get("kind") != "first_message":
             continue
         try:
@@ -204,8 +237,47 @@ def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]
             continue
         allowed[contact_id] = {
             "sent_at": str(event.get("sent_at") or ""),
-            "recipient_name": str(event.get("recipient_name") or ""),
+            "recipient_name": str(
+                event.get("recipient_name")
+                or contact_names.get(contact_id, "")
+            ),
         }
+
+    drafts = workspace.get("neona_drafts", [])
+    if isinstance(drafts, dict):
+        drafts = [
+            {"telegram_id": contact_id, **draft}
+            for contact_id, draft in drafts.items()
+            if isinstance(draft, dict)
+        ]
+    if not isinstance(drafts, list):
+        drafts = []
+
+    for draft in drafts:
+        if not isinstance(draft, dict) or not bool(draft.get("sent")):
+            continue
+        try:
+            contact_id = int(draft.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+
+        if contact_id not in allowed:
+            allowed[contact_id] = {
+                "sent_at": str(draft.get("sent_at") or ""),
+                "recipient_name": contact_names.get(contact_id, ""),
+            }
+        else:
+            # sent_log остаётся приоритетным, но заполняем возможные пробелы.
+            if not allowed[contact_id].get("sent_at"):
+                allowed[contact_id]["sent_at"] = str(
+                    draft.get("sent_at") or ""
+                )
+            if not allowed[contact_id].get("recipient_name"):
+                allowed[contact_id]["recipient_name"] = contact_names.get(
+                    contact_id,
+                    "",
+                )
+
     return allowed
 
 
