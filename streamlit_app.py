@@ -16,6 +16,10 @@ from agency_calendar import (
     render_agency_calendar,
     render_today_meetings_compact,
 )
+from neona_telegram_dialogs import (
+    DialogError as NeonaDialogError,
+    run_sync_owner_once,
+)
 from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
@@ -5247,6 +5251,63 @@ if received_hash:
                             "календаре Агентства W. Основное время — МСК; "
                             "местное время человека рассчитывается на дату встречи."
                         )
+
+                    with st.expander("💬 Входящие сообщения Telegram — тест"):
+                        st.caption(
+                            "На этом этапе Неона отвечает только людям, которым "
+                            "из Агентства W уже было отправлено утверждённое первое "
+                            "сообщение. Старые сообщения не обрабатываются. Первый "
+                            "запуск создаёт безопасную точку отсчёта."
+                        )
+                        st.info(
+                            "Тестовый режим: проверка выполняется по кнопке. "
+                            "После проверки логики подключим отдельный круглосуточный "
+                            "worker, чтобы ответы не зависели от открытого сайта."
+                        )
+                        if st.button(
+                            "🔄 Проверить входящие сейчас",
+                            type="primary",
+                            key=f"neona_sync_incoming_{telegram_id}",
+                        ):
+                            try:
+                                with st.spinner("Неона проверяет новые ответы..."):
+                                    dialog_stats = run_sync_owner_once(
+                                        int(telegram_id),
+                                        first_name,
+                                        initialize_new_dialogs=True,
+                                    )
+                                if dialog_stats.get("initialized", 0) and not dialog_stats.get("processed", 0):
+                                    st.success(
+                                        "Точка отсчёта создана. Старую переписку "
+                                        "Неона не тронула. Теперь можно отправить "
+                                        "новое тестовое сообщение и нажать кнопку ещё раз."
+                                    )
+                                elif dialog_stats.get("replied", 0):
+                                    st.success(
+                                        "Новые ответы обработаны: "
+                                        f"{dialog_stats.get('replied', 0)}."
+                                    )
+                                elif dialog_stats.get("errors", 0):
+                                    st.warning(
+                                        "Обработка завершилась с ошибкой. "
+                                        "Ни одно неподтверждённое действие не было "
+                                        "объявлено выполненным."
+                                    )
+                                else:
+                                    st.info("Новых ответов пока нет.")
+                                st.caption(
+                                    "Контактов после первого сообщения: "
+                                    f"{dialog_stats.get('allowed', 0)} · "
+                                    "новых входящих: "
+                                    f"{dialog_stats.get('processed', 0)}"
+                                )
+                            except NeonaDialogError as exc:
+                                st.error(str(exc))
+                            except Exception as exc:
+                                st.error(
+                                    "Не удалось проверить входящие сообщения: "
+                                    + str(exc)
+                                )
 
                     candidates_key = (
                         f"neonia_candidates_{telegram_id}"
