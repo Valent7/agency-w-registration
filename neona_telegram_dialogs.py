@@ -277,7 +277,7 @@ def initialize_dialog_after_first_message(
         int(contact_id),
         last_incoming_id=int(baseline_incoming_id or 0),
         stage="idle",
-        greeted=False,
+        greeted=True,
         context={
             "first_message_sent_at": str(sent_at or ""),
             "activated_by": "agency_w_first_message",
@@ -431,6 +431,19 @@ def _is_no(text: str) -> bool:
     return any((" " in word and word in lowered) or (" " not in word and word in tokens) for word in NO_WORDS)
 
 
+def _is_positive_interest(text: str) -> bool:
+    """Явный интерес к показу/встрече после первого сообщения."""
+    lowered = re.sub(r"[^a-zа-яё0-9 ]+", " ", text.lower()).strip()
+    if _is_yes(text):
+        return True
+    markers = (
+        "интересно", "мне интересно", "хочу", "хочу посмотреть",
+        "покажи", "покажите", "давайте", "готов", "готова",
+        "можно посмотреть", "хочу увидеть",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def _is_simple_acknowledgement(text: str) -> bool:
     """Короткая реакция после уже назначенной встречи не требует ответа."""
     raw = text.strip().lower()
@@ -476,25 +489,65 @@ def _format_slot(start_utc: datetime, tz_name: str) -> str:
     )
 
 
-def _find_three_slots(config: Config, owner_id: int, around_utc: datetime, contact_timezone: str) -> list[datetime]:
+def _find_two_nearest_slots(
+    config: Config,
+    owner_id: int,
+    around_utc: datetime,
+    contact_timezone: str,
+) -> list[datetime]:
+    """Ищет 2 ближайших свободных варианта.
+
+    Приоритет: тот же день и время максимально близко к запросу.
+    Выходные не исключаются: если владелец уже принимает встречи в субботу,
+    календарь должен уметь предложить соседний свободный слот в эту же субботу.
+    """
+    now_limit = datetime.now(UTC) + timedelta(minutes=30)
+    requested_msk = around_utc.astimezone(MSK)
+    requested_day = requested_msk.date()
     result: list[datetime] = []
-    start_day_msk = around_utc.astimezone(MSK).date()
-    for day_offset in range(0, 8):
-        day = start_day_msk + timedelta(days=day_offset)
-        if day.weekday() >= 5:
-            continue
-        cursor = datetime.combine(day, dt_time(10, 0), MSK)
-        end = datetime.combine(day, dt_time(20, 0), MSK)
-        while cursor + timedelta(minutes=DURATION_MINUTES) <= end:
-            start_utc = cursor.astimezone(UTC)
-            end_utc = start_utc + timedelta(minutes=DURATION_MINUTES)
-            local = start_utc.astimezone(ZoneInfo(contact_timezone))
-            if 8 <= local.hour < 22 and start_utc > datetime.now(UTC) + timedelta(minutes=30):
-                if _slot_free(config, owner_id, start_utc, end_utc):
-                    result.append(start_utc)
-                    if len(result) == 3:
-                        return result
-            cursor += timedelta(minutes=30)
+
+    def consider(candidate_msk: datetime) -> None:
+        if len(result) >= 2:
+            return
+        # Рабочее окно владельца 10:00–20:00 МСК.
+        if candidate_msk.date() < requested_day:
+            return
+        day_start = datetime.combine(candidate_msk.date(), dt_time(10, 0), MSK)
+        day_end = datetime.combine(candidate_msk.date(), dt_time(20, 0), MSK)
+        if candidate_msk < day_start or candidate_msk + timedelta(minutes=DURATION_MINUTES) > day_end:
+            return
+        start_utc = candidate_msk.astimezone(UTC)
+        end_utc = start_utc + timedelta(minutes=DURATION_MINUTES)
+        local = start_utc.astimezone(ZoneInfo(contact_timezone))
+        if not (8 <= local.hour < 22):
+            return
+        if start_utc <= now_limit:
+            return
+        if start_utc == around_utc:
+            return
+        if start_utc in result:
+            return
+        if _slot_free(config, owner_id, start_utc, end_utc):
+            result.append(start_utc)
+
+    # Сначала ищем вокруг запрошенного времени в ТОТ ЖЕ ДЕНЬ.
+    # Один вариант раньше, один позже, затем расширяем радиус.
+    for minutes in (30, 60, 90, 120, 150, 180, 210, 240, 270, 300):
+        consider(requested_msk - timedelta(minutes=minutes))
+        consider(requested_msk + timedelta(minutes=minutes))
+        if len(result) >= 2:
+            return result
+
+    # Только если в этот день двух вариантов нет — смотрим следующие 7 дней,
+    # включая субботу и воскресенье, начиная примерно с желаемого времени.
+    for day_offset in range(1, 8):
+        day = requested_day + timedelta(days=day_offset)
+        same_time = datetime.combine(day, requested_msk.timetz().replace(tzinfo=None), MSK)
+        for minutes in (0, -30, 30, -60, 60, -90, 90, -120, 120):
+            consider(same_time + timedelta(minutes=minutes))
+            if len(result) >= 2:
+                return result
+
     return result
 
 
@@ -505,7 +558,8 @@ def _openai_general_reply(config: Config, owner_name: str, first_name: str, text
     instructions = f"""
 Ты Неона — виртуальная помощница {owner_name}. Пиши по-русски простым человеческим языком, без корпоративного жаргона.
 Главная задача — заинтересовать человека реальными возможностями Агентства W и постепенно привести к осознанной встрече с {owner_name}.
-Факты, которые уже реально доступны: команда ИИ-помощников помогает владельцу искать подходящих людей в его Telegram-контактах и чатах, анализировать кандидатов и готовить персональное первое сообщение. Окончательный выбор и утверждение первого сообщения делает человек.
+Факты, которые уже реально доступны: команда ИИ-помощников помогает владельцу искать подходящих людей в ЕГО Telegram-контактах и чатах, анализировать кандидатов и готовить персональное первое сообщение. Окончательный выбор и утверждение первого сообщения делает человек.
+Никогда не говори собеседнику «в ваших Telegram-контактах», «в ваших чатах» или иначе не создавай впечатление, что Агентство W уже имеет доступ к данным собеседника. Корректная формулировка: «{owner_name} может показать на своём реальном примере, как это работает».
 Никогда не называй ИИ-помощников ботами. Не выдумывай функций. Не говори «проверила», «записала», «отправила», «создала», если техническое действие не было реально выполнено.
 Не используй фамилию собеседника в обращении. {greeting_rule}
 Ответ — 1–4 коротких предложения.
@@ -638,7 +692,7 @@ def _schedule_reply(
             )
 
     if stage == "awaiting_slot_choice":
-        choice = re.search(r"\b([123])\b", text)
+        choice = re.search(r"\b([12])\b", text)
         slots = context.get("offered_slots") or []
         if choice and isinstance(slots, list) and len(slots) >= int(choice.group(1)):
             selected = slots[int(choice.group(1)) - 1]
@@ -670,8 +724,9 @@ def _schedule_reply(
         if len(questions) == 1:
             ask = questions[0]
         else:
-            ask = "; и ".join(questions)
-        return prefix + "Подскажите, пожалуйста, " + ask + ".", "collecting_meeting_details", context
+            ask = "; ".join(questions[:-1]) + "; и " + questions[-1]
+        lead = "Отлично. Тогда давайте подберём удобное время. " if stage == "invited_to_meeting" else ""
+        return prefix + lead + "Подскажите, пожалуйста, " + ask + ".", "collecting_meeting_details", context
 
     start_utc = _parse_start(context)
     if start_utc is None:
@@ -692,7 +747,7 @@ def _schedule_reply(
             context,
         )
 
-    slots = _find_three_slots(config, owner_id, start_utc, tz_name)
+    slots = _find_two_nearest_slots(config, owner_id, start_utc, tz_name)
     if not slots:
         return (
             prefix + "Это время занято, а в ближайшем рабочем окне свободных вариантов пока не нашлось. Напишите другой удобный день — я проверю.",
@@ -702,7 +757,7 @@ def _schedule_reply(
     context["offered_slots"] = [slot.isoformat() for slot in slots]
     options = "\n".join(f"{index}. {_format_slot(slot, tz_name)}" for index, slot in enumerate(slots, 1))
     return (
-        prefix + "Это время занято. Нашла ближайшие свободные варианты:\n" + options + "\nНапишите номер подходящего варианта.",
+        prefix + "Это время занято. Нашла ближайшие свободные варианты:\n" + options + "\nНапишите номер подходящего варианта — 1 или 2.",
         "awaiting_slot_choice",
         context,
     )
@@ -753,7 +808,24 @@ def _process_message(
         return reply, "scheduled", True, context
 
     scheduling_stage = stage in {"invited_to_meeting", "collecting_meeting_details", "awaiting_confirmation", "awaiting_slot_choice"}
-    if _meeting_intent(text) or scheduling_stage:
+
+    # Как только человек явно проявил интерес, этап презентации закончен.
+    # Больше не повторяем рассказ об Агентстве W — сразу собираем данные встречи.
+    if stage == "idle" and _is_positive_interest(text):
+        reply, new_stage, context = _schedule_reply(
+            config,
+            owner_id,
+            owner_name,
+            contact_id,
+            first_name,
+            username,
+            text,
+            message_dt,
+            "invited_to_meeting",
+            context,
+            greet,
+        )
+    elif _meeting_intent(text) or scheduling_stage:
         reply, new_stage, context = _schedule_reply(
             config,
             owner_id,
@@ -850,7 +922,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         contact_id,
                         last_incoming_id=baseline_id,
                         stage="idle",
-                        greeted=False,
+                        greeted=True,
                         context={
                             "initialized_at": datetime.now(UTC).isoformat(),
                             "first_message_sent_at": sent_at_raw,
@@ -862,7 +934,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 state = {
                     "last_incoming_message_id": baseline_id,
                     "stage": "idle",
-                    "greeted": False,
+                    "greeted": True,
                     "context": {
                         "first_message_sent_at": sent_at_raw,
                         "activated_by": "sent_log_fallback",
