@@ -72,6 +72,7 @@ WEEKDAYS_RU = {
 YES_WORDS = {
     "да", "подтверждаю", "подтверждаем", "согласен", "согласна",
     "договорились", "ок", "okay", "yes", "подходит", "устраивает",
+    "отлично", "хорошо", "супер",
 }
 NO_WORDS = {"нет", "не подходит", "неудобно", "другое время", "перенести"}
 
@@ -430,6 +431,25 @@ def _is_no(text: str) -> bool:
     return any((" " in word and word in lowered) or (" " not in word and word in tokens) for word in NO_WORDS)
 
 
+def _is_simple_acknowledgement(text: str) -> bool:
+    """Короткая реакция после уже назначенной встречи не требует ответа."""
+    raw = text.strip().lower()
+    if not raw:
+        return True
+
+    emoji_only = re.sub(r"[\s👍👌🙏❤️❤✅👏🙂😊🔥🎉💚💛💙💜🤝]+", "", raw)
+    if not emoji_only:
+        return True
+
+    normalized = re.sub(r"[^a-zа-яё0-9 ]+", " ", raw).strip()
+    phrases = {
+        "спасибо", "благодарю", "отлично", "хорошо", "супер",
+        "договорились", "до встречи", "ок", "okay", "понятно",
+        "ясно", "принято",
+    }
+    return normalized in phrases
+
+
 def _parse_start(context: dict[str, Any]) -> datetime | None:
     date_value = context.get("requested_date")
     time_value = context.get("requested_time")
@@ -704,6 +724,34 @@ def _process_message(
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
     greet = not greeted
 
+    # Встреча уже назначена — не начинаем приглашение заново.
+    if stage == "scheduled":
+        lowered = text.lower()
+
+        if _is_simple_acknowledgement(text):
+            return "", "scheduled", True, context
+
+        if any(token in lowered for token in (
+            "перенести", "другое время", "другой день", "не смогу",
+            "не могу", "отменить", "отмена",
+        )):
+            context.pop("proposed_start_at", None)
+            context.pop("requested_date", None)
+            context.pop("requested_time", None)
+            context.pop("offered_slots", None)
+            return (
+                "Хорошо. Напишите, пожалуйста, какой новый день и время вам удобны. "
+                "Если часовой пояс и формат встречи остаются прежними, повторять их не нужно.",
+                "collecting_meeting_details",
+                True,
+                context,
+            )
+
+        # На содержательный вопрос после записи отвечаем по существу,
+        # но этап встречи остаётся назначенным.
+        reply = _openai_general_reply(config, owner_name, first_name, text, False)
+        return reply, "scheduled", True, context
+
     scheduling_stage = stage in {"invited_to_meeting", "collecting_meeting_details", "awaiting_confirmation", "awaiting_slot_choice"}
     if _meeting_intent(text) or scheduling_stage:
         reply, new_stage, context = _schedule_reply(
@@ -873,7 +921,21 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         latest.date.astimezone(UTC),
                         state,
                     )
-                    sent = await client.send_message(entity, reply, parse_mode=None, link_preview=False)
+                    if reply:
+                        sent = await client.send_message(
+                            entity,
+                            reply,
+                            parse_mode=None,
+                            link_preview=False,
+                        )
+                        saved_context = {
+                            **context,
+                            "last_reply_id": int(sent.id),
+                        }
+                        stats["replied"] += 1
+                    else:
+                        saved_context = dict(context)
+
                     _save_dialog_state(
                         config,
                         int(owner_id),
@@ -881,9 +943,8 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         last_incoming_id=int(latest.id),
                         stage=stage,
                         greeted=greeted,
-                        context={**context, "last_reply_id": int(sent.id)},
+                        context=saved_context,
                     )
-                    stats["replied"] += 1
                 except Exception:
                     stats["errors"] += 1
                     # При ошибке не помечаем сообщения обработанными, чтобы
