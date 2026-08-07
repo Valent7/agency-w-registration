@@ -18,6 +18,7 @@ from agency_calendar import (
 )
 from neona_telegram_dialogs import (
     DialogError as NeonaDialogError,
+    initialize_dialog_after_first_message,
     run_sync_owner_once,
 )
 from workspace_persistence import (
@@ -1175,6 +1176,20 @@ async def send_telegram_first_message(
                 "исходный чат больше недоступен."
             )
 
+        # Последнее входящее сообщение, существовавшее ДО первого
+        # сообщения Агентства W. Всё, что придёт позже, должна обработать Неона.
+        baseline_incoming_message_id = 0
+        try:
+            async for previous_message in client.iter_messages(entity, limit=50):
+                if previous_message.out:
+                    continue
+                if not getattr(previous_message, "message", None):
+                    continue
+                baseline_incoming_message_id = int(previous_message.id)
+                break
+        except Exception:
+            baseline_incoming_message_id = 0
+
         sent_message = await client.send_message(
             entity,
             message,
@@ -1182,11 +1197,15 @@ async def send_telegram_first_message(
             link_preview=False,
         )
 
+        sent_at = datetime.now(
+            ZoneInfo("Europe/Berlin")
+        ).isoformat()
         return {
             "message_id": int(sent_message.id),
-            "sent_at": datetime.now(
-                ZoneInfo("Europe/Berlin")
-            ).isoformat(),
+            "sent_at": sent_at,
+            "baseline_incoming_message_id": int(
+                baseline_incoming_message_id
+            ),
         }
     finally:
         await client.disconnect()
@@ -3473,10 +3492,7 @@ if received_hash:
                             and edited_message.strip()
                             != str(draft.get("message", "")).strip()
                         ):
-                            draft["message"] = ensure_neona_identity(
-                                edited_message.strip(),
-                                first_name,
-                            )
+                            draft["message"] = edited_message.strip()
                             draft["approved"] = False
                             draft["status"] = "Сообщение отредактировано"
                             neona_drafts[contact_id] = draft
@@ -3494,10 +3510,7 @@ if received_hash:
                                 f"{telegram_id}_{contact_id}"
                             ),
                         ):
-                            final_message = ensure_neona_identity(
-                                edited_message.strip(),
-                                first_name,
-                            )
+                            final_message = edited_message.strip()
                             if not final_message:
                                 st.warning(
                                     "Сначала заполните текст сообщения."
@@ -3639,6 +3652,27 @@ if received_hash:
                                         st.session_state[
                                             sent_log_key
                                         ] = sent_log
+
+                                        try:
+                                            initialize_dialog_after_first_message(
+                                                telegram_id,
+                                                contact_id,
+                                                baseline_incoming_id=int(
+                                                    send_result.get(
+                                                        "baseline_incoming_message_id",
+                                                        0,
+                                                    )
+                                                ),
+                                                sent_at=send_result["sent_at"],
+                                            )
+                                        except Exception as dialog_exc:
+                                            draft["dialog_activation_error"] = str(
+                                                dialog_exc
+                                            )
+                                            neona_drafts[contact_id] = draft
+                                            st.session_state[
+                                                neona_drafts_key
+                                            ] = neona_drafts
 
                                         for candidate_item in candidate_results:
                                             if int(
@@ -6182,12 +6216,9 @@ if received_hash:
                                             st.rerun()
 
                                         if save_message or approve_message:
-                                            normalized_message = (
-                                                ensure_neona_identity(
-                                                    edited_message.strip(),
-                                                    first_name,
-                                                )
-                                            )
+                                            # Владелец вручную отредактировал текст: сохраняем и утверждаем
+                                            # ровно то, что видно в поле, без скрытых дописок.
+                                            normalized_message = edited_message.strip()
                                             if not normalized_message:
                                                 st.warning(
                                                     "Текст сообщения пуст."
@@ -6422,6 +6453,29 @@ if received_hash:
                                                         st.session_state[
                                                             sent_log_key
                                                         ] = sent_log
+
+                                                        try:
+                                                            initialize_dialog_after_first_message(
+                                                                telegram_id,
+                                                                contact_id,
+                                                                baseline_incoming_id=int(
+                                                                    send_result.get(
+                                                                        "baseline_incoming_message_id",
+                                                                        0,
+                                                                    )
+                                                                ),
+                                                                sent_at=send_result[
+                                                                    "sent_at"
+                                                                ],
+                                                            )
+                                                        except Exception as dialog_exc:
+                                                            draft[
+                                                                "dialog_activation_error"
+                                                            ] = str(dialog_exc)
+                                                            drafts[contact_id] = draft
+                                                            st.session_state[
+                                                                neona_drafts_key
+                                                            ] = drafts
 
                                                         for candidate in candidate_results:
                                                             try:

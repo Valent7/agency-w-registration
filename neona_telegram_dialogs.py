@@ -257,6 +257,33 @@ def _save_dialog_state(
     response.raise_for_status()
 
 
+def initialize_dialog_after_first_message(
+    owner_id: int,
+    contact_id: int,
+    *,
+    baseline_incoming_id: int = 0,
+    sent_at: str = "",
+) -> None:
+    """Создаёт точку отсчёта сразу после первого исходящего сообщения.
+
+    Старую переписку Неона не трогает. Первый новый ответ человека уже
+    окажется после baseline_incoming_id и будет обработан.
+    """
+    config = load_config()
+    _save_dialog_state(
+        config,
+        int(owner_id),
+        int(contact_id),
+        last_incoming_id=int(baseline_incoming_id or 0),
+        stage="idle",
+        greeted=False,
+        context={
+            "first_message_sent_at": str(sent_at or ""),
+            "activated_by": "agency_w_first_message",
+        },
+    )
+
+
 def _list_meetings(config: Config, owner_id: int, start_utc: datetime, end_utc: datetime) -> list[dict[str, Any]]:
     response = requests.get(
         f"{config.supabase_url}/rest/v1/agency_meetings",
@@ -461,7 +488,10 @@ def _openai_general_reply(config: Config, owner_name: str, first_name: str, text
 Факты, которые уже реально доступны: команда ИИ-помощников помогает владельцу искать подходящих людей в его Telegram-контактах и чатах, анализировать кандидатов и готовить персональное первое сообщение. Окончательный выбор и утверждение первого сообщения делает человек.
 Никогда не называй ИИ-помощников ботами. Не выдумывай функций. Не говори «проверила», «записала», «отправила», «создала», если техническое действие не было реально выполнено.
 Не используй фамилию собеседника в обращении. {greeting_rule}
-Ответ — 1–4 коротких предложения. Если человеку уже интересно, мягко предложи встречу с {owner_name}, но не назначай время самостоятельно.
+Ответ — 1–4 коротких предложения.
+Если человек прямо говорит, что ему интересно, не пересказывай заново первое сообщение. Дай один конкретный и правдивый повод увидеть систему вживую: {owner_name} может показать на реальном примере, как команда уже ищет подходящих людей и готовит персональные первые сообщения.
+После этого мягко подведи к короткой встрече с {owner_name} и задай один простой вопрос о готовности встретиться.
+Не назначай дату, время и формат самостоятельно — их нужно отдельно согласовать с человеком.
 """.strip()
     response = requests.post(
         "https://api.openai.com/v1/responses",
@@ -741,21 +771,90 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
             latest_incoming_id = int(recent[-1].id) if recent else 0
 
             if state is None:
+                # Если точка отсчёта не была создана в момент отправки,
+                # ориентируемся на время первого сообщения из sent_log:
+                # старые входящие до него игнорируем, ответы после него обрабатываем.
+                sent_at_raw = str(allowed[contact_id].get("sent_at") or "")
+                sent_at_dt = None
+                if sent_at_raw:
+                    try:
+                        sent_at_dt = datetime.fromisoformat(
+                            sent_at_raw.replace("Z", "+00:00")
+                        ).astimezone(UTC)
+                    except Exception:
+                        sent_at_dt = None
+
+                baseline_id = latest_incoming_id
+                if sent_at_dt is not None:
+                    old_incoming = [
+                        message
+                        for message in recent
+                        if message.date.astimezone(UTC) <= sent_at_dt
+                    ]
+                    baseline_id = (
+                        int(old_incoming[-1].id) if old_incoming else 0
+                    )
+
                 if initialize_new_dialogs:
                     _save_dialog_state(
                         config,
                         int(owner_id),
                         contact_id,
-                        last_incoming_id=latest_incoming_id,
+                        last_incoming_id=baseline_id,
                         stage="idle",
                         greeted=False,
-                        context={"initialized_at": datetime.now(UTC).isoformat()},
+                        context={
+                            "initialized_at": datetime.now(UTC).isoformat(),
+                            "first_message_sent_at": sent_at_raw,
+                            "activated_by": "sent_log_fallback",
+                        },
                     )
                     stats["initialized"] += 1
-                continue
+
+                state = {
+                    "last_incoming_message_id": baseline_id,
+                    "stage": "idle",
+                    "greeted": False,
+                    "context": {
+                        "first_message_sent_at": sent_at_raw,
+                        "activated_by": "sent_log_fallback",
+                    },
+                }
 
             last_id = int(state.get("last_incoming_message_id") or 0)
-            new_messages = [message for message in recent if int(message.id) > last_id]
+            new_messages = [
+                message for message in recent if int(message.id) > last_id
+            ]
+
+            # Старая тестовая версия могла ошибочно поставить baseline прямо
+            # на первом ответе. Один раз подхватываем такой ответ, если Неона
+            # ещё ни разу не отвечала в этом диалоге.
+            if not new_messages and not bool(state.get("greeted", False)):
+                state_context = (
+                    state.get("context")
+                    if isinstance(state.get("context"), dict)
+                    else {}
+                )
+                if not state_context.get("last_reply_id"):
+                    sent_at_raw = str(
+                        allowed[contact_id].get("sent_at") or ""
+                    )
+                    try:
+                        sent_at_dt = datetime.fromisoformat(
+                            sent_at_raw.replace("Z", "+00:00")
+                        ).astimezone(UTC)
+                    except Exception:
+                        sent_at_dt = None
+                    if sent_at_dt is not None:
+                        after_first = [
+                            message
+                            for message in recent
+                            if message.date.astimezone(UTC) > sent_at_dt
+                        ]
+                        if after_first:
+                            latest_after_first = after_first[-1]
+                            if int(latest_after_first.id) == last_id:
+                                new_messages = [latest_after_first]
             if new_messages:
                 stats["processed"] += len(new_messages)
                 latest = new_messages[-1]
