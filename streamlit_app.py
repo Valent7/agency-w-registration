@@ -16,6 +16,8 @@ from agency_calendar import (
     render_agency_calendar,
     render_today_meetings_compact,
 )
+from team_center import render_team_center
+
 from neona_telegram_dialogs import (
     DialogError as NeonaDialogError,
     initialize_dialog_after_first_message,
@@ -6680,15 +6682,12 @@ if received_hash:
                     )
 
         elif main_section == "👥 Команда":
-            st.markdown("### 👥 Команда")
-
-            with st.container(border=True):
-                st.markdown("**Лично приглашённые партнёры**")
-                st.caption("Список партнёров появится после подключения базы.")
-
-            with st.container(border=True):
-                st.markdown("**Структура и активность**")
-                st.caption("Здесь будут новые регистрации и результаты команды.")
+            render_team_center(
+                telegram_id,
+                member_code,
+                first_name,
+                partner_link,
+            )
 
         elif main_section == "👤 Профиль":
             inviter_text = referral_code if referral_code else "не указан"
