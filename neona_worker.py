@@ -11,7 +11,7 @@ import requests
 import neona_telegram_dialogs as nd
 
 
-BRAIN_VERSION = "4.4"
+BRAIN_VERSION = "4.5"
 APP_DIR = Path(__file__).resolve().parent
 CORE_PATH = APP_DIR / "NEONA_CORE.md"
 
@@ -523,6 +523,104 @@ def _explicit_meeting_commitment(text: str) -> bool:
         or any(word in lowered for word in nd.WEEKDAYS_RU)
     )
     return bool(nd._detect_time(text) and has_date)
+
+
+
+MEETING_CONSENT_PHRASES = (
+    "давайте встретимся",
+    "давайте созвонимся",
+    "давай встретимся",
+    "давай созвонимся",
+    "хочу встретиться",
+    "хочу созвониться",
+    "готов встретиться",
+    "готова встретиться",
+    "готов созвониться",
+    "готова созвониться",
+    "согласен на встречу",
+    "согласна на встречу",
+    "согласен встретиться",
+    "согласна встретиться",
+    "хорошо, давайте встретимся",
+    "хорошо, давайте созвонимся",
+    "можем встретиться",
+    "можем созвониться",
+    "когда можно встретиться",
+    "когда можно созвониться",
+    "назначим встречу",
+    "назначить встречу",
+    "запишите меня",
+    "давайте назначим",
+)
+
+
+def _looks_like_objection_or_question(text: str) -> bool:
+    raw = str(text or "")
+    lowered = re.sub(r"\s+", " ", raw.lower()).strip()
+
+    # Прямой вопрос "когда можно встретиться?" — это уже запрос на встречу.
+    if any(phrase in lowered for phrase in (
+        "когда можно встретиться",
+        "когда можно созвониться",
+        "когда вам удобно встретиться",
+        "когда вам удобно созвониться",
+    )):
+        return False
+
+    objection_markers = (
+        "зачем", "почему", "в чем преимущество", "в чём преимущество",
+        "сама могу", "сам могу", "я и сама", "я и сам",
+        "не понимаю", "не вижу смысла", "какой смысл",
+        "что мне это даст", "для чего", "а зачем",
+        "сомневаюсь", "не уверен", "не уверена",
+    )
+    return "?" in raw or any(marker in lowered for marker in objection_markers)
+
+
+def _has_meeting_datetime(
+    text: str,
+    message_dt: datetime,
+    tz_name: str | None,
+) -> bool:
+    return bool(
+        _smart_detect_date(text, message_dt, tz_name)
+        or nd._detect_time(text)
+    )
+
+
+def _user_consciously_accepted_meeting(
+    text: str,
+    context: dict[str, Any],
+    message_dt: datetime,
+) -> bool:
+    """
+    Только входящая реплика человека может открыть календарь.
+    Предложение Неоны или решение модели meeting_committed недостаточны.
+    """
+    lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+
+    if _looks_like_objection_or_question(text):
+        return False
+
+    if any(phrase in lowered for phrase in MEETING_CONSENT_PHRASES):
+        return True
+
+    invite_pending = bool(context.get("meeting_invite_pending"))
+
+    # Простое "да" считается согласием только как непосредственный ответ
+    # на последнее приглашение Неоны.
+    if invite_pending and nd._is_yes(text):
+        return True
+
+    # Дата/время как непосредственный ответ на приглашение тоже означает согласие.
+    if invite_pending and _has_meeting_datetime(
+        text,
+        message_dt,
+        context.get("contact_timezone"),
+    ):
+        return True
+
+    return False
 
 
 def _conversation_tail(context: dict[str, Any]) -> list[dict[str, str]]:
@@ -1148,6 +1246,25 @@ def _ai_director(
 - Если человек задаёт возражение, сначала ответь на него; затем вернись к
   следующему нужному шагу, а не начинай разговор заново.
 
+ОСОЗНАННОЕ СОГЛАСИЕ:
+- Твоё собственное предложение встречи НЕ является согласием человека.
+- Если ты предложила встречу, остановись и жди ответа человека.
+- Не спрашивай дату, время, часовой пояс или формат, пока человек сам явно
+  не согласился на встречу.
+- Вопрос, сомнение или возражение после приглашения — это НЕ согласие.
+- Фразы вроде «я и сама могу ей позвонить», «в чём преимущество?»,
+  «зачем мне встреча?» означают: продолжай диалог и сначала ответь по смыслу.
+- Только явное «да», «давайте», «согласна/согласен», прямой запрос на встречу
+  или дата/время как ответ на приглашение открывают календарный этап.
+
+РИТМ ЖИВОГО РАЗГОВОРА:
+- Не каждый ответ обязан заканчиваться вопросом.
+- После содержательной реплики человека иногда сначала коротко отрази,
+  что ты услышала и поняла.
+- Не превращай беседу в анкету «вопрос → ответ → новый вопрос».
+- Хороший ритм: услышала → отреагировала → при необходимости углубила →
+  показала пользу → пригласила → получила осознанное согласие.
+
 {greeting_rule}
 
 Верни ТОЛЬКО JSON:
@@ -1251,7 +1368,6 @@ def _smart_process_message(
     # Календарные этапы обрабатываются строгим кодом, а не ИИ.
     if stage in {
         "scheduled",
-        "invited_to_meeting",
         "collecting_meeting_details",
         "awaiting_confirmation",
         "awaiting_slot_choice",
@@ -1304,7 +1420,35 @@ def _smart_process_message(
         context = _remember_exchange(context, text, reply)
         context["conversation_stage"] = "closed"
         context["next_action"] = "respect_boundary"
+        context["meeting_invite_pending"] = False
         return reply, "idle", True, context
+
+    # ЖЕЛЕЗНЫЙ ШЛЮЗ: календарь открывает только сам человек.
+    if _user_consciously_accepted_meeting(text, context, message_dt):
+        context["meeting_consent_received"] = True
+        context["meeting_invite_pending"] = False
+        reply, new_stage, context = _schedule_reply_v41(
+            config,
+            owner_id,
+            owner_name,
+            contact_id,
+            first_name,
+            username,
+            text,
+            message_dt,
+            "invited_to_meeting",
+            context,
+            greet,
+        )
+        context["brain_version"] = BRAIN_VERSION
+        context = _remember_exchange(context, text, reply)
+        return reply, new_stage, True, context
+
+    # Если на приглашение пришёл не ответ "да", приглашение больше не pending.
+    # Неона должна продолжить разговор и при необходимости пригласить заново позже.
+    if context.get("meeting_invite_pending"):
+        context["meeting_invite_pending"] = False
+        context["meeting_consent_received"] = False
 
     plan = _ai_director(
         config,
@@ -1332,27 +1476,12 @@ def _smart_process_message(
     elif bool(plan.get("objection_resolved")):
         context["objection_resolved"] = True
 
-    committed = bool(plan.get("meeting_committed")) or _explicit_meeting_commitment(text)
-    if committed:
-        reply, new_stage, context = _schedule_reply_v41(
-            config,
-            owner_id,
-            owner_name,
-            contact_id,
-            first_name,
-            username,
-            text,
-            message_dt,
-            "invited_to_meeting",
-            context,
-            greet,
-        )
-    else:
-        new_stage = (
-            "invited_to_meeting"
-            if bool(plan.get("invited_to_meeting"))
-            else "idle"
-        )
+    # Решение модели "meeting_committed" НЕ открывает календарь.
+    # Неона может только пригласить человека на встречу.
+    new_stage = "idle"
+    if bool(plan.get("invited_to_meeting")):
+        context["meeting_invite_pending"] = True
+        context["meeting_consent_received"] = False
 
     context["brain_version"] = BRAIN_VERSION
     context = _remember_exchange(context, text, reply)
