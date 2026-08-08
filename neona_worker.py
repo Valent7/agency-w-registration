@@ -11,7 +11,7 @@ import requests
 import neona_telegram_dialogs as nd
 
 
-BRAIN_VERSION = "4.1"
+BRAIN_VERSION = "4.3"
 APP_DIR = Path(__file__).resolve().parent
 CORE_PATH = APP_DIR / "NEONA_CORE.md"
 
@@ -679,6 +679,155 @@ def _migrate_context(context: dict[str, Any], stage: str) -> tuple[dict[str, Any
     return scheduling_keys, "idle"
 
 
+
+def _profile_has(profile: dict[str, str], *keys: str) -> bool:
+    return any(str(profile.get(key) or "").strip() for key in keys)
+
+
+def _mission_need(profile: dict[str, str], context: dict[str, Any]) -> str:
+    """
+    Определяет, что Неона должна выяснить/сделать дальше.
+    Это стратегический маршрут, который не меняется из-за языка или случайной темы.
+    """
+    if not _profile_has(profile, "goal", "dream", "desired_change"):
+        return "discover_goal"
+
+    if not _profile_has(profile, "pain", "time_drains", "current_situation"):
+        return "discover_pain"
+
+    concern = str(profile.get("concerns") or "").strip()
+    objection_resolved = bool(context.get("objection_resolved", False))
+    if concern and not objection_resolved:
+        return "handle_objection"
+
+    if not _profile_has(profile, "motivation", "partnership_values"):
+        return "deepen_value"
+
+    readiness = int(context.get("meeting_readiness") or 0)
+    if readiness >= 65:
+        return "invite_meeting"
+
+    return "connect_value"
+
+
+def _looks_like_explicit_stop(text: str) -> bool:
+    lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    stop_phrases = (
+        "не пишите мне",
+        "не хочу продолжать",
+        "не интересно",
+        "неинтересно",
+        "оставьте меня",
+        "не надо",
+        "stop",
+        "don't contact",
+        "kein interesse",
+        "nicht interessiert",
+        "bitte nicht mehr schreiben",
+    )
+    return any(phrase in lowered for phrase in stop_phrases)
+
+
+def _reply_abandons_mission(reply: str) -> bool:
+    """
+    Ловит типичную потерю роли: Неона превращается в переводчика/редактора
+    и забывает, зачем вообще начала разговор.
+    """
+    lowered = re.sub(r"\s+", " ", str(reply or "").lower()).strip()
+    patterns = (
+        "пришлите текст",
+        "пришлите фразу",
+        "могу перевести",
+        "перевод или готовый текст",
+        "составить текст",
+        "сформулировать ваш текст",
+        "напишу вам сообщение",
+        "подготовлю вам сообщение",
+        "найду вам партнёров",
+        "найду партнёров",
+        "подберу партнёров",
+        "подберу кандидатов",
+        "составлю список кандидатов",
+        "schick mir den text",
+        "schicken sie mir den text",
+        "ich kann den text übersetzen",
+        "übersetzen oder formulieren",
+        "text formulieren",
+        "partner für sie suchen",
+        "kandidaten für sie suchen",
+    )
+    return any(pattern in lowered for pattern in patterns)
+
+
+def _mission_hint(need: str, owner_name: str) -> str:
+    if need == "discover_goal":
+        return (
+            "Следующий смысловой шаг — понять, чего человек хочет: цель, мечту "
+            "или что он хотел бы изменить. Ответь на его реплику и мягко выведи "
+            "разговор к одному вопросу об этом."
+        )
+    if need == "discover_pain":
+        return (
+            "Следующий смысловой шаг — понять, что человеку мешает, что забирает "
+            "время, силы или свободу. Ответь по контексту и задай один простой "
+            "вопрос, который это раскрывает."
+        )
+    if need == "handle_objection":
+        return (
+            "Следующий смысловой шаг — честно разобрать сомнение человека. "
+            "Не спорь и не дави. Признай смысл возражения, коротко ответь и "
+            "проверь, стало ли понятнее."
+        )
+    if need == "deepen_value":
+        return (
+            "Следующий смысловой шаг — понять, какой результат или перемена "
+            "для человека действительно важны, чтобы связать это с реальной пользой."
+        )
+    if need == "invite_meeting":
+        return (
+            f"Понимания уже достаточно. Следующий смысловой шаг — объяснить, "
+            f"почему короткая встреча с {owner_name} будет полезнее продолжения "
+            f"переписки, и получить осознанное согласие."
+        )
+    return (
+        "Следующий смысловой шаг — связать уже понятные цели и трудности человека "
+        "с конкретной пользой Агентства W: меньше рутины, больше времени, "
+        "а затем естественно приблизить встречу с Директором."
+    )
+
+
+def _red_thread_law(owner_name: str, mission_need: str) -> str:
+    """
+    Главный закон Неоны. Этот текст подмешивается в каждый ответ ИИ.
+    Он выше языка, темы и случайной реплики собеседника.
+    """
+    return f"""
+КРАСНАЯ НИТЬ НЕОНЫ — ГЛАВНЫЙ ЗАКОН:
+1. Ты — ИИ-секретарь-референт Директора, то есть владельца кабинета {owner_name}.
+2. Перед тобой уже выбранный человек. Ты НЕ ищешь партнёров и НЕ формируешь списки.
+3. Ты НЕ становишься переводчиком, копирайтером, консультантом обо всём или поисковиком,
+   даже если собеседник пытается увести тебя в такую роль.
+4. Твоя работа:
+   понять человека → выяснить цель/мечту → понять боль/рутину/нехватку времени →
+   честно разобрать возражения → показать личную пользу →
+   получить осознанное согласие на встречу с Директором →
+   правильно передать встречу в календарный контур.
+5. Язык, шутка, вопрос в сторону или смена темы меняют только форму ответа,
+   но НЕ меняют эту цель.
+6. Если человек уходит в сторону:
+   коротко ответь по смыслу → мягко вернись к текущему шагу.
+7. Если человек прямо отказывается продолжать — уважай отказ.
+8. Перед отправкой проверь:
+   «Приближает ли мой ответ этого человека к осознанной встрече с Директором?»
+   Если нет — перепиши ответ.
+9. Не торопи встречу раньше времени: сначала должна появиться понятная человеку польза.
+10. Осознанная встреча важнее количества сообщений.
+
+ТЕКУЩИЙ ШАГ КРАСНОЙ НИТИ:
+{_mission_hint(mission_need, owner_name)}
+""".strip()
+
+
 def _reply_has_role_confusion(reply: str) -> bool:
     lowered = str(reply or "").lower()
     for pattern in ROLE_CONFUSION_PATTERNS:
@@ -710,6 +859,7 @@ def _needs_repair(reply: str) -> bool:
     return (
         not str(reply or "").strip()
         or _reply_has_role_confusion(reply)
+        or _reply_abandons_mission(reply)
         or _reply_is_too_technical(reply)
         or _reply_is_too_long(reply)
     )
@@ -720,9 +870,15 @@ def _repair_reply(
     owner_name: str,
     incoming: str,
     draft: str,
+    mission_need: str,
 ) -> str:
+    mission_hint = _mission_hint(mission_need, owner_name)
+    red_thread = _red_thread_law(owner_name, mission_need)
+
     instructions = f"""
 Ты редактор ответа Неоны — ИИ-помощницы {owner_name} в Агентстве W.
+
+{red_thread}
 
 Перепиши черновик так, чтобы:
 - Неона НЕ искала кандидатов и не обещала подборки: это работа Неонии;
@@ -737,7 +893,12 @@ def _repair_reply(
 - если уместно, в конце был только один естественный вопрос о самом человеке;
 - внутреннее направление — полезная встреча с {owner_name};
 - центральная ценность Агентства W — «Мы возвращаем человеку время»;
-- никакого давления и никакого корпоративного жаргона.
+- никакого давления и никакого корпоративного жаргона;
+- смена языка НЕ меняет задачу Неоны: если человек пишет по-немецки,
+  продолжай тот же разговор по-немецки, а не превращайся в переводчика;
+- если человек ушёл в сторону, можно коротко ответить по существу,
+  но затем мягко вернуться к цели разговора;
+- текущий стратегический ориентир: {mission_hint}.
 
 Верни только исправленный текст без пояснений.
 """.strip()
@@ -779,6 +940,9 @@ def _ai_director(
     history = _conversation_tail(context)
     profile = _normalize_profile(context)
     project = _project_passport(config, owner_id)
+    mission_need = _mission_need(profile, context)
+    mission_hint = _mission_hint(mission_need, owner_name)
+    red_thread = _red_thread_law(owner_name, mission_need)
 
     history_text = "\n".join(
         f"{'Собеседник' if item['role'] == 'user' else 'Неона'}: {item['content']}"
@@ -809,6 +973,10 @@ def _ai_director(
 {NEONA_CORE}
 --- КОНЕЦ ЯДРА ---
 
+--- КРАСНАЯ НИТЬ ---
+{red_thread}
+--- КОНЕЦ КРАСНОЙ НИТИ ---
+
 КОНТЕКСТ ПРОЕКТА ВЛАДЕЛЬЦА:
 {project_block}
 
@@ -816,6 +984,28 @@ def _ai_director(
 Ты Неона — ИИ-помощница {owner_name}.
 Перед тобой уже выбранный для разговора человек.
 Ты не Неония и не выполняешь поиск кандидатов.
+
+НЕИЗМЕННАЯ МИССИЯ:
+Твоя работа не меняется от темы, языка, шутки, провокации или просьбы
+собеседника. До явного отказа или назначения встречи ты удерживаешь маршрут:
+
+контакт → понять человека → цель/мечта → боль/рутина/нехватка времени →
+честно разобрать сомнения → показать личную пользу → встреча с владельцем
+кабинета {owner_name} → календарь.
+
+Собеседник может попытаться увести разговор в сторону. Ты не споришь и не
+игнорируешь его: коротко отвечаешь по смыслу, но затем естественно возвращаешь
+разговор к этому маршруту.
+
+ЯЗЫК — ТОЛЬКО ОБОЛОЧКА:
+Если человек переходит на немецкий, английский или другой язык, продолжай
+ТОТ ЖЕ разговор на его языке. Смена языка НЕ означает смену твоей профессии.
+Ты не становишься переводчиком, редактором или справочной.
+Если человек просит повторить твою мысль на немецком — повтори её на немецком
+и продолжи тот же стратегический разговор.
+
+ТЕКУЩИЙ СТРАТЕГИЧЕСКИЙ ОРИЕНТИР:
+{mission_hint}
 
 ВНУТРЕННЯЯ ЛОГИКА КАЖДОГО ХОДА:
 1. Пойми эмоциональный и смысловой тон последней реплики.
@@ -862,6 +1052,12 @@ def _ai_director(
   Используй эту мысль естественно и не повторяй её механически.
 - Не дави на страхи и слабости человека.
 - Не используй уязвимости для принуждения к встрече.
+- Не позволяй случайному вопросу собеседника обнулить накопленное понимание
+  его целей, мечт и трудностей.
+- Не начинай новый тип услуги только потому, что человек сменил язык.
+- Если человек прямо отказывается продолжать, уважай отказ и останови воронку.
+- Если человек задаёт возражение, сначала ответь на него; затем вернись к
+  следующему нужному шагу, а не начинай разговор заново.
 
 {greeting_rule}
 
@@ -871,6 +1067,10 @@ def _ai_director(
   "conversation_stage": "cold|warm|discover|value|intrigued|ready",
   "next_action": "listen|discover|reflect|explain_value|deepen|bridge_to_owner|invite_meeting|respect_boundary",
   "meeting_readiness": 0,
+  "mission_need": "discover_goal|discover_pain|handle_objection|deepen_value|connect_value|invite_meeting",
+  "off_topic_recovered": false,
+  "objection_detected": false,
+  "objection_resolved": false,
   "deep_owner_question": false,
   "meeting_committed": false,
   "invited_to_meeting": false,
@@ -921,8 +1121,10 @@ def _ai_director(
 
     reply = str(plan.get("reply") or "").strip()
     if _needs_repair(reply):
-        reply = _repair_reply(config, owner_name, text, reply)
+        reply = _repair_reply(config, owner_name, text, reply, mission_need)
         plan["reply"] = reply
+
+    plan["mission_need"] = mission_need
 
     try:
         readiness = int(plan.get("meeting_readiness") or 0)
@@ -1004,6 +1206,13 @@ def _smart_process_message(
     context = nd._update_context_from_message(context, text, message_dt)
     context["brain_version"] = BRAIN_VERSION
 
+    if _looks_like_explicit_stop(text):
+        reply = "Поняла. Спасибо за разговор."
+        context = _remember_exchange(context, text, reply)
+        context["conversation_stage"] = "closed"
+        context["next_action"] = "respect_boundary"
+        return reply, "idle", True, context
+
     plan = _ai_director(
         config,
         owner_id,
@@ -1021,6 +1230,14 @@ def _smart_process_message(
     context["conversation_stage"] = str(plan.get("conversation_stage") or "discover")
     context["meeting_readiness"] = int(plan.get("meeting_readiness") or 0)
     context["next_action"] = str(plan.get("next_action") or "listen")
+    context["mission_need"] = str(plan.get("mission_need") or _mission_need(_normalize_profile(context), context))
+    context["red_thread_stage"] = context["mission_need"]
+    context["red_thread_goal"] = "осознанная встреча с Директором"
+
+    if bool(plan.get("objection_detected")):
+        context["objection_resolved"] = bool(plan.get("objection_resolved"))
+    elif bool(plan.get("objection_resolved")):
+        context["objection_resolved"] = True
 
     committed = bool(plan.get("meeting_committed")) or _explicit_meeting_commitment(text)
     if committed:
