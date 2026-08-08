@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import re
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 import neona_telegram_dialogs as nd
+import team_telegram_delivery as team_delivery
 
 
 BRAIN_VERSION = "4.5"
@@ -1355,6 +1357,24 @@ def _smart_process_message(
     message_dt,
     state: dict[str, Any],
 ):
+        # Зарегистрированный прямой партнёр относится к разделу «Команда».
+    # Неона с ним не вступает в автоматический диалог.
+    if team_delivery._is_direct_partner(config, owner_id, contact_id):
+        partner_context = (
+            state.get("context")
+            if isinstance(state.get("context"), dict)
+            else {}
+        )
+        partner_context = dict(partner_context)
+        partner_context["routed_to_team_center"] = True
+        partner_context["brain_version"] = BRAIN_VERSION
+
+        return (
+            "",
+            str(state.get("stage") or "idle"),
+            True,
+            partner_context,
+        )
     stage = str(state.get("stage") or "idle")
     greeted = bool(state.get("greeted", False))
     raw_context = state.get("context") if isinstance(state.get("context"), dict) else {}
@@ -1496,4 +1516,14 @@ nd._process_message = _smart_process_message
 
 
 if __name__ == "__main__":
-    nd.worker_forever(int(os.getenv("NEONA_POLL_SECONDS", "15")))
+    team_thread = __import__("threading").Thread(
+        target=team_delivery.worker_forever,
+        args=(int(os.getenv("TEAM_TELEGRAM_POLL_SECONDS", "15")),),
+        daemon=True,
+        name="team-telegram-delivery",
+    )
+    team_thread.start()
+
+    nd.worker_forever(
+        int(os.getenv("NEONA_POLL_SECONDS", "15"))
+    )
