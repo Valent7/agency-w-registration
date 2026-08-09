@@ -4423,7 +4423,7 @@ if received_hash:
                                         }
                                         recommended_limit = max(
                                             0,
-                                            5 - len(owner_contacts),
+                                            5 - sum(1 for contact in owner_contacts.values() if isinstance(contact, dict) and str(contact.get("work_date") or "") == datetime.now(ZoneInfo("Europe/Berlin")).date().isoformat()),
                                         )
 
                                         existing_selected_ids = []
