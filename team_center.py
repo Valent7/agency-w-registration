@@ -508,6 +508,7 @@ def _render_instructions(
 
     st.markdown("#### 📚 Инструкции")
 
+    # Инструкции от пригласившего Директора
     if referrer:
         incoming = _get(
             "agency_team_instructions",
@@ -520,18 +521,23 @@ def _render_instructions(
                 "order": "created_at.desc",
             },
         )
+
         st.caption(
             f"Материалы от Директора: {_display_name(referrer)}"
         )
+
         if not incoming:
             st.caption("Инструкций пока нет.")
+
         for item in incoming:
             with st.container(border=True):
                 st.markdown(
                     f"**{item.get('title') or 'Инструкция'}**"
                 )
+
                 if item.get("body"):
                     st.write(item["body"])
+
                 if item.get("url"):
                     st.link_button(
                         "🔗 Открыть материал",
@@ -544,21 +550,30 @@ def _render_instructions(
         )
 
     st.divider()
+
+    # Создание новой инструкции
     st.markdown("#### ➕ Добавить инструкцию своей команде")
 
-    with st.form("team_instruction_create"):
+    with st.form(
+        "team_instruction_create",
+        clear_on_submit=True,
+    ):
         title = st.text_input("Название")
+
         body = st.text_area(
             "Короткое пояснение",
             height=100,
         )
+
         url = st.text_input(
             "Ссылка на материал — необязательно"
         )
+
         submitted = st.form_submit_button(
             "Сохранить инструкцию",
             use_container_width=True,
         )
+
         if submitted:
             if not title.strip():
                 st.warning("Укажите название.")
@@ -575,27 +590,133 @@ def _render_instructions(
                         "is_active": True,
                     },
                 )
+
                 st.success("Инструкция добавлена.")
                 st.rerun()
 
+    # Собственные инструкции Директора
     own = _get(
         "agency_team_instructions",
         {
             "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+            "is_active": "eq.true",
             "select": "*",
             "order": "created_at.desc",
         },
     )
+
     if own:
         st.markdown("#### Ваши инструкции")
+
         for item in own:
-            status = "🟢" if item.get("is_active") else "⚪"
+            item_id = int(item["id"])
+
             with st.container(border=True):
                 st.markdown(
-                    f"{status} **{item.get('title') or 'Инструкция'}**"
+                    f"🟢 **{item.get('title') or 'Инструкция'}**"
                 )
+
                 if item.get("body"):
                     st.caption(str(item["body"]))
+
+                material_url = str(
+                    item.get("url") or ""
+                ).strip()
+
+                if material_url:
+                    st.link_button(
+                        "🔗 Открыть материал",
+                        material_url,
+                        use_container_width=True,
+                    )
+
+                # Редактирование
+                with st.expander("✏️ Редактировать"):
+                    with st.form(
+                        f"team_instruction_edit_{item_id}"
+                    ):
+                        edit_title = st.text_input(
+                            "Название",
+                            value=str(
+                                item.get("title") or ""
+                            ),
+                            key=f"instruction_title_{item_id}",
+                        )
+
+                        edit_body = st.text_area(
+                            "Короткое пояснение",
+                            value=str(
+                                item.get("body") or ""
+                            ),
+                            height=100,
+                            key=f"instruction_body_{item_id}",
+                        )
+
+                        edit_url = st.text_input(
+                            "Ссылка на материал — необязательно",
+                            value=material_url,
+                            key=f"instruction_url_{item_id}",
+                        )
+
+                        save_edit = st.form_submit_button(
+                            "💾 Сохранить изменения",
+                            use_container_width=True,
+                        )
+
+                        if save_edit:
+                            if not edit_title.strip():
+                                st.warning(
+                                    "Укажите название."
+                                )
+                            else:
+                                _patch(
+                                    "agency_team_instructions",
+                                    {
+                                        "id": f"eq.{item_id}"
+                                    },
+                                    {
+                                        "title": edit_title.strip(),
+                                        "body": (
+                                            edit_body.strip()
+                                            or None
+                                        ),
+                                        "url": (
+                                            edit_url.strip()
+                                            or None
+                                        ),
+                                    },
+                                )
+
+                                st.success(
+                                    "Изменения сохранены."
+                                )
+                                st.rerun()
+
+                # Удаление
+                if st.button(
+                    "🗑️ Удалить",
+                    key=f"instruction_delete_{item_id}",
+                    use_container_width=True,
+                ):
+                    _patch(
+                        "agency_team_instructions",
+                        {
+                            "id": f"eq.{item_id}"
+                        },
+                        {
+                            "is_active": False
+                        },
+                    )
+
+                    st.success(
+                        "Инструкция удалена."
+                    )
+                    st.rerun()
+
+    else:
+        st.caption(
+            "У вас пока нет собственных инструкций."
+        )
 
 
 def _render_announcements(
