@@ -2894,17 +2894,17 @@ if received_hash:
     ZoneInfo("Europe/Berlin")
 ).date().isoformat()
 
-active_owner_contacts = {
-    int(contact_id)
-    for contact_id, contact in owner_contacts.items()
-    if isinstance(contact, dict)
-    and str(contact.get("work_date") or "") == today_work_date
-}
-
-recommended_limit = max(
-    0,
-    5 - len(active_owner_contacts),
-)
+                    active_owner_contacts = {
+                        int(contact_id)
+                        for contact_id, contact in owner_contacts.items()
+                        if isinstance(contact, dict)
+                        and str(contact.get("work_date") or "") == today_work_date
+                    }
+                    
+                    recommended_limit = max(
+                        0,
+                        5 - len(active_owner_contacts),
+                    )
 
                     st.markdown(
                         f"#### ✅ Выбор {first_name} из списка Неонии"
