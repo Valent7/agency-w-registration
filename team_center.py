@@ -783,6 +783,93 @@ def _render_announcements(
                         item["url"],
                         use_container_width=True,
                     )
+                item_id = item.get("id")
+
+                if item_id is not None:
+                    # Редактирование объявления
+                    with st.expander("✏️ Редактировать"):
+                        with st.form(
+                            f"team_announcement_edit_{item_id}"
+                        ):
+                            edit_title = st.text_input(
+                                "Заголовок",
+                                value=str(
+                                    item.get("title") or ""
+                                ),
+                                key=f"announcement_title_{item_id}",
+                            )
+
+                            edit_body = st.text_area(
+                                "Текст объявления",
+                                value=str(
+                                    item.get("body") or ""
+                                ),
+                                height=120,
+                                key=f"announcement_body_{item_id}",
+                            )
+
+                            edit_url = st.text_input(
+                                "Ссылка — необязательно",
+                                value=str(
+                                    item.get("url") or ""
+                                ),
+                                key=f"announcement_url_{item_id}",
+                            )
+
+                            save_edit = st.form_submit_button(
+                                "💾 Сохранить изменения",
+                                use_container_width=True,
+                            )
+
+                        if save_edit:
+                            if (
+                                not edit_title.strip()
+                                or not edit_body.strip()
+                            ):
+                                st.warning(
+                                    "Укажите заголовок и текст объявления."
+                                )
+                            else:
+                                _patch(
+                                    "agency_team_announcements",
+                                    {
+                                        "id": f"eq.{item_id}"
+                                    },
+                                    {
+                                        "title": edit_title.strip(),
+                                        "body": edit_body.strip(),
+                                        "url": (
+                                            edit_url.strip()
+                                            or None
+                                        ),
+                                    },
+                                )
+
+                                st.success(
+                                    "Изменения сохранены."
+                                )
+                                st.rerun()
+
+                    # Удаление объявления
+                    if st.button(
+                        "🗑 Удалить",
+                        key=f"announcement_delete_{item_id}",
+                        use_container_width=True,
+                    ):
+                        _patch(
+                            "agency_team_announcements",
+                            {
+                                "id": f"eq.{item_id}"
+                            },
+                            {
+                                "is_active": False
+                            },
+                        )
+
+                        st.success(
+                            "Объявление удалено."
+                        )
+                        st.rerun()                
     else:
         st.caption("У вас пока нет опубликованных объявлений.")
     st.divider()
