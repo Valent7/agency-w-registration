@@ -756,7 +756,35 @@ def _render_announcements(
                         item["url"],
                         use_container_width=True,
                     )
+    # Мои опубликованные объявления
+    own_announcements = _get(
+        "agency_team_announcements",
+        {
+            "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+            "is_active": "eq.true",
+            "select": "*",
+            "order": "created_at.desc",
+            "limit": 50,
+        },
+    )
 
+    if own_announcements:
+        st.markdown("#### 📌 Мои объявления")
+        for item in own_announcements:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{item.get('title') or 'Объявление'}**"
+                )
+                st.write(str(item.get("body") or ""))
+
+                if item.get("url"):
+                    st.link_button(
+                        "🔗 Открыть ссылку",
+                        item["url"],
+                        use_container_width=True,
+                    )
+    else:
+        st.caption("У вас пока нет опубликованных объявлений.")
     st.divider()
     st.markdown("#### ➕ Новое объявление для моей команды")
     with st.form("team_announcement_create"):
