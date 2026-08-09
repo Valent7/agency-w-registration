@@ -2890,10 +2890,21 @@ if received_hash:
                         for candidate in top_candidates
                     }
                     familiar_count = len(owner_contacts)
-                    recommended_limit = max(
-                        0,
-                        5 - familiar_count,
-                    )
+                    today_work_date = datetime.now(
+    ZoneInfo("Europe/Berlin")
+).date().isoformat()
+
+active_owner_contacts = {
+    int(contact_id)
+    for contact_id, contact in owner_contacts.items()
+    if isinstance(contact, dict)
+    and str(contact.get("work_date") or "") == today_work_date
+}
+
+recommended_limit = max(
+    0,
+    5 - len(active_owner_contacts),
+)
 
                     st.markdown(
                         f"#### ✅ Выбор {first_name} из списка Неонии"
@@ -4421,29 +4432,56 @@ if received_hash:
                                             int(contact_id)
                                             for contact_id in owner_contacts
                                         }
-                                        recommended_limit = max(
-                                            0,
-                                            5 - len(owner_contacts),
-                                        )
+                                        today_work_date = datetime.now(
+    ZoneInfo("Europe/Berlin")
+).date().isoformat()
 
-                                        existing_selected_ids = []
-                                        for contact_id in st.session_state.get(
-                                            selected_candidates_key,
-                                            [],
-                                        ):
-                                            try:
-                                                contact_id = int(contact_id)
-                                            except (TypeError, ValueError):
-                                                continue
-                                            if (
-                                                contact_id in global_candidate_by_id
-                                                and contact_id not in known_contact_ids
-                                                and contact_id not in existing_selected_ids
-                                            ):
-                                                existing_selected_ids.append(contact_id)
-                                        existing_selected_ids = existing_selected_ids[
-                                            :recommended_limit
-                                        ]
+active_owner_contacts = {
+    int(contact_id)
+    for contact_id, contact in owner_contacts.items()
+    if isinstance(contact, dict)
+    and str(contact.get("work_date") or "") == today_work_date
+}
+
+recommended_limit = max(
+    0,
+    5 - len(active_owner_contacts),
+)
+
+existing_selected_ids = []
+
+for contact_id in st.session_state.get(
+    selected_candidates_key,
+    [],
+):
+    try:
+        contact_id = int(contact_id)
+    except (TypeError, ValueError):
+        continue
+
+    candidate = global_candidate_by_id.get(
+        contact_id,
+        {},
+    )
+
+    # В сегодняшний лимит входят только кандидаты,
+    # выбранные именно сегодня.
+    if (
+        str(candidate.get("selected_work_date") or "")
+        != today_work_date
+    ):
+        continue
+
+    if (
+        contact_id in global_candidate_by_id
+        and contact_id not in known_contact_ids
+        and contact_id not in existing_selected_ids
+    ):
+        existing_selected_ids.append(contact_id)
+
+existing_selected_ids = existing_selected_ids[
+    :recommended_limit
+]
 
                                         top_candidate_by_id = {
                                             int(item["telegram_id"]): item
@@ -4640,6 +4678,25 @@ if received_hash:
                                             selected_elsewhere_ids
                                             + checked_current_ids
                                         )[:recommended_limit]
+                                        # Запоминаем дату сегодняшнего выбора кандидатов.
+                                        final_selected_set = set(final_selected_ids)
+                                        
+                                        for contact_id, candidate in global_candidate_by_id.items():
+                                            if not isinstance(candidate, dict):
+                                                continue
+                                        
+                                            try:
+                                                contact_id = int(contact_id)
+                                            except (TypeError, ValueError):
+                                                continue
+                                        
+                                            if contact_id in final_selected_set:
+                                                candidate["selected_work_date"] = today_work_date
+                                            elif (
+                                                str(candidate.get("selected_work_date") or "")
+                                                == today_work_date
+                                            ):
+                                                candidate.pop("selected_work_date", None)
                                         st.session_state[
                                             selected_candidates_key
                                         ] = final_selected_ids
@@ -4653,93 +4710,93 @@ if received_hash:
                                             f"**Выбрано владельцем: "
                                             f"{selected_total} из 5**"
                                         )
-
-                                        selected_from_this_chat = [
-                                            top_candidate_by_id[contact_id]
-                                            for contact_id in checked_current_ids
-                                            if contact_id in top_candidate_by_id
-                                        ]
-                                        if selected_from_this_chat:
-                                            st.markdown(
-                                                "#### ✅ Выбраны из этого чата"
-                                            )
-                                            for candidate in selected_from_this_chat:
-                                                st.write(
-                                                    f"• **{candidate['name']}** · "
-                                                    f"{candidate['score']}% · "
-                                                    f"{candidate['segment']}"
-                                                )
-
-                                        confirm_selection = st.button(
-                                            "✅ Сохранить выбор и передать Неоне",
-                                            type="primary",
-                                            disabled=not final_selected_ids,
-                                            key=(
-                                                "confirm_chat_candidates_"
-                                                f"{telegram_id}_{selected_chat_id}"
-                                            ),
-                                        )
-                                        if confirm_selection:
-                                            selected_id_set = set(
-                                                final_selected_ids
-                                            )
-                                            for item in global_candidates:
-                                                try:
-                                                    item_id = int(
-                                                        item.get("telegram_id")
-                                                    )
-                                                except (TypeError, ValueError):
-                                                    continue
-                                                if item_id in selected_id_set:
-                                                    item["status"] = (
-                                                        "Выбран владельцем"
-                                                    )
-                                            st.session_state[
-                                                global_candidates_key
-                                            ] = global_candidates
-                                            for item in candidate_results:
-                                                try:
-                                                    item_id = int(
-                                                        item.get("telegram_id")
-                                                    )
-                                                except (TypeError, ValueError):
-                                                    continue
-                                                if item_id in selected_id_set:
-                                                    item["status"] = (
-                                                        "Выбран владельцем"
-                                                    )
-                                            chat_candidates_map[
-                                                chat_map_id
-                                            ] = candidate_results
-                                            st.session_state[
-                                                chat_candidates_map_key
-                                            ] = chat_candidates_map
-                                            persist_workspace_if_changed(
-                                                telegram_id,
-                                                force=True,
-                                            )
-                                            st.success(
-                                                "Выбор сохранён. Неона получила "
-                                                "выбранных кандидатов для следующего "
-                                                "этапа — подготовки персональных "
-                                                "первых сообщений."
-                                            )
-
-                                    if candidate_results:
-                                        with st.expander(
-                                            "Все результаты по выбранному чату"
-                                        ):
-                                            all_results_table = [
-                                                {
-                                                    "Имя": item["name"],
-                                                    "Username": (
-                                                        f"@{item['username']}"
-                                                        if item.get("username")
-                                                        else "—"
-                                                    ),
-                                                    "Сегмент": item["segment"],
-                                                    "Соответствие": (
-                                                        f"{item['score']}%"
+                                        
+                                                                                selected_from_this_chat = [
+                                                                                    top_candidate_by_id[contact_id]
+                                                                                    for contact_id in checked_current_ids
+                                                                                    if contact_id in top_candidate_by_id
+                                                                                ]
+                                                                                if selected_from_this_chat:
+                                                                                    st.markdown(
+                                                                                        "#### ✅ Выбраны из этого чата"
+                                                                                    )
+                                                                                    for candidate in selected_from_this_chat:
+                                                                                        st.write(
+                                                                                            f"• **{candidate['name']}** · "
+                                                                                            f"{candidate['score']}% · "
+                                                                                            f"{candidate['segment']}"
+                                                                                        )
+                                        
+                                                                                confirm_selection = st.button(
+                                                                                    "✅ Сохранить выбор и передать Неоне",
+                                                                                    type="primary",
+                                                                                    disabled=not final_selected_ids,
+                                                                                    key=(
+                                                                                        "confirm_chat_candidates_"
+                                                                                        f"{telegram_id}_{selected_chat_id}"
+                                                                                    ),
+                                                                                )
+                                                                                if confirm_selection:
+                                                                                    selected_id_set = set(
+                                                                                        final_selected_ids
+                                                                                    )
+                                                                                    for item in global_candidates:
+                                                                                        try:
+                                                                                            item_id = int(
+                                                                                                item.get("telegram_id")
+                                                                                            )
+                                                                                        except (TypeError, ValueError):
+                                                                                            continue
+                                                                                        if item_id in selected_id_set:
+                                                                                            item["status"] = (
+                                                                                                "Выбран владельцем"
+                                                                                            )
+                                                                                    st.session_state[
+                                                                                        global_candidates_key
+                                                                                    ] = global_candidates
+                                                                                    for item in candidate_results:
+                                                                                        try:
+                                                                                            item_id = int(
+                                                                                                item.get("telegram_id")
+                                                                                            )
+                                                                                        except (TypeError, ValueError):
+                                                                                            continue
+                                                                                        if item_id in selected_id_set:
+                                                                                            item["status"] = (
+                                                                                                "Выбран владельцем"
+                                                                                            )
+                                                                                    chat_candidates_map[
+                                                                                        chat_map_id
+                                                                                    ] = candidate_results
+                                                                                    st.session_state[
+                                                                                        chat_candidates_map_key
+                                                                                    ] = chat_candidates_map
+                                                                                    persist_workspace_if_changed(
+                                                                                        telegram_id,
+                                                                                        force=True,
+                                                                                    )
+                                                                                    st.success(
+                                                                                        "Выбор сохранён. Неона получила "
+                                                                                        "выбранных кандидатов для следующего "
+                                                                                        "этапа — подготовки персональных "
+                                                                                        "первых сообщений."
+                                                                                    )
+                                        
+                                                                            if candidate_results:
+                                                                                with st.expander(
+                                                                                    "Все результаты по выбранному чату"
+                                                                                ):
+                                                                                    all_results_table = [
+                                                                                        {
+                                                                                            "Имя": item["name"],
+                                                                                            "Username": (
+                                                                                                f"@{item['username']}"
+                                                                                                if item.get("username")
+                                                                                                else "—"
+                                                                                            ),
+                                                                                            "Сегмент": item["segment"],
+                                                                                            "Соответствие": (
+                                                                                                f"{item['score']}%"
                                                     ),
                                                     "Уверенность": item[
                                                         "confidence"
