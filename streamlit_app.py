@@ -17,6 +17,7 @@ from agency_calendar import (
     render_today_meetings_compact,
 )
 from team_center import render_team_center
+from personal_tasks import render_personal_tasks
 
 from neona_telegram_dialogs import (
     DialogError as NeonaDialogError,
@@ -3715,8 +3716,7 @@ if received_hash:
                 render_today_meetings_compact(int(telegram_id))
 
             with st.container(border=True):
-                st.markdown("**✅ Задачи на сегодня**")
-                st.caption("Главные задачи дня появятся здесь.")
+                render_personal_tasks(int(telegram_id))
 
             with st.container(border=True):
                 st.markdown("**📊 Итоги**")
