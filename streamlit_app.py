@@ -18,6 +18,14 @@ from agency_calendar import (
 )
 from team_center import render_team_center
 from personal_tasks import render_personal_tasks
+from neola_partner_center import (
+    activation_is_confirmed,
+    activation_label,
+    ensure_partner_activation,
+    render_neola_agent,
+    render_neola_quick_assistant,
+    render_partner_center,
+)
 
 from neona_telegram_dialogs import (
     DialogError as NeonaDialogError,
@@ -2722,6 +2730,24 @@ if received_hash:
             key="main_section",
         )
 
+        # Постоянный быстрый вызов Неолы. Она получает контекст текущего экрана
+        # и учитывает вложенную навигацию («матрёшки») Агентства W.
+        neola_ui_context_parts = [str(main_section)]
+        current_agent_context = st.session_state.get("selected_agent")
+        current_neonia_mode = st.session_state.get("neonia_mode")
+        if current_agent_context:
+            neola_ui_context_parts.append(f"агент: {current_agent_context}")
+        if current_neonia_mode:
+            neola_ui_context_parts.append(f"режим Неонии: {current_neonia_mode}")
+        neola_ui_context = " → ".join(neola_ui_context_parts)
+
+        render_neola_quick_assistant(
+            int(telegram_id),
+            first_name,
+            neola_ui_context,
+            ask_openai,
+        )
+
         if main_section == "☀️ День":
             st.markdown("### ☀️ Мой день")
 
@@ -2793,11 +2819,19 @@ if received_hash:
         elif main_section == "🤖 Агенты":
             st.markdown("### 🤖 Агенты")
 
-            selected_agent = st.selectbox(
-                "Выберите агента",
-                ["Стагирит", "Неония", "Неона", "Неола"],
-                key="selected_agent",
-            )
+            # Архитектура «матрёшки»: специализированные агенты находятся
+            # внутри Стагирита как главного координатора.
+            with st.container(border=True):
+                st.markdown("#### 🧭 Стагирит")
+                st.caption(
+                    "Главный координатор. Внутри него находятся специализированные "
+                    "агенты Агентства W."
+                )
+                selected_agent = st.selectbox(
+                    "Откройте нужного агента внутри Стагирита",
+                    ["Стагирит", "Неония", "Неона", "Неола"],
+                    key="selected_agent",
+                )
 
             agent_descriptions = {
                 "Стагирит": (
@@ -5897,18 +5931,33 @@ if received_hash:
                                     "утверждения конкретного сообщения владельцем."
                                 )
 
-                else:
-                    st.caption(
-                        "Подключение этого агента будет следующим этапом."
+                elif selected_agent == "Неола":
+                    render_neola_agent(
+                        int(telegram_id),
+                        first_name,
+                        neola_ui_context,
+                        ask_openai,
                     )
 
         elif main_section == "👥 Команда":
-            render_team_center(
-                telegram_id,
-                member_code,
-                first_name,
-                partner_link,
+            partner_center_tab, team_tools_tab = st.tabs(
+                ["🌳 Центр партнёров", "🧰 Инструменты команды"]
             )
+
+            with partner_center_tab:
+                render_partner_center(
+                    int(telegram_id),
+                    member_code,
+                    first_name,
+                )
+
+            with team_tools_tab:
+                render_team_center(
+                    telegram_id,
+                    member_code,
+                    first_name,
+                    partner_link,
+                )
 
         elif main_section == "👤 Профиль":
             inviter_text = referral_code if referral_code else "не указан"
@@ -5919,7 +5968,12 @@ if received_hash:
                 st.markdown(f"**Имя:** {first_name}")
                 st.markdown(f"**Партнёрский код:** `{member_code}`")
                 st.markdown(f"**Пригласитель:** `{inviter_text}`")
-                st.markdown("**Статус:** 🟢 Активен")
+                profile_activation = ensure_partner_activation(int(telegram_id))
+                st.markdown(f"**Статус:** {activation_label(profile_activation)}")
+                if activation_is_confirmed(profile_activation):
+                    st.markdown("**Неола:** 🎙 доступна")
+                else:
+                    st.markdown("**Неола:** 🔒 после подтверждения 5 лож")
 
             st.markdown("**Персональная партнёрская ссылка:**")
             st.code(partner_link, language=None)
