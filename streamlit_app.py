@@ -4060,6 +4060,165 @@ if received_hash:
                                         "самостоятельно выбирает не более 5."
                                     )
 
+                                    # Выбор владельцем до 5 кандидатов из ТОП-10 Неонии
+                                    selected_candidates_key = (
+                                        f"neonia_selected_candidates_{telegram_id}"
+                                    )
+                                    top_candidates = sorted(
+                                        [
+                                            item
+                                            for item in candidate_results
+                                            if item.get("recommendation")
+                                            == "Передать Неоне"
+                                        ],
+                                        key=lambda item: item.get("score", 0),
+                                        reverse=True,
+                                    )[:10]
+
+                                    if top_candidates:
+                                        st.markdown(
+                                            f"#### ✅ Выбор {first_name} из списка Неонии"
+                                        )
+                                        st.caption(
+                                            "Неония предлагает до 10 лучших кандидатов. "
+                                            "Кого передать Неоне, решает владелец кабинета. "
+                                            "Можно выбрать не более 5 человек."
+                                        )
+
+                                        candidate_by_id = {
+                                            int(item["telegram_id"]): item
+                                            for item in top_candidates
+                                            if item.get("telegram_id") is not None
+                                        }
+                                        previously_selected = []
+                                        for contact_id in st.session_state.get(
+                                            selected_candidates_key, []
+                                        ):
+                                            try:
+                                                normalized_id = int(contact_id)
+                                            except (TypeError, ValueError):
+                                                continue
+                                            if normalized_id in candidate_by_id:
+                                                previously_selected.append(normalized_id)
+                                        previously_selected = previously_selected[:5]
+
+                                        for contact_id in candidate_by_id:
+                                            checkbox_key = (
+                                                "owner_select_candidate_"
+                                                f"{telegram_id}_{contact_id}"
+                                            )
+                                            if checkbox_key not in st.session_state:
+                                                st.session_state[checkbox_key] = (
+                                                    contact_id in previously_selected
+                                                )
+
+                                        checked_ids = [
+                                            contact_id
+                                            for contact_id in candidate_by_id
+                                            if st.session_state.get(
+                                                "owner_select_candidate_"
+                                                f"{telegram_id}_{contact_id}",
+                                                False,
+                                            )
+                                        ]
+                                        if len(checked_ids) > 5:
+                                            for contact_id in checked_ids[5:]:
+                                                st.session_state[
+                                                    "owner_select_candidate_"
+                                                    f"{telegram_id}_{contact_id}"
+                                                ] = False
+                                            checked_ids = checked_ids[:5]
+
+                                        for candidate in top_candidates:
+                                            contact_id = int(candidate["telegram_id"])
+                                            checkbox_key = (
+                                                "owner_select_candidate_"
+                                                f"{telegram_id}_{contact_id}"
+                                            )
+                                            is_checked = st.session_state.get(
+                                                checkbox_key, False
+                                            )
+                                            limit_reached = (
+                                                len(checked_ids) >= 5 and not is_checked
+                                            )
+                                            username = (
+                                                f"@{candidate['username']}"
+                                                if candidate.get("username")
+                                                else "без username"
+                                            )
+                                            with st.container(border=True):
+                                                st.checkbox(
+                                                    f"Выбрать: {candidate['name']} · "
+                                                    f"{candidate['score']}% · {username}",
+                                                    key=checkbox_key,
+                                                    disabled=limit_reached,
+                                                )
+                                                with st.expander(
+                                                    "Посмотреть карточку кандидата"
+                                                ):
+                                                    st.write(
+                                                        f"**Сегмент:** "
+                                                        f"{candidate.get('segment', '—')}"
+                                                    )
+                                                    st.write(
+                                                        f"**Уверенность:** "
+                                                        f"{candidate.get('confidence', '—')}"
+                                                    )
+                                                    reasons = candidate.get("reasons") or []
+                                                    if reasons:
+                                                        st.write(
+                                                            "**Почему предложен:** "
+                                                            + "; ".join(reasons)
+                                                        )
+                                                    st.write(
+                                                        "**Подход к знакомству:** "
+                                                        f"{candidate.get('message_angle', '—')}"
+                                                    )
+
+                                        final_selected_ids = [
+                                            contact_id
+                                            for contact_id in candidate_by_id
+                                            if st.session_state.get(
+                                                "owner_select_candidate_"
+                                                f"{telegram_id}_{contact_id}",
+                                                False,
+                                            )
+                                        ][:5]
+
+                                        st.caption(
+                                            f"Выбрано владельцем: "
+                                            f"{len(final_selected_ids)} из 5"
+                                        )
+
+                                        if st.button(
+                                            "✅ Сохранить выбор и передать Неоне",
+                                            type="primary",
+                                            disabled=not final_selected_ids,
+                                            key=f"confirm_contact_candidates_{telegram_id}",
+                                        ):
+                                            st.session_state[
+                                                selected_candidates_key
+                                            ] = final_selected_ids
+                                            selected_id_set = set(final_selected_ids)
+                                            for item in candidate_results:
+                                                try:
+                                                    item_id = int(
+                                                        item.get("telegram_id")
+                                                    )
+                                                except (TypeError, ValueError):
+                                                    continue
+                                                if item_id in selected_id_set:
+                                                    item["status"] = "Выбран владельцем"
+                                            st.session_state[candidates_key] = candidate_results
+                                            persist_workspace_if_changed(
+                                                telegram_id,
+                                                force=True,
+                                            )
+                                            st.success(
+                                                "✅ Выбор сохранён и передан Неоне."
+                                            )
+                                            st.rerun()
+
                                     if st.button(
                                         "Сбросить результаты и "
                                         "начать заново",
