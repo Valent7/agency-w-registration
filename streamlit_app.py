@@ -2576,25 +2576,7 @@ if received_hash:
         st.markdown(
             f"## {greeting}, {first_name}! {greeting_icon}"
         )
-        st.markdown(
-            f"""
-            <div class="registration-card">
-                <h2>Директор Агентства W</h2>
-                <p>
-                    <strong>{first_name}</strong>, сегодня под вашим
-                    руководством работает команда ИИ-агентов.
-                </p>
-                <p>
-                    🧭 Стагирит — координатор &nbsp;·&nbsp;
-                    🔎 Неония — аналитик &nbsp;·&nbsp;
-                    💬 Неона — секретарь-референт &nbsp;·&nbsp;
-                    🌱 Неола — наставник
-                </p>
-                <p><strong>🟢 Команда готова к работе.</strong></p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        
         telegram_connected = render_telegram_connection(telegram_id)
         st.session_state["neonia_telegram_connected"] = telegram_connected
 
