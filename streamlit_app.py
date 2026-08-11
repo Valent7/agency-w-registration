@@ -26,6 +26,7 @@ from neola_partner_center import (
     render_neola_quick_assistant,
     render_partner_center,
 )
+from neola_realtime_voice import render_neola_realtime_voice
 
 from neona_telegram_dialogs import (
     DialogError as NeonaDialogError,
@@ -2741,12 +2742,48 @@ if received_hash:
             neola_ui_context_parts.append(f"режим Неонии: {current_neonia_mode}")
         neola_ui_context = " → ".join(neola_ui_context_parts)
 
-        render_neola_quick_assistant(
-            int(telegram_id),
-            first_name,
-            neola_ui_context,
-            ask_openai,
-        )
+        # Живой голосовой вызов Неолы.
+        # Открывается только по желанию партнёра, поэтому Realtime-сессия
+        # не создаётся при каждом обычном переходе по кабинету.
+        try:
+            neola_activation = ensure_partner_activation(int(telegram_id))
+        except Exception:
+            neola_activation = None
+
+        if neola_activation and activation_is_confirmed(neola_activation):
+            if "neola_live_open" not in st.session_state:
+                st.session_state["neola_live_open"] = False
+
+            neola_button_label = (
+                "✕ Закрыть Неолу"
+                if st.session_state["neola_live_open"]
+                else "🎙 Неола рядом"
+            )
+            if st.button(
+                neola_button_label,
+                key="neola_live_toggle",
+                type="primary",
+            ):
+                st.session_state["neola_live_open"] = not st.session_state[
+                    "neola_live_open"
+                ]
+                st.rerun()
+
+            if st.session_state["neola_live_open"]:
+                neola_step = int(
+                    (neola_activation or {}).get("onboarding_step") or 0
+                )
+                with st.container(border=True):
+                    render_neola_realtime_voice(
+                        int(telegram_id),
+                        first_name,
+                        neola_ui_context,
+                        neola_step,
+                    )
+        else:
+            st.caption(
+                "🔒 Неола включится после подтверждения активации партнёра."
+            )
 
         if main_section == "☀️ День":
             st.markdown("### ☀️ Мой день")
@@ -5932,12 +5969,47 @@ if received_hash:
                                 )
 
                 elif selected_agent == "Неола":
-                    render_neola_agent(
-                        int(telegram_id),
-                        first_name,
-                        neola_ui_context,
-                        ask_openai,
+                    st.caption(
+                        "Неола — живой голосовой наставник. "
+                        "Говорите с ней естественно: можно перебить, попросить "
+                        "повторить, говорить медленнее или объяснить проще."
                     )
+                    try:
+                        neola_agent_activation = ensure_partner_activation(
+                            int(telegram_id)
+                        )
+                    except Exception:
+                        neola_agent_activation = None
+
+                    if (
+                        neola_agent_activation
+                        and activation_is_confirmed(neola_agent_activation)
+                    ):
+                        neola_agent_step = int(
+                            (neola_agent_activation or {}).get(
+                                "onboarding_step"
+                            )
+                            or 0
+                        )
+                        st.progress(
+                            min(max(neola_agent_step / 7.0, 0.0), 1.0),
+                            text=f"Прогресс Неолы: {neola_agent_step}/7",
+                        )
+                        render_neola_realtime_voice(
+                            int(telegram_id),
+                            first_name,
+                            "🤖 Агенты → 🧭 Стагирит → Неола",
+                            neola_agent_step,
+                        )
+                    else:
+                        # До подтверждения 5 лож сохраняем прежний экран
+                        # загрузки/подтверждения активации.
+                        render_neola_agent(
+                            int(telegram_id),
+                            first_name,
+                            neola_ui_context,
+                            ask_openai,
+                        )
 
         elif main_section == "👥 Команда":
             partner_center_tab, team_tools_tab = st.tabs(
