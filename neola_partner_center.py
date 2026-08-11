@@ -20,7 +20,6 @@ def _now_iso():
 def _supabase_headers(prefer=None):
     headers = {
         "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-        "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
         "Content-Type": "application/json",
     }
     if prefer:
