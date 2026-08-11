@@ -18,10 +18,18 @@ def _now_iso():
 
 
 def _supabase_headers(prefer=None):
+    key = str(st.secrets["SUPABASE_SECRET_KEY"])
     headers = {
-        "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+        "apikey": key,
         "Content-Type": "application/json",
     }
+
+    # Legacy service_role keys are JWTs (eyJ...). For them PostgREST/RLS
+    # needs the Authorization bearer token. New sb_secret_... keys must not
+    # be sent as Bearer and are authorized through the apikey header.
+    if key.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {key}"
+
     if prefer:
         headers["Prefer"] = prefer
     return headers
@@ -946,7 +954,17 @@ def _render_neola_conversation(telegram_id, owner_name, ui_context, ask_openai_f
 
 
 def render_neola_quick_assistant(telegram_id, owner_name, ui_context, ask_openai_fn):
-    activation = ensure_partner_activation(telegram_id)
+    try:
+        activation = ensure_partner_activation(telegram_id)
+    except requests.HTTPError:
+        # Быстрый помощник не должен ломать весь кабинет, если Supabase
+        # временно недоступен или ключ требует обновления.
+        st.caption("🎙 Неола временно не подключилась. Остальные разделы работают.")
+        return
+    except Exception:
+        st.caption("🎙 Неола временно не подключилась. Остальные разделы работают.")
+        return
+
     label = "🎙 Неола рядом" if activation_is_confirmed(activation) else "🔒 Неола"
 
     if hasattr(st, "popover"):
@@ -975,7 +993,11 @@ def render_neola_agent(telegram_id, owner_name, ui_context, ask_openai_fn):
         "Неола — голосовой наставник. Она ведёт по реальным действиям, знает "
         "вложенную навигацию Агентства W и оставляет текстовые шаги в чате."
     )
-    activation = ensure_partner_activation(telegram_id)
+    try:
+        activation = ensure_partner_activation(telegram_id)
+    except Exception:
+        st.warning("Неола пока не смогла подключиться к базе партнёров. Остальная система работает.")
+        return
     if not activation_is_confirmed(activation):
         with st.container(border=True):
             render_my_activation(telegram_id)
