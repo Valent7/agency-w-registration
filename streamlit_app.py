@@ -1565,24 +1565,125 @@ NEONA_FIRST_MESSAGE_FORBIDDEN = NEONA_FORBIDDEN_CLAIMS
 
 
 def candidate_first_name(contact):
-    """Возвращает безопасное короткое имя для обращения."""
+    """Возвращает безопасное имя: никогда не подставляет @username."""
 
     first_name = str(contact.get("first_name") or "").strip()
-    if first_name and len(first_name) <= 40:
+    if (
+        first_name
+        and len(first_name) <= 40
+        and not first_name.startswith("@")
+        and not any(character.isdigit() for character in first_name)
+    ):
         return first_name
 
     full_name = str(contact.get("name") or "").strip()
-    if not full_name:
-        return ""
+    if full_name:
+        first_word = full_name.split()[0].strip(" ,.!?;:()[]{}\"'")
+        if (
+            first_word
+            and len(first_word) <= 40
+            and not first_word.startswith("@")
+            and not any(character.isdigit() for character in first_word)
+        ):
+            return first_word
 
-    first_word = full_name.split()[0].strip(" ,.!?;:()[]{}\"'")
-    if not first_word or len(first_word) > 40:
-        return ""
+    # Если имя очевидно читается в username, используем обычное имя.
+    # В остальных случаях лучше нейтральное «Здравствуйте!», чем обращение по нику.
+    username = str(contact.get("username") or "").strip().lstrip("@").lower()
+    possible_handles = [username]
+    possible_handles.extend(
+        handle.lower()
+        for handle in re.findall(r"@([A-Za-zА-Яа-яЁё0-9_.-]+)", full_name)
+    )
+    obvious_names = {
+        "larisa": "Лариса",
+        "larissa": "Лариса",
+        "natasha": "Наталья",
+        "natalia": "Наталья",
+        "natalya": "Наталья",
+        "nadia": "Надежда",
+        "nadezhda": "Надежда",
+        "sveta": "Светлана",
+        "svetlana": "Светлана",
+        "elena": "Елена",
+        "lena": "Елена",
+        "irina": "Ирина",
+        "marina": "Марина",
+        "olga": "Ольга",
+        "anna": "Анна",
+        "anya": "Анна",
+        "tatiana": "Татьяна",
+        "tatyana": "Татьяна",
+        "valentina": "Валентина",
+        "lyubov": "Любовь",
+        "lubov": "Любовь",
+        "alexander": "Александр",
+        "aleksandr": "Александр",
+        "sergey": "Сергей",
+        "sergei": "Сергей",
+        "yuri": "Юрий",
+        "yuriy": "Юрий",
+        "ilya": "Илья",
+        "ilnur": "Ильнур",
+        "dmitry": "Дмитрий",
+        "dmitriy": "Дмитрий",
+    }
+    for handle in possible_handles:
+        handle_compact = re.sub(r"[^a-zа-яё]", "", handle)
+        for latin_name, russian_name in obvious_names.items():
+            if handle_compact.startswith(latin_name):
+                return russian_name
 
-    if any(character.isdigit() for character in first_word):
-        return ""
+    return ""
 
-    return first_word
+
+def normalize_neona_first_greeting(message, contact):
+    """Убирает @username из обращения в первом сообщении Неоны."""
+
+    message = str(message or "").strip()
+    first_name = candidate_first_name(contact)
+    username = str(contact.get("username") or "").strip().lstrip("@")
+
+    if not message:
+        return message
+
+    # Сохраняем дружелюбное «привет», если модель уже выбрала такой тон.
+    first_fragment = message[:160].lower()
+    informal = "привет" in first_fragment
+    if first_name:
+        safe_greeting = f"{first_name}, привет!" if informal else f"{first_name}, здравствуйте!"
+    else:
+        safe_greeting = "Здравствуйте!"
+
+    if username:
+        username_re = re.escape(username)
+        patterns = (
+            rf"^(?:привет|здравствуйте)\s*,?\s*@{username_re}\s*[!,.]?\s*",
+            rf"^@{username_re}\s*[,!.-]?\s*(?:привет|здравствуйте)\s*[!,.]?\s*",
+            rf"^@{username_re}\s*[,!.-]?\s*",
+        )
+        for pattern in patterns:
+            new_message, replacements = re.subn(
+                pattern,
+                safe_greeting + " ",
+                message,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            if replacements:
+                return re.sub(r"\s{2,}", " ", new_message).strip()
+
+    # На всякий случай не разрешаем никам оставаться в самом обращении.
+    if re.match(r"^(?:привет|здравствуйте)\s*,?\s*@[^\s!,.]+", message, flags=re.IGNORECASE):
+        message = re.sub(
+            r"^(?:привет|здравствуйте)\s*,?\s*@[^\s!,.]+\s*[!,.]?\s*",
+            safe_greeting + " ",
+            message,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    return re.sub(r"\s{2,}", " ", message).strip()
 
 
 def build_neona_safe_first_message(owner_name, contact):
@@ -1654,6 +1755,7 @@ def validate_neona_first_message(message, owner_name):
 def finalize_neona_first_message(message, owner_name, contact):
     """Нормализует текст и заменяет небезопасный вариант шаблоном."""
 
+    message = normalize_neona_first_greeting(message, contact)
     message = ensure_neona_identity(message, owner_name)
     message = re.sub(r"\s+", " ", message).strip()
     errors = validate_neona_first_message(message, owner_name)
