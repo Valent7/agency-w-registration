@@ -1,0 +1,546 @@
+import hashlib
+import html
+import inspect
+import json
+
+import requests
+import streamlit as st
+
+
+REALTIME_MODEL = "gpt-realtime-2"
+REALTIME_VOICE = "marin"
+
+
+def _privacy_safe_user_id(telegram_id):
+    raw = f"agency-w-neola:{int(telegram_id)}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def build_neola_realtime_instructions(
+    owner_name,
+    ui_context,
+    onboarding_step=0,
+):
+    owner_name = str(owner_name or "Партнёр").strip()
+    ui_context = str(ui_context or "Агентство W").strip()
+
+    return f"""
+# Role and Objective
+Ты — Неола, живой голосовой наставник партнёра Агентства W.
+Партнёр: {owner_name}.
+Текущий интерфейс: {ui_context}.
+Текущий шаг онбординга: {int(onboarding_step)}/7.
+
+Твоя задача — помогать человеку прямо во время реальной работы,
+особенно если он пожилой, неуверенно пользуется компьютером или телефоном,
+боится нажать не туда или быстро забывает длинную инструкцию.
+
+# Language
+- Всегда говори по-русски, если человек сам не попросил другой язык.
+
+# Personality and Tone
+- Тёплая, спокойная, уважительная женщина-наставник.
+- Никакого снисходительного тона.
+- Говори естественно, как живой помощник рядом.
+- Не торопи.
+- Никогда не перегружай техническими терминами.
+
+# Golden Rule: one step = one action
+- Если человеку нужно что-то нажать, давай ТОЛЬКО ОДИН следующий шаг.
+- После шага остановись и дождись подтверждения человека.
+- Пример: «Нажмите “Агенты”. Скажите мне, когда откроется».
+- НЕ говори сразу: «Откройте Агенты, потом Стагирита, потом Неонию...».
+
+# Navigation map
+- Главная → «🤖 Агенты» → «🧭 Стагирит».
+- Внутри Стагирита находятся Неония, Неона и Неола.
+- Неония: анализ проекта/ЦА, Telegram-чаты, контакты, анализ и ТОП-10.
+- После ТОП-10 человек сам выбирает до 5 кандидатов.
+- Неона: персональное первое сообщение и дальнейший диалог.
+- Неола: голосовой наставник и сопровождение.
+
+# Adaptive navigation
+- Всегда учитывай текущий экран: {ui_context}.
+- Если человек уже находится на нужном шаге, не веди его сначала.
+- Если не уверена, что именно человек видит, спроси: «Что сейчас написано у вас на экране?»
+- Если он в Telegram, сначала уточни устройство: компьютер/Mac/Android/iPhone.
+- Не выдумывай расположение кнопок, если не уверена.
+
+# Elder-friendly behavior
+- Если человек говорит «не понял», объясни проще, а не повторяй тот же абзац.
+- Если говорит «повтори» — повтори только последний шаг.
+- Если говорит «медленнее» — говори заметно медленнее и короче.
+- Если говорит «где это?» — опиши ориентир на экране простыми словами.
+- После каждого действия подтверждай коротко: «Да, всё правильно».
+- Ошибки пользователя воспринимай спокойно: помоги вернуться на нужный шаг.
+
+# Conversation behavior
+- Это ЖИВОЙ разговор, не лекция.
+- Человек может тебя перебивать — остановись и выслушай.
+- Обычно отвечай 1–3 короткими предложениями.
+- Если вопрос простой, отвечай сразу без лишних вступлений.
+- Не перечисляй несколько вариантов, если человеку нужен один следующий шаг.
+
+# Day 1
+Цель первого дня — не изучить теорию, а сделать реальное действие:
+Неония → ТОП-10 → выбор → Неона → проверить/исправить → утвердить →
+отправить первое сообщение.
+
+# Human control
+- ИИ предлагает, человек принимает решение.
+- Не выбирай кандидатов вместо партнёра.
+- Не заставляй отправлять сообщение, если человек сомневается.
+- Помоги отредактировать формулировку простыми словами.
+
+# Meeting handoff
+Если Неона довела диалог до встречи:
+- спроси, проведёт ли новичок встречу сам или нужна помощь наставника;
+- если нужна помощь, время должно подходить собеседнику, новичку и наставнику;
+- встречу нельзя считать окончательно назначенной до общего подтверждения.
+
+# First phrase
+После подключения скажи коротко:
+«{owner_name}, я рядом. Скажите, где вы сейчас находитесь в Агентстве W, и пойдём по одному шагу».
+""".strip()
+
+
+def create_realtime_client_secret(
+    telegram_id,
+    owner_name,
+    ui_context,
+    onboarding_step=0,
+):
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY не найден в Streamlit Secrets.")
+
+    instructions = build_neola_realtime_instructions(
+        owner_name,
+        ui_context,
+        onboarding_step,
+    )
+
+    body = {
+        "session": {
+            "type": "realtime",
+            "model": REALTIME_MODEL,
+            "output_modalities": ["audio"],
+            "instructions": instructions,
+            "reasoning": {
+                "effort": "low",
+            },
+            "audio": {
+                "input": {
+                    "noise_reduction": {
+                        "type": "near_field",
+                    },
+                    "transcription": {
+                        "model": "gpt-4o-mini-transcribe",
+                        "language": "ru",
+                    },
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "eagerness": "low",
+                        "create_response": True,
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {
+                    "voice": REALTIME_VOICE,
+                    "speed": 0.95,
+                },
+            },
+            "max_output_tokens": 500,
+        }
+    }
+
+    response = requests.post(
+        "https://api.openai.com/v1/realtime/client_secrets",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "OpenAI-Safety-Identifier": _privacy_safe_user_id(telegram_id),
+        },
+        json=body,
+        timeout=30,
+    )
+
+    if not response.ok:
+        details = response.text[:800]
+        raise RuntimeError(
+            f"OpenAI Realtime не создал голосовую сессию: "
+            f"{response.status_code} {details}"
+        )
+
+    data = response.json()
+    token = str(data.get("value") or "").strip()
+    if not token:
+        raise RuntimeError("OpenAI Realtime не вернул временный ключ сессии.")
+
+    return token, instructions
+
+
+def _render_realtime_html(ephemeral_key, instructions, ui_context):
+    token_json = json.dumps(ephemeral_key)
+    instructions_json = json.dumps(instructions)
+    context_json = json.dumps(str(ui_context or "Агентство W"))
+
+    # Важно: все динамические значения передаются через JSON, а не вставляются
+    # как произвольный HTML.
+    return f"""
+<div id="neola-live-shell" style="
+    border:1px solid rgba(217,180,91,.42);
+    border-radius:20px;
+    padding:20px;
+    background:rgba(255,255,255,.035);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    color:#f5f1e8;
+">
+  <div style="font-size:28px;font-weight:700;margin-bottom:6px;">
+    🎙 Неола рядом
+  </div>
+  <div style="font-size:16px;color:#c8c1b5;margin-bottom:16px;line-height:1.45;">
+    Нажмите один раз и разговаривайте. Печатать ничего не нужно.
+    Можно сказать: «повтори», «медленнее», «где это?» или перебить Неолу.
+  </div>
+
+  <div id="neola-live-status" style="
+      padding:12px 14px;border-radius:12px;background:#171a20;
+      margin-bottom:14px;font-size:17px;">
+    ⚪ Неола ещё не подключена
+  </div>
+
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+    <button id="neola-live-start" style="
+      border:none;border-radius:14px;padding:14px 20px;
+      background:linear-gradient(180deg,#275d3b,#1f4d31);
+      color:white;font-size:18px;font-weight:700;cursor:pointer;">
+      🎙 Начать разговор
+    </button>
+    <button id="neola-live-stop" style="
+      border:1px solid #64666c;border-radius:14px;padding:14px 20px;
+      background:#202229;color:#f5f1e8;font-size:18px;font-weight:650;
+      cursor:pointer;display:none;">
+      Закончить
+    </button>
+  </div>
+
+  <div id="neola-live-transcript" style="
+      min-height:72px;max-height:250px;overflow:auto;
+      padding:12px 14px;border-radius:12px;background:#101217;
+      font-size:16px;line-height:1.5;color:#ded8cc;">
+    <div style="color:#8f938f;">Здесь будут коротко появляться ваши фразы и ответы Неолы.</div>
+  </div>
+</div>
+
+<script>
+(() => {{
+  const TOKEN = {token_json};
+  const INSTRUCTIONS = {instructions_json};
+  const CONTEXT = {context_json};
+
+  const shell = document.getElementById("neola-live-shell");
+  const statusEl = document.getElementById("neola-live-status");
+  const startBtn = document.getElementById("neola-live-start");
+  const stopBtn = document.getElementById("neola-live-stop");
+  const transcriptEl = document.getElementById("neola-live-transcript");
+
+  function setStatus(text) {{
+    if (statusEl) statusEl.textContent = text;
+  }}
+
+  function appendLine(who, text) {{
+    if (!transcriptEl || !text) return;
+    if (transcriptEl.dataset.empty !== "false") {{
+      transcriptEl.innerHTML = "";
+      transcriptEl.dataset.empty = "false";
+    }}
+    const row = document.createElement("div");
+    row.style.margin = "8px 0";
+    const label = document.createElement("strong");
+    label.textContent = who + ": ";
+    row.appendChild(label);
+    row.appendChild(document.createTextNode(text));
+    transcriptEl.appendChild(row);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }}
+
+  function uiConnected() {{
+    startBtn.style.display = "none";
+    stopBtn.style.display = "inline-block";
+    setStatus("🟢 Неола рядом. Говорите — она слушает.");
+  }}
+
+  function uiDisconnected() {{
+    startBtn.style.display = "inline-block";
+    stopBtn.style.display = "none";
+    setStatus("⚪ Разговор закончен");
+  }}
+
+  // Глобальный объект позволяет соединению пережить обычные rerun Streamlit,
+  // пока браузерная страница не перезагружена полностью.
+  if (!window.__agencyWNeolaLive) {{
+    window.__agencyWNeolaLive = {{
+      pc: null,
+      dc: null,
+      stream: null,
+      audioEl: null,
+      connected: false,
+      connecting: false,
+      assistantTranscript: "",
+      instructions: INSTRUCTIONS,
+      context: CONTEXT,
+    }};
+  }}
+
+  const live = window.__agencyWNeolaLive;
+  live.instructions = INSTRUCTIONS;
+  live.context = CONTEXT;
+
+  function sendContextUpdate() {{
+    if (!live.dc || live.dc.readyState !== "open") return;
+    live.dc.send(JSON.stringify({{
+      type: "session.update",
+      session: {{
+        type: "realtime",
+        instructions: live.instructions
+      }}
+    }}));
+  }}
+
+  if (live.connected && live.pc && live.pc.connectionState !== "closed") {{
+    uiConnected();
+    sendContextUpdate();
+  }}
+
+  async function startLive() {{
+    if (live.connected || live.connecting) {{
+      uiConnected();
+      return;
+    }}
+
+    live.connecting = true;
+    setStatus("🟡 Подключаю Неолу…");
+
+    try {{
+      const pc = new RTCPeerConnection();
+      const audioEl = document.createElement("audio");
+      audioEl.autoplay = true;
+      audioEl.setAttribute("playsinline", "");
+      audioEl.style.display = "none";
+      document.body.appendChild(audioEl);
+
+      pc.ontrack = (event) => {{
+        audioEl.srcObject = event.streams[0];
+        audioEl.play().catch(() => {{}});
+      }};
+
+      const stream = await navigator.mediaDevices.getUserMedia({{
+        audio: {{
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }}
+      }});
+
+      stream.getAudioTracks().forEach(track => pc.addTrack(track, stream));
+
+      const dc = pc.createDataChannel("oai-events");
+
+      dc.addEventListener("open", () => {{
+        live.connected = true;
+        live.connecting = false;
+        uiConnected();
+        sendContextUpdate();
+
+        // Просим Неолу начать первой короткой фразой.
+        dc.send(JSON.stringify({{
+          type: "response.create",
+          response: {{
+            instructions:
+              "Начни разговор одной короткой фразой приветствия из системной инструкции. " +
+              "После этого замолчи и слушай человека."
+          }}
+        }}));
+      }});
+
+      dc.addEventListener("message", (event) => {{
+        let msg;
+        try {{
+          msg = JSON.parse(event.data);
+        }} catch (_) {{
+          return;
+        }}
+
+        if (msg.type === "input_audio_buffer.speech_started") {{
+          setStatus("👂 Слушаю вас…");
+        }}
+
+        if (msg.type === "input_audio_buffer.speech_stopped") {{
+          setStatus("🟡 Поняла. Отвечаю…");
+        }}
+
+        if (msg.type === "conversation.item.input_audio_transcription.completed") {{
+          appendLine("Вы", msg.transcript || "");
+        }}
+
+        if (msg.type === "response.output_audio_transcript.delta") {{
+          live.assistantTranscript += (msg.delta || "");
+        }}
+
+        if (msg.type === "response.output_audio_transcript.done") {{
+          const finalText = (msg.transcript || live.assistantTranscript || "").trim();
+          if (finalText) appendLine("Неола", finalText);
+          live.assistantTranscript = "";
+        }}
+
+        if (msg.type === "response.done") {{
+          setStatus("🟢 Говорите — Неола слушает.");
+        }}
+
+        if (msg.type === "error") {{
+          const message = (msg.error && msg.error.message) || msg.message || "Неизвестная ошибка";
+          setStatus("🔴 " + message);
+        }}
+      }});
+
+      pc.addEventListener("connectionstatechange", () => {{
+        if (pc.connectionState === "failed" || pc.connectionState === "closed") {{
+          live.connected = false;
+          live.connecting = false;
+          uiDisconnected();
+        }}
+      }});
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sdpResponse = await fetch(
+        "https://api.openai.com/v1/realtime/calls",
+        {{
+          method: "POST",
+          body: offer.sdp,
+          headers: {{
+            "Authorization": "Bearer " + TOKEN,
+            "Content-Type": "application/sdp"
+          }}
+        }}
+      );
+
+      if (!sdpResponse.ok) {{
+        const details = await sdpResponse.text();
+        throw new Error("Не удалось открыть голосовую сессию: " + details);
+      }}
+
+      const answer = {{
+        type: "answer",
+        sdp: await sdpResponse.text()
+      }};
+
+      await pc.setRemoteDescription(answer);
+
+      live.pc = pc;
+      live.dc = dc;
+      live.stream = stream;
+      live.audioEl = audioEl;
+
+    }} catch (error) {{
+      live.connecting = false;
+      live.connected = false;
+      setStatus("🔴 " + (error.message || String(error)));
+      if (error && error.name === "NotAllowedError") {{
+        appendLine(
+          "Подсказка",
+          "Разрешите браузеру доступ к микрофону и нажмите «Начать разговор» ещё раз."
+        );
+      }}
+    }}
+  }}
+
+  function stopLive() {{
+    try {{
+      if (live.dc) live.dc.close();
+    }} catch (_) {{}}
+    try {{
+      if (live.pc) live.pc.close();
+    }} catch (_) {{}}
+    try {{
+      if (live.stream) live.stream.getTracks().forEach(track => track.stop());
+    }} catch (_) {{}}
+    try {{
+      if (live.audioEl) {{
+        live.audioEl.pause();
+        live.audioEl.srcObject = null;
+        live.audioEl.remove();
+      }}
+    }} catch (_) {{}}
+
+    live.pc = null;
+    live.dc = null;
+    live.stream = null;
+    live.audioEl = null;
+    live.connected = false;
+    live.connecting = false;
+    live.assistantTranscript = "";
+    uiDisconnected();
+  }}
+
+  startBtn.onclick = startLive;
+  stopBtn.onclick = stopLive;
+}})();
+</script>
+"""
+
+
+def render_neola_realtime_voice(
+    telegram_id,
+    owner_name,
+    ui_context,
+    onboarding_step=0,
+):
+    """
+    Первый живой голосовой прототип Неолы.
+
+    Важно:
+    - основной OPENAI_API_KEY остаётся только на сервере Streamlit;
+    - в браузер передаётся короткоживущий ephemeral client secret;
+    - разговор идёт напрямую браузер <-> OpenAI Realtime через WebRTC.
+    """
+    try:
+        token, instructions = create_realtime_client_secret(
+            telegram_id=telegram_id,
+            owner_name=owner_name,
+            ui_context=ui_context,
+            onboarding_step=onboarding_step,
+        )
+    except Exception as exc:
+        st.error(f"Не удалось подготовить живой голос Неолы: {exc}")
+        return False
+
+    html_body = _render_realtime_html(
+        ephemeral_key=token,
+        instructions=instructions,
+        ui_context=ui_context,
+    )
+
+    # Новые версии Streamlit умеют безопасно выполнять явно разрешённый JS
+    # через st.html без iframe — это предпочтительно для микрофона/WebRTC.
+    try:
+        params = inspect.signature(st.html).parameters
+    except Exception:
+        params = {}
+
+    if "unsafe_allow_javascript" not in params:
+        st.warning(
+            "Для живого голосового режима нужна версия Streamlit, "
+            "в которой st.html поддерживает JavaScript. "
+            "Сначала обновите Streamlit."
+        )
+        return False
+
+    st.html(
+        html_body,
+        unsafe_allow_javascript=True,
+        width="stretch",
+    )
+    return True
