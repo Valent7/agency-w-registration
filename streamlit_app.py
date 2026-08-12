@@ -29,6 +29,7 @@ from neola_partner_center import (
     render_partner_center,
 )
 from neola_realtime_voice import render_neola_realtime_voice
+import neola_role_policy  # фиксирует границы роли Неолы
 
 from neona_dialog_policy import (
     DialogError as NeonaDialogError,
@@ -3542,8 +3543,8 @@ if received_hash:
                                         st.caption(
                                             "Неония рекомендует людей, но окончательный "
                                             "выбор делает владелец кабинета. Откройте "
-                                            "карточку, изучите основания и отметьте нужных "
-                                            "людей. Общий лимит — не более 5 человек."
+                                            "карточку, изучите основания и отметьте тех, "
+                                            "с кем хотите работать. Количество определяет владелец."
                                         )
 
                                         global_candidates = st.session_state.get(
@@ -3565,10 +3566,9 @@ if received_hash:
                                             int(contact_id)
                                             for contact_id in owner_contacts
                                         }
-                                        recommended_limit = max(
-                                            0,
-                                            5 - sum( 1 for contact in owner_contacts.values() if isinstance(contact, dict) and str(contact.get("work_date") or "") == datetime.now(ZoneInfo("Europe/Berlin")).date().isoformat()),
-                                        )
+                                        # Жёсткого дневного лимита нет.
+                                        # Владелец сам определяет рабочий объём.
+                                        recommended_limit = 10
 
                                         existing_selected_ids = []
                                         for contact_id in st.session_state.get(
@@ -3599,11 +3599,7 @@ if received_hash:
                                             for contact_id in existing_selected_ids
                                             if contact_id not in top_candidate_by_id
                                         ]
-                                        current_chat_limit = max(
-                                            0,
-                                            recommended_limit
-                                            - len(selected_elsewhere_ids),
-                                        )
+                                        current_chat_limit = len(top_candidate_ids)
 
                                         for contact_id in top_candidate_ids:
                                             checkbox_key = (
@@ -3628,11 +3624,9 @@ if received_hash:
                                         ]
 
                                         if selected_elsewhere_ids:
-                                            st.info(
-                                                "В других источниках уже выбрано: "
-                                                f"{len(selected_elsewhere_ids)}. "
-                                                "Для этого чата осталось мест: "
-                                                f"{current_chat_limit}."
+                                            st.caption(
+                                                "В других источниках уже есть выбранные кандидаты. "
+                                                "Это не ограничивает выбор в текущем ТОП-10."
                                             )
 
                                         for number, candidate in enumerate(
@@ -3653,11 +3647,7 @@ if received_hash:
                                                     False,
                                                 )
                                             )
-                                            limit_reached = (
-                                                len(currently_checked)
-                                                >= current_chat_limit
-                                                and not is_checked
-                                            )
+                                            limit_reached = False
                                             username = (
                                                 f"@{candidate['username']}"
                                                 if candidate.get("username")
@@ -3671,10 +3661,7 @@ if received_hash:
                                                         f"{candidate['name']}"
                                                     ),
                                                     key=checkbox_key,
-                                                    disabled=(
-                                                        current_chat_limit == 0
-                                                        or limit_reached
-                                                    ),
+                                                    disabled=False,
                                                 )
                                                 st.markdown(
                                                     f"**{candidate['score']}% соответствия** "
@@ -4238,13 +4225,12 @@ if received_hash:
                                     )
 
                                     st.info(
-                                        "На рабочем столе показываются "
-                                        "10 лучших кандидатов с рекомендацией "
-                                        f"«Передать Неоне». Из них {first_name} "
-                                        "самостоятельно выбирает не более 5."
+                                        "Неония показывает 10 лучших кандидатов. "
+                                        f"{first_name} самостоятельно решает, "
+                                        "сколько из них передать Неоне."
                                     )
 
-                                    # Выбор владельцем до 5 кандидатов из ТОП-10 Неонии
+                                    # Выбор владельцем нужных кандидатов из ТОП-10 Неонии
                                     selected_candidates_key = (
                                         f"neonia_selected_candidates_{telegram_id}"
                                     )
@@ -4261,12 +4247,16 @@ if received_hash:
 
                                     if top_candidates:
                                         st.markdown(
-                                            f"#### ✅ Выбор {first_name} из списка Неонии"
+                                            "#### ⭐ ТОП-10 кандидатов"
                                         )
                                         st.caption(
                                             "Неония предлагает до 10 лучших кандидатов. "
-                                            "Кого передать Неоне, решает владелец кабинета. "
-                                            "Можно выбрать не более 5 человек."
+                                            "Кого и сколько передать Неоне, решает владелец кабинета."
+                                        )
+                                        st.info(
+                                            "Telegram может ограничивать аккаунт при слишком частых "
+                                            "первых сообщениях. Агентство не блокирует выбор: "
+                                            "темп работы определяет владелец."
                                         )
 
                                         candidate_by_id = {
@@ -4284,7 +4274,6 @@ if received_hash:
                                                 continue
                                             if normalized_id in candidate_by_id:
                                                 previously_selected.append(normalized_id)
-                                        previously_selected = previously_selected[:5]
 
                                         for contact_id in candidate_by_id:
                                             checkbox_key = (
@@ -4305,13 +4294,6 @@ if received_hash:
                                                 False,
                                             )
                                         ]
-                                        if len(checked_ids) > 5:
-                                            for contact_id in checked_ids[5:]:
-                                                st.session_state[
-                                                    "owner_select_candidate_"
-                                                    f"{telegram_id}_{contact_id}"
-                                                ] = False
-                                            checked_ids = checked_ids[:5]
 
                                         for candidate in top_candidates:
                                             contact_id = int(candidate["telegram_id"])
@@ -4322,9 +4304,7 @@ if received_hash:
                                             is_checked = st.session_state.get(
                                                 checkbox_key, False
                                             )
-                                            limit_reached = (
-                                                len(checked_ids) >= 5 and not is_checked
-                                            )
+                                            limit_reached = False
                                             username = (
                                                 f"@{candidate['username']}"
                                                 if candidate.get("username")
@@ -4335,7 +4315,7 @@ if received_hash:
                                                     f"Выбрать: {candidate['name']} · "
                                                     f"{candidate['score']}% · {username}",
                                                     key=checkbox_key,
-                                                    disabled=limit_reached,
+                                                    disabled=False,
                                                 )
                                                 with st.expander(
                                                     "Посмотреть карточку кандидата"
@@ -4901,7 +4881,7 @@ if received_hash:
                                 already_selected = (
                                     chosen_known_id in selected_ids
                                 )
-                                limit_reached = len(selected_ids) >= 5
+                                limit_reached = False
 
                                 familiarity_note = st.text_area(
                                     "Откуда и как вы знакомы?",
@@ -4966,17 +4946,12 @@ if received_hash:
                                         "Этот человек уже выбран "
                                         "среди текущих кандидатов."
                                     )
-                                elif limit_reached:
-                                    st.warning(
-                                        "Лимит 5 человек уже заполнен."
-                                    )
 
                                 if st.button(
                                     "➕ Добавить знакомого к работе",
                                     disabled=(
                                         already_added
                                         or already_selected
-                                        or limit_reached
                                     ),
                                     key=(
                                         "add_known_contact_"
