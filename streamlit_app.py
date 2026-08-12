@@ -30,7 +30,7 @@ from neola_partner_center import (
 )
 from neola_realtime_voice import render_neola_realtime_voice
 
-from neona_telegram_dialogs import (
+from neona_dialog_policy import (
     DialogError as NeonaDialogError,
     initialize_dialog_after_first_message,
     run_sync_owner_once,
@@ -1756,63 +1756,12 @@ def build_neona_safe_first_message(owner_name, contact):
 
 
 def validate_neona_first_message(message, owner_name):
-    """Проверяет простоту и безопасность первого сообщения."""
+    """Владелец — финальный редактор. Блокируем только пустое сообщение."""
 
     message = str(message or "").strip()
-    lowered = message.lower()
-    errors = []
-
     if not message:
         return ["сообщение пустое"]
-
-    if len(message) > 430:
-        errors.append("первое сообщение слишком длинное")
-
-    if "меня зовут неона" not in lowered:
-        errors.append("нет имени Неоны")
-
-    if not (
-        "секретарь-референт" in lowered
-        or "секретарь‑референт" in lowered
-    ):
-        errors.append("Неона должна представляться секретарём-референтом")
-
-    if not message.rstrip().endswith("Вам это интересно?"):
-        errors.append("сообщение должно заканчиваться «Вам это интересно?»")
-
-    if message.count("?") > 2:
-        errors.append("слишком много вопросов")
-
-    if "http://" in lowered or "https://" in lowered or "www." in lowered:
-        errors.append("в первом сообщении нельзя отправлять ссылку")
-
-    cognitive_overload = (
-        "до пяти",
-        "за пару часов",
-        "автоматические анонсы",
-        "автоматические сценарии",
-        "сценарии в telegram",
-        "директор процесса",
-        "вы остаётесь директором",
-        "вы остаетесь директором",
-        "специализированных ии-помощников",
-        "специализированные ии-помощники",
-    )
-    for phrase in cognitive_overload:
-        if phrase in lowered:
-            errors.append(f"слишком сложная формулировка: {phrase}")
-
-    message_words = set(
-        re.findall(r"[a-zа-яё]+(?:[-‑][a-zа-яё]+)?", lowered)
-    )
-    if message_words.intersection(set(NEONA_FORBIDDEN_AI_LABELS)):
-        errors.append("ИИ нельзя называть ботом или чат-ботом")
-
-    for phrase in NEONA_FIRST_MESSAGE_FORBIDDEN:
-        if phrase in lowered:
-            errors.append(f"запрещённая формулировка: {phrase}")
-
-    return errors
+    return []
 
 
 
