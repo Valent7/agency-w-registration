@@ -10,6 +10,7 @@ from neona_reglament import (
     build_neona_first_message_system_prompt,
     build_neona_first_messages_system_prompt,
     choose_neona_magnet,
+    NEONA_MAGNET_NAMES,
     neona_identity,
     neona_reglament_markdown,
 )
@@ -1697,69 +1698,65 @@ def normalize_neona_first_greeting(message, contact):
 
 
 def build_neona_safe_first_message(owner_name, contact):
-    """Короткий безопасный запасной текст по человеческому магниту."""
+    """Запасное первое сообщение с нулевой когнитивной нагрузкой."""
 
     first_name = candidate_first_name(contact)
     magnet = choose_neona_magnet(contact)
-    owner_identity = neona_identity(owner_name)
+    identity = neona_identity(owner_name)
 
-    openers = {
+    templates = {
         "Не менять свой проект — усилить его": (
-            "Если у вас уже есть своё направление, менять его ради другого не нужно."
+            "если у вас уже есть свой проект — бросать его ради другого точно не нужно.",
+            "Мы создаём Агентство, которое помогает убрать часть рутины "
+            "из уже существующего бизнеса.",
         ),
         "Не ещё одна школа — реальная помощь в работе": (
-            "Иногда человеку нужна не ещё одна школа, а помощь прямо в момент работы."
+            "иногда человеку нужна не ещё одна школа, а помощь прямо во время работы.",
+            "Мы создаём Агентство, которое помогает делать следующий шаг сразу, "
+            "а не оставляет человека один на один с обучением.",
         ),
         "Не писать всем подряд — начать с подходящих людей": (
-            "Не обязательно писать всем подряд — сначала можно понять, с кем разговор действительно имеет смысл."
+            "не обязательно писать всем подряд — сначала можно понять, "
+            "с кем разговор действительно имеет смысл.",
+            "Агентство помогает начать именно с тех людей, кому тема может быть близка.",
         ),
         "ИИ не нужно изучать — можно просто спросить голосом": (
-            "ИИ больше не обязательно изучать — с ним можно просто разговаривать."
+            "ИИ больше не обязательно изучать — с ним можно просто разговаривать.",
+            "Можно сказать голосом «Куда мне нажать?» — и получить помощь по шагам.",
         ),
         "Вернуть себе время": (
-            "Самый дорогой ресурс сегодня — время, и часть рутины уже можно отдать ИИ."
+            "самое дорогое сегодня — время, и часть рутины уже можно передать ИИ.",
+            "Мы создаём Агентство, которое помогает вернуть человеку время "
+            "для действительно важных дел.",
         ),
         "Новичок не остаётся один": (
-            "Мы нашли способ не оставлять новичка один на один с новой системой."
+            "мы нашли способ снять с лидера часть постоянной заботы о новичках.",
+            "Теперь новичок может просто спросить голосом «Куда мне нажать?» "
+            "и получить помощь сразу.",
         ),
         "Своя ИИ-команда рядом": (
-            "Представьте: рядом не один универсальный помощник, а небольшая ИИ-команда."
+            "сегодня одному человеку уже не обязательно делать всю рутину самому.",
+            "Мы создаём Агентство, где рядом работает небольшая ИИ-команда "
+            "и берёт часть повседневных задач на себя.",
         ),
     }
 
-    benefits = {
-        "Не менять свой проект — усилить его": (
-            "Агентство W можно подключать к тому, что человек уже развивает, чтобы снять часть рутины."
-        ),
-        "Не ещё одна школа — реальная помощь в работе": (
-            "ИИ-помощники помогают делать реальные шаги, а не только объясняют теорию."
-        ),
-        "Не писать всем подряд — начать с подходящих людей": (
-            "Неония помогает сначала выделить подходящих людей, а решение, кому писать, остаётся за владельцем."
-        ),
-        "ИИ не нужно изучать — можно просто спросить голосом": (
-            "Неоле достаточно сказать «куда мне нажать?» — и она ведёт по одному шагу."
-        ),
-        "Вернуть себе время": (
-            "Агентство W строится вокруг простой идеи — вернуть человеку время, которое съедает рутина."
-        ),
-        "Новичок не остаётся один": (
-            "Голосовая Неола может вести человека по одному действию и объяснять ещё раз, если он запутался."
-        ),
-        "Своя ИИ-команда рядом": (
-            "У разных агентов свои роли: анализ, диалоги, координация и голосовое сопровождение."
-        ),
-    }
+    opener, benefit = templates.get(
+        magnet,
+        templates["Своя ИИ-команда рядом"],
+    )
 
-    opener = openers.get(magnet, openers["Своя ИИ-команда рядом"])
     if first_name:
-        opener = f"{first_name}, {opener[0].lower() + opener[1:]}"
-    return f"{opener} {owner_identity} {benefits.get(magnet, benefits['Своя ИИ-команда рядом'])}"
+        opener = f"{first_name}, {opener}"
+    else:
+        opener = opener[0].upper() + opener[1:]
+
+    return f"{opener} {identity} {benefit} Вам это интересно?"
 
 
 
 def validate_neona_first_message(message, owner_name):
-    """Проверяет безопасность, не превращая живой текст обратно в шаблон."""
+    """Проверяет простоту и безопасность первого сообщения."""
 
     message = str(message or "").strip()
     lowered = message.lower()
@@ -1768,31 +1765,48 @@ def validate_neona_first_message(message, owner_name):
     if not message:
         return ["сообщение пустое"]
 
-    has_neona_name = "меня зовут неона" in lowered
-    has_role = (
+    if len(message) > 430:
+        errors.append("первое сообщение слишком длинное")
+
+    if "меня зовут неона" not in lowered:
+        errors.append("нет имени Неоны")
+
+    if not (
         "секретарь-референт" in lowered
         or "секретарь‑референт" in lowered
-    )
-    if not (has_neona_name and has_role):
-        errors.append(
-            "нет представления Неоны как секретаря-референта владельца"
-        )
+    ):
+        errors.append("Неона должна представляться секретарём-референтом")
 
-    # Вопрос допустим, но не обязателен. Главное — не устраивать анкету.
-    if message.count("?") > 1:
-        errors.append("в первом сообщении не должно быть больше одного вопроса")
+    if not message.rstrip().endswith("Вам это интересно?"):
+        errors.append("сообщение должно заканчиваться «Вам это интересно?»")
+
+    if message.count("?") > 2:
+        errors.append("слишком много вопросов")
 
     if "http://" in lowered or "https://" in lowered or "www." in lowered:
         errors.append("в первом сообщении нельзя отправлять ссылку")
 
+    cognitive_overload = (
+        "до пяти",
+        "за пару часов",
+        "автоматические анонсы",
+        "автоматические сценарии",
+        "сценарии в telegram",
+        "директор процесса",
+        "вы остаётесь директором",
+        "вы остаетесь директором",
+        "специализированных ии-помощников",
+        "специализированные ии-помощники",
+    )
+    for phrase in cognitive_overload:
+        if phrase in lowered:
+            errors.append(f"слишком сложная формулировка: {phrase}")
+
     message_words = set(
         re.findall(r"[a-zа-яё]+(?:[-‑][a-zа-яё]+)?", lowered)
     )
-    forbidden_ai_labels = set(NEONA_FORBIDDEN_AI_LABELS)
-    if message_words.intersection(forbidden_ai_labels):
-        errors.append(
-            "ИИ-помощников нельзя называть ботами или чат-ботами"
-        )
+    if message_words.intersection(set(NEONA_FORBIDDEN_AI_LABELS)):
+        errors.append("ИИ нельзя называть ботом или чат-ботом")
 
     for phrase in NEONA_FIRST_MESSAGE_FORBIDDEN:
         if phrase in lowered:
@@ -5546,9 +5560,98 @@ if received_hash:
                                             draft.get("magnet")
                                             or choose_neona_magnet(contact)
                                         ).strip()
-                                        st.caption(
-                                            f"🧲 Магнит: {selected_magnet}"
+                                        if selected_magnet not in NEONA_MAGNET_NAMES:
+                                            selected_magnet = choose_neona_magnet(contact)
+
+                                        magnet_index = list(
+                                            NEONA_MAGNET_NAMES
+                                        ).index(selected_magnet)
+
+                                        magnet_columns = st.columns([3, 1])
+                                        chosen_magnet = magnet_columns[0].selectbox(
+                                            "🧲 Магнит первого сообщения",
+                                            options=list(NEONA_MAGNET_NAMES),
+                                            index=magnet_index,
+                                            key=(
+                                                "neona_magnet_select_"
+                                                f"{telegram_id}_{contact_id}_"
+                                                f"{draft_revision}"
+                                            ),
                                         )
+                                        rewrite_for_magnet = magnet_columns[1].button(
+                                            "✨ Переписать",
+                                            disabled=bool(draft.get("sent")),
+                                            key=(
+                                                "neona_rewrite_for_magnet_"
+                                                f"{telegram_id}_{contact_id}_"
+                                                f"{draft_revision}"
+                                            ),
+                                        )
+
+                                        if (
+                                            chosen_magnet != selected_magnet
+                                            and not draft.get("sent")
+                                        ):
+                                            st.caption(
+                                                "Вы выбрали другой магнит. "
+                                                "Нажмите «✨ Переписать», "
+                                                "и Неона создаст новый текст под него."
+                                            )
+
+                                        if rewrite_for_magnet:
+                                            with st.spinner(
+                                                "Неона переписывает сообщение "
+                                                "под выбранный магнит..."
+                                            ):
+                                                try:
+                                                    contact[
+                                                        "selected_magnet_override"
+                                                    ] = chosen_magnet
+                                                    new_message = (
+                                                        generate_neona_first_message(
+                                                            first_name,
+                                                            passport["analysis"],
+                                                            contact,
+                                                        )
+                                                    )
+                                                    draft = {
+                                                        "message": new_message,
+                                                        "magnet": chosen_magnet,
+                                                        "approved": False,
+                                                        "status": (
+                                                            "Сообщение переписано "
+                                                            "под выбранный магнит"
+                                                        ),
+                                                        "revision": (
+                                                            draft_revision + 1
+                                                        ),
+                                                        "validation_errors": [],
+                                                    }
+                                                    drafts[contact_id] = draft
+                                                    drafts.pop(
+                                                        str(contact_id),
+                                                        None,
+                                                    )
+                                                    st.session_state[
+                                                        neona_drafts_key
+                                                    ] = drafts
+                                                    contact["status"] = draft[
+                                                        "status"
+                                                    ]
+                                                    st.session_state[
+                                                        candidates_key
+                                                    ] = candidate_results
+                                                    persist_workspace_if_changed(
+                                                        telegram_id,
+                                                        force=True,
+                                                    )
+                                                    st.rerun()
+                                                except Exception as exc:
+                                                    st.error(
+                                                        "Не удалось переписать "
+                                                        f"сообщение: {exc}"
+                                                    )
+
                                         edited_message = st.text_area(
                                             "Первое сообщение",
                                             value=str(
@@ -5615,6 +5718,8 @@ if received_hash:
                                                 "действующему регламенту..."
                                             ):
                                                 try:
+                                                    # Если владелец вручную выбрал магнит,
+                                                    # повторная генерация его не меняет.
                                                     new_message = (
                                                         generate_neona_first_message(
                                                             first_name,
