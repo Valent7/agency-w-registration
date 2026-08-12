@@ -9,6 +9,7 @@ from neona_reglament import (
     NEONA_FORBIDDEN_CLAIMS,
     build_neona_first_message_system_prompt,
     build_neona_first_messages_system_prompt,
+    choose_neona_magnet,
     neona_identity,
     neona_reglament_markdown,
 )
@@ -1696,34 +1697,69 @@ def normalize_neona_first_greeting(message, contact):
 
 
 def build_neona_safe_first_message(owner_name, contact):
-    """Правдивый запасной текст о реально работающих возможностях."""
+    """Короткий безопасный запасной текст по человеческому магниту."""
 
     first_name = candidate_first_name(contact)
-    greeting = (
-        f"{first_name}, здравствуйте!"
-        if first_name
-        else "Здравствуйте!"
-    )
+    magnet = choose_neona_magnet(contact)
+    owner_identity = neona_identity(owner_name)
 
-    return (
-        f"{greeting} {neona_identity(owner_name)} "
-        f"{owner_name} создаёт команду ИИ-помощников, где каждый отвечает "
-        "за свою часть работы. Один находит подходящих людей, другой готовит "
-        "для каждого персональное первое сообщение, а окончательное решение "
-        "всегда остаётся за человеком. Уже сейчас они работают как единая "
-        "команда, и со временем она будет расти. Хотите увидеть, как это "
-        "выглядит на реальном примере?"
-    )
+    openers = {
+        "Не менять свой проект — усилить его": (
+            "Если у вас уже есть своё направление, менять его ради другого не нужно."
+        ),
+        "Не ещё одна школа — реальная помощь в работе": (
+            "Иногда человеку нужна не ещё одна школа, а помощь прямо в момент работы."
+        ),
+        "Не писать всем подряд — начать с подходящих людей": (
+            "Не обязательно писать всем подряд — сначала можно понять, с кем разговор действительно имеет смысл."
+        ),
+        "ИИ не нужно изучать — можно просто спросить голосом": (
+            "ИИ больше не обязательно изучать — с ним можно просто разговаривать."
+        ),
+        "Вернуть себе время": (
+            "Самый дорогой ресурс сегодня — время, и часть рутины уже можно отдать ИИ."
+        ),
+        "Новичок не остаётся один": (
+            "Мы нашли способ не оставлять новичка один на один с новой системой."
+        ),
+        "Своя ИИ-команда рядом": (
+            "Представьте: рядом не один универсальный помощник, а небольшая ИИ-команда."
+        ),
+    }
+
+    benefits = {
+        "Не менять свой проект — усилить его": (
+            "Агентство W можно подключать к тому, что человек уже развивает, чтобы снять часть рутины."
+        ),
+        "Не ещё одна школа — реальная помощь в работе": (
+            "ИИ-помощники помогают делать реальные шаги, а не только объясняют теорию."
+        ),
+        "Не писать всем подряд — начать с подходящих людей": (
+            "Неония помогает сначала выделить подходящих людей, а решение, кому писать, остаётся за владельцем."
+        ),
+        "ИИ не нужно изучать — можно просто спросить голосом": (
+            "Неоле достаточно сказать «куда мне нажать?» — и она ведёт по одному шагу."
+        ),
+        "Вернуть себе время": (
+            "Агентство W строится вокруг простой идеи — вернуть человеку время, которое съедает рутина."
+        ),
+        "Новичок не остаётся один": (
+            "Голосовая Неола может вести человека по одному действию и объяснять ещё раз, если он запутался."
+        ),
+        "Своя ИИ-команда рядом": (
+            "У разных агентов свои роли: анализ, диалоги, координация и голосовое сопровождение."
+        ),
+    }
+
+    opener = openers.get(magnet, openers["Своя ИИ-команда рядом"])
+    if first_name:
+        opener = f"{first_name}, {opener[0].lower() + opener[1:]}"
+    return f"{opener} {owner_identity} {benefits.get(magnet, benefits['Своя ИИ-команда рядом'])}"
+
 
 
 def validate_neona_first_message(message, owner_name):
-    """Проверяет только существенные рамки первого сообщения Неоны.
-
-    Валидатор не считает знаки и предложения и не требует точного совпадения
-    с шаблонными фразами. Он блокирует только действительно опасные случаи:
-    отсутствие представления, несколько вопросов, запрещённые обещания,
-    слово «бот» и ссылки в первом сообщении.
-    """
+    """Проверяет безопасность, не превращая живой текст обратно в шаблон."""
 
     message = str(message or "").strip()
     lowered = message.lower()
@@ -1733,15 +1769,18 @@ def validate_neona_first_message(message, owner_name):
         return ["сообщение пустое"]
 
     has_neona_name = "меня зовут неона" in lowered
-    has_helper_role = "помощниц" in lowered
-    if not (has_neona_name and has_helper_role):
-        errors.append("нет понятного представления Неоны как помощницы владельца")
+    has_role = (
+        "секретарь-референт" in lowered
+        or "секретарь‑референт" in lowered
+    )
+    if not (has_neona_name and has_role):
+        errors.append(
+            "нет представления Неоны как секретаря-референта владельца"
+        )
 
-    if message.count("?") != 1:
-        errors.append("в первом сообщении должен быть один простой вопрос")
-
-    if "ии-помощник" not in lowered and "ии‑помощник" not in lowered:
-        errors.append("не сказано о команде ИИ-помощников")
+    # Вопрос допустим, но не обязателен. Главное — не устраивать анкету.
+    if message.count("?") > 1:
+        errors.append("в первом сообщении не должно быть больше одного вопроса")
 
     if "http://" in lowered or "https://" in lowered or "www." in lowered:
         errors.append("в первом сообщении нельзя отправлять ссылку")
@@ -1760,6 +1799,8 @@ def validate_neona_first_message(message, owner_name):
             errors.append(f"запрещённая формулировка: {phrase}")
 
     return errors
+
+
 
 def finalize_neona_first_message(message, owner_name, contact):
     """Нормализует текст и заменяет небезопасный вариант шаблоном."""
@@ -1800,6 +1841,7 @@ def generate_neona_first_messages(
             "source_chat_title": item.get("source_chat_title", ""),
             "profile_about": item.get("profile_about", ""),
             "public_messages": item.get("public_messages", [])[:3],
+            "selected_magnet": choose_neona_magnet(item),
         }
         for item in selected_candidates
     ]
@@ -1849,6 +1891,10 @@ def generate_neona_first_messages(
 
         result[contact_id] = {
             "message": message,
+            "magnet": (
+                str(item.get("magnet") or "").strip()
+                or choose_neona_magnet(contact)
+            ),
             "approved": False,
             "status": "Сообщение подготовлено",
         }
@@ -1863,6 +1909,7 @@ def generate_neona_first_messages(
                 owner_name,
                 contact,
             ),
+            "magnet": choose_neona_magnet(contact),
             "approved": False,
             "status": "Сообщение подготовлено",
         }
@@ -1925,7 +1972,7 @@ def search_known_contacts(contacts, query, limit=20):
 
 
 def ensure_neona_identity(message, owner_name):
-    """Гарантирует одно простое представление Неоны без повторов."""
+    """Гарантирует одно представление Неоны как секретаря-референта."""
 
     message = str(message or "").strip()
     identity = neona_identity(owner_name)
@@ -2014,6 +2061,7 @@ def generate_neona_first_message(
         "must_mention": contact.get("must_mention", ""),
         "avoid": contact.get("avoid", ""),
         "known_contact": is_known_contact,
+        "selected_magnet": choose_neona_magnet(contact),
     }
 
     request = (
@@ -5458,6 +5506,7 @@ if received_hash:
                                                     )
                                                     drafts[contact_id] = {
                                                         "message": message,
+                                                        "magnet": choose_neona_magnet(contact),
                                                         "approved": False,
                                                         "status": (
                                                             "Сообщение подготовлено"
@@ -5492,6 +5541,13 @@ if received_hash:
                                             "neona_agent_message_text_"
                                             f"{telegram_id}_{contact_id}_"
                                             f"{draft_revision}"
+                                        )
+                                        selected_magnet = str(
+                                            draft.get("magnet")
+                                            or choose_neona_magnet(contact)
+                                        ).strip()
+                                        st.caption(
+                                            f"🧲 Магнит: {selected_magnet}"
                                         )
                                         edited_message = st.text_area(
                                             "Первое сообщение",
@@ -5568,6 +5624,7 @@ if received_hash:
                                                     )
                                                     draft = {
                                                         "message": new_message,
+                                                        "magnet": choose_neona_magnet(contact),
                                                         "approved": False,
                                                         "status": (
                                                             "Сообщение сформировано заново"
