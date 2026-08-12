@@ -426,7 +426,7 @@ def _attention_label(activation):
 
 def render_my_activation(telegram_id):
     activation = ensure_partner_activation(telegram_id)
-    st.markdown("#### 🔐Моя активация Neonexa)
+    st.markdown("#### 🔐Моя активация Neonexa")
     st.write(activation_label(activation))
 
     if activation_is_confirmed(activation):
