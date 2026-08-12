@@ -209,7 +209,7 @@ def analyze_neoxa_proof(image_bytes, mime_type):
     body = {
         "model": "gpt-5-mini",
         "instructions": (
-            "Ты проверяешь скриншот активации партнёра NeoXa/NeoNexa. "
+            "Ты проверяешь скриншот активации партнёра Neonexa. "
             "Не подтверждай покупку окончательно — только извлеки видимые данные. "
             "Верни ТОЛЬКО JSON-объект: nickname (строка), lodges_count (целое число), "
             "looks_like_neoxa (true/false), confidence ('высокая'|'средняя'|'низкая'), "
@@ -426,7 +426,7 @@ def _attention_label(activation):
 
 def render_my_activation(telegram_id):
     activation = ensure_partner_activation(telegram_id)
-    st.markdown("#### 🔐 Моя активация NeoXa")
+    st.markdown("#### 🔐Моя активация Neonexa)
     st.write(activation_label(activation))
 
     if activation_is_confirmed(activation):
@@ -444,11 +444,11 @@ def render_my_activation(telegram_id):
         st.warning(f"Наставник попросил новый скриншот: {reason}")
 
     st.caption(
-        "Загрузите скриншот NeoXa, на котором одновременно видны ваш ник и "
+        "Загрузите скриншот Neonexa, на котором одновременно видны ваш ник и "
         "количество приобретённых/активированных лож (не меньше 5)."
     )
     uploaded = st.file_uploader(
-        "Скриншот NeoXa",
+        "Скриншот Neonexa",
         type=["png", "jpg", "jpeg", "webp"],
         key=f"neola_activation_proof_{telegram_id}",
     )
@@ -605,7 +605,7 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                     if proof and proof.get("proof_image_base64"):
                         try:
                             raw = base64.b64decode(proof["proof_image_base64"])
-                            st.image(raw, caption="Подтверждение NeoXa", width=420)
+                            st.image(raw, caption="Подтверждение Neonexa", width=420)
                         except Exception:
                             st.warning("Скриншот сохранён, но не удалось показать предпросмотр.")
                     ai_result = (proof or {}).get("proof_ai_result") or {}
