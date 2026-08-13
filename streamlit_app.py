@@ -2706,6 +2706,43 @@ if received_hash:
         if not telegram_connected:
             st.stop()
 
+        # ---------------------------------------------------------
+        # ШЛЮЗ АКТИВАЦИИ НОВОГО ПАРТНЁРА
+        # До подтверждения 5 лож Neonexa рабочий кабинет не открывается.
+        # При этом партнёр обязательно должен иметь доступ к экрану,
+        # где он сам загружает скриншот подтверждения.
+        # ---------------------------------------------------------
+        try:
+            entry_activation = ensure_partner_activation(int(telegram_id))
+        except Exception as exc:
+            st.error(
+                "Не удалось проверить активацию партнёра. "
+                "Попробуйте обновить страницу."
+            )
+            st.caption(f"Техническая причина: {exc}")
+            st.stop()
+
+        if not activation_is_confirmed(entry_activation):
+            st.markdown("## 🔐 Активация доступа к Агентству W")
+            st.info(
+                "Для начала работы подтвердите приобретение/активацию "
+                "не менее 5 лож в Neonexa."
+            )
+            st.caption(
+                "До подтверждения скриншота рабочие разделы Агентства W "
+                "и Неола недоступны."
+            )
+
+            # render_neola_agent при неподтверждённой активации
+            # показывает только безопасный экран загрузки скриншота.
+            render_neola_agent(
+                int(telegram_id),
+                first_name,
+                "🔐 Активация доступа",
+                ask_openai,
+            )
+            st.stop()
+
         hydrate_workspace_state_once(telegram_id)
 
         persistence_ready = st.session_state.get(
