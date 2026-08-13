@@ -30,6 +30,13 @@ from neola_partner_center import (
 )
 from neola_realtime_voice import render_neola_realtime_voice
 import neola_role_policy  # фиксирует границы роли Неолы
+from neonia_intelligence_v1 import (
+    analyze_candidate_project_risk,
+    analyze_owner_project_target_profile,
+    render_project_risk,
+    render_target_profile,
+    target_profile_for_analysis,
+)
 
 from neona_dialog_policy import (
     DialogError as NeonaDialogError,
@@ -1446,7 +1453,15 @@ def analyze_contacts_for_target_audience(
   «Нужно больше данных»,
   «Пока не подходит»;
 - message_angle — безопасная тема первого обращения,
-  без обещаний дохода и давления.
+  без обещаний дохода и давления;
+- project_name — название проекта/компании, который человек явно продвигает,
+  только если это следует из данных; иначе пустая строка;
+- project_url — ссылка на этот проект, только если она реально есть в данных;
+- project_evidence — 1 короткая фраза, откуда видно связь человека с проектом.
+
+ВАЖНО: интерес к ИИ, криптовалюте или Telegram сам по себе НЕ делает
+человека целевой аудиторией. Оценивай соответствие именно сохранённому
+портрету ЦА проекта владельца.
 
 Оценка должна опираться прежде всего на bio, прежнюю переписку
 и явные интересы человека. Отсутствие username, телефона или bio
@@ -1536,6 +1551,11 @@ def analyze_contacts_for_target_audience(
                         or "Нейтральное знакомство"
                     )[:500]
                 ),
+                "project_name": str(item.get("project_name") or "")[:180],
+                "project_url": str(item.get("project_url") or "")[:900],
+                "project_evidence": str(
+                    item.get("project_evidence") or ""
+                )[:500],
                 "status": "Новый кандидат",
                 "analyzed_at": datetime.now(
                     ZoneInfo("Europe/Berlin")
@@ -2950,7 +2970,7 @@ if received_hash:
                     neonia_mode = st.radio(
                 "Выберите задачу Неонии:",
                 [
-                    "🎯 Анализ проекта и ЦА",
+                    "🎯 Определить мою целевую аудиторию",
                     "🔎 Поиск чатов",
                     "🎯 Поиск контактов в чатах по ЦА",
                     "👥 Поиск контактов",
@@ -2959,7 +2979,7 @@ if received_hash:
                 horizontal=True,
                 key="neonia_mode",
             )
-                    if neonia_mode != "🎯 Анализ проекта и ЦА":
+                    if neonia_mode != "🎯 Определить мою целевую аудиторию":
                         mode_messages = {
                         "🔎 Поиск чатов": (
                             "Здесь Неония загружает доступные Telegram-группы "
@@ -3219,7 +3239,7 @@ if received_hash:
 
                             if not passport:
                                 st.warning(
-                                    "Сначала откройте «Анализ проекта и ЦА» "
+                                    "Сначала откройте «Определить мою целевую аудиторию» "
                                     "и создайте паспорт целевой аудитории."
                                 )
                             elif not eligible_chats:
@@ -4376,6 +4396,69 @@ if received_hash:
                                                         f"{candidate.get('message_angle', '—')}"
                                                     )
 
+                                                    project_name = str(
+                                                        candidate.get("project_name") or ""
+                                                    ).strip()
+                                                    project_url = str(
+                                                        candidate.get("project_url") or ""
+                                                    ).strip()
+                                                    project_evidence = str(
+                                                        candidate.get("project_evidence") or ""
+                                                    ).strip()
+
+                                                    if project_name:
+                                                        st.divider()
+                                                        st.write(
+                                                            f"**🔎 Проект кандидата:** {project_name}"
+                                                        )
+                                                        if project_evidence:
+                                                            st.caption(project_evidence)
+
+                                                        risk_key = (
+                                                            "neonia_project_risk_"
+                                                            f"{telegram_id}_{contact_id}"
+                                                        )
+                                                        existing_risk = st.session_state.get(
+                                                            risk_key
+                                                        )
+                                                        if isinstance(existing_risk, dict):
+                                                            render_project_risk(existing_risk)
+
+                                                        if st.button(
+                                                            "🔎 Проверить риск проекта",
+                                                            key=(
+                                                                "check_project_risk_"
+                                                                f"{telegram_id}_{contact_id}"
+                                                            ),
+                                                        ):
+                                                            with st.spinner(
+                                                                "Неония проверяет факты и источники..."
+                                                            ):
+                                                                try:
+                                                                    risk = analyze_candidate_project_risk(
+                                                                        ask_openai,
+                                                                        project_name,
+                                                                        project_url,
+                                                                        project_evidence,
+                                                                    )
+                                                                except Exception as exc:
+                                                                    st.error(
+                                                                        "Не удалось проверить проект: "
+                                                                        + str(exc)
+                                                                    )
+                                                                else:
+                                                                    st.session_state[risk_key] = risk
+                                                                    persist_workspace_if_changed(
+                                                                        telegram_id,
+                                                                        force=True,
+                                                                    )
+                                                                    st.rerun()
+                                                    else:
+                                                        st.caption(
+                                                            "⚪ Проект кандидата не определён — "
+                                                            "Неония не будет его придумывать."
+                                                        )
+
                                         final_selected_ids = [
                                             contact_id
                                             for contact_id in candidate_by_id
@@ -4452,143 +4535,99 @@ if received_hash:
                                         st.rerun()
 
                         st.stop()
+                    passport_key = (
+                        f"neonia_target_audience_passport_{telegram_id}"
+                    )
+                    saved_passport = st.session_state.get(passport_key)
+                    if isinstance(saved_passport, dict) and isinstance(
+                        saved_passport.get("profile"), dict
+                    ):
+                        st.markdown("### ✅ Сохранённый портрет ЦА")
+                        render_target_profile(saved_passport["profile"])
+                        st.caption(
+                            "Неония использует именно этот портрет при следующем "
+                            "анализе Telegram-контактов."
+                        )
+                        st.divider()
+
+                    st.markdown("### 🎯 Определить мою целевую аудиторию")
+                    st.write(
+                        "Добавьте материалы вашего проекта. Неония не будет писать "
+                        "длинный отчёт — она сформирует короткий светофор и чёткий "
+                        "портрет людей, которых стоит искать."
+                    )
+
                     with st.form("neonia_source_form"):
                         project_links = st.text_area(
                             "🔗 Ссылки на проект",
                             placeholder=(
                                 "Официальный сайт, страница продукта, "
-                                "презентация или ролик — каждая ссылка "
-                                "с новой строки."
+                                "презентация или ролик — каждая ссылка с новой строки."
                             ),
-                            height=120,
+                            height=110,
                         )
 
                         project_files = st.file_uploader(
-                            "📄 Загрузите материалы проекта",
-                            type=[
-                                "pdf",
-                                "docx",
-                                "pptx",
-                                "txt",
-                                "csv",
-                                "xlsx",
-                            ],
+                            "📄 Материалы проекта",
+                            type=["pdf", "docx", "pptx", "txt", "csv", "xlsx"],
                             accept_multiple_files=True,
-                            help=(
-                                "Можно загрузить сразу несколько документов."
-                            ),
                         )
 
                         owner_note = st.text_area(
-                            "📝 Комментарий владельца — необязательно",
+                            "📝 Что особенно важно учесть — необязательно",
                             placeholder=(
-                                "Например: отдельно проверь продукт, "
-                                "маркетинг, доходность и возможные риски."
+                                "Например: нам нужны партнёры, которые работают с людьми "
+                                "и открыты дополнительному направлению."
                             ),
-                            height=100,
+                            height=90,
                         )
 
                         neonia_submitted = st.form_submit_button(
-                            "🎯 Изучить проект и определить ЦА"
+                            "🎯 Определить мою ЦА"
                         )
 
-                        if neonia_submitted:
-                            if not project_links.strip() and not project_files:
-                                st.warning(
-                                    "Добавьте хотя бы одну ссылку или загрузите материал проекта."
-                                )
-                            else:
-                                neonia_prompt = """
-    Ты — Неония, ИИ-аналитик Агентства W.
-
-Сейчас ты работаешь только в разделе
-«Анализ проекта и определение целевой аудитории».
-
-Твоя задача:
-— изучить предоставленные ссылки и документы;
-— понять суть проекта, продукта и предложения;
-— определить, какие реальные проблемы людей решает проект;
-— проверить основные заявления проекта;
-— выявить сильные стороны, ограничения и возможные риски;
-— определить отдельные портреты потенциального клиента и партнёра;
-— сформировать критерии, по которым позже будут анализироваться
-контакты и участники чатов.
-
-На этом этапе не анализируй конкретного человека.
-Не создавай раздел «Анализ человека» и не сообщай,
-что данные о человеке не предоставлены.
-
-Отвечай простым русским языком.
-
-Обязательно разделяй:
-— подтверждённые факты;
-— заявления самого проекта;
-— независимые подтверждения;
-— аналитические выводы;
-— предположения;
-— сведения, которых недостаточно для вывода.
-
-Структура ответа:
-
-1. Суть проекта.
-2. Продукты или услуги и их реальная ценность.
-3. Какие проблемы людей может решать проект.
-4. Как устроена модель проекта и из чего формируется доход.
-5. Условия входа: деньги, время, навыки и возможные сложности.
-6. Сильные стороны проекта.
-7. Ограничения и возможные риски.
-8. Основные сегменты целевой аудитории.
-9. Портрет потенциального клиента.
-10. Портрет потенциального партнёра.
-11. Признаки, по которым искать подходящих людей в контактах.
-12. Признаки, по которым искать подходящих людей в чатах.
-13. Кому проект, вероятно, не подходит.
-14. Какие данные ещё необходимо проверить.
-15. Критерии для следующего этапа:
-«Анализ контактов по параметрам ЦА».
-
-Не придумывай факты и не выдавай рекламные заявления
-за независимо подтверждённую информацию.
-    """
-    
-                            file_names = ", ".join(file.name for file in project_files) if project_files else "Файлы не загружены."
-                            neonia_request = f"Ссылки на проект:\n{project_links.strip() or 'Ссылки не указаны.'}\n\nЗагруженные материалы:\n{file_names}\n\nКомментарий:\n{owner_note.strip() or 'Комментарий не указан.'}"
-    
-                            with st.spinner("Неония проводит анализ..."):
-                                neonia_answer = ask_openai(
-                                    neonia_prompt,
-                                    neonia_request,
-                                    uploaded_files=project_files,
-                                    use_web_search=bool(project_links.strip()),
-                                )
-
-                            passport_key = (
-                                f"neonia_target_audience_passport_{telegram_id}"
+                    if neonia_submitted:
+                        if not project_links.strip() and not project_files:
+                            st.warning(
+                                "Добавьте хотя бы одну ссылку или материал проекта."
                             )
+                        else:
+                            with st.spinner(
+                                "Неония изучает проект и формирует портрет ЦА..."
+                            ):
+                                try:
+                                    profile = analyze_owner_project_target_profile(
+                                        ask_openai,
+                                        project_links,
+                                        project_files,
+                                        owner_note,
+                                    )
+                                except Exception as exc:
+                                    st.error(f"Не удалось определить ЦА: {exc}")
+                                else:
+                                    file_names = ", ".join(
+                                        file.name for file in project_files
+                                    ) if project_files else "Файлы не загружены."
 
-                            st.session_state[passport_key] = {
-                                "analysis": neonia_answer,
-                                "project_links": project_links.strip(),
-                                "file_names": file_names,
-                                "owner_note": owner_note.strip(),
-                                "saved_at": datetime.now(
-                                    ZoneInfo("Europe/Berlin")
-                                ).isoformat(),
-                            }
+                                    st.session_state[passport_key] = {
+                                        "profile": profile,
+                                        "analysis": target_profile_for_analysis(profile),
+                                        "project_links": project_links.strip(),
+                                        "file_names": file_names,
+                                        "owner_note": owner_note.strip(),
+                                        "saved_at": profile.get("saved_at"),
+                                    }
+                                    persist_workspace_if_changed(
+                                        telegram_id,
+                                        force=True,
+                                    )
+                                    st.success("✅ Портрет ЦА сохранён")
+                                    render_target_profile(profile)
+                                    st.info(
+                                        "Следующий шаг: открыть поиск контактов. "
+                                        "Неония будет сравнивать людей именно с этим портретом."
+                                    )
 
-                            persist_workspace_if_changed(
-                                telegram_id,
-                                force=True,
-                            )
-
-                            st.success(
-                                "✅ Паспорт целевой аудитории сохранён"
-                            )
-                            st.markdown(
-                                "#### 📋 Результат Неонии"
-                            )
-                            st.write(neonia_answer)
-    
                 elif selected_agent == "Неона":
                     st.caption(
                         "Неона получает только тех людей, которых выбрал владелец "
@@ -4811,7 +4850,6 @@ if received_hash:
                         if normalized_id not in selected_ids:
                             selected_ids.append(normalized_id)
 
-                    selected_ids = selected_ids[:5]
                     selected_contacts = [
                         candidate_by_id[contact_id]
                         for contact_id in selected_ids
