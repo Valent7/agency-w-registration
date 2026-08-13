@@ -30,7 +30,7 @@ from neola_partner_center import (
 )
 from neola_realtime_voice import render_neola_realtime_voice
 import neola_role_policy  # фиксирует границы роли Неолы
-from neonia_intelligence_v1 import (
+from neonia_intelligence_v2 import (
     analyze_candidate_project_risk,
     analyze_owner_project_target_profile,
     render_project_risk,
@@ -3226,6 +3226,15 @@ if received_hash:
                             )
 
                             passport = st.session_state.get(passport_key)
+                            if isinstance(passport, dict):
+                                profile_for_search = passport.get("profile")
+                                if not (
+                                    passport.get("schema_version") == 2
+                                    and isinstance(profile_for_search, dict)
+                                    and profile_for_search.get("portrait")
+                                ):
+                                    passport = None
+
                             chats = st.session_state.get(
                                 chats_state_key,
                                 [],
@@ -4539,22 +4548,40 @@ if received_hash:
                         f"neonia_target_audience_passport_{telegram_id}"
                     )
                     saved_passport = st.session_state.get(passport_key)
-                    if isinstance(saved_passport, dict) and isinstance(
-                        saved_passport.get("profile"), dict
-                    ):
+                    saved_profile = (
+                        saved_passport.get("profile")
+                        if isinstance(saved_passport, dict)
+                        else None
+                    )
+                    is_live_profile = bool(
+                        isinstance(saved_profile, dict)
+                        and saved_profile.get("portrait")
+                        and (
+                            saved_profile.get("who_is_this")
+                            or saved_profile.get("current_situation")
+                        )
+                    )
+
+                    if is_live_profile:
                         st.markdown("### ✅ Сохранённый портрет ЦА")
-                        render_target_profile(saved_passport["profile"])
+                        render_target_profile(saved_profile)
                         st.caption(
-                            "Неония использует именно этот портрет при следующем "
-                            "анализе Telegram-контактов."
+                            "Неония использует именно этот живой портрет "
+                            "при следующем анализе Telegram-контактов."
                         )
                         st.divider()
+                    elif isinstance(saved_profile, dict):
+                        st.warning(
+                            "Сохранён старый вариант ЦА. Он больше не используется: "
+                            "в нём смешивались сведения о проекте и портрет человека. "
+                            "Создайте новый живой портрет ниже."
+                        )
 
                     st.markdown("### 🎯 Определить мою целевую аудиторию")
                     st.write(
-                        "Добавьте материалы вашего проекта. Неония не будет писать "
-                        "длинный отчёт — она сформирует короткий светофор и чёткий "
-                        "портрет людей, которых стоит искать."
+                        "Добавьте материалы проекта. Неония изучит их внутри, "
+                        "но на экран выведет только живой портрет человека, "
+                        "которому этот проект действительно может быть нужен."
                     )
 
                     with st.form("neonia_source_form"):
@@ -4610,6 +4637,7 @@ if received_hash:
                                     ) if project_files else "Файлы не загружены."
 
                                     st.session_state[passport_key] = {
+                                        "schema_version": 2,
                                         "profile": profile,
                                         "analysis": target_profile_for_analysis(profile),
                                         "project_links": project_links.strip(),
