@@ -258,6 +258,10 @@ def analyze_neoxa_proof(image_bytes, mime_type):
 
 
 def submit_activation_proof(telegram_id, uploaded_file):
+    """
+    Финансовое доказательство сохраняется ПЕРВЫМ.
+    Ошибка OpenAI не должна приводить к потере скриншота.
+    """
     image_bytes = uploaded_file.getvalue()
     if not image_bytes:
         raise RuntimeError("Файл пуст.")
@@ -265,33 +269,83 @@ def submit_activation_proof(telegram_id, uploaded_file):
         raise RuntimeError("Скриншот слишком большой. Максимум 4 МБ.")
 
     mime_type = uploaded_file.type or "image/png"
-    analysis = analyze_neoxa_proof(image_bytes, mime_type)
     encoded = base64.b64encode(image_bytes).decode("ascii")
+    submitted_at = _now_iso()
 
-    payload = {
+    # ШАГ 1. Надёжно сохраняем сам файл и переводим заявку в ожидание проверки.
+    initial_payload = {
         "telegram_id": int(telegram_id),
         "status": "proof_submitted",
-        "neoxa_nickname": analysis["nickname"] or None,
-        "lodges_count": int(analysis["lodges_count"]),
+        "neoxa_nickname": None,
+        "lodges_count": 0,
         "proof_filename": uploaded_file.name[:255],
         "proof_mime": mime_type[:100],
         "proof_image_base64": encoded,
-        "proof_ai_result": analysis,
-        "submitted_at": _now_iso(),
+        "proof_ai_result": {
+            "nickname": "",
+            "lodges_count": 0,
+            "looks_like_neoxa": False,
+            "confidence": "не проверено",
+            "note": "Скриншот сохранён. ИИ-анализ ещё не выполнен.",
+        },
+        "submitted_at": submitted_at,
         "reviewed_at": None,
         "reviewed_by": None,
         "rejection_reason": None,
         "attention_level": "red",
-        "last_action_at": _now_iso(),
+        "last_action_at": submitted_at,
     }
 
     rows = _post_json(
         "partner_activations?on_conflict=telegram_id",
-        payload,
+        initial_payload,
         prefer="resolution=merge-duplicates,return=representation",
         timeout=30,
     )
-    return (rows[0] if rows else get_partner_activation(telegram_id)), analysis
+    saved_activation = rows[0] if rows else get_partner_activation(telegram_id)
+
+    # ШАГ 2. ИИ — только помощник. Любая его ошибка НЕ отменяет сохранение.
+    try:
+        analysis = analyze_neoxa_proof(image_bytes, mime_type)
+        ai_payload = {
+            "neoxa_nickname": analysis["nickname"] or None,
+            "lodges_count": int(analysis["lodges_count"]),
+            "proof_ai_result": analysis,
+            "last_action_at": _now_iso(),
+        }
+        patched = _patch_json(
+            "partner_activations",
+            {"telegram_id": f"eq.{int(telegram_id)}"},
+            ai_payload,
+        )
+        if patched:
+            saved_activation = patched[0]
+        return saved_activation, analysis, None
+    except Exception as exc:
+        fallback = {
+            "nickname": "",
+            "lodges_count": 0,
+            "looks_like_neoxa": False,
+            "confidence": "не проверено",
+            "note": (
+                "Скриншот сохранён. Автоматический анализ временно недоступен; "
+                "нужна ручная проверка наставником/владельцем."
+            ),
+        }
+        # Сохраняем отметку об ошибке анализа, но не сам текст исключения целиком.
+        try:
+            _patch_json(
+                "partner_activations",
+                {"telegram_id": f"eq.{int(telegram_id)}"},
+                {
+                    "proof_ai_result": fallback,
+                    "last_action_at": _now_iso(),
+                },
+            )
+        except Exception:
+            pass
+        return saved_activation, fallback, str(exc)
+
 
 
 def load_activation_proof(telegram_id):
@@ -300,7 +354,7 @@ def load_activation_proof(telegram_id):
             "partner_activations",
             params={
                 "telegram_id": f"eq.{int(telegram_id)}",
-                "select": "proof_image_base64,proof_mime,proof_ai_result",
+                "select": "proof_image_base64,proof_mime,proof_ai_result,proof_filename,submitted_at,reviewed_at,reviewed_by,lodges_count,status",
                 "limit": "1",
             },
         )
@@ -419,7 +473,7 @@ def _attention_label(activation):
 
 def render_my_activation(telegram_id):
     activation = ensure_partner_activation(telegram_id)
-    st.markdown("#### 🔐 Моя активация NeoXa")
+    st.markdown("#### 🔐 Моя активация Neonexa")
     st.write(activation_label(activation))
 
     if activation_is_confirmed(activation):
@@ -437,11 +491,11 @@ def render_my_activation(telegram_id):
         st.warning(f"Наставник попросил новый скриншот: {reason}")
 
     st.caption(
-        "Загрузите скриншот NeoXa, на котором одновременно видны ваш ник и "
+        "Загрузите скриншот Neonexa, на котором одновременно видны ваш ник и "
         "количество приобретённых/активированных лож (не меньше 5)."
     )
     uploaded = st.file_uploader(
-        "Скриншот NeoXa",
+        "Скриншот Neonexa",
         type=["png", "jpg", "jpeg", "webp"],
         key=f"neola_activation_proof_{telegram_id}",
     )
@@ -451,16 +505,31 @@ def render_my_activation(telegram_id):
         key=f"neola_submit_proof_{telegram_id}",
     ):
         try:
-            with st.spinner("Неола читает скриншот и готовит его наставнику..."):
-                _, analysis = submit_activation_proof(telegram_id, uploaded)
-            st.success("Скриншот отправлен наставнику.")
-            st.caption(
-                f"Предварительно распознано: ник — {analysis['nickname'] or 'не найден'}, "
-                f"ложи — {analysis['lodges_count']}. Окончательное решение принимает человек."
+            with st.spinner("Сначала сохраняю скриншот, затем пробую его распознать..."):
+                _, analysis, ai_error = submit_activation_proof(telegram_id, uploaded)
+
+            st.success(
+                "Скриншот сохранён и отправлен на подтверждение. "
+                "Теперь он не потеряется даже при ошибке ИИ."
             )
+            if ai_error:
+                st.warning(
+                    "Автоматическое распознавание временно недоступно. "
+                    "Наставник или владелец структуры проверит скриншот вручную."
+                )
+            else:
+                st.caption(
+                    f"Предварительно распознано: ник — "
+                    f"{analysis['nickname'] or 'не найден'}, "
+                    f"ложи — {analysis['lodges_count']}. "
+                    "Окончательное решение принимает человек."
+                )
             st.rerun()
         except Exception as exc:
-            st.error(f"Не удалось отправить подтверждение: {exc}")
+            st.error(
+                "Не удалось сохранить скриншот. "
+                f"Повторите попытку: {exc}"
+            )
     return activation
 
 
@@ -608,34 +677,73 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                     str(member.get("referrer_code") or "") == str(current_member_code)
                     or is_root_owner
                 )
+
+                # Финансовое доказательство НЕ исчезает после подтверждения.
+                # Прямой наставник и владелец структуры видят архив постоянно.
+                proof = load_activation_proof(member_id) if can_review_activation else None
+                has_proof = bool(proof and proof.get("proof_image_base64"))
+
+                if has_proof:
+                    with st.expander("🧾 Подтверждение 5 лож Neonexa", expanded=False):
+                        if (
+                            is_root_owner
+                            and str(member.get("referrer_code") or "") != str(current_member_code)
+                        ):
+                            st.caption(
+                                "👑 Вы видите это подтверждение как владелец структуры."
+                            )
+
+                        try:
+                            raw = base64.b64decode(proof["proof_image_base64"])
+                            st.image(
+                                raw,
+                                caption="Финансовое подтверждение Neonexa",
+                                width=420,
+                            )
+                        except Exception:
+                            st.warning(
+                                "Скриншот сохранён, но не удалось показать предпросмотр."
+                            )
+
+                        submitted_at = proof.get("submitted_at") or "—"
+                        reviewed_at = proof.get("reviewed_at") or "—"
+                        reviewer = proof.get("reviewed_by") or "—"
+                        proof_lodges = int(proof.get("lodges_count") or 0)
+                        proof_status = str(proof.get("status") or "")
+
+                        st.caption(
+                            f"Файл: {proof.get('proof_filename') or '—'} · "
+                            f"загружен: {submitted_at}"
+                        )
+
+                        if proof_status in {"confirmed", "legacy_active"}:
+                            st.success(
+                                f"✅ Подтверждено лож: {proof_lodges or '—'} · "
+                                f"кем: {reviewer} · дата: {reviewed_at}"
+                            )
+                        elif proof_status == "proof_submitted":
+                            st.warning("⏳ Скриншот ждёт подтверждения.")
+                        elif proof_status == "rejected":
+                            st.warning(
+                                "↩️ Этот скриншот был отклонён. "
+                                "Он сохранён в истории как доказательство проверки."
+                            )
+
+                        ai_result = (proof or {}).get("proof_ai_result") or {}
+                        if ai_result:
+                            st.info(
+                                "Предварительный разбор ИИ: "
+                                f"ник — {ai_result.get('nickname') or 'не найден'}; "
+                                f"ложи — {ai_result.get('lodges_count') or 0}; "
+                                f"уверенность — "
+                                f"{ai_result.get('confidence') or 'не проверено'}."
+                            )
+
+                # Кнопки решения показываем только пока заявка ждёт подтверждения.
                 if (
                     can_review_activation
                     and (activation or {}).get("status") == "proof_submitted"
                 ):
-                    if (
-                        is_root_owner
-                        and str(member.get("referrer_code") or "") != str(current_member_code)
-                    ):
-                        st.caption(
-                            "👑 Вы видите это подтверждение как владелец структуры. "
-                            "Прямой наставник также может подтвердить своего партнёра."
-                        )
-
-                    proof = load_activation_proof(member_id)
-                    if proof and proof.get("proof_image_base64"):
-                        try:
-                            raw = base64.b64decode(proof["proof_image_base64"])
-                            st.image(raw, caption="Подтверждение Neonexa", width=420)
-                        except Exception:
-                            st.warning("Скриншот сохранён, но не удалось показать предпросмотр.")
-                    ai_result = (proof or {}).get("proof_ai_result") or {}
-                    if ai_result:
-                        st.info(
-                            "Предварительный разбор ИИ: "
-                            f"ник — {ai_result.get('nickname') or 'не найден'}; "
-                            f"ложи — {ai_result.get('lodges_count') or 0}; "
-                            f"уверенность — {ai_result.get('confidence') or 'низкая'}."
-                        )
                     recognized_lodges = int((activation or {}).get("lodges_count") or 0)
                     confirmed_lodges = st.number_input(
                         "Сколько лож вы видите на скриншоте?",
@@ -644,7 +752,11 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                         value=max(0, recognized_lodges),
                         step=1,
                         key=f"confirmed_lodges_{current_telegram_id}_{member_id}",
-                        help="ИИ только помогает прочитать скриншот. Окончательное число подтверждает наставник или владелец структуры.",
+                        help=(
+                            "ИИ только помогает прочитать скриншот. "
+                            "Окончательное число подтверждает наставник "
+                            "или владелец структуры."
+                        ),
                     )
                     reason_key = f"reject_reason_{current_telegram_id}_{member_id}"
                     reject_reason = st.text_input(
@@ -666,7 +778,10 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                                 True,
                                 confirmed_lodges=int(confirmed_lodges),
                             )
-                            st.success("Партнёр активирован. Неола теперь доступна ему.")
+                            st.success(
+                                "Партнёр активирован. "
+                                "Скриншот остаётся в финансовом архиве."
+                            )
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
@@ -681,10 +796,15 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                                 False,
                                 reject_reason,
                             )
-                            st.warning("Партнёру будет показана просьба загрузить новый скриншот.")
+                            st.warning(
+                                "Партнёру будет показана просьба загрузить "
+                                "новый скриншот. Старый останется в истории "
+                                "до следующей загрузки."
+                            )
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
+
 
     with tree_tab:
         by_code, children = _member_maps(members)
