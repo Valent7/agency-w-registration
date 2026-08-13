@@ -254,7 +254,7 @@ def render_target_profile(profile: dict):
                     st.caption(item["reason"])
 
     if profile.get("do_not_assume"):
-        with st.expander("🧭 Что Неония НЕ будет принимать за признак ЦА"):
+        with st.expander("🧭 Что НЕ делает человека нашей ЦА"):
             for item in profile["do_not_assume"]:
                 st.write(f"• {item}")
 
