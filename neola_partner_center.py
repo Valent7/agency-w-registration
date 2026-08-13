@@ -18,18 +18,11 @@ def _now_iso():
 
 
 def _supabase_headers(prefer=None):
-    key = str(st.secrets["SUPABASE_SECRET_KEY"])
     headers = {
-        "apikey": key,
+        "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+        "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
         "Content-Type": "application/json",
     }
-
-    # Legacy service_role keys are JWTs (eyJ...). For them PostgREST/RLS
-    # needs the Authorization bearer token. New sb_secret_... keys must not
-    # be sent as Bearer and are authorized through the apikey header.
-    if key.startswith("eyJ"):
-        headers["Authorization"] = f"Bearer {key}"
-
     if prefer:
         headers["Prefer"] = prefer
     return headers
@@ -209,7 +202,7 @@ def analyze_neoxa_proof(image_bytes, mime_type):
     body = {
         "model": "gpt-5-mini",
         "instructions": (
-            "Ты проверяешь скриншот активации партнёра Neonexa. "
+            "Ты проверяешь скриншот активации партнёра NeoXa/NeoNexa. "
             "Не подтверждай покупку окончательно — только извлеки видимые данные. "
             "Верни ТОЛЬКО JSON-объект: nickname (строка), lodges_count (целое число), "
             "looks_like_neoxa (true/false), confidence ('высокая'|'средняя'|'низкая'), "
@@ -426,7 +419,7 @@ def _attention_label(activation):
 
 def render_my_activation(telegram_id):
     activation = ensure_partner_activation(telegram_id)
-    st.markdown("#### 🔐Моя активация Neonexa")
+    st.markdown("#### 🔐 Моя активация NeoXa")
     st.write(activation_label(activation))
 
     if activation_is_confirmed(activation):
@@ -444,11 +437,11 @@ def render_my_activation(telegram_id):
         st.warning(f"Наставник попросил новый скриншот: {reason}")
 
     st.caption(
-        "Загрузите скриншот Neonexa, на котором одновременно видны ваш ник и "
+        "Загрузите скриншот NeoXa, на котором одновременно видны ваш ник и "
         "количество приобретённых/активированных лож (не меньше 5)."
     )
     uploaded = st.file_uploader(
-        "Скриншот Neonexa",
+        "Скриншот NeoXa",
         type=["png", "jpg", "jpeg", "webp"],
         key=f"neola_activation_proof_{telegram_id}",
     )
@@ -486,6 +479,18 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
     except Exception as exc:
         st.error(f"Не удалось загрузить структуру партнёров: {exc}")
         return
+
+    current_member = next(
+        (
+            member for member in members
+            if int(member.get("telegram_id") or 0) == int(current_telegram_id)
+        ),
+        None,
+    )
+    is_root_owner = bool(
+        current_member
+        and not str(current_member.get("referrer_code") or "").strip()
+    )
 
     visible = descendants_for_member(members, current_member_code)
     ids = [int(item["telegram_id"]) for item in visible]
@@ -596,11 +601,26 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                     f"пригласивший: {member.get('referrer_code') or '—'}"
                 )
 
-                # Прямой пригласивший подтверждает скриншот своего человека.
-                if (
+                # Скриншот может подтвердить:
+                # 1) прямой пригласивший;
+                # 2) корневой владелец кабинета — для любого человека в своей структуре.
+                can_review_activation = (
                     str(member.get("referrer_code") or "") == str(current_member_code)
+                    or is_root_owner
+                )
+                if (
+                    can_review_activation
                     and (activation or {}).get("status") == "proof_submitted"
                 ):
+                    if (
+                        is_root_owner
+                        and str(member.get("referrer_code") or "") != str(current_member_code)
+                    ):
+                        st.caption(
+                            "👑 Вы видите это подтверждение как владелец структуры. "
+                            "Прямой наставник также может подтвердить своего партнёра."
+                        )
+
                     proof = load_activation_proof(member_id)
                     if proof and proof.get("proof_image_base64"):
                         try:
@@ -624,7 +644,7 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                         value=max(0, recognized_lodges),
                         step=1,
                         key=f"confirmed_lodges_{current_telegram_id}_{member_id}",
-                        help="ИИ только помогает прочитать скриншот. Окончательное число подтверждает наставник.",
+                        help="ИИ только помогает прочитать скриншот. Окончательное число подтверждает наставник или владелец структуры.",
                     )
                     reason_key = f"reject_reason_{current_telegram_id}_{member_id}"
                     reject_reason = st.text_input(
@@ -954,17 +974,7 @@ def _render_neola_conversation(telegram_id, owner_name, ui_context, ask_openai_f
 
 
 def render_neola_quick_assistant(telegram_id, owner_name, ui_context, ask_openai_fn):
-    try:
-        activation = ensure_partner_activation(telegram_id)
-    except requests.HTTPError:
-        # Быстрый помощник не должен ломать весь кабинет, если Supabase
-        # временно недоступен или ключ требует обновления.
-        st.caption("🎙 Неола временно не подключилась. Остальные разделы работают.")
-        return
-    except Exception:
-        st.caption("🎙 Неола временно не подключилась. Остальные разделы работают.")
-        return
-
+    activation = ensure_partner_activation(telegram_id)
     label = "🎙 Неола рядом" if activation_is_confirmed(activation) else "🔒 Неола"
 
     if hasattr(st, "popover"):
@@ -993,11 +1003,7 @@ def render_neola_agent(telegram_id, owner_name, ui_context, ask_openai_fn):
         "Неола — голосовой наставник. Она ведёт по реальным действиям, знает "
         "вложенную навигацию Агентства W и оставляет текстовые шаги в чате."
     )
-    try:
-        activation = ensure_partner_activation(telegram_id)
-    except Exception:
-        st.warning("Неола пока не смогла подключиться к базе партнёров. Остальная система работает.")
-        return
+    activation = ensure_partner_activation(telegram_id)
     if not activation_is_confirmed(activation):
         with st.container(border=True):
             render_my_activation(telegram_id)
