@@ -60,30 +60,32 @@ def _clean_items(items, max_items=8):
 
 def normalize_target_profile(raw: dict) -> dict:
     raw = raw if isinstance(raw, dict) else {}
-    project_name = str(raw.get("project_name") or "Проект владельца").strip()[:120]
-    summary = str(raw.get("project_summary") or "").strip()[:900]
-    ideal = str(raw.get("ideal_audience") or "").strip()[:1400]
+
+    def text(key, limit=1800):
+        return str(raw.get(key) or "").strip()[:limit]
 
     profile = {
-        "project_name": project_name,
-        "project_summary": summary,
-        "ideal_audience": ideal,
-        "green": _clean_items(raw.get("green"), 8),
-        "yellow": _clean_items(raw.get("yellow"), 8),
-        "red": _clean_items(raw.get("red"), 8),
-        "gray": _clean_items(raw.get("gray"), 5),
-        "search_signals": _clean_items(raw.get("search_signals"), 10),
+        "project_name": text("project_name", 120) or "Проект владельца",
+        "portrait": text("portrait", 2200),
+        "who_is_this": text("who_is_this", 1500),
+        "current_situation": text("current_situation", 1500),
+        "goals": _clean_items(raw.get("goals"), 8),
+        "pains": _clean_items(raw.get("pains"), 8),
+        "fears": _clean_items(raw.get("fears"), 8),
+        "motivators": _clean_items(raw.get("motivators"), 8),
+        "telegram_signals": _clean_items(raw.get("telegram_signals"), 12),
+        "weak_fit": _clean_items(raw.get("weak_fit"), 8),
         "do_not_assume": [
-            str(x).strip()[:220]
-            for x in (raw.get("do_not_assume") or [])[:8]
+            str(x).strip()[:260]
+            for x in (raw.get("do_not_assume") or [])[:10]
             if str(x).strip()
         ],
         "saved_at": datetime.now(ZoneInfo("Europe/Berlin")).isoformat(),
     }
 
-    if not profile["ideal_audience"]:
-        profile["ideal_audience"] = (
-            "Недостаточно данных для уверенного портрета ЦА. "
+    if not profile["portrait"]:
+        profile["portrait"] = (
+            "Недостаточно данных, чтобы представить человека достаточно точно. "
             "Добавьте материалы проекта."
         )
     return profile
@@ -95,51 +97,72 @@ def analyze_owner_project_target_profile(
     project_files,
     owner_note: str,
 ):
-    prompt = r'''
-Ты — Неония, аналитик Агентства W.
+    prompt = r"""
+Ты — Неония, специалист по поиску целевой аудитории Агентства W.
 
-Твоя задача — НЕ написать длинный обзор проекта, а определить, КОГО ИСКАТЬ
-для конкретного проекта владельца.
+ВНУТРЕННЕ изучи проект владельца, но НЕ показывай пользователю анализ проекта,
+структуру компании, CEO, основателей, администраторов каналов, юридических
+владельцев и прочую справочную информацию, если она не помогает понять
+потенциального клиента/партнёра.
 
-Проект может быть любым: сетевой бизнес, услуги, образование, туризм,
-недвижимость, обычная компания и т.д. НИКОГДА не используй фиксированную ЦА
-Neonexa для другого проекта.
+ТВОЙ ЕДИНСТВЕННЫЙ РЕЗУЛЬТАТ — ЖИВОЙ ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ.
 
-Сначала пойми реальную ценность, продукт, модель и кому это может быть нужно.
-Затем сформируй портрет ЦА по поведенческим и мотивационным признакам.
-Тематические интересы (например ИИ, криптовалюта, Web3) сами по себе не делают
-человека целевой аудиторией, если проект не требует именно этого.
+Проект может быть любым. Нельзя использовать фиксированную ЦА Neonexa.
+Для каждого проекта заново пойми:
+- какую реальную пользу получает человек;
+- какую проблему или желание закрывает предложение;
+- в какой жизненной/деловой ситуации возникает потребность;
+- что человек хочет изменить;
+- что его раздражает или тормозит;
+- чего он опасается;
+- какие слова, выгоды и возможности способны привлечь его внимание;
+- какие ПОВЕДЕНЧЕСКИЕ признаки можно реально увидеть в Telegram.
 
-Нельзя делать выводы по полу, национальности, фотографии или возрасту.
-Нельзя придумывать факты.
+Портрет должен быть настолько конкретным и образным, чтобы владелец мог
+представить этого человека: чем он живёт, чего хочет, что его беспокоит,
+почему он может остановиться и прочитать предложение.
+
+НЕ ДЕЛАЙ демографических предположений по полу, возрасту, национальности,
+фотографии, религии, здоровью или политическим взглядам.
+Не придумывай факты.
+
+Очень важно:
+- интерес к ИИ, криптовалюте, Web3, TON или Telegram сам по себе НЕ означает,
+  что человек подходит;
+- разработчик ботов, криптокошельков или программист НЕ становится ЦА только
+  из-за технологической тематики;
+- отличай интерес к теме от реальной потребности в предложении проекта;
+- признаки для Telegram должны быть наблюдаемыми, а не фантазиями о человеке.
 
 Верни ТОЛЬКО JSON без Markdown:
 {
-  "project_name": "короткое название",
-  "project_summary": "1-3 простых предложения — что предлагает проект",
-  "ideal_audience": "один чёткий абзац: кто наш идеальный человек",
-  "green": [
-    {"text": "сильный признак ЦА", "reason": "почему это важно"}
+  "project_name": "короткое название проекта",
+  "portrait": "яркий цельный портрет идеального человека, 5-8 предложений",
+  "who_is_this": "кто он в деловом/жизненном смысле, без демографических догадок",
+  "current_situation": "что сейчас происходит в его работе/бизнесе/поиске возможностей",
+  "goals": [
+    {"text": "чего хочет", "reason": "почему проект может быть ему полезен"}
   ],
-  "yellow": [
-    {"text": "дополнительный или неоднозначный признак", "reason": "почему недостаточно одного этого признака"}
+  "pains": [
+    {"text": "что болит или раздражает", "reason": "как это связано с проектом"}
   ],
-  "red": [
-    {"text": "признак слабого соответствия", "reason": "почему"}
+  "fears": [
+    {"text": "сомнение или страх", "reason": "что важно учитывать в первом контакте"}
   ],
-  "gray": [
-    {"text": "что нельзя определить без дополнительных данных", "reason": "каких данных не хватает"}
+  "motivators": [
+    {"text": "что способно зацепить внимание", "reason": "почему"}
   ],
-  "search_signals": [
-    {"text": "конкретный сигнал для поиска в Telegram-контактах", "reason": "как он связан с ЦА"}
+  "telegram_signals": [
+    {"text": "наблюдаемый сигнал в Telegram", "reason": "почему он указывает на соответствие ЦА"}
+  ],
+  "weak_fit": [
+    {"text": "кому проект скорее не подходит", "reason": "почему"}
   ],
   "do_not_assume": [
-    "ошибочный критерий, который нельзя считать достаточным основанием"
+    "что нельзя считать достаточным признаком ЦА"
   ]
 }
-
-Пиши простым русским языком. 4-8 сильных зелёных признаков лучше, чем 20 общих.
-'''.strip()
+""".strip()
 
     file_names = ", ".join(file.name for file in (project_files or [])) or "Файлы не загружены."
     request = (
@@ -160,53 +183,83 @@ Neonexa для другого проекта.
 
 
 def target_profile_for_analysis(profile: dict) -> str:
-    """Короткий машиночитаемый паспорт, по которому Неония сравнивает контакты."""
+    """Машиночитаемый портрет, по которому Неония сравнивает реальные контакты."""
     profile = profile if isinstance(profile, dict) else {}
     payload = {
         "project_name": profile.get("project_name"),
-        "ideal_audience": profile.get("ideal_audience"),
-        "strong_signals": [x.get("text") for x in profile.get("green", [])],
-        "secondary_signals": [x.get("text") for x in profile.get("yellow", [])],
-        "weak_fit_signals": [x.get("text") for x in profile.get("red", [])],
-        "search_signals": [x.get("text") for x in profile.get("search_signals", [])],
+        "portrait": profile.get("portrait"),
+        "who_is_this": profile.get("who_is_this"),
+        "current_situation": profile.get("current_situation"),
+        "goals": [x.get("text") for x in profile.get("goals", [])],
+        "pains": [x.get("text") for x in profile.get("pains", [])],
+        "motivators": [x.get("text") for x in profile.get("motivators", [])],
+        "observable_telegram_signals": [
+            x.get("text") for x in profile.get("telegram_signals", [])
+        ],
+        "weak_fit": [x.get("text") for x in profile.get("weak_fit", [])],
         "do_not_assume": profile.get("do_not_assume", []),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def render_target_profile(profile: dict):
+    """Пользователь видит только портрет ЦА. Внутренний анализ проекта скрыт."""
     profile = profile if isinstance(profile, dict) else {}
-    st.markdown(f"### 🎯 Портрет ЦА: {profile.get('project_name') or 'Проект'}")
-    if profile.get("project_summary"):
-        st.caption(profile["project_summary"])
+    st.markdown(f"## 🎯 Портрет вашей ЦА")
+    st.caption(profile.get("project_name") or "Проект")
 
-    if profile.get("ideal_audience"):
-        st.success(f"**Итоговый портрет ЦА:** {profile['ideal_audience']}")
+    if profile.get("portrait"):
+        st.success(profile["portrait"])
 
-    for key in ("green", "yellow", "red", "gray"):
-        emoji, label = TARGET_STATUSES[key]
+    if profile.get("who_is_this"):
+        st.markdown("### 👤 Кто этот человек")
+        st.write(profile["who_is_this"])
+
+    if profile.get("current_situation"):
+        st.markdown("### 🌿 Что сейчас происходит в его жизни или бизнесе")
+        st.write(profile["current_situation"])
+
+    sections = [
+        ("goals", "🎯 Чего он хочет"),
+        ("pains", "😣 Что его беспокоит"),
+        ("fears", "⚠️ Чего он опасается"),
+        ("motivators", "✨ Что способно остановить его взгляд"),
+    ]
+    for key, title in sections:
         items = profile.get(key) or []
         if not items:
             continue
-        st.markdown(f"**{emoji} {label}**")
+        st.markdown(f"### {title}")
         for item in items:
-            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            txt = item.get("text", "") if isinstance(item, dict) else str(item)
             reason = item.get("reason", "") if isinstance(item, dict) else ""
-            st.write(f"{emoji} {text}")
+            st.write(f"• **{txt}**")
             if reason:
                 st.caption(reason)
 
-    if profile.get("search_signals"):
-        with st.expander("🔍 По каким признакам Неония будет искать людей"):
-            for item in profile["search_signals"]:
+    signals = profile.get("telegram_signals") or []
+    if signals:
+        with st.expander("🔍 Как Неония узнает такого человека в Telegram"):
+            for item in signals:
+                st.write(f"• **{item.get('text', '')}**")
+                if item.get("reason"):
+                    st.caption(item["reason"])
+
+    weak = profile.get("weak_fit") or []
+    if weak:
+        with st.expander("🚫 Кому проект, скорее всего, не подходит"):
+            for item in weak:
                 st.write(f"• {item.get('text', '')}")
                 if item.get("reason"):
                     st.caption(item["reason"])
 
     if profile.get("do_not_assume"):
-        with st.expander("🚫 Что НЕ считать достаточным признаком ЦА"):
+        with st.expander("🧭 Что Неония НЕ будет принимать за признак ЦА"):
             for item in profile["do_not_assume"]:
                 st.write(f"• {item}")
+
+    st.info("💡 Вот такого человека Неония будет искать среди ваших контактов.")
+
 
 
 def normalize_project_risk(raw: dict) -> dict:
