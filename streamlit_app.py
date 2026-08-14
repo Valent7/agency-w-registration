@@ -1599,14 +1599,20 @@ NEONA_FIRST_MESSAGE_FORBIDDEN = NEONA_FORBIDDEN_CLAIMS
 def candidate_first_name(contact):
     """Возвращает безопасное имя: никогда не подставляет @username."""
 
-    first_name = str(contact.get("first_name") or "").strip()
-    if (
-        first_name
-        and len(first_name) <= 40
-        and not first_name.startswith("@")
-        and not any(character.isdigit() for character in first_name)
-    ):
-        return first_name
+    raw_first_name = str(contact.get("first_name") or "").strip()
+    if raw_first_name:
+        # Telegram first_name sometimes contains initials/extra words (e.g. "Aigul SK").
+        # For a human greeting use only the first clean name token.
+        first_name = re.split(r"[\s|,/]+", raw_first_name, maxsplit=1)[0].strip(
+            " ,.!?;:()[]{}\"'"
+        )
+        if (
+            first_name
+            and len(first_name) <= 40
+            and not first_name.startswith("@")
+            and not any(character.isdigit() for character in first_name)
+        ):
+            return first_name
 
     full_name = str(contact.get("name") or "").strip()
     if full_name:
@@ -1829,7 +1835,7 @@ def ensure_neona_first_message_opt_out(message):
 
 
 def validate_neona_first_message(message, owner_name):
-    """Проверяет только обязательные правила первого сообщения."""
+    """Проверяет обязательные правила человеческого первого сообщения."""
 
     message = str(message or "").strip()
     if not message:
@@ -1837,13 +1843,39 @@ def validate_neona_first_message(message, owner_name):
 
     errors = []
     lowered = message.lower()
+    identity = neona_identity(owner_name)
+
+    # После приветствия Неона должна сразу представиться, а не вставлять
+    # внутреннее название магнита, сегмента или рекламный заголовок.
+    greeting_end = message.find("!")
+    if greeting_end == -1:
+        errors.append("нет человеческого приветствия")
+    else:
+        after_greeting = message[greeting_end + 1 :].lstrip()
+        if not after_greeting.lower().startswith("меня зовут неона"):
+            errors.append("после приветствия Неона должна сразу представиться")
+
+    if identity.lower() not in lowered[:350]:
+        errors.append("нет точного представления Неоны и владельца")
+
     if message.count("?") != 1:
         errors.append("в первом сообщении должен быть один простой вопрос")
-    if (
-        "больше не буду вас беспокоить" not in lowered
-        and "больше не буду вам писать" not in lowered
-    ):
-        errors.append("нет уважительного выхода при отсутствии интереса")
+
+    if not message.endswith(NEONA_FIRST_MESSAGE_OPT_OUT):
+        errors.append("уважительный выход должен стоять в самом конце")
+
+    awkward_old_phrases = (
+        "понятный путь входа",
+        "путь входа",
+        "понятный старт для вашей сети",
+        "своя ии-команда рядом даёт",
+        "своя ии-команда рядом дает",
+    )
+    for phrase in awkward_old_phrases:
+        if phrase in lowered:
+            errors.append("осталась старая или неестественная формулировка")
+            break
+
     return errors
 
 
