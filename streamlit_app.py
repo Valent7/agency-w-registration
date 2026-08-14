@@ -1670,7 +1670,7 @@ def candidate_first_name(contact):
 
 
 def normalize_neona_first_greeting(message, contact):
-    """Убирает @username из обращения в первом сообщении Неоны."""
+    """Всегда начинает первое сообщение с человеческого приветствия по имени."""
 
     message = str(message or "").strip()
     first_name = candidate_first_name(contact)
@@ -1679,110 +1679,172 @@ def normalize_neona_first_greeting(message, contact):
     if not message:
         return message
 
-    # Сохраняем дружелюбное «привет», если модель уже выбрала такой тон.
-    first_fragment = message[:160].lower()
-    informal = "привет" in first_fragment
+    safe_greeting = (
+        f"{first_name}, здравствуйте!"
+        if first_name
+        else "Здравствуйте!"
+    )
+
+    # Убираем любое старое/модельное обращение, чтобы не получить два приветствия.
     if first_name:
-        safe_greeting = f"{first_name}, привет!" if informal else f"{first_name}, здравствуйте!"
-    else:
-        safe_greeting = "Здравствуйте!"
-
-    if username:
-        username_re = re.escape(username)
-        patterns = (
-            rf"^(?:привет|здравствуйте)\s*,?\s*@{username_re}\s*[!,.]?\s*",
-            rf"^@{username_re}\s*[,!.-]?\s*(?:привет|здравствуйте)\s*[!,.]?\s*",
-            rf"^@{username_re}\s*[,!.-]?\s*",
-        )
-        for pattern in patterns:
-            new_message, replacements = re.subn(
-                pattern,
-                safe_greeting + " ",
-                message,
-                count=1,
-                flags=re.IGNORECASE,
-            )
-            if replacements:
-                return re.sub(r"\s{2,}", " ", new_message).strip()
-
-    # На всякий случай не разрешаем никам оставаться в самом обращении.
-    if re.match(r"^(?:привет|здравствуйте)\s*,?\s*@[^\s!,.]+", message, flags=re.IGNORECASE):
+        escaped_name = re.escape(first_name)
         message = re.sub(
-            r"^(?:привет|здравствуйте)\s*,?\s*@[^\s!,.]+\s*[!,.]?\s*",
-            safe_greeting + " ",
+            rf"^{escaped_name}\s*,?\s*(?:здравствуйте|привет)\s*[!,.]?\s*",
+            "",
+            message,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        # Старые версии могли начинать сразу с «Имя, если...». Имя уже будет в приветствии.
+        message = re.sub(
+            rf"^{escaped_name}\s*,\s*",
+            "",
             message,
             count=1,
             flags=re.IGNORECASE,
         )
 
-    return re.sub(r"\s{2,}", " ", message).strip()
+    if username:
+        username_re = re.escape(username)
+        message = re.sub(
+            rf"^(?:привет|здравствуйте)?\s*,?\s*@{username_re}\s*[!,.]?\s*",
+            "",
+            message,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        message = re.sub(
+            rf"^@{username_re}\s*[,!.-]?\s*(?:привет|здравствуйте)?\s*[!,.]?\s*",
+            "",
+            message,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    # Если модель начала с нейтрального приветствия, заменяем его единым стандартом.
+    message = re.sub(
+        r"^(?:здравствуйте|привет)\s*[!,.]?\s*",
+        "",
+        message,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+    message = re.sub(r"\s{2,}", " ", message).strip()
+    return f"{safe_greeting} {message}".strip()
 
 
 def build_neona_safe_first_message(owner_name, contact):
-    """Запасное первое сообщение с нулевой когнитивной нагрузкой."""
+    """Запасное человеческое первое сообщение для холодного или тёплого контакта."""
 
     first_name = candidate_first_name(contact)
     magnet = choose_neona_magnet(contact)
     identity = neona_identity(owner_name)
+    is_known_contact = (
+        contact.get("source") == "Знакомый — выбран директором"
+    )
 
-    templates = {
-        "Не менять свой проект — усилить его": (
-            "если у вас уже есть свой проект — бросать его ради другого точно не нужно.",
-            "Мы создаём Агентство, которое помогает убрать часть рутины "
-            "из уже существующего бизнеса.",
+    greeting = (
+        f"{first_name}, здравствуйте!"
+        if first_name
+        else "Здравствуйте!"
+    )
+
+    benefits = {
+        "Вернуть человеку время": (
+            "Если у вас много вещей, которые приходится делать самому каждый день, "
+            "часть повторяющейся работы можно передать ИИ-помощникам и вернуть себе время."
         ),
-        "Не ещё одна школа — реальная помощь в работе": (
-            "иногда человеку нужна не ещё одна школа, а помощь прямо во время работы.",
-            "Мы создаём Агентство, которое помогает делать следующий шаг сразу, "
-            "а не оставляет человека один на один с обучением.",
+        "Своя ИИ-команда": (
+            "Мы создаём Агентство, где рядом с человеком работает несколько ИИ-помощников: "
+            "у каждого своя задача, а решения всё равно остаются за человеком."
         ),
-        "Не писать всем подряд — начать с подходящих людей": (
-            "не обязательно писать всем подряд — сначала можно понять, "
-            "с кем разговор действительно имеет смысл.",
-            "Агентство помогает начать именно с тех людей, кому тема может быть близка.",
+        "Усилить существующий проект": (
+            "Если у вас уже есть своё дело, менять его ради другого не нужно. Гораздо "
+            "интереснее посмотреть, какую часть рутины можно снять и усилить то, что вы уже делаете."
         ),
-        "ИИ не нужно изучать — можно просто спросить голосом": (
-            "ИИ больше не обязательно изучать — с ним можно просто разговаривать.",
-            "Можно сказать голосом «Куда мне нажать?» — и получить помощь по шагам.",
+        "Найти подходящих людей": (
+            "Не обязательно писать всем подряд. Сначала можно понять, с кем разговор "
+            "действительно имеет смысл, и только потом начинать общение."
         ),
-        "Вернуть себе время": (
-            "самое дорогое сегодня — время, и часть рутины уже можно передать ИИ.",
-            "Мы создаём Агентство, которое помогает вернуть человеку время "
-            "для действительно важных дел.",
+        "Начать разговор без навязывания": (
+            "Мы не начинаем с рекламного предложения. Смысл в том, чтобы сначала понять, "
+            "почему тема может быть полезна именно этому человеку, и начать нормальный разговор."
         ),
-        "Новичок не остаётся один": (
-            "мы нашли способ снять с лидера часть постоянной заботы о новичках.",
-            "Теперь новичок может просто спросить голосом «Куда мне нажать?» "
-            "и получить помощь сразу.",
+        "Сопровождение новичка": (
+            "Когда приходит новый человек, ему нужно показать первые шаги. Часть такого "
+            "сопровождения может взять на себя отдельный ИИ-помощник."
         ),
-        "Своя ИИ-команда рядом": (
-            "сегодня одному человеку уже не обязательно делать всю рутину самому.",
-            "Мы создаём Агентство, где рядом работает небольшая ИИ-команда "
-            "и берёт часть повседневных задач на себя.",
+        "Агентство понимает конкретный проект": (
+            "Сначала система разбирается в конкретном проекте и его аудитории, и только "
+            "после этого помощники работают в этом контексте, а не одинаково для всех."
+        ),
+        "Человек остаётся главным": (
+            "ИИ нужен не для того, чтобы заменить человека. Он снимает часть подготовки и "
+            "рутины, а отношения, выбор и важные решения остаются за человеком."
         ),
     }
 
-    opener, benefit = templates.get(
+    benefit = benefits.get(
         magnet,
-        templates["Своя ИИ-команда рядом"],
+        benefits["Своя ИИ-команда"],
     )
 
-    if first_name:
-        opener = f"{first_name}, {opener}"
+    if is_known_contact:
+        bridge = (
+            f"Вы уже знакомы с моим руководителем, поэтому напишу без длинного предисловия. "
+        )
     else:
-        opener = opener[0].upper() + opener[1:]
+        bridge = ""
 
-    return f"{opener} {identity} {benefit} Вам это интересно?"
+    question = "Вам было бы интересно посмотреть, как это может пригодиться именно вам?"
+    opt_out = (
+        "Если тема вам сейчас неинтересна, просто скажите — "
+        "я больше не буду вас беспокоить."
+    )
 
+    return re.sub(
+        r"\s+",
+        " ",
+        f"{greeting} {identity} {bridge}{benefit} {question} {opt_out}",
+    ).strip()
+
+
+def ensure_neona_first_message_opt_out(message):
+    """Добавляет согласованный уважительный выход, если модель его пропустила."""
+
+    message = str(message or "").strip()
+    lowered = message.lower()
+    if (
+        "больше не буду вас беспокоить" in lowered
+        or "больше не буду вам писать" in lowered
+    ):
+        return message
+
+    opt_out = (
+        "Если тема вам сейчас неинтересна, просто скажите — "
+        "я больше не буду вас беспокоить."
+    )
+    return f"{message} {opt_out}".strip()
 
 
 def validate_neona_first_message(message, owner_name):
-    """Владелец — финальный редактор. Блокируем только пустое сообщение."""
+    """Проверяет только обязательные правила первого сообщения."""
 
     message = str(message or "").strip()
     if not message:
         return ["сообщение пустое"]
-    return []
+
+    errors = []
+    lowered = message.lower()
+    if message.count("?") != 1:
+        errors.append("в первом сообщении должен быть один простой вопрос")
+    if (
+        "больше не буду вас беспокоить" not in lowered
+        and "больше не буду вам писать" not in lowered
+    ):
+        errors.append("нет уважительного выхода при отсутствии интереса")
+    return errors
 
 
 
@@ -1791,6 +1853,7 @@ def finalize_neona_first_message(message, owner_name, contact):
 
     message = normalize_neona_first_greeting(message, contact)
     message = ensure_neona_identity(message, owner_name)
+    message = ensure_neona_first_message_opt_out(message)
     message = re.sub(r"\s+", " ", message).strip()
     errors = validate_neona_first_message(message, owner_name)
 
@@ -1825,6 +1888,13 @@ def generate_neona_first_messages(
             "source_chat_title": item.get("source_chat_title", ""),
             "profile_about": item.get("profile_about", ""),
             "public_messages": item.get("public_messages", [])[:3],
+            "familiarity_note": item.get("familiarity_note", ""),
+            "owner_draft": item.get("owner_draft", ""),
+            "must_mention": item.get("must_mention", ""),
+            "avoid": item.get("avoid", ""),
+            "known_contact": (
+                item.get("source") == "Знакомый — выбран директором"
+            ),
             "selected_magnet": choose_neona_magnet(item),
         }
         for item in selected_candidates
@@ -4885,11 +4955,68 @@ if received_hash:
                     ]
 
                     st.divider()
-                    st.markdown("### 🤝 Найти знакомого")
+                    st.markdown("### 👥 Кого взять в работу")
+                    st.caption(
+                        "У Неоны два независимых входа: холодные контакты из "
+                        "списка Неонии и ваши знакомые — тёплые или полутёплые. "
+                        "Неония рекомендует, но не блокирует личный выбор владельца."
+                    )
+
+                    cold_selected_contacts = [
+                        candidate_by_id[contact_id]
+                        for contact_id in selected_ids
+                        if contact_id in candidate_by_id
+                        and candidate_by_id[contact_id].get("source")
+                        != "Знакомый — выбран директором"
+                    ]
+                    cold_selected_by_id = {
+                        int(item["telegram_id"]): item
+                        for item in cold_selected_contacts
+                        if item.get("telegram_id") is not None
+                    }
+                    cold_options = [None] + list(cold_selected_by_id)
+
+                    st.markdown("#### 1. 🔎 Список Неонии — холодные контакты")
+                    if cold_selected_by_id:
+                        focused_cold_id = st.selectbox(
+                            "Найдите человека среди выбранных из списка Неонии",
+                            options=cold_options,
+                            format_func=lambda contact_id: (
+                                "Начните вводить имя или выберите человека"
+                                if contact_id is None
+                                else (
+                                    f"{cold_selected_by_id[contact_id].get('name') or 'Без имени'} "
+                                    + (
+                                        f"@{cold_selected_by_id[contact_id].get('username')}"
+                                        if cold_selected_by_id[contact_id].get("username")
+                                        else ""
+                                    )
+                                )
+                            ),
+                            key=f"neona_cold_contact_focus_{telegram_id}",
+                        )
+                        if focused_cold_id is not None:
+                            selected_contacts.sort(
+                                key=lambda item: (
+                                    int(item.get("telegram_id") or 0)
+                                    != int(focused_cold_id)
+                                )
+                            )
+                            st.caption(
+                                "Это холодный контакт. Неона использует контекст "
+                                "Неонии, но никогда не сообщает человеку о внутреннем анализе."
+                            )
+                    else:
+                        st.info(
+                            "Здесь появятся люди, которых вы выбрали из списка Неонии "
+                            "и передали Неоне."
+                        )
+
+                    st.markdown("#### 2. 🔎 Найти знакомого — тёплые контакты")
                     st.write(
-                        "Найдите любого человека среди уже загруженных "
-                        "Telegram-контактов — даже если Неония не "
-                        "рекомендовала его по критериям ЦА."
+                        "Найдите любого человека среди уже загруженных Telegram-контактов. "
+                        "Даже если Неония его не рекомендовала или вообще не включила в свой "
+                        "список, поиск и работа с ним не блокируются."
                     )
 
                     if not all_contacts:
@@ -4999,10 +5126,10 @@ if received_hash:
                                     ),
                                 )
                                 owner_draft = st.text_area(
-                                    "Ваш набросок первого сообщения",
+                                    "Что вы хотели бы ему сказать? — необязательно",
                                     placeholder=(
-                                        "Напишите простыми словами, "
-                                        "что Вы хотите сказать."
+                                        "Можно оставить пустым. Неона сама подготовит "
+                                        "человеческое первое сообщение."
                                     ),
                                     key=(
                                         "known_owner_draft_"
@@ -5046,110 +5173,121 @@ if received_hash:
                                     )
                                 elif already_selected:
                                     st.info(
-                                        "Этот человек уже выбран "
-                                        "среди текущих кандидатов."
+                                        "Этот человек есть и в списке Неонии. Если вы "
+                                        "знаете его лично, можно добавить его как знакомого — "
+                                        "Неона будет общаться с ним как с тёплым контактом."
                                     )
 
                                 if st.button(
                                     "➕ Добавить знакомого к работе",
-                                    disabled=(
-                                        already_added
-                                        or already_selected
-                                    ),
+                                    disabled=already_added,
                                     key=(
                                         "add_known_contact_"
                                         f"{telegram_id}_"
                                         f"{chosen_known_id}"
                                     ),
                                 ):
-                                    if not owner_draft.strip():
-                                        st.warning(
-                                            "Добавьте хотя бы короткий "
-                                            "набросок первого сообщения."
+                                    previous_known = owner_contacts.get(
+                                        chosen_known_id,
+                                        owner_contacts.get(
+                                            str(chosen_known_id),
+                                            {},
+                                        ),
+                                    )
+                                    if not isinstance(previous_known, dict):
+                                        previous_known = {}
+
+                                    # Если знакомого ранее выбрала Неония, личное знание
+                                    # владельца важнее: переводим контакт в тёплый режим.
+                                    current_cold_ids = []
+                                    for contact_id in st.session_state.get(
+                                        selected_candidates_key,
+                                        [],
+                                    ):
+                                        try:
+                                            normalized_contact_id = int(contact_id)
+                                        except (TypeError, ValueError):
+                                            continue
+                                        if normalized_contact_id != int(chosen_known_id):
+                                            current_cold_ids.append(normalized_contact_id)
+                                    st.session_state[selected_candidates_key] = current_cold_ids
+
+                                    owner_contacts[
+                                        chosen_known_id
+                                    ] = {
+                                        **previous_known,
+                                        "telegram_id": int(
+                                            chosen_known_id
+                                        ),
+                                        "name": (
+                                            chosen_contact.get("name")
+                                            or previous_known.get("name")
+                                            or "Без имени"
+                                        ),
+                                        "first_name": (
+                                            chosen_contact.get("first_name")
+                                            or previous_known.get("first_name")
+                                            or ""
+                                        ),
+                                        "username": (
+                                            chosen_contact.get("username")
+                                            or previous_known.get("username")
+                                            or ""
+                                        ),
+                                        "source": (
+                                            "Знакомый — выбран директором"
+                                        ),
+                                        "segment": "Выбран директором",
+                                        "score": 0,
+                                        "confidence": "решение владельца",
+                                        "reasons": [
+                                            familiarity_note.strip()
+                                            or (
+                                                "Добавлен владельцем "
+                                                "как знакомый контакт"
+                                            )
+                                        ],
+                                        "recommendation": (
+                                            "Добавлен директором"
+                                        ),
+                                        "message_angle": (
+                                            owner_draft.strip()
+                                            or familiarity_note.strip()
+                                            or "Тёплое знакомство по выбору владельца"
+                                        ),
+                                        "familiarity_note": (
+                                            familiarity_note.strip()
+                                        ),
+                                        "owner_draft": owner_draft.strip(),
+                                        "must_mention": must_mention.strip(),
+                                        "avoid": avoid.strip(),
+                                        "work_date": today_work_date,
+                                        "status": (
+                                            "Диалог уже начат"
+                                            if dialog_already_started
+                                            else "Выбран владельцем"
+                                        ),
+                                    }
+                                    st.session_state[
+                                        owner_contacts_key
+                                    ] = owner_contacts
+                                    persist_workspace_if_changed(
+                                        telegram_id,
+                                        force=True,
+                                    )
+                                    if dialog_already_started:
+                                        st.success(
+                                            "Знакомый снова добавлен к работе сегодня. "
+                                            "Первое сообщение уже отправлялось ранее, "
+                                            "поэтому Неона ждёт нового входящего и "
+                                            "продолжит существующий диалог."
                                         )
                                     else:
-                                        previous_known = owner_contacts.get(
-                                            chosen_known_id,
-                                            owner_contacts.get(
-                                                str(chosen_known_id),
-                                                {},
-                                            ),
+                                        st.success(
+                                            "Знакомый добавлен. "
+                                            "Неона получила его для работы."
                                         )
-                                        if not isinstance(previous_known, dict):
-                                            previous_known = {}
-
-                                        owner_contacts[
-                                            chosen_known_id
-                                        ] = {
-                                            **previous_known,
-                                            "telegram_id": int(
-                                                chosen_known_id
-                                            ),
-                                            "name": (
-                                                chosen_contact.get("name")
-                                                or previous_known.get("name")
-                                                or "Без имени"
-                                            ),
-                                            "first_name": (
-                                                chosen_contact.get("first_name")
-                                                or previous_known.get("first_name")
-                                                or ""
-                                            ),
-                                            "username": (
-                                                chosen_contact.get("username")
-                                                or previous_known.get("username")
-                                                or ""
-                                            ),
-                                            "source": (
-                                                "Знакомый — выбран директором"
-                                            ),
-                                            "segment": "Выбран директором",
-                                            "score": 0,
-                                            "confidence": "решение владельца",
-                                            "reasons": [
-                                                familiarity_note.strip()
-                                                or (
-                                                    "Добавлен владельцем "
-                                                    "как знакомый контакт"
-                                                )
-                                            ],
-                                            "recommendation": (
-                                                "Добавлен директором"
-                                            ),
-                                            "message_angle": owner_draft.strip(),
-                                            "familiarity_note": (
-                                                familiarity_note.strip()
-                                            ),
-                                            "owner_draft": owner_draft.strip(),
-                                            "must_mention": must_mention.strip(),
-                                            "avoid": avoid.strip(),
-                                            "work_date": today_work_date,
-                                            "status": (
-                                                "Диалог уже начат"
-                                                if dialog_already_started
-                                                else "Выбран владельцем"
-                                            ),
-                                        }
-                                        st.session_state[
-                                            owner_contacts_key
-                                        ] = owner_contacts
-                                        persist_workspace_if_changed(
-                                            telegram_id,
-                                            force=True,
-                                        )
-                                        if dialog_already_started:
-                                            st.success(
-                                                "Знакомый снова добавлен к работе сегодня. "
-                                                "Первое сообщение уже отправлялось ранее, "
-                                                "поэтому Неона ждёт нового входящего и "
-                                                "продолжит существующий диалог."
-                                            )
-                                        else:
-                                            st.success(
-                                                "Знакомый добавлен. "
-                                                "Неона получила его для работы."
-                                            )
-                                        st.rerun()
+                                    st.rerun()
 
                     drafts = st.session_state.get(
                         neona_drafts_key,
@@ -5246,9 +5384,9 @@ if received_hash:
 
                     if not selected_contacts:
                         st.warning(
-                            "Неона пока не получила выбранных людей. "
-                            "Вернитесь к Неонии, отметьте до 5 кандидатов и "
-                            "нажмите «Сохранить выбор и передать Неоне»."
+                            "Неона пока не получила людей для работы. Вы можете "
+                            "выбрать холодный контакт у Неонии или найти здесь "
+                            "своего знакомого — даже если его нет в списке Неонии."
                         )
                     else:
                         passport = st.session_state.get(passport_key)
