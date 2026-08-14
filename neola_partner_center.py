@@ -75,8 +75,8 @@ def load_agency_members():
     return _get_json(
         "agency_members",
         params={
-            "select": "telegram_id,first_name,username,member_code,referrer_code",
-            "order": "telegram_id.asc",
+            "select": "telegram_id,first_name,username,member_code,referrer_code,created_at",
+            "order": "created_at.desc",
             "limit": "10000",
         },
     )
@@ -87,7 +87,7 @@ def get_member_by_telegram_id(telegram_id):
         "agency_members",
         params={
             "telegram_id": f"eq.{int(telegram_id)}",
-            "select": "telegram_id,first_name,username,member_code,referrer_code",
+            "select": "telegram_id,first_name,username,member_code,referrer_code,created_at",
             "limit": "1",
         },
     )
@@ -444,6 +444,76 @@ def direct_inviter_member(members, member):
     return by_code.get(ref)
 
 
+def _member_display_name(member):
+    if not member:
+        return ""
+    name = str(member.get("first_name") or "").strip()
+    username = str(member.get("username") or "").strip().lstrip("@")
+    if name and username:
+        return f"{name} (@{username})"
+    if name:
+        return name
+    if username:
+        return f"@{username}"
+    return f"Telegram {member.get('telegram_id') or '—'}"
+
+
+def _parse_member_created_at(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC_TZ)
+    return parsed
+
+
+def _member_joined_today(member):
+    parsed = _parse_member_created_at(member.get("created_at"))
+    if not parsed:
+        return False
+    return parsed.astimezone(BERLIN_TZ).date() == datetime.now(BERLIN_TZ).date()
+
+
+def _member_joined_label(member):
+    parsed = _parse_member_created_at(member.get("created_at"))
+    if not parsed:
+        return "дата не определена"
+    return parsed.astimezone(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+
+
+def _created_sort_key(member):
+    parsed = _parse_member_created_at(member.get("created_at"))
+    return parsed.timestamp() if parsed else 0
+
+
+def _visible_members_for_viewer(members, current_member, current_member_code, is_root_owner):
+    """Владелец видит весь реестр, обычный партнёр — только свою ветку вниз."""
+    descendants = descendants_for_member(members, current_member_code)
+    if not is_root_owner:
+        return descendants
+
+    depth_by_code = {
+        str(item.get("member_code") or ""): int(item.get("depth") or 0)
+        for item in descendants
+    }
+    current_id = int((current_member or {}).get("telegram_id") or 0)
+    visible = []
+    for member in members:
+        member_id = int(member.get("telegram_id") or 0)
+        if member_id == current_id:
+            continue
+        row = dict(member)
+        code = str(row.get("member_code") or "")
+        row["depth"] = depth_by_code.get(code)
+        row["outside_owner_tree"] = code not in depth_by_code
+        visible.append(row)
+    return visible
+
+
 def _compact_status(activation):
     if not activation:
         return "⚪ Зарегистрирован"
@@ -536,10 +606,6 @@ def render_my_activation(telegram_id):
 
 def render_partner_center(current_telegram_id, current_member_code, current_name):
     st.markdown("### 🌳 Центр партнёров")
-    st.caption(
-        "Компактная структура: вы видите свою ветку вниз. Подробная карточка "
-        "открывается только по нажатию."
-    )
 
     with st.container(border=True):
         render_my_activation(current_telegram_id)
@@ -562,13 +628,43 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
         and not str(current_member.get("referrer_code") or "").strip()
     )
 
-    visible = descendants_for_member(members, current_member_code)
-    ids = [int(item["telegram_id"]) for item in visible]
+    visible = _visible_members_for_viewer(
+        members,
+        current_member,
+        current_member_code,
+        is_root_owner,
+    )
+    visible_ids = {int(item.get("telegram_id") or 0) for item in visible}
+    ids = sorted(visible_ids)
     activations = load_partner_activations(ids) if ids else []
     activation_by_id = {int(item["telegram_id"]): item for item in activations}
 
+    if is_root_owner:
+        st.info(
+            "👑 Режим владельца Агентства W: здесь видны все зарегистрированные "
+            "люди во всём Агентстве, независимо от ветки."
+        )
+    else:
+        st.caption(
+            "🔐 Вы видите только свою структуру вниз: личных партнёров и все поколения под ними."
+        )
+
+    unresolved_inviter = []
+    for member in visible:
+        ref_code = str(member.get("referrer_code") or "").strip()
+        inviter = direct_inviter_member(members, member)
+        if not ref_code or inviter is None:
+            unresolved_inviter.append(member)
+
+    if is_root_owner and unresolved_inviter:
+        st.warning(
+            f"⚠️ У {len(unresolved_inviter)} человек пригласитель не определён или "
+            "цепочка приглашения нарушена. Они всё равно показаны владельцу Агентства."
+        )
+
     total = len(visible)
-    new_count = sum(
+    today_count = sum(1 for member in visible if _member_joined_today(member))
+    waiting_count = sum(
         1 for member in visible
         if (activation_by_id.get(int(member["telegram_id"]), {}).get("status")
             in {None, "awaiting_proof", "proof_submitted", "rejected"})
@@ -582,19 +678,23 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
         if activation.get("attention_level") in {"red", "orange"}
     )
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Всего", total)
-    c2.metric("Новые", new_count)
-    c3.metric("Онбординг", onboarding_count)
-    c4.metric("Требуют внимания", attention_count)
+    c2.metric("Новые сегодня", today_count)
+    c3.metric("Ждут подтверждения", waiting_count)
+    c4.metric("Онбординг", onboarding_count)
+    c5.metric("Требуют внимания", attention_count)
 
     if not visible:
-        st.info("В вашей ветке пока нет зарегистрированных партнёров.")
+        if is_root_owner:
+            st.info("В Агентстве пока нет других зарегистрированных участников.")
+        else:
+            st.info("В вашей ветке пока нет зарегистрированных партнёров.")
         return
 
     filter_options = [
         "Все",
-        "Новые",
+        "Новые сегодня",
         "Ждут подтверждения",
         "Онбординг",
         "Активные",
@@ -607,19 +707,22 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
         key=f"partner_filter_{current_telegram_id}",
     )
     query = st.text_input(
-        "🔎 Имя или ник",
+        "🔎 Имя, ник или пригласитель",
         key=f"partner_search_{current_telegram_id}",
-        placeholder="Начните вводить имя или @username",
+        placeholder="Начните вводить имя, @username или имя пригласившего",
     ).strip().lower().lstrip("@")
 
     def matches(member):
         activation = activation_by_id.get(int(member["telegram_id"]))
+        inviter = direct_inviter_member(members, member)
         if query:
             haystack = " ".join(
                 [
                     str(member.get("first_name") or ""),
                     str(member.get("username") or ""),
                     str(member.get("member_code") or ""),
+                    str(member.get("referrer_code") or ""),
+                    _member_display_name(inviter),
                 ]
             ).lower()
             if query not in haystack:
@@ -627,10 +730,10 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
         status = (activation or {}).get("status")
         onboarding = (activation or {}).get("onboarding_status")
         attention = (activation or {}).get("attention_level")
-        if filter_value == "Новые":
-            return status in {None, "awaiting_proof", "proof_submitted", "rejected"}
+        if filter_value == "Новые сегодня":
+            return _member_joined_today(member)
         if filter_value == "Ждут подтверждения":
-            return status == "proof_submitted"
+            return status in {None, "awaiting_proof", "proof_submitted", "rejected"}
         if filter_value == "Онбординг":
             return onboarding in {"started", "in_progress"}
         if filter_value == "Активные":
@@ -639,8 +742,13 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
             return attention in {"red", "orange"}
         return True
 
-    filtered = [member for member in visible if matches(member)]
+    filtered = sorted(
+        [member for member in visible if matches(member)],
+        key=_created_sort_key,
+        reverse=True,
+    )
 
+    by_code, children = _member_maps(members)
     list_tab, tree_tab = st.tabs(["📋 Список", "🌳 Структура"])
 
     with list_tab:
@@ -651,36 +759,55 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
             activation = activation_by_id.get(member_id)
             name = str(member.get("first_name") or "Партнёр")
             username = str(member.get("username") or "").strip()
-            depth = int(member.get("depth") or 1)
+            depth = member.get("depth")
             lodges = int((activation or {}).get("lodges_count") or 0)
             step = int((activation or {}).get("onboarding_step") or 0)
             status_text = _compact_status(activation)
             attention_text = _attention_label(activation)
+            inviter = direct_inviter_member(members, member)
+            inviter_name = _member_display_name(inviter)
+            ref_code = str(member.get("referrer_code") or "").strip()
+            member_code = str(member.get("member_code") or "").strip()
+            direct_children = len(children.get(member_code, []))
+
+            if depth:
+                line_text = f"линия {int(depth)}"
+            elif is_root_owner:
+                line_text = "вне основной цепочки"
+            else:
+                line_text = "линия не определена"
 
             with st.expander(
-                f"{name} · линия {depth} · {status_text}",
+                f"{name} · {line_text} · {status_text}",
                 expanded=False,
             ):
+                if inviter_name:
+                    st.markdown(f"**Пригласил:** {inviter_name}")
+                else:
+                    st.error("⚠️ Пригласитель не определён")
+
                 cols = st.columns([1.4, 1, 1, 1])
                 cols[0].write(f"**@{username}**" if username else "Без username")
                 cols[1].write(f"**Ложи:** {lodges or '—'}")
                 cols[2].write(f"**Неола:** {step}/7")
-                cols[3].write(f"**Внимание:** {attention_text}")
+                cols[3].write(f"**Личных партнёров:** {direct_children}")
+
                 st.caption(
-                    f"Код: {member.get('member_code') or '—'} · "
-                    f"пригласивший: {member.get('referrer_code') or '—'}"
+                    f"В Агентстве с: {_member_joined_label(member)} · "
+                    f"код: {member_code or '—'} · "
+                    f"код пригласившего: {ref_code or '—'} · "
+                    f"внимание: {attention_text}"
                 )
 
                 # Скриншот может подтвердить:
                 # 1) прямой пригласивший;
-                # 2) корневой владелец кабинета — для любого человека в своей структуре.
+                # 2) корневой владелец кабинета — для любого человека в Агентстве.
                 can_review_activation = (
                     str(member.get("referrer_code") or "") == str(current_member_code)
                     or is_root_owner
                 )
 
                 # Финансовое доказательство НЕ исчезает после подтверждения.
-                # Прямой наставник и владелец структуры видят архив постоянно.
                 proof = load_activation_proof(member_id) if can_review_activation else None
                 has_proof = bool(proof and proof.get("proof_image_base64"))
 
@@ -691,7 +818,7 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                             and str(member.get("referrer_code") or "") != str(current_member_code)
                         ):
                             st.caption(
-                                "👑 Вы видите это подтверждение как владелец структуры."
+                                "👑 Вы видите это подтверждение как владелец Агентства."
                             )
 
                         try:
@@ -740,7 +867,6 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                                 f"{ai_result.get('confidence') or 'не проверено'}."
                             )
 
-                # Кнопки решения показываем только пока заявка ждёт подтверждения.
                 if (
                     can_review_activation
                     and (activation or {}).get("status") == "proof_submitted"
@@ -806,33 +932,98 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                         except Exception as exc:
                             st.error(str(exc))
 
-
     with tree_tab:
-        by_code, children = _member_maps(members)
+        connected = descendants_for_member(members, current_member_code)
+        connected_ids = {int(item.get("telegram_id") or 0) for item in connected}
+
+        def tree_label(child, depth):
+            child_id = int(child.get("telegram_id") or 0)
+            activation = activation_by_id.get(child_id)
+            child_code = str(child.get("member_code") or "")
+            direct_children = len(
+                [item for item in children.get(child_code, [])
+                 if int(item.get("telegram_id") or 0) in visible_ids]
+            )
+            inviter = direct_inviter_member(members, child)
+            inviter_text = _member_display_name(inviter) or "⚠️ не определён"
+            return (
+                f"{'↳ ' * min(depth, 4)}{child.get('first_name') or 'Партнёр'} "
+                f"· пригласил: {inviter_text} · {_compact_status(activation)} · "
+                f"личных: {direct_children}"
+            )
 
         def render_branch(parent_code, depth=0, max_depth=20):
             if depth >= max_depth:
                 st.caption("… глубина скрыта")
                 return
             for child in children.get(parent_code, []):
-                if child not in visible:
+                child_id = int(child.get("telegram_id") or 0)
+                if child_id not in visible_ids:
                     continue
-                child_id = int(child["telegram_id"])
-                activation = activation_by_id.get(child_id)
                 child_code = str(child.get("member_code") or "")
-                direct_children = len(children.get(child_code, []))
-                label = (
-                    f"{'↳ ' * min(depth, 4)}{child.get('first_name') or 'Партнёр'} "
-                    f"· {_compact_status(activation)} · ↓ {direct_children}"
-                )
-                if direct_children:
+                direct_visible_children = [
+                    item for item in children.get(child_code, [])
+                    if int(item.get("telegram_id") or 0) in visible_ids
+                ]
+                label = tree_label(child, depth)
+                if direct_visible_children:
                     with st.expander(label, expanded=False):
+                        st.caption(f"В Агентстве с: {_member_joined_label(child)}")
                         render_branch(child_code, depth + 1, max_depth)
                 else:
                     st.write(label)
 
         st.markdown(f"**{current_name}**")
         render_branch(str(current_member_code))
+
+        if is_root_owner:
+            disconnected_ids = visible_ids - connected_ids
+            if disconnected_ids:
+                visible_codes = {
+                    str(item.get("member_code") or "")
+                    for item in visible
+                    if int(item.get("telegram_id") or 0) in disconnected_ids
+                }
+                disconnected_roots = []
+                for member in visible:
+                    member_id = int(member.get("telegram_id") or 0)
+                    if member_id not in disconnected_ids:
+                        continue
+                    ref = str(member.get("referrer_code") or "").strip()
+                    if not ref or ref not in visible_codes:
+                        disconnected_roots.append(member)
+
+                st.divider()
+                st.markdown("**⚠️ Вне основной цепочки приглашений**")
+                st.caption(
+                    "Эти люди зарегистрированы в Агентстве, но их связь с основной "
+                    "структурой Валентины не определяется. Владелец всё равно видит их."
+                )
+
+                shown_roots = set()
+                for root_member in sorted(
+                    disconnected_roots,
+                    key=_created_sort_key,
+                    reverse=True,
+                ):
+                    root_id = int(root_member.get("telegram_id") or 0)
+                    if root_id in shown_roots:
+                        continue
+                    shown_roots.add(root_id)
+                    root_code = str(root_member.get("member_code") or "")
+                    direct_visible_children = [
+                        item for item in children.get(root_code, [])
+                        if int(item.get("telegram_id") or 0) in visible_ids
+                    ]
+                    label = tree_label(root_member, 0)
+                    if direct_visible_children:
+                        with st.expander(label, expanded=False):
+                            st.caption(
+                                f"В Агентстве с: {_member_joined_label(root_member)}"
+                            )
+                            render_branch(root_code, 1, 20)
+                    else:
+                        st.write(label)
 
 
 def _save_neola_message(telegram_id, role, content):
