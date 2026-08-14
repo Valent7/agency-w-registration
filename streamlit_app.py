@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
 from neonia_chats import render_neonia_chats
 from neona_reglament import (
+    NEONA_FIRST_MESSAGE_OPT_OUT,
     NEONA_FORBIDDEN_AI_LABELS,
     NEONA_FORBIDDEN_CLAIMS,
     build_neona_first_message_system_prompt,
