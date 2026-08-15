@@ -2062,113 +2062,6 @@ def finalize_neona_first_message(message, owner_name, contact):
     return message
 
 
-def generate_neona_first_messages(
-    owner_name,
-    passport_analysis,
-    selected_candidates,
-):
-    """Создаёт первые сообщения для выбранных кандидатов."""
-
-    system_prompt = build_neona_first_messages_system_prompt(
-        owner_name
-    )
-
-    safe_candidates = [
-        {
-            "telegram_id": item["telegram_id"],
-            "name": item.get("name", ""),
-            "first_name": item.get("first_name", ""),
-            "username": item.get("username", ""),
-            "segment": item.get("segment", ""),
-            "score": item.get("score", 0),
-            "reasons": item.get("reasons", []),
-            "message_angle": item.get("message_angle", ""),
-            "source": item.get("source", "Рекомендация Неонии"),
-            "source_chat_title": item.get("source_chat_title", ""),
-            "profile_about": item.get("profile_about", ""),
-            "public_messages": item.get("public_messages", [])[:3],
-            "familiarity_note": item.get("familiarity_note", ""),
-            "owner_draft": item.get("owner_draft", ""),
-            "must_mention": item.get("must_mention", ""),
-            "avoid": item.get("avoid", ""),
-            "known_contact": (
-                item.get("source") == "Знакомый — выбран директором"
-            ),
-            "selected_magnet": choose_neona_magnet(item),
-        }
-        for item in selected_candidates
-    ]
-
-    request = (
-        "ПАСПОРТ ЦА:\n"
-        f"{passport_analysis}\n\n"
-        "ВЫБРАННЫЕ КАНДИДАТЫ:\n"
-        f"{json.dumps(safe_candidates, ensure_ascii=False)}"
-    )
-
-    answer = ask_openai(system_prompt, request)
-
-    if answer.startswith("Ошибка OpenAI:"):
-        raise RuntimeError(answer)
-
-    raw_messages = extract_json_array(answer)
-    allowed_ids = {
-        int(item["telegram_id"])
-        for item in selected_candidates
-    }
-    candidate_lookup = {
-        int(item["telegram_id"]): item
-        for item in selected_candidates
-    }
-    result = {}
-
-    for item in raw_messages:
-        try:
-            contact_id = int(item.get("telegram_id"))
-        except (TypeError, ValueError):
-            continue
-
-        if contact_id not in allowed_ids:
-            continue
-
-        message = str(item.get("message") or "").strip()
-        if not message:
-            continue
-
-        contact = candidate_lookup.get(contact_id, {})
-        message = finalize_neona_first_message(
-            message,
-            owner_name,
-            contact,
-        )
-
-        result[contact_id] = {
-            "message": message,
-            "magnet": (
-                str(item.get("magnet") or "").strip()
-                or choose_neona_magnet(contact)
-            ),
-            "approved": False,
-            "status": "Сообщение подготовлено",
-        }
-
-    # Даже если модель пропустила кандидата, создаём безопасный черновик.
-    for contact_id in allowed_ids:
-        if contact_id in result:
-            continue
-        contact = candidate_lookup.get(contact_id, {})
-        result[contact_id] = {
-            "message": build_neona_safe_first_message(
-                owner_name,
-                contact,
-            ),
-            "magnet": choose_neona_magnet(contact),
-            "approved": False,
-            "status": "Сообщение подготовлено",
-        }
-
-    return result
-
 def search_known_contacts(contacts, query, limit=20):
     """Ищет знакомого среди уже загруженных Telegram-контактов."""
 
@@ -2302,6 +2195,12 @@ def generate_neona_first_message(
         "first_name": contact.get("first_name", ""),
         "username": contact.get("username", ""),
         "source": contact.get("source", "Рекомендация Неонии"),
+        "potential_interest": contact.get("potential_interest", ""),
+        "actuality": contact.get("actuality", ""),
+        "warmth": contact.get("warmth", ""),
+        "obstacles": contact.get("obstacles", []),
+        "short_portrait": contact.get("short_portrait", ""),
+        "owner_hint": contact.get("owner_hint", ""),
         "segment": contact.get("segment", ""),
         "score": contact.get("score", 0),
         "reasons": contact.get("reasons", []),
@@ -3159,19 +3058,21 @@ if received_hash:
                 candidates_key,
                 [],
             )
-            recommended_candidates = [
+            selected_candidates = [
                 candidate
                 for candidate in candidate_results
-                if candidate.get("recommendation") == "Передать Неоне"
+                if candidate.get("status") in {
+                    "Выбран владельцем",
+                    "Сообщение подготовлено",
+                    "Сообщение отредактировано",
+                    "Первое сообщение утверждено",
+                    "Отправлено",
+                }
             ]
-            recommended_candidates.sort(
-                key=lambda item: -int(item.get("score", 0))
-            )
-            top_candidates = recommended_candidates[:10]
 
             st.info(
-                f"🎯 Неония: {len(top_candidates)} кандидатов на сегодня. "
-                "Работа с кандидатами — в разделе «🤖 Агенты → Неония»."
+                f"🎯 Неония: выбрано в работу {len(selected_candidates)}. "
+                "Анализ новых контактов — в разделе «🤖 Агенты → Неония»."
             )
 
             with st.container(border=True):
@@ -4840,11 +4741,11 @@ if received_hash:
 
                 elif selected_agent == "Неона":
                     st.caption(
-                        "Неона получает только тех людей, которых выбрал владелец "
-                        "кабинета. Её задача — правдиво заинтересовать человека "
-                        "и постепенно привести к осознанной встрече с владельцем. "
-                        "Первое сообщение она готовит, но не отправляет без "
-                        "утверждения владельца."
+                        "Неона получает только людей, которых выбрал владелец. "
+                        "Она готовит короткое персональное первое сообщение, "
+                        "а после ответа ведёт диалог с одной целью — привести человека "
+                        "к осознанной встрече с владельцем. Первое сообщение не "
+                        "отправляется без утверждения владельца."
                     )
 
                     with st.expander("📜 Задача и регламент Неоны"):
@@ -5747,17 +5648,24 @@ if received_hash:
                                         f"#### {number}. {contact.get('name', 'Кандидат')}"
                                     )
                                     st.caption(
-                                        f"{username} · {contact.get('score', 0)}% · "
-                                        f"{contact.get('segment', 'Сегмент не указан')} · "
-                                        f"источник: {source_title}"
+                                        f"{username} · источник: {source_title}"
                                     )
+                                    if contact.get("potential_interest"):
+                                        st.caption(
+                                            "Неония: интерес — "
+                                            f"{contact.get('potential_interest', 'неясно')}; "
+                                            "актуальность — "
+                                            f"{contact.get('actuality', 'неясно')}; "
+                                            "теплота — "
+                                            f"{contact.get('warmth', 'неясно')}."
+                                        )
 
                                     with st.expander(
                                         "Контекст для персонализации"
                                     ):
                                         reasons = contact.get("reasons", [])
                                         if reasons:
-                                            st.write("**Почему выбран:**")
+                                            st.write("**Что известно о контакте:**")
                                             for reason in reasons:
                                                 st.write(f"• {reason}")
                                         st.write(
