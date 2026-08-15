@@ -2243,6 +2243,32 @@ def generate_neona_first_message(
         contact,
     )
 
+
+
+def generate_neona_first_messages(
+    owner_name,
+    passport_analysis,
+    selected_candidates,
+):
+    """Пакетная кнопка: использует ту же единственную логику для каждого контакта."""
+    result = {}
+    for contact in selected_candidates:
+        contact_id = int(contact["telegram_id"])
+        message = generate_neona_first_message(
+            owner_name,
+            passport_analysis,
+            contact,
+        )
+        result[contact_id] = {
+            "message": message,
+            "magnet": choose_neona_magnet(contact),
+            "approved": False,
+            "status": "Сообщение подготовлено",
+            "revision": 1,
+            "validation_errors": [],
+        }
+    return result
+
 def render_telegram_connection(expected_telegram_id):
     expected_telegram_id = int(expected_telegram_id)
 
