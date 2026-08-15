@@ -920,8 +920,15 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
 
 
 
+def _message_mime_type(message) -> str:
+    document = getattr(message, "document", None)
+    return str(getattr(document, "mime_type", "") or "").lower()
+
+
 def _telegram_message_kind(message) -> str:
-    """Минимально различает текст и голос/аудио для входящего диалога."""
+    """Надёжно различает обычный текст и Telegram voice/audio."""
+
+    mime_type = _message_mime_type(message)
 
     if bool(getattr(message, "voice", False)):
         return "voice"
@@ -929,31 +936,59 @@ def _telegram_message_kind(message) -> str:
         return "audio"
 
     document = getattr(message, "document", None)
-    mime_type = str(getattr(document, "mime_type", "") or "").lower()
-    if mime_type.startswith("audio/"):
+    if document is not None and mime_type.startswith("audio/"):
         return "audio"
 
     return "text"
 
 
-async def _download_audio_to_temp(message) -> Path | None:
-    document = getattr(message, "document", None)
-    mime_type = str(getattr(document, "mime_type", "") or "").lower()
-    suffix = mimetypes.guess_extension(mime_type) or ".ogg"
+def _audio_suffix(message) -> str:
+    mime_type = _message_mime_type(message)
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
+    if "ogg" in mime_type or "opus" in mime_type:
+        return ".ogg"
+    if "mpeg" in mime_type or "mp3" in mime_type:
+        return ".mp3"
+    if "mp4" in mime_type or "m4a" in mime_type:
+        return ".m4a"
+    if "wav" in mime_type:
+        return ".wav"
+    if "aac" in mime_type:
+        return ".aac"
+    if "flac" in mime_type:
+        return ".flac"
+
+    # Telegram voice обычно OGG/Opus.
+    return ".ogg"
+
+
+async def _download_audio_to_temp(message) -> Path | None:
+    """Скачивает Telegram voice/audio как байты — проверенный Telethon-вариант."""
+
+    audio_bytes = await message.download_media(file=bytes)
+    if not audio_bytes:
+        return None
+
+    with tempfile.NamedTemporaryFile(
+        suffix=_audio_suffix(message),
+        delete=False,
+    ) as temporary:
+        temporary.write(audio_bytes)
         temp_path = Path(temporary.name)
 
-    result = await message.download_media(file=str(temp_path))
-    if not result or not temp_path.exists() or temp_path.stat().st_size == 0:
+    if not temp_path.exists() or temp_path.stat().st_size == 0:
         temp_path.unlink(missing_ok=True)
         return None
 
     return temp_path
 
 
-def _transcribe_audio(config: Config, path: Path) -> str:
-    """Расшифровывает голосовое через OpenAI только когда реально пришло аудио."""
+def _transcribe_audio_with_model(
+    config: Config,
+    path: Path,
+    model: str,
+) -> str:
+    mime_type = mimetypes.guess_type(path.name)[0] or "audio/ogg"
 
     with path.open("rb") as audio_file:
         response = requests.post(
@@ -961,11 +996,17 @@ def _transcribe_audio(config: Config, path: Path) -> str:
             headers={
                 "Authorization": f"Bearer {config.openai_api_key}",
             },
-            files={
-                "file": (path.name, audio_file),
-            },
             data={
-                "model": "gpt-4o-mini-transcribe",
+                "model": model,
+                "language": "ru",
+                "response_format": "json",
+            },
+            files={
+                "file": (
+                    path.name,
+                    audio_file,
+                    mime_type,
+                ),
             },
             timeout=120,
         )
@@ -975,8 +1016,30 @@ def _transcribe_audio(config: Config, path: Path) -> str:
     return str(payload.get("text") or "").strip()
 
 
+def _transcribe_audio(config: Config, path: Path) -> str:
+    """Современная транскрибация с запасным проверенным вариантом."""
+
+    try:
+        transcript = _transcribe_audio_with_model(
+            config,
+            path,
+            "gpt-4o-mini-transcribe",
+        )
+        if transcript:
+            return transcript
+    except Exception:
+        pass
+
+    # Старый рабочий контур Агентства использовал whisper-1.
+    return _transcribe_audio_with_model(
+        config,
+        path,
+        "whisper-1",
+    )
+
+
 async def _incoming_message_text(config: Config, message) -> str:
-    """Возвращает текст обычного сообщения или транскрипцию голосового."""
+    """Возвращает текст обычного сообщения или транскрипцию voice/audio."""
 
     plain_text = str(getattr(message, "message", "") or "").strip()
     kind = _telegram_message_kind(message)
@@ -990,11 +1053,9 @@ async def _incoming_message_text(config: Config, message) -> str:
             return ""
 
         try:
-            transcript = _transcribe_audio(config, temp_path)
+            return _transcribe_audio(config, temp_path)
         finally:
             temp_path.unlink(missing_ok=True)
-
-        return transcript
 
     return plain_text
 
