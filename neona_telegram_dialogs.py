@@ -11,6 +11,8 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
+import mimetypes
+import tempfile
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -72,7 +74,6 @@ WEEKDAYS_RU = {
 YES_WORDS = {
     "да", "подтверждаю", "подтверждаем", "согласен", "согласна",
     "договорились", "ок", "okay", "yes", "подходит", "устраивает",
-    "отлично", "хорошо", "супер",
 }
 NO_WORDS = {"нет", "не подходит", "неудобно", "другое время", "перенести"}
 
@@ -193,42 +194,9 @@ def _load_workspace(config: Config, owner_id: int) -> dict[str, Any]:
 
 
 def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]]:
-    """Все люди, с которыми Агентство W уже реально начало диалог.
-
-    Основной источник — sent_log. Дополнительная страховка — сохранённые
-    черновики с sent=True. Это важно для старых контактов: если человек
-    ответил через день или неделю, Неона всё равно должна продолжить
-    диалог после входящего сообщения.
-    """
     workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
-
-    contact_names: dict[int, str] = {}
-    for collection_name in ("owner_known_contacts", "contacts", "candidates"):
-        collection = workspace.get(collection_name, [])
-        if isinstance(collection, dict):
-            collection = list(collection.values())
-        if not isinstance(collection, list):
-            continue
-        for contact in collection:
-            if not isinstance(contact, dict):
-                continue
-            try:
-                contact_id = int(contact.get("telegram_id"))
-            except (TypeError, ValueError):
-                continue
-            contact_names[contact_id] = str(
-                contact.get("first_name")
-                or contact.get("name")
-                or ""
-            )
-
-    sent_log = (
-        workspace.get("sent_log", [])
-        if isinstance(workspace.get("sent_log"), list)
-        else []
-    )
-    for event in sent_log:
+    for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
         if not isinstance(event, dict) or event.get("kind") != "first_message":
             continue
         try:
@@ -237,47 +205,8 @@ def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]
             continue
         allowed[contact_id] = {
             "sent_at": str(event.get("sent_at") or ""),
-            "recipient_name": str(
-                event.get("recipient_name")
-                or contact_names.get(contact_id, "")
-            ),
+            "recipient_name": str(event.get("recipient_name") or ""),
         }
-
-    drafts = workspace.get("neona_drafts", [])
-    if isinstance(drafts, dict):
-        drafts = [
-            {"telegram_id": contact_id, **draft}
-            for contact_id, draft in drafts.items()
-            if isinstance(draft, dict)
-        ]
-    if not isinstance(drafts, list):
-        drafts = []
-
-    for draft in drafts:
-        if not isinstance(draft, dict) or not bool(draft.get("sent")):
-            continue
-        try:
-            contact_id = int(draft.get("telegram_id"))
-        except (TypeError, ValueError):
-            continue
-
-        if contact_id not in allowed:
-            allowed[contact_id] = {
-                "sent_at": str(draft.get("sent_at") or ""),
-                "recipient_name": contact_names.get(contact_id, ""),
-            }
-        else:
-            # sent_log остаётся приоритетным, но заполняем возможные пробелы.
-            if not allowed[contact_id].get("sent_at"):
-                allowed[contact_id]["sent_at"] = str(
-                    draft.get("sent_at") or ""
-                )
-            if not allowed[contact_id].get("recipient_name"):
-                allowed[contact_id]["recipient_name"] = contact_names.get(
-                    contact_id,
-                    "",
-                )
-
     return allowed
 
 
@@ -349,7 +278,7 @@ def initialize_dialog_after_first_message(
         int(contact_id),
         last_incoming_id=int(baseline_incoming_id or 0),
         stage="idle",
-        greeted=True,
+        greeted=False,
         context={
             "first_message_sent_at": str(sent_at or ""),
             "activated_by": "agency_w_first_message",
@@ -503,38 +432,6 @@ def _is_no(text: str) -> bool:
     return any((" " in word and word in lowered) or (" " not in word and word in tokens) for word in NO_WORDS)
 
 
-def _is_positive_interest(text: str) -> bool:
-    """Явный интерес к показу/встрече после первого сообщения."""
-    lowered = re.sub(r"[^a-zа-яё0-9 ]+", " ", text.lower()).strip()
-    if _is_yes(text):
-        return True
-    markers = (
-        "интересно", "мне интересно", "хочу", "хочу посмотреть",
-        "покажи", "покажите", "давайте", "готов", "готова",
-        "можно посмотреть", "хочу увидеть",
-    )
-    return any(marker in lowered for marker in markers)
-
-
-def _is_simple_acknowledgement(text: str) -> bool:
-    """Короткая реакция после уже назначенной встречи не требует ответа."""
-    raw = text.strip().lower()
-    if not raw:
-        return True
-
-    emoji_only = re.sub(r"[\s👍👌🙏❤️❤✅👏🙂😊🔥🎉💚💛💙💜🤝]+", "", raw)
-    if not emoji_only:
-        return True
-
-    normalized = re.sub(r"[^a-zа-яё0-9 ]+", " ", raw).strip()
-    phrases = {
-        "спасибо", "благодарю", "отлично", "хорошо", "супер",
-        "договорились", "до встречи", "ок", "okay", "понятно",
-        "ясно", "принято",
-    }
-    return normalized in phrases
-
-
 def _parse_start(context: dict[str, Any]) -> datetime | None:
     date_value = context.get("requested_date")
     time_value = context.get("requested_time")
@@ -561,65 +458,25 @@ def _format_slot(start_utc: datetime, tz_name: str) -> str:
     )
 
 
-def _find_two_nearest_slots(
-    config: Config,
-    owner_id: int,
-    around_utc: datetime,
-    contact_timezone: str,
-) -> list[datetime]:
-    """Ищет 2 ближайших свободных варианта.
-
-    Приоритет: тот же день и время максимально близко к запросу.
-    Выходные не исключаются: если владелец уже принимает встречи в субботу,
-    календарь должен уметь предложить соседний свободный слот в эту же субботу.
-    """
-    now_limit = datetime.now(UTC) + timedelta(minutes=30)
-    requested_msk = around_utc.astimezone(MSK)
-    requested_day = requested_msk.date()
+def _find_three_slots(config: Config, owner_id: int, around_utc: datetime, contact_timezone: str) -> list[datetime]:
     result: list[datetime] = []
-
-    def consider(candidate_msk: datetime) -> None:
-        if len(result) >= 2:
-            return
-        # Рабочее окно владельца 10:00–20:00 МСК.
-        if candidate_msk.date() < requested_day:
-            return
-        day_start = datetime.combine(candidate_msk.date(), dt_time(10, 0), MSK)
-        day_end = datetime.combine(candidate_msk.date(), dt_time(20, 0), MSK)
-        if candidate_msk < day_start or candidate_msk + timedelta(minutes=DURATION_MINUTES) > day_end:
-            return
-        start_utc = candidate_msk.astimezone(UTC)
-        end_utc = start_utc + timedelta(minutes=DURATION_MINUTES)
-        local = start_utc.astimezone(ZoneInfo(contact_timezone))
-        if not (8 <= local.hour < 22):
-            return
-        if start_utc <= now_limit:
-            return
-        if start_utc == around_utc:
-            return
-        if start_utc in result:
-            return
-        if _slot_free(config, owner_id, start_utc, end_utc):
-            result.append(start_utc)
-
-    # Сначала ищем вокруг запрошенного времени в ТОТ ЖЕ ДЕНЬ.
-    # Один вариант раньше, один позже, затем расширяем радиус.
-    for minutes in (30, 60, 90, 120, 150, 180, 210, 240, 270, 300):
-        consider(requested_msk - timedelta(minutes=minutes))
-        consider(requested_msk + timedelta(minutes=minutes))
-        if len(result) >= 2:
-            return result
-
-    # Только если в этот день двух вариантов нет — смотрим следующие 7 дней,
-    # включая субботу и воскресенье, начиная примерно с желаемого времени.
-    for day_offset in range(1, 8):
-        day = requested_day + timedelta(days=day_offset)
-        same_time = datetime.combine(day, requested_msk.timetz().replace(tzinfo=None), MSK)
-        for minutes in (0, -30, 30, -60, 60, -90, 90, -120, 120):
-            consider(same_time + timedelta(minutes=minutes))
-            if len(result) >= 2:
-                return result
-
+    start_day_msk = around_utc.astimezone(MSK).date()
+    for day_offset in range(0, 8):
+        day = start_day_msk + timedelta(days=day_offset)
+        if day.weekday() >= 5:
+            continue
+        cursor = datetime.combine(day, dt_time(10, 0), MSK)
+        end = datetime.combine(day, dt_time(20, 0), MSK)
+        while cursor + timedelta(minutes=DURATION_MINUTES) <= end:
+            start_utc = cursor.astimezone(UTC)
+            end_utc = start_utc + timedelta(minutes=DURATION_MINUTES)
+            local = start_utc.astimezone(ZoneInfo(contact_timezone))
+            if 8 <= local.hour < 22 and start_utc > datetime.now(UTC) + timedelta(minutes=30):
+                if _slot_free(config, owner_id, start_utc, end_utc):
+                    result.append(start_utc)
+                    if len(result) == 3:
+                        return result
+            cursor += timedelta(minutes=30)
     return result
 
 
@@ -630,8 +487,7 @@ def _openai_general_reply(config: Config, owner_name: str, first_name: str, text
     instructions = f"""
 Ты Неона — виртуальная помощница {owner_name}. Пиши по-русски простым человеческим языком, без корпоративного жаргона.
 Главная задача — заинтересовать человека реальными возможностями Агентства W и постепенно привести к осознанной встрече с {owner_name}.
-Факты, которые уже реально доступны: команда ИИ-помощников помогает владельцу искать подходящих людей в ЕГО Telegram-контактах и чатах, анализировать кандидатов и готовить персональное первое сообщение. Окончательный выбор и утверждение первого сообщения делает человек.
-Никогда не говори собеседнику «в ваших Telegram-контактах», «в ваших чатах» или иначе не создавай впечатление, что Агентство W уже имеет доступ к данным собеседника. Корректная формулировка: «{owner_name} может показать на своём реальном примере, как это работает».
+Факты, которые уже реально доступны: команда ИИ-помощников помогает владельцу искать подходящих людей в его Telegram-контактах и чатах, анализировать кандидатов и готовить персональное первое сообщение. Окончательный выбор и утверждение первого сообщения делает человек.
 Никогда не называй ИИ-помощников ботами. Не выдумывай функций. Не говори «проверила», «записала», «отправила», «создала», если техническое действие не было реально выполнено.
 Не используй фамилию собеседника в обращении. {greeting_rule}
 Ответ — 1–4 коротких предложения.
@@ -764,7 +620,7 @@ def _schedule_reply(
             )
 
     if stage == "awaiting_slot_choice":
-        choice = re.search(r"\b([12])\b", text)
+        choice = re.search(r"\b([123])\b", text)
         slots = context.get("offered_slots") or []
         if choice and isinstance(slots, list) and len(slots) >= int(choice.group(1)):
             selected = slots[int(choice.group(1)) - 1]
@@ -796,9 +652,8 @@ def _schedule_reply(
         if len(questions) == 1:
             ask = questions[0]
         else:
-            ask = "; ".join(questions[:-1]) + "; и " + questions[-1]
-        lead = "Отлично. Тогда давайте подберём удобное время. " if stage == "invited_to_meeting" else ""
-        return prefix + lead + "Подскажите, пожалуйста, " + ask + ".", "collecting_meeting_details", context
+            ask = "; и ".join(questions)
+        return prefix + "Подскажите, пожалуйста, " + ask + ".", "collecting_meeting_details", context
 
     start_utc = _parse_start(context)
     if start_utc is None:
@@ -819,7 +674,7 @@ def _schedule_reply(
             context,
         )
 
-    slots = _find_two_nearest_slots(config, owner_id, start_utc, tz_name)
+    slots = _find_three_slots(config, owner_id, start_utc, tz_name)
     if not slots:
         return (
             prefix + "Это время занято, а в ближайшем рабочем окне свободных вариантов пока не нашлось. Напишите другой удобный день — я проверю.",
@@ -829,7 +684,7 @@ def _schedule_reply(
     context["offered_slots"] = [slot.isoformat() for slot in slots]
     options = "\n".join(f"{index}. {_format_slot(slot, tz_name)}" for index, slot in enumerate(slots, 1))
     return (
-        prefix + "Это время занято. Нашла ближайшие свободные варианты:\n" + options + "\nНапишите номер подходящего варианта — 1 или 2.",
+        prefix + "Это время занято. Нашла ближайшие свободные варианты:\n" + options + "\nНапишите номер подходящего варианта.",
         "awaiting_slot_choice",
         context,
     )
@@ -851,53 +706,8 @@ def _process_message(
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
     greet = not greeted
 
-    # Встреча уже назначена — не начинаем приглашение заново.
-    if stage == "scheduled":
-        lowered = text.lower()
-
-        if _is_simple_acknowledgement(text):
-            return "", "scheduled", True, context
-
-        if any(token in lowered for token in (
-            "перенести", "другое время", "другой день", "не смогу",
-            "не могу", "отменить", "отмена",
-        )):
-            context.pop("proposed_start_at", None)
-            context.pop("requested_date", None)
-            context.pop("requested_time", None)
-            context.pop("offered_slots", None)
-            return (
-                "Хорошо. Напишите, пожалуйста, какой новый день и время вам удобны. "
-                "Если часовой пояс и формат встречи остаются прежними, повторять их не нужно.",
-                "collecting_meeting_details",
-                True,
-                context,
-            )
-
-        # На содержательный вопрос после записи отвечаем по существу,
-        # но этап встречи остаётся назначенным.
-        reply = _openai_general_reply(config, owner_name, first_name, text, False)
-        return reply, "scheduled", True, context
-
     scheduling_stage = stage in {"invited_to_meeting", "collecting_meeting_details", "awaiting_confirmation", "awaiting_slot_choice"}
-
-    # Как только человек явно проявил интерес, этап презентации закончен.
-    # Больше не повторяем рассказ об Агентстве W — сразу собираем данные встречи.
-    if stage == "idle" and _is_positive_interest(text):
-        reply, new_stage, context = _schedule_reply(
-            config,
-            owner_id,
-            owner_name,
-            contact_id,
-            first_name,
-            username,
-            text,
-            message_dt,
-            "invited_to_meeting",
-            context,
-            greet,
-        )
-    elif _meeting_intent(text) or scheduling_stage:
+    if _meeting_intent(text) or scheduling_stage:
         reply, new_stage, context = _schedule_reply(
             config,
             owner_id,
@@ -956,8 +766,17 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
             state = _dialog_state(config, int(owner_id), contact_id)
             recent = []
             async for message in client.iter_messages(entity, limit=30):
-                if message.out or not message.message:
+                if message.out:
                     continue
+
+                kind = _telegram_message_kind(message)
+                plain_text = str(getattr(message, "message", "") or "").strip()
+
+                # Берём обычный текст, голос и аудио. Остальные пустые медиа
+                # пока не включаем в диалог Неоны.
+                if not plain_text and kind not in {"voice", "audio"}:
+                    continue
+
                 recent.append(message)
             recent.sort(key=lambda item: int(item.id))
             latest_incoming_id = int(recent[-1].id) if recent else 0
@@ -994,7 +813,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         contact_id,
                         last_incoming_id=baseline_id,
                         stage="idle",
-                        greeted=True,
+                        greeted=False,
                         context={
                             "initialized_at": datetime.now(UTC).isoformat(),
                             "first_message_sent_at": sent_at_raw,
@@ -1006,7 +825,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 state = {
                     "last_incoming_message_id": baseline_id,
                     "stage": "idle",
-                    "greeted": True,
+                    "greeted": False,
                     "context": {
                         "first_message_sent_at": sent_at_raw,
                         "activated_by": "sent_log_fallback",
@@ -1050,7 +869,22 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
             if new_messages:
                 stats["processed"] += len(new_messages)
                 latest = new_messages[-1]
-                combined_text = "\n".join(str(message.message).strip() for message in new_messages if str(message.message).strip())
+                incoming_parts = []
+                for incoming_message in new_messages:
+                    incoming_text = await _incoming_message_text(
+                        config,
+                        incoming_message,
+                    )
+                    if incoming_text:
+                        incoming_parts.append(incoming_text)
+
+                combined_text = "\n".join(incoming_parts).strip()
+                if not combined_text:
+                    # Если аудио не удалось распознать, не помечаем его обработанным:
+                    # следующий запуск сможет попробовать снова.
+                    stats["errors"] += 1
+                    continue
+
                 try:
                     first_name = _first_name(entity, allowed[contact_id].get("recipient_name", ""))
                     username = str(getattr(entity, "username", "") or "")
@@ -1065,21 +899,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         latest.date.astimezone(UTC),
                         state,
                     )
-                    if reply:
-                        sent = await client.send_message(
-                            entity,
-                            reply,
-                            parse_mode=None,
-                            link_preview=False,
-                        )
-                        saved_context = {
-                            **context,
-                            "last_reply_id": int(sent.id),
-                        }
-                        stats["replied"] += 1
-                    else:
-                        saved_context = dict(context)
-
+                    sent = await client.send_message(entity, reply, parse_mode=None, link_preview=False)
                     _save_dialog_state(
                         config,
                         int(owner_id),
@@ -1087,8 +907,9 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         last_incoming_id=int(latest.id),
                         stage=stage,
                         greeted=greeted,
-                        context=saved_context,
+                        context={**context, "last_reply_id": int(sent.id)},
                     )
+                    stats["replied"] += 1
                 except Exception:
                     stats["errors"] += 1
                     # При ошибке не помечаем сообщения обработанными, чтобы
@@ -1096,6 +917,86 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
         return stats
     finally:
         await client.disconnect()
+
+
+
+def _telegram_message_kind(message) -> str:
+    """Минимально различает текст и голос/аудио для входящего диалога."""
+
+    if bool(getattr(message, "voice", False)):
+        return "voice"
+    if bool(getattr(message, "audio", False)):
+        return "audio"
+
+    document = getattr(message, "document", None)
+    mime_type = str(getattr(document, "mime_type", "") or "").lower()
+    if mime_type.startswith("audio/"):
+        return "audio"
+
+    return "text"
+
+
+async def _download_audio_to_temp(message) -> Path | None:
+    document = getattr(message, "document", None)
+    mime_type = str(getattr(document, "mime_type", "") or "").lower()
+    suffix = mimetypes.guess_extension(mime_type) or ".ogg"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
+        temp_path = Path(temporary.name)
+
+    result = await message.download_media(file=str(temp_path))
+    if not result or not temp_path.exists() or temp_path.stat().st_size == 0:
+        temp_path.unlink(missing_ok=True)
+        return None
+
+    return temp_path
+
+
+def _transcribe_audio(config: Config, path: Path) -> str:
+    """Расшифровывает голосовое через OpenAI только когда реально пришло аудио."""
+
+    with path.open("rb") as audio_file:
+        response = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={
+                "Authorization": f"Bearer {config.openai_api_key}",
+            },
+            files={
+                "file": (path.name, audio_file),
+            },
+            data={
+                "model": "gpt-4o-mini-transcribe",
+            },
+            timeout=120,
+        )
+
+    response.raise_for_status()
+    payload = response.json()
+    return str(payload.get("text") or "").strip()
+
+
+async def _incoming_message_text(config: Config, message) -> str:
+    """Возвращает текст обычного сообщения или транскрипцию голосового."""
+
+    plain_text = str(getattr(message, "message", "") or "").strip()
+    kind = _telegram_message_kind(message)
+
+    if kind == "text":
+        return plain_text
+
+    if kind in {"voice", "audio"}:
+        temp_path = await _download_audio_to_temp(message)
+        if temp_path is None:
+            return ""
+
+        try:
+            transcript = _transcribe_audio(config, temp_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+        return transcript
+
+    return plain_text
 
 
 def run_sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dialogs: bool = True) -> dict[str, int]:
