@@ -1,4 +1,5 @@
 import streamlit as st
+from agency_values import render_agency_development
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -2895,7 +2896,7 @@ if received_hash:
 
         main_section = st.segmented_control(
             "Главное меню",
-            ["☀️ День", "📅 Календарь", "🤖 Агенты", "👥 Команда", "👤 Профиль"],
+            ["☀️ День", "📅 Календарь", "🤖 Агенты", "👥 Команда", "🗺️ Развитие", "👤 Профиль"],
             default="☀️ День",
             required=True,
             label_visibility="collapsed",
@@ -6390,6 +6391,9 @@ if received_hash:
                     first_name,
                     partner_link,
                 )
+
+        elif main_section == "🗺️ Развитие":
+            render_agency_development()
 
         elif main_section == "👤 Профиль":
             inviter_text = referral_code if referral_code else "не указан"
