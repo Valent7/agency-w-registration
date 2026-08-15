@@ -1428,6 +1428,89 @@ async def fetch_telegram_contact_contexts(
         await client.disconnect()
 
 
+
+def split_contacts_by_analysis_value(contact_contexts):
+    """Не отправляет в OpenAI контакты, где фактически нечего анализировать."""
+
+    informative = []
+    empty = []
+
+    for source in contact_contexts:
+        # Собираем только содержательные поля, которые реально могут помочь анализу.
+        chunks = []
+
+        for key in (
+            "about",
+            "bio",
+            "description",
+            "context",
+            "dialogue",
+            "messages",
+            "recent_messages",
+            "public_info",
+        ):
+            value = source.get(key)
+            if isinstance(value, list):
+                value = " ".join(
+                    str(item) for item in value if str(item).strip()
+                )
+            if value is not None and str(value).strip():
+                chunks.append(str(value).strip())
+
+        # Имя, username и телефон сами по себе не считаем достаточными
+        # основаниями для платного ИИ-анализа.
+        useful_text = " ".join(chunks).strip()
+
+        if len(useful_text) >= 40:
+            informative.append(source)
+        else:
+            empty.append(source)
+
+    return informative, empty
+
+
+def build_no_data_candidate(source):
+    """Бесплатная локальная характеристика пустого контакта."""
+
+    return {
+        "telegram_id": int(source["telegram_id"]),
+        "name": source.get("name") or "Без имени",
+        "first_name": source.get("first_name") or "",
+        "username": source.get("username") or "",
+        "potential_interest": "неясно",
+        "actuality": "неясно",
+        "warmth": "неясно",
+        "obstacles": ["недостаточно данных"],
+        "short_portrait": (
+            "Данных о человеке пока недостаточно. "
+            "Неония не видит признаков, по которым можно уверенно "
+            "оценить его интерес к вашему предложению."
+        ),
+        "owner_hint": (
+            "Если вы знаете этого человека лично, решение о разговоре "
+            "лучше принять на основании вашего знакомства."
+        ),
+        "message_angle": (
+            "Если владелец решит написать — начать с обычного "
+            "человеческого обращения без предположений об интересах."
+        ),
+        "project_name": "",
+        "project_url": "",
+        "project_evidence": "",
+        # Совместимость с уже работающей Неоной.
+        "segment": "Недостаточно данных",
+        "score": 0,
+        "confidence": "данных недостаточно",
+        "reasons": ["Недостаточно содержательных данных для ИИ-анализа"],
+        "recommendation": "Решает владелец",
+        "status": "Проанализирован без OpenAI",
+        "analysis_cost_mode": "local_no_ai",
+        "analyzed_at": datetime.now(
+            ZoneInfo("Europe/Berlin")
+        ).isoformat(),
+    }
+
+
 def analyze_contacts_for_target_audience(
     passport_analysis,
     contact_contexts,
@@ -1601,6 +1684,7 @@ def analyze_contacts_for_target_audience(
                 ],
                 "recommendation": "Решает владелец",
                 "status": "Проанализирован",
+                "analysis_cost_mode": "openai",
                 "analyzed_at": datetime.now(
                     ZoneInfo("Europe/Berlin")
                 ).isoformat(),
@@ -4335,12 +4419,45 @@ if received_hash:
                                                         batch,
                                                     )
                                                 )
-                                                batch_results = (
-                                                    analyze_contacts_for_target_audience(
-                                                        passport["analysis"],
-                                                        contact_contexts,
+                                                (
+                                                    informative_contexts,
+                                                    empty_contexts,
+                                                ) = split_contacts_by_analysis_value(
+                                                    contact_contexts
+                                                )
+
+                                                batch_results = [
+                                                    build_no_data_candidate(item)
+                                                    for item in empty_contexts
+                                                ]
+
+                                                if informative_contexts:
+                                                    ai_results = (
+                                                        analyze_contacts_for_target_audience(
+                                                            passport["analysis"],
+                                                            informative_contexts,
+                                                        )
+                                                    )
+                                                    for item in ai_results:
+                                                        item[
+                                                            "analysis_cost_mode"
+                                                        ] = "openai"
+                                                    batch_results.extend(ai_results)
+
+                                                # Возвращаем исходный порядок десятки.
+                                                source_order = {
+                                                    int(item["telegram_id"]): pos
+                                                    for pos, item in enumerate(
+                                                        contact_contexts
+                                                    )
+                                                }
+                                                batch_results.sort(
+                                                    key=lambda item: source_order.get(
+                                                        int(item["telegram_id"]),
+                                                        9999,
                                                     )
                                                 )
+
                                                 candidate_results = (
                                                     merge_candidate_results(
                                                         candidate_results,
@@ -4449,6 +4566,14 @@ if received_hash:
                                                 "💡 Мнение Неонии: "
                                                 f"{candidate.get('owner_hint', '—')}"
                                             )
+
+                                            if candidate.get(
+                                                "analysis_cost_mode"
+                                            ) == "local_no_ai":
+                                                st.caption(
+                                                    "💰 Пустой контакт: "
+                                                    "OpenAI для этой оценки не вызывался."
+                                                )
 
                                             with st.expander(
                                                 "Как Неоне лучше начать разговор"
