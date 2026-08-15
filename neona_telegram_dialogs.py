@@ -1051,3 +1051,10 @@ def worker_forever(poll_seconds: int = 15) -> None:
         except Exception as exc:
             print(f"worker error={exc}", flush=True)
         time.sleep(max(5, int(poll_seconds)))
+
+
+if __name__ == "__main__":
+    # Постоянный рабочий цикл Неоны.
+    # Интервал 15 секунд достаточно быстрый для живого диалога
+    # и не вызывает OpenAI, если новых сообщений нет.
+    worker_forever(poll_seconds=15)
