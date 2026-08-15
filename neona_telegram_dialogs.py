@@ -23,6 +23,20 @@ except Exception:  # pragma: no cover - standalone worker mode
     st = None
 
 UTC = timezone.utc
+
+_LAST_VOICE_DIAGNOSTICS: list[dict] = []
+
+def _voice_diag_reset() -> None:
+    _LAST_VOICE_DIAGNOSTICS.clear()
+
+def _voice_diag_add(stage: str, **data) -> None:
+    item = {"stage": stage, "at": datetime.now(UTC).isoformat()}
+    item.update(data)
+    _LAST_VOICE_DIAGNOSTICS.append(item)
+
+def get_last_voice_diagnostics() -> list[dict]:
+    return list(_LAST_VOICE_DIAGNOSTICS)
+
 MSK = ZoneInfo("Europe/Moscow")
 DURATION_MINUTES = 30
 
@@ -729,6 +743,7 @@ def _process_message(
 
 
 async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dialogs: bool = True) -> dict[str, int]:
+    _voice_diag_reset()
     """
     Проверяет новые личные входящие сообщения только от людей, которым из
     Агентства W уже было отправлено утверждённое первое сообщение.
@@ -880,6 +895,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
 
                 combined_text = "\n".join(incoming_parts).strip()
                 if not combined_text:
+                    _voice_diag_add("incoming_text_empty", latest_message_id=int(latest.id))
                     # Если аудио не удалось распознать, не помечаем его обработанным:
                     # следующий запуск сможет попробовать снова.
                     stats["errors"] += 1
@@ -900,6 +916,12 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         state,
                     )
                     sent = await client.send_message(entity, reply, parse_mode=None, link_preview=False)
+                    if any(_telegram_message_kind(item) in {"voice", "audio"} for item in new_messages):
+                        _voice_diag_add(
+                            "reply_sent_after_voice",
+                            latest_message_id=int(latest.id),
+                            reply_id=int(sent.id),
+                        )
                     _save_dialog_state(
                         config,
                         int(owner_id),
@@ -910,7 +932,12 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         context={**context, "last_reply_id": int(sent.id)},
                     )
                     stats["replied"] += 1
-                except Exception:
+                except Exception as exc:
+                    _voice_diag_add(
+                        "dialog_or_send_error",
+                        latest_message_id=int(latest.id),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                     stats["errors"] += 1
                     # При ошибке не помечаем сообщения обработанными, чтобы
                     # следующая попытка могла повторить безопасно.
@@ -963,25 +990,40 @@ def _audio_suffix(message) -> str:
 
 
 async def _download_audio_to_temp(message) -> Path | None:
-    """Скачивает Telegram voice/audio как байты — проверенный Telethon-вариант."""
-
-    audio_bytes = await message.download_media(file=bytes)
-    if not audio_bytes:
+    message_id = int(getattr(message, "id", 0) or 0)
+    mime_type = _message_mime_type(message)
+    suffix = _audio_suffix(message)
+    _voice_diag_add(
+        "voice_detected",
+        message_id=message_id,
+        mime_type=mime_type or "unknown",
+        suffix=suffix,
+        is_voice=bool(getattr(message, "voice", False)),
+        is_audio=bool(getattr(message, "audio", False)),
+    )
+    try:
+        audio_bytes = await message.download_media(file=bytes)
+    except Exception as exc:
+        _voice_diag_add(
+            "download_error",
+            message_id=message_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return None
-
-    with tempfile.NamedTemporaryFile(
-        suffix=_audio_suffix(message),
-        delete=False,
-    ) as temporary:
+    if not audio_bytes:
+        _voice_diag_add("download_empty", message_id=message_id)
+        return None
+    _voice_diag_add("download_ok", message_id=message_id, bytes=len(audio_bytes))
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
         temporary.write(audio_bytes)
         temp_path = Path(temporary.name)
-
-    if not temp_path.exists() or temp_path.stat().st_size == 0:
-        temp_path.unlink(missing_ok=True)
-        return None
-
+    _voice_diag_add(
+        "tempfile_ok",
+        message_id=message_id,
+        suffix=temp_path.suffix,
+        bytes=temp_path.stat().st_size if temp_path.exists() else 0,
+    )
     return temp_path
-
 
 def _transcribe_audio_with_model(
     config: Config,
@@ -989,32 +1031,32 @@ def _transcribe_audio_with_model(
     model: str,
 ) -> str:
     mime_type = mimetypes.guess_type(path.name)[0] or "audio/ogg"
-
+    _voice_diag_add(
+        "transcription_request",
+        model=model,
+        mime_type=mime_type,
+        bytes=path.stat().st_size if path.exists() else 0,
+    )
     with path.open("rb") as audio_file:
         response = requests.post(
             "https://api.openai.com/v1/audio/transcriptions",
-            headers={
-                "Authorization": f"Bearer {config.openai_api_key}",
-            },
-            data={
-                "model": model,
-                "language": "ru",
-                "response_format": "json",
-            },
-            files={
-                "file": (
-                    path.name,
-                    audio_file,
-                    mime_type,
-                ),
-            },
+            headers={"Authorization": f"Bearer {config.openai_api_key}"},
+            data={"model": model, "language": "ru", "response_format": "json"},
+            files={"file": (path.name, audio_file, mime_type)},
             timeout=120,
         )
-
-    response.raise_for_status()
-    payload = response.json()
-    return str(payload.get("text") or "").strip()
-
+    if not response.ok:
+        _voice_diag_add(
+            "transcription_http_error",
+            model=model,
+            status_code=int(response.status_code),
+            response_text=str(response.text or "")[:500],
+        )
+        response.raise_for_status()
+    payload=response.json()
+    transcript=str(payload.get("text") or "").strip()
+    _voice_diag_add("transcription_ok", model=model, characters=len(transcript))
+    return transcript
 
 def _transcribe_audio(config: Config, path: Path) -> str:
     """Современная транскрибация с запасным проверенным вариантом."""
@@ -1027,9 +1069,13 @@ def _transcribe_audio(config: Config, path: Path) -> str:
         )
         if transcript:
             return transcript
-    except Exception:
-        pass
-
+    except Exception as exc:
+        _voice_diag_add(
+            "primary_transcription_exception",
+            model="gpt-4o-mini-transcribe",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    _voice_diag_add("fallback_started", model="whisper-1")
     # Старый рабочий контур Агентства использовал whisper-1.
     return _transcribe_audio_with_model(
         config,

@@ -45,6 +45,7 @@ from neona_dialog_policy import (
     initialize_dialog_after_first_message,
     run_sync_owner_once,
 )
+from neona_telegram_dialogs import get_last_voice_diagnostics
 from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
@@ -4833,6 +4834,21 @@ if received_hash:
                                     "новых входящих: "
                                     f"{dialog_stats.get('processed', 0)}"
                                 )
+                                voice_diag = get_last_voice_diagnostics()
+                                if voice_diag:
+                                    with st.expander(
+                                        "🧪 Диагностика голосового сообщения",
+                                        expanded=True,
+                                    ):
+                                        st.caption(
+                                            "Показывает технические этапы обработки. "
+                                            "Содержимое голосового здесь не сохраняется."
+                                        )
+                                        st.json(voice_diag)
+                                else:
+                                    st.caption(
+                                        "🧪 Голосовое сообщение в этом запуске не обнаружено."
+                                    )
                             except NeonaDialogError as exc:
                                 st.error(str(exc))
                             except Exception as exc:
