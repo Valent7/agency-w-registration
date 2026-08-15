@@ -447,6 +447,60 @@ def _is_no(text: str) -> bool:
     return any((" " in word and word in lowered) or (" " not in word and word in tokens) for word in NO_WORDS)
 
 
+def _is_positive_interest(text: str) -> bool:
+    """Явный интерес к показу/встрече после первого сообщения."""
+    lowered = re.sub(r"[^a-zа-яё0-9 ]+", " ", text.lower()).strip()
+    if _is_yes(text):
+        return True
+    markers = (
+        "интересно",
+        "мне интересно",
+        "хочу",
+        "хочу посмотреть",
+        "покажи",
+        "покажите",
+        "давайте",
+        "готов",
+        "готова",
+        "можно посмотреть",
+        "хочу увидеть",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_simple_acknowledgement(text: str) -> bool:
+    """Короткая реакция после уже назначенной встречи не требует ответа."""
+    raw = text.strip().lower()
+    if not raw:
+        return True
+
+    emoji_only = re.sub(
+        r"[\s👍👌🙏❤️❤✅👏🙂😊🔥🎉💚💛💙💜🤝]+",
+        "",
+        raw,
+    )
+    if not emoji_only:
+        return True
+
+    normalized = re.sub(r"[^a-zа-яё0-9 ]+", " ", raw).strip()
+    phrases = {
+        "спасибо",
+        "благодарю",
+        "отлично",
+        "хорошо",
+        "супер",
+        "договорились",
+        "до встречи",
+        "ок",
+        "okay",
+        "понятно",
+        "ясно",
+        "принято",
+    }
+    return normalized in phrases
+
+
+
 def _parse_start(context: dict[str, Any]) -> datetime | None:
     date_value = context.get("requested_date")
     time_value = context.get("requested_time")
