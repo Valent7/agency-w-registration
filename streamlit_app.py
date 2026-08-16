@@ -1,7 +1,7 @@
 import streamlit as st
 from agency_values import render_agency_development
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
 from neonia_chats import render_neonia_chats
@@ -60,9 +60,17 @@ from pathlib import Path
 from PIL import Image
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.functions.contacts import GetContactsRequest
+from telethon.tl.functions.contacts import GetContactsRequest, GetStatusesRequest
 from telethon.tl.functions.users import GetFullUserRequest
-from telethon.tl.types import InputPeerUser
+from telethon.tl.types import (
+    InputPeerUser,
+    UserStatusOnline,
+    UserStatusOffline,
+    UserStatusRecently,
+    UserStatusLastWeek,
+    UserStatusLastMonth,
+    UserStatusEmpty,
+)
 from telethon.errors import (
     SessionPasswordNeededError,
     PhoneCodeInvalidError,
@@ -1317,6 +1325,184 @@ def extract_json_array(answer):
     return json.loads(cleaned[start:end + 1])
 
 
+
+def _telegram_activity_record(status):
+    """Строгая пригодность холодного контакта: онлайн, сегодня или вчера.
+
+    При приблизительном Telegram-статусе ("был недавно") точная дата неизвестна,
+    поэтому автоматический холодный отбор не считает такой контакт подтверждённо
+    активным за последние сутки/вчера.
+    """
+    berlin = ZoneInfo("Europe/Berlin")
+    now_local = datetime.now(berlin)
+    yesterday = now_local.date() - timedelta(days=1)
+
+    result = {
+        "activity_eligible": False,
+        "telegram_activity_label": "активность не подтверждена",
+        "last_seen_at": "",
+        "activity_precision": "unknown",
+    }
+
+    if isinstance(status, UserStatusOnline):
+        result.update(
+            {
+                "activity_eligible": True,
+                "telegram_activity_label": "сейчас онлайн",
+                "last_seen_at": now_local.isoformat(),
+                "activity_precision": "exact",
+            }
+        )
+        return result
+
+    if isinstance(status, UserStatusOffline):
+        was_online = getattr(status, "was_online", None)
+        if isinstance(was_online, (int, float)):
+            was_online = datetime.fromtimestamp(
+                was_online,
+                tz=timezone.utc,
+            )
+        if isinstance(was_online, datetime):
+            if was_online.tzinfo is None:
+                was_online = was_online.replace(tzinfo=timezone.utc)
+            local_seen = was_online.astimezone(berlin)
+            seen_date = local_seen.date()
+
+            if seen_date == now_local.date():
+                label = f"сегодня в {local_seen:%H:%M}"
+            elif seen_date == yesterday:
+                label = f"вчера в {local_seen:%H:%M}"
+            else:
+                label = f"{local_seen:%d.%m.%Y в %H:%M}"
+
+            result.update(
+                {
+                    "activity_eligible": seen_date >= yesterday,
+                    "telegram_activity_label": label,
+                    "last_seen_at": local_seen.isoformat(),
+                    "activity_precision": "exact",
+                }
+            )
+        return result
+
+    if isinstance(status, UserStatusRecently):
+        result.update(
+            {
+                "telegram_activity_label": (
+                    "был недавно — точное время скрыто"
+                ),
+                "activity_precision": "approx_recently",
+            }
+        )
+        return result
+
+    if isinstance(status, UserStatusLastWeek):
+        result.update(
+            {
+                "telegram_activity_label": "был на прошлой неделе",
+                "activity_precision": "approx_week",
+            }
+        )
+        return result
+
+    if isinstance(status, UserStatusLastMonth):
+        result.update(
+            {
+                "telegram_activity_label": "был в прошлом месяце",
+                "activity_precision": "approx_month",
+            }
+        )
+        return result
+
+    if isinstance(status, UserStatusEmpty) or status is None:
+        return result
+
+    return result
+
+
+async def fetch_telegram_contact_activity(telegram_id):
+    """Одним запросом получает Telegram-статусы контактов без OpenAI."""
+    session_string = load_telegram_session_from_supabase(
+        telegram_id
+    )
+
+    if not session_string:
+        return {}
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            return {}
+
+        statuses = await client(GetStatusesRequest())
+        result = {}
+        for item in statuses:
+            try:
+                contact_id = int(getattr(item, "user_id"))
+            except (TypeError, ValueError):
+                continue
+            result[contact_id] = _telegram_activity_record(
+                getattr(item, "status", None)
+            )
+        return result
+    finally:
+        await client.disconnect()
+
+
+def select_next_active_contacts(
+    contacts,
+    start_offset,
+    activity_by_id,
+    limit=10,
+):
+    """Сканирует общий список, пока не найдёт до 10 строго активных людей."""
+    selected = []
+    index = max(0, int(start_offset or 0))
+    checked = 0
+    hidden_or_unknown = 0
+    old_activity = 0
+
+    while index < len(contacts) and len(selected) < int(limit):
+        contact = contacts[index]
+        index += 1
+        checked += 1
+
+        try:
+            contact_id = int(contact["telegram_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        activity = activity_by_id.get(contact_id) or {}
+        if bool(activity.get("activity_eligible")):
+            selected.append(
+                {
+                    **contact,
+                    **activity,
+                }
+            )
+            continue
+
+        precision = str(activity.get("activity_precision") or "")
+        if precision.startswith("approx") or precision == "unknown":
+            hidden_or_unknown += 1
+        else:
+            old_activity += 1
+
+    return selected, index, {
+        "checked": checked,
+        "hidden_or_unknown": hidden_or_unknown,
+        "old_activity": old_activity,
+    }
+
+
 async def fetch_telegram_contact_contexts(
     telegram_id,
     contacts_batch,
@@ -1355,6 +1541,19 @@ async def fetch_telegram_contact_contexts(
                 "verified": False,
                 "telegram_warning": False,
                 "recent_messages": [],
+                "activity_eligible": bool(
+                    contact.get("activity_eligible", False)
+                ),
+                "telegram_activity_label": str(
+                    contact.get("telegram_activity_label")
+                    or "активность не подтверждена"
+                ),
+                "last_seen_at": str(
+                    contact.get("last_seen_at") or ""
+                ),
+                "activity_precision": str(
+                    contact.get("activity_precision") or "unknown"
+                ),
             }
 
             try:
@@ -1479,8 +1678,14 @@ def build_no_data_candidate(source):
         "name": source.get("name") or "Без имени",
         "first_name": source.get("first_name") or "",
         "username": source.get("username") or "",
+        "activity_eligible": bool(source.get("activity_eligible", False)),
+        "telegram_activity_label": str(
+            source.get("telegram_activity_label") or "активность не подтверждена"
+        ),
+        "last_seen_at": str(source.get("last_seen_at") or ""),
+        "activity_precision": str(source.get("activity_precision") or "unknown"),
         "potential_interest": "неясно",
-        "actuality": "неясно",
+        "actuality": "активен сейчас",
         "warmth": "неясно",
         "obstacles": ["недостаточно данных"],
         "short_portrait": (
@@ -1657,8 +1862,17 @@ def analyze_contacts_for_target_audience(
                 "name": source.get("name") or "Без имени",
                 "first_name": source.get("first_name") or "",
                 "username": source.get("username") or "",
+                "activity_eligible": bool(source.get("activity_eligible", False)),
+                "telegram_activity_label": str(
+                    source.get("telegram_activity_label")
+                    or "активность не подтверждена"
+                ),
+                "last_seen_at": str(source.get("last_seen_at") or ""),
+                "activity_precision": str(
+                    source.get("activity_precision") or "unknown"
+                ),
                 "potential_interest": potential_interest,
-                "actuality": actuality,
+                "actuality": "активен сейчас",
                 "warmth": warmth,
                 "obstacles": obstacles,
                 "short_portrait": str(
@@ -1705,8 +1919,17 @@ def analyze_contacts_for_target_audience(
                 "name": source.get("name") or "Без имени",
                 "first_name": source.get("first_name") or "",
                 "username": source.get("username") or "",
+                "activity_eligible": bool(source.get("activity_eligible", False)),
+                "telegram_activity_label": str(
+                    source.get("telegram_activity_label")
+                    or "активность не подтверждена"
+                ),
+                "last_seen_at": str(source.get("last_seen_at") or ""),
+                "activity_precision": str(
+                    source.get("activity_precision") or "unknown"
+                ),
                 "potential_interest": "средний",
-                "actuality": "неясно",
+                "actuality": "активен сейчас",
                 "warmth": "холодный",
                 "obstacles": ["мало данных"],
                 "short_portrait": "Недостаточно данных для уверенной характеристики.",
@@ -4296,19 +4519,26 @@ if received_hash:
 
                                 st.success("✅ Проект, ЦА и контакты готовы")
                                 st.caption(
-                                    "ЦА здесь — ориентир, а не фильтр. "
-                                    "Неония никого не исключает автоматически."
+                                    "Для холодного списка действует обязательное правило: "
+                                    "Неония предлагает только контакты, которые сейчас онлайн "
+                                    "или были в Telegram сегодня/вчера. ЦА остаётся ориентиром."
+                                )
+
+                                active_candidate_count = sum(
+                                    1
+                                    for item in candidate_results
+                                    if bool(item.get("activity_eligible"))
                                 )
 
                                 c1, c2, c3 = st.columns(3)
                                 c1.metric("Контактов", len(contacts))
                                 c2.metric(
-                                    "Уже проанализировано",
+                                    "Проверено по активности",
                                     min(current_offset, len(contacts)),
                                 )
                                 c3.metric(
-                                    "Осталось",
-                                    max(0, len(contacts) - current_offset),
+                                    "Активных изучено",
+                                    active_candidate_count,
                                 )
 
                                 with st.expander(
@@ -4316,30 +4546,25 @@ if received_hash:
                                 ):
                                     st.write(passport["analysis"])
 
-                                # Текущая десятка — последняя обработанная партия.
-                                batch_start = max(0, current_offset - 10)
-                                current_batch_ids = {
-                                    int(contact["telegram_id"])
-                                    for contact in contacts[batch_start:current_offset]
-                                }
+                                # Показываем последнюю десятку только подтверждённо
+                                # активных холодных контактов.
                                 current_batch_results = [
                                     item
                                     for item in candidate_results
-                                    if int(item.get("telegram_id", 0))
-                                    in current_batch_ids
-                                ]
+                                    if bool(item.get("activity_eligible"))
+                                ][-10:]
 
                                 if not current_batch_results and current_offset < len(contacts):
                                     st.info(
-                                        "Нажмите кнопку ниже. Неония возьмёт первые "
-                                        "10 ещё не проанализированных контактов."
+                                        "Нажмите кнопку ниже. Неония сначала проверит "
+                                        "Telegram-активность и соберёт до 10 активных людей."
                                     )
 
                                 if current_offset < len(contacts):
                                     label = (
-                                        "🧠 Проанализировать первые 10 контактов"
+                                        "🟢 Найти первые 10 активных контактов"
                                         if current_offset == 0
-                                        else "➡️ Проанализировать следующие 10"
+                                        else "➡️ Найти следующие 10 активных"
                                     )
                                     if st.button(
                                         label,
@@ -4349,14 +4574,42 @@ if received_hash:
                                             f"{telegram_id}_{current_offset}"
                                         ),
                                     ):
-                                        batch = contacts[
-                                            current_offset:current_offset + 10
-                                        ]
                                         with st.spinner(
-                                            "Неония изучает очередные контакты "
-                                            "и составляет короткие характеристики..."
+                                            "Неония проверяет активность Telegram и "
+                                            "изучает только свежие контакты..."
                                         ):
                                             try:
+                                                activity_by_id = run_telegram_async(
+                                                    fetch_telegram_contact_activity(
+                                                        telegram_id
+                                                    )
+                                                )
+
+                                                (
+                                                    batch,
+                                                    new_offset,
+                                                    activity_stats,
+                                                ) = select_next_active_contacts(
+                                                    contacts,
+                                                    current_offset,
+                                                    activity_by_id,
+                                                    limit=10,
+                                                )
+
+                                                st.session_state[offset_key] = new_offset
+
+                                                if not batch:
+                                                    persist_workspace_if_changed(
+                                                        telegram_id,
+                                                        force=True,
+                                                    )
+                                                    st.warning(
+                                                        "Среди оставшихся контактов Неония "
+                                                        "не нашла людей с подтверждённой "
+                                                        "активностью сегодня или вчера."
+                                                    )
+                                                    st.rerun()
+
                                                 contact_contexts = run_telegram_async(
                                                     fetch_telegram_contact_contexts(
                                                         telegram_id,
@@ -4388,7 +4641,6 @@ if received_hash:
                                                         ] = "openai"
                                                     batch_results.extend(ai_results)
 
-                                                # Возвращаем исходный порядок десятки.
                                                 source_order = {
                                                     int(item["telegram_id"]): pos
                                                     for pos, item in enumerate(
@@ -4408,11 +4660,9 @@ if received_hash:
                                                         batch_results,
                                                     )
                                                 )
-                                                new_offset = current_offset + len(batch)
                                                 st.session_state[candidates_key] = (
                                                     candidate_results
                                                 )
-                                                st.session_state[offset_key] = new_offset
 
                                                 # Новая десятка = новый осознанный выбор.
                                                 st.session_state[
@@ -4426,6 +4676,10 @@ if received_hash:
                                                         None,
                                                     )
 
+                                                st.session_state[
+                                                    f"neonia_last_activity_stats_{telegram_id}"
+                                                ] = activity_stats
+
                                                 persist_workspace_if_changed(
                                                     telegram_id,
                                                     force=True,
@@ -4433,18 +4687,18 @@ if received_hash:
                                                 st.rerun()
                                             except Exception as exc:
                                                 st.error(
-                                                    "Не удалось выполнить анализ: "
+                                                    "Не удалось проверить активность "
+                                                    "контактов: "
                                                     f"{exc}"
                                                 )
 
                                 if current_batch_results:
                                     st.markdown(
-                                        "### 👥 Текущие 10 контактов"
+                                        "### 👥 Активные кандидаты Неонии"
                                     )
                                     st.caption(
-                                        "Посмотрите характеристики и выберите до 5 людей, "
-                                        "с которыми хотите начать разговор. "
-                                        "Даже низкий приоритет не блокирует выбор."
+                                        "Здесь только люди с подтверждённой активностью "
+                                        "в Telegram сегодня или вчера. Выберите до 5."
                                     )
 
                                     batch_by_id = {
@@ -4470,6 +4724,11 @@ if received_hash:
                                             st.checkbox(
                                                 f"{candidate['name']} · {username}",
                                                 key=checkbox_key,
+                                            )
+
+                                            st.success(
+                                                "🟢 Telegram: "
+                                                f"{candidate.get('telegram_activity_label', 'активность подтверждена')}"
                                             )
 
                                             if st.session_state.get(
@@ -4510,14 +4769,6 @@ if received_hash:
                                                 "💡 Мнение Неонии: "
                                                 f"{candidate.get('owner_hint', '—')}"
                                             )
-
-                                            if candidate.get(
-                                                "analysis_cost_mode"
-                                            ) == "local_no_ai":
-                                                st.caption(
-                                                    "💰 Пустой контакт: "
-                                                    "OpenAI для этой оценки не вызывался."
-                                                )
 
                                             with st.expander(
                                                 "Как Неоне лучше начать разговор"

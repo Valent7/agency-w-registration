@@ -394,7 +394,16 @@ def _candidate_snapshot(owner_id: int) -> dict[str, int]:
 
     return {
         "contacts": len(contacts) if isinstance(contacts, list) else 0,
-        "candidates": len(candidates) if isinstance(candidates, list) else 0,
+        "candidates": (
+            sum(
+                1
+                for item in candidates
+                if isinstance(item, dict)
+                and item.get("activity_eligible") is True
+            )
+            if isinstance(candidates, list)
+            else 0
+        ),
         "selected": len(selected_ids),
         "checked_pending": len(pending_ids),
     }
@@ -420,6 +429,8 @@ def _meeting_candidate_pool(owner_id: int, limit: int = 10) -> list[dict[str, An
             continue
         if item.get("status") == "Отправлено":
             continue
+        if item.get("activity_eligible") is not True:
+            continue
         usable.append({**item, "telegram_id": contact_id})
 
     # Текущая десятка Неонии находится в конце накопленного списка.
@@ -431,8 +442,11 @@ def _candidate_label(candidate: dict[str, Any]) -> str:
     username = str(candidate.get("username") or "").strip()
     username_part = f" · @{username}" if username else ""
     interest = str(candidate.get("potential_interest") or "неясно")
-    actuality = str(candidate.get("actuality") or "неясно")
-    return f"{name}{username_part} · интерес: {interest} · {actuality}"
+    activity = str(
+        candidate.get("telegram_activity_label")
+        or "активность подтверждена"
+    )
+    return f"{name}{username_part} · {activity} · интерес: {interest}"
 
 
 def _save_stagirite_candidate_selection(
@@ -680,10 +694,10 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                             candidate = by_id[cid]
                             st.markdown(f"**{candidate.get('name', 'Кандидат')}**")
                             st.write(
-                                "Интерес: "
+                                "Telegram: "
+                                f"{candidate.get('telegram_activity_label', 'активен')} · "
+                                "интерес: "
                                 f"{candidate.get('potential_interest', 'неясно')} · "
-                                "актуальность: "
-                                f"{candidate.get('actuality', 'неясно')} · "
                                 "теплота: "
                                 f"{candidate.get('warmth', 'неясно')}"
                             )
