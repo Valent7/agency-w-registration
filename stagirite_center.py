@@ -400,6 +400,8 @@ def _candidate_snapshot(owner_id: int) -> dict[str, int]:
                 for item in candidates
                 if isinstance(item, dict)
                 and item.get("activity_eligible") is True
+                and item.get("work_state") == "available"
+                and not bool(item.get("selection_blocked"))
             )
             if isinstance(candidates, list)
             else 0
@@ -430,6 +432,10 @@ def _meeting_candidate_pool(owner_id: int, limit: int = 10) -> list[dict[str, An
         if item.get("status") == "Отправлено":
             continue
         if item.get("activity_eligible") is not True:
+            continue
+        if item.get("work_state") != "available":
+            continue
+        if bool(item.get("selection_blocked")):
             continue
         usable.append({**item, "telegram_id": contact_id})
 

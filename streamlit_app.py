@@ -1630,6 +1630,195 @@ async def fetch_telegram_contact_contexts(
 
 
 
+def _normalize_dialogue_text(value):
+    value = str(value or "").lower().replace("ё", "е")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _looks_like_explicit_refusal(value):
+    """Только сильные формулировки отказа, без догадок."""
+    text_value = _normalize_dialogue_text(value)
+    if not text_value:
+        return False
+
+    strong_patterns = (
+        r"\bнет[, ]+(?:мне )?не ?интерес",
+        r"\bне ?интересно\b",
+        r"\bнеинтересно\b",
+        r"\bне хочу\b",
+        r"\bне надо мне\b",
+        r"\bне пишите\b",
+        r"\bне пиши\b",
+        r"\bне беспокойте\b",
+        r"\bне беспокой\b",
+        r"\bнет[, ]+спасибо\b",
+        r"\bkein interesse\b",
+        r"\bnicht interessiert\b",
+        r"\bnot interested\b",
+        r"\bno thanks\b",
+        r"\bplease stop\b",
+        r"\bstop messaging\b",
+    )
+    return any(
+        re.search(pattern, text_value, flags=re.IGNORECASE)
+        for pattern in strong_patterns
+    )
+
+
+def classify_contact_for_new_outreach(
+    source,
+    already_sent_ids=None,
+    known_contact_ids=None,
+):
+    """Определяет, можно ли предлагать контакт для НОВОГО первого сообщения."""
+    already_sent_ids = set(already_sent_ids or [])
+    known_contact_ids = set(known_contact_ids or [])
+
+    contact_id = int(source["telegram_id"])
+    recent = source.get("recent_messages") or []
+    if not isinstance(recent, list):
+        recent = []
+
+    inbound = [
+        item for item in recent
+        if isinstance(item, dict)
+        and item.get("direction") == "от контакта"
+        and str(item.get("text") or "").strip()
+    ]
+    outbound = [
+        item for item in recent
+        if isinstance(item, dict)
+        and item.get("direction") == "от владельца"
+        and str(item.get("text") or "").strip()
+    ]
+
+    # Самый свежий входящий ответ важнее старых сообщений.
+    latest_inbound_text = ""
+    if inbound:
+        latest_inbound_text = str(inbound[0].get("text") or "")
+
+    if _looks_like_explicit_refusal(latest_inbound_text):
+        return {
+            "work_state": "explicit_refusal",
+            "work_state_label": "Явный отказ — не предлагать",
+            "selection_blocked": True,
+            "block_reason": "явный отказ",
+        }
+
+    if contact_id in already_sent_ids:
+        return {
+            "work_state": "already_contacted",
+            "work_state_label": "Первое сообщение уже отправлено — ждём ответ",
+            "selection_blocked": True,
+            "block_reason": "первое сообщение уже отправлено",
+        }
+
+    # В холодном списке не начинаем заново уже существующий двусторонний диалог.
+    if inbound and outbound:
+        return {
+            "work_state": "dialogue_started",
+            "work_state_label": "Диалог уже начат",
+            "selection_blocked": True,
+            "block_reason": "диалог уже начат",
+        }
+
+    # Контакт, которого владелец уже перевёл в свой тёплый список, не должен
+    # снова появляться как новый холодный кандидат.
+    if contact_id in known_contact_ids:
+        return {
+            "work_state": "warm_contact",
+            "work_state_label": "Уже в тёплых контактах владельца",
+            "selection_blocked": True,
+            "block_reason": "уже в тёплых контактах",
+        }
+
+    if source.get("telegram_warning"):
+        return {
+            "work_state": "telegram_warning",
+            "work_state_label": "Профиль Telegram требует осторожности",
+            "selection_blocked": True,
+            "block_reason": "предупреждение Telegram",
+        }
+
+    return {
+        "work_state": "available",
+        "work_state_label": "Можно начинать новый разговор",
+        "selection_blocked": False,
+        "block_reason": "",
+    }
+
+
+def enrich_contact_workability(
+    contact_contexts,
+    already_sent_ids=None,
+    known_contact_ids=None,
+):
+    enriched = []
+    for source in contact_contexts:
+        state = classify_contact_for_new_outreach(
+            source,
+            already_sent_ids=already_sent_ids,
+            known_contact_ids=known_contact_ids,
+        )
+        enriched.append({**source, **state})
+    return enriched
+
+
+def candidate_priority_key(candidate):
+    """Порядок внутри активной и пригодной партии."""
+    interest = str(
+        candidate.get("potential_interest") or "неясно"
+    ).strip().lower()
+    obstacles_text = " ".join(
+        str(value).lower()
+        for value in (candidate.get("obstacles") or [])
+    )
+
+    competing = any(
+        token in obstacles_text
+        for token in (
+            "другой проект",
+            "других сетев",
+            "другие сетев",
+            "сетевых",
+            "заработных предлож",
+            "активно продвигает",
+            "конкурирующ",
+        )
+    )
+
+    no_data = (
+        candidate.get("analysis_cost_mode") == "local_no_ai"
+        or interest == "неясно"
+    )
+
+    if competing:
+        group = 4
+    elif interest == "высокий":
+        group = 0
+    elif interest == "средний":
+        group = 1
+    elif no_data:
+        group = 2
+    else:
+        group = 3
+
+    warmth_rank = {
+        "знакомый": 0,
+        "поверхностно знакомый": 1,
+        "холодный": 2,
+        "неясно": 3,
+    }.get(str(candidate.get("warmth") or "").lower(), 3)
+
+    return (
+        group,
+        warmth_rank,
+        str(candidate.get("name") or "").lower(),
+    )
+
+
+
 def split_contacts_by_analysis_value(contact_contexts):
     """Не отправляет в OpenAI контакты, где фактически нечего анализировать."""
 
@@ -1684,6 +1873,24 @@ def build_no_data_candidate(source):
         ),
         "last_seen_at": str(source.get("last_seen_at") or ""),
         "activity_precision": str(source.get("activity_precision") or "unknown"),
+        "work_state": str(source.get("work_state") or "available"),
+        "work_state_label": str(
+            source.get("work_state_label") or "Можно начинать новый разговор"
+        ),
+        "selection_blocked": bool(source.get("selection_blocked", False)),
+        "block_reason": str(source.get("block_reason") or ""),
+        "work_state": str(source.get("work_state") or "available"),
+        "work_state_label": str(
+            source.get("work_state_label") or "Можно начинать новый разговор"
+        ),
+        "selection_blocked": bool(source.get("selection_blocked", False)),
+        "block_reason": str(source.get("block_reason") or ""),
+        "work_state": str(source.get("work_state") or "available"),
+        "work_state_label": str(
+            source.get("work_state_label") or "Можно начинать новый разговор"
+        ),
+        "selection_blocked": bool(source.get("selection_blocked", False)),
+        "block_reason": str(source.get("block_reason") or ""),
         "potential_interest": "неясно",
         "actuality": "активен сейчас",
         "warmth": "неясно",
@@ -1735,9 +1942,14 @@ def analyze_contacts_for_target_audience(
 1) сохранённый портрет целевой аудитории проекта владельца;
 2) данные очередных контактов Telegram.
 
-Твоя задача НЕ состоит в том, чтобы решить, «подходит» человек или «не подходит».
-ЦА — только один из ориентиров. Любой человек может оказаться хорошим
-собеседником, поэтому окончательное решение всегда принимает владелец.
+До тебя уже дошли только контакты, которые:
+- активны в Telegram сегодня или вчера;
+- не дали явного отказа;
+- не находятся в уже начатом диалоге;
+- ещё не получили первое сообщение в текущей работе.
+
+Твоя задача НЕ состоит в том, чтобы решать за владельца.
+ЦА — ориентир для расстановки приоритета среди уже пригодных контактов.
 
 Для КАЖДОГО переданного контакта составь маленькую практичную характеристику
 по четырём отдельным показателям:
@@ -4546,13 +4758,21 @@ if received_hash:
                                 ):
                                     st.write(passport["analysis"])
 
-                                # Показываем последнюю десятку только подтверждённо
-                                # активных холодных контактов.
+                                # Точная текущая рабочая партия: активные + пригодные
+                                # для нового обращения. Старые/отказавшие сюда не попадают.
+                                current_batch_results = list(
+                                    st.session_state.get(
+                                        f"neonia_current_workable_batch_{telegram_id}",
+                                        [],
+                                    )
+                                    or []
+                                )
                                 current_batch_results = [
                                     item
-                                    for item in candidate_results
+                                    for item in current_batch_results
                                     if bool(item.get("activity_eligible"))
-                                ][-10:]
+                                    and not bool(item.get("selection_blocked"))
+                                ][:10]
 
                                 if not current_batch_results and current_offset < len(contacts):
                                     st.info(
@@ -4616,11 +4836,69 @@ if received_hash:
                                                         batch,
                                                     )
                                                 )
+
+                                                sent_events = st.session_state.get(
+                                                    f"neona_first_message_sent_log_{telegram_id}",
+                                                    [],
+                                                )
+                                                if not isinstance(sent_events, list):
+                                                    sent_events = []
+                                                already_sent_ids = {
+                                                    int(event.get("telegram_id"))
+                                                    for event in sent_events
+                                                    if isinstance(event, dict)
+                                                    and str(event.get("telegram_id") or "").isdigit()
+                                                }
+
+                                                known_contacts = st.session_state.get(
+                                                    f"neonia_owner_known_contacts_{telegram_id}",
+                                                    {},
+                                                )
+                                                if not isinstance(known_contacts, dict):
+                                                    known_contacts = {}
+                                                known_contact_ids = set()
+                                                for raw_id in known_contacts.keys():
+                                                    try:
+                                                        known_contact_ids.add(int(raw_id))
+                                                    except (TypeError, ValueError):
+                                                        continue
+
+                                                enriched_contexts = enrich_contact_workability(
+                                                    contact_contexts,
+                                                    already_sent_ids=already_sent_ids,
+                                                    known_contact_ids=known_contact_ids,
+                                                )
+
+                                                blocked_contexts = [
+                                                    item
+                                                    for item in enriched_contexts
+                                                    if bool(item.get("selection_blocked"))
+                                                ]
+                                                workable_contexts = [
+                                                    item
+                                                    for item in enriched_contexts
+                                                    if not bool(item.get("selection_blocked"))
+                                                ]
+
+                                                blocked_counts = {}
+                                                for item in blocked_contexts:
+                                                    reason = str(
+                                                        item.get("block_reason")
+                                                        or "не для нового обращения"
+                                                    )
+                                                    blocked_counts[reason] = (
+                                                        blocked_counts.get(reason, 0) + 1
+                                                    )
+
+                                                st.session_state[
+                                                    f"neonia_last_skipped_counts_{telegram_id}"
+                                                ] = blocked_counts
+
                                                 (
                                                     informative_contexts,
                                                     empty_contexts,
                                                 ) = split_contacts_by_analysis_value(
-                                                    contact_contexts
+                                                    workable_contexts
                                                 )
 
                                                 batch_results = [
@@ -4641,17 +4919,11 @@ if received_hash:
                                                         ] = "openai"
                                                     batch_results.extend(ai_results)
 
-                                                source_order = {
-                                                    int(item["telegram_id"]): pos
-                                                    for pos, item in enumerate(
-                                                        contact_contexts
-                                                    )
-                                                }
+                                                # Лучшие пригодные активные контакты идут наверх:
+                                                # высокий -> средний -> мало данных -> низкий ->
+                                                # конкурирующие/другие предложения.
                                                 batch_results.sort(
-                                                    key=lambda item: source_order.get(
-                                                        int(item["telegram_id"]),
-                                                        9999,
-                                                    )
+                                                    key=candidate_priority_key
                                                 )
 
                                                 candidate_results = (
@@ -4663,6 +4935,9 @@ if received_hash:
                                                 st.session_state[candidates_key] = (
                                                     candidate_results
                                                 )
+                                                st.session_state[
+                                                    f"neonia_current_workable_batch_{telegram_id}"
+                                                ] = batch_results
 
                                                 # Новая десятка = новый осознанный выбор.
                                                 st.session_state[
@@ -4697,9 +4972,21 @@ if received_hash:
                                         "### 👥 Активные кандидаты Неонии"
                                     )
                                     st.caption(
-                                        "Здесь только люди с подтверждённой активностью "
-                                        "в Telegram сегодня или вчера. Выберите до 5."
+                                        "Здесь только люди, которые активны сегодня/вчера "
+                                        "и подходят именно для нового обращения: без явного "
+                                        "отказа и без уже начатого диалога. Выберите до 5."
                                     )
+
+                                    skipped_counts = st.session_state.get(
+                                        f"neonia_last_skipped_counts_{telegram_id}",
+                                        {},
+                                    )
+                                    if isinstance(skipped_counts, dict) and skipped_counts:
+                                        with st.expander(
+                                            "Почему некоторые активные контакты не показаны"
+                                        ):
+                                            for reason, count in skipped_counts.items():
+                                                st.write(f"• {reason}: {count}")
 
                                     batch_by_id = {
                                         int(item["telegram_id"]): item
@@ -4740,10 +5027,6 @@ if received_hash:
                                             i1.write(
                                                 "**🎯 Потенциальный интерес:** "
                                                 f"{candidate.get('potential_interest', '—')}"
-                                            )
-                                            i1.write(
-                                                "**🟢 Актуальность:** "
-                                                f"{candidate.get('actuality', '—')}"
                                             )
                                             i2.write(
                                                 "**🤝 Теплота:** "
@@ -4876,8 +5159,8 @@ if received_hash:
                                                         "potential_interest",
                                                         "—",
                                                     ),
-                                                    "Актуальность": item.get(
-                                                        "actuality",
+                                                    "Telegram": item.get(
+                                                        "telegram_activity_label",
                                                         "—",
                                                     ),
                                                     "Теплота": item.get(
@@ -4905,6 +5188,14 @@ if received_hash:
                                 ):
                                     st.session_state[candidates_key] = []
                                     st.session_state[offset_key] = 0
+                                    st.session_state.pop(
+                                        f"neonia_current_workable_batch_{telegram_id}",
+                                        None,
+                                    )
+                                    st.session_state.pop(
+                                        f"neonia_last_skipped_counts_{telegram_id}",
+                                        None,
+                                    )
                                     st.session_state.pop(
                                         selected_candidates_key,
                                         None,
