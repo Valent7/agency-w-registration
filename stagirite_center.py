@@ -1107,9 +1107,10 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
             if pool:
                 st.markdown("**👥 Выберите людей для работы Неоны**")
                 st.caption(
-                    f"Для цели «{needed_count} встречи» можно выбрать от "
-                    f"{needed_count} до 5 человек. Это единственный шаг, "
-                    "который Стагирит оставляет вам: решение, с кем начинать разговор."
+                    f"Цель — {needed_count} встреч(а). Можно начать даже с одного "
+                    "подходящего человека: Неона сразу возьмёт его в работу, "
+                    "а Стагирит продолжит контролировать цель и при необходимости "
+                    "предложит следующих кандидатов. Выберите от 1 до 5."
                 )
 
                 by_id = {int(item["telegram_id"]): item for item in pool}
@@ -1152,7 +1153,7 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                 if st.button(
                     "✅ Выбрать и передать Неоне",
                     type="primary",
-                    disabled=len(chosen_ids) < needed_count,
+                    disabled=len(chosen_ids) < 1,
                     key=f"stagirite_confirm_people_{task.get('id', task.get('created_at'))}",
                     use_container_width=True,
                 ):
@@ -1161,6 +1162,10 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                     if task_id:
                         updated_result = dict(result)
                         updated_result["selected_candidate_ids"] = [int(x) for x in chosen_ids]
+                        updated_result["selection_note"] = (
+                            f"Выбрано {len(chosen_ids)} из цели "
+                            f"{needed_count} встреч(а). Работа начата."
+                        )
                         _update_task(
                             owner_id,
                             task_id,
