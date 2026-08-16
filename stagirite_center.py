@@ -11,6 +11,7 @@ import requests
 import streamlit as st
 
 import agency_calendar
+from workspace_persistence import persist_workspace_if_changed
 
 
 UTC = ZoneInfo("UTC")
@@ -388,6 +389,81 @@ def _candidate_snapshot(owner_id: int) -> dict[str, int]:
     }
 
 
+
+def _meeting_candidate_pool(owner_id: int, limit: int = 10) -> list[dict[str, Any]]:
+    """Последние подготовленные Неонией кандидаты для выбора прямо у Стагирита."""
+    owner_id = int(owner_id)
+    candidates = st.session_state.get(f"neonia_candidates_{owner_id}", [])
+    if not isinstance(candidates, list):
+        return []
+
+    usable: list[dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        try:
+            contact_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if not str(item.get("name") or "").strip():
+            continue
+        if item.get("status") == "Отправлено":
+            continue
+        usable.append({**item, "telegram_id": contact_id})
+
+    # Текущая десятка Неонии находится в конце накопленного списка.
+    return usable[-max(1, int(limit)):]
+
+
+def _candidate_label(candidate: dict[str, Any]) -> str:
+    name = str(candidate.get("name") or "Кандидат")
+    username = str(candidate.get("username") or "").strip()
+    username_part = f" · @{username}" if username else ""
+    interest = str(candidate.get("potential_interest") or "неясно")
+    actuality = str(candidate.get("actuality") or "неясно")
+    return f"{name}{username_part} · интерес: {interest} · {actuality}"
+
+
+def _save_stagirite_candidate_selection(
+    owner_id: int,
+    selected_ids: list[int],
+) -> None:
+    """Сохраняет человеческий выбор и передаёт его в общий рабочий контекст."""
+    owner_id = int(owner_id)
+    normalized: list[int] = []
+    for value in selected_ids:
+        try:
+            contact_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in normalized:
+            normalized.append(contact_id)
+
+    st.session_state[f"neonia_selected_candidates_{owner_id}"] = normalized
+
+    candidates_key = f"neonia_candidates_{owner_id}"
+    candidates = st.session_state.get(candidates_key, [])
+    if isinstance(candidates, list):
+        selected_set = set(normalized)
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            try:
+                candidate_id = int(candidate.get("telegram_id"))
+            except (TypeError, ValueError):
+                continue
+            if candidate_id in selected_set and candidate.get("status") not in {
+                "Сообщение подготовлено",
+                "Сообщение отредактировано",
+                "Первое сообщение утверждено",
+                "Отправлено",
+            }:
+                candidate["status"] = "Выбран владельцем"
+        st.session_state[candidates_key] = candidates
+
+    persist_workspace_if_changed(owner_id, force=True)
+
+
 def _generate_content(ask_openai_fn, owner_name: str, assignment: str) -> str:
     instructions = f"""
 Ты — Стагирит, заместитель Директора Агентства W.
@@ -528,6 +604,7 @@ def _status_icon(status: str) -> str:
         "Нужно уточнение": "🟡",
         "Утверждено": "✅",
         "Выполнено": "✅",
+        "В работе": "🔵",
         "Ошибка": "🔴",
     }.get(status, "⚙️")
 
@@ -537,7 +614,7 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
 
     meetings = result.get("meetings")
     if isinstance(meetings, dict):
-        st.markdown("**📅 Календарь**")
+        st.markdown("**📅 Свободное время**")
         st.write(str(meetings.get("message") or ""))
         slots = meetings.get("slots") or []
         for idx, slot in enumerate(slots, start=1):
@@ -547,59 +624,120 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
             )
 
         snapshot = _candidate_snapshot(owner_id)
-        st.caption(
-            "Неония: "
-            f"контактов {snapshot.get('contacts', 0)} · "
-            f"подготовлено кандидатов {snapshot.get('candidates', 0)} · "
-            f"выбрано владельцем {snapshot.get('selected', 0)}"
-        )
-
-        pending_count = int(snapshot.get("checked_pending", 0) or 0)
         selected_count = int(snapshot.get("selected", 0) or 0)
         needed_count = int(result.get("meeting_count", 2) or 2)
 
-        if pending_count:
-            st.warning(
-                f"Вы отметили {pending_count} кандидат(а), но выбор ещё не сохранён. "
-                "В Неонии нажмите «✅ Сохранить выбор и передать Неоне»."
-            )
+        st.caption(
+            f"Неония подготовила кандидатов: {snapshot.get('candidates', 0)} · "
+            f"выбрано вами: {selected_count}"
+        )
 
-        if slots and selected_count >= needed_count:
+        if slots and selected_count < needed_count:
+            pool = _meeting_candidate_pool(owner_id, limit=10)
+            if pool:
+                st.markdown("**👥 Выберите людей для работы Неоны**")
+                st.caption(
+                    f"Для цели «{needed_count} встречи» можно выбрать от "
+                    f"{needed_count} до 5 человек. Это единственный шаг, "
+                    "который Стагирит оставляет вам: решение, с кем начинать разговор."
+                )
+
+                by_id = {int(item["telegram_id"]): item for item in pool}
+                current_selected = [
+                    cid
+                    for cid in st.session_state.get(
+                        f"neonia_selected_candidates_{int(owner_id)}",
+                        [],
+                    )
+                    if cid in by_id
+                ]
+
+                chosen_ids = st.multiselect(
+                    "Кандидаты Неонии",
+                    options=list(by_id.keys()),
+                    default=current_selected,
+                    format_func=lambda cid: _candidate_label(by_id[cid]),
+                    max_selections=5,
+                    key=f"stagirite_candidate_choice_{task.get('id', task.get('created_at'))}",
+                )
+
+                if chosen_ids:
+                    with st.expander("Коротко о выбранных"):
+                        for cid in chosen_ids:
+                            candidate = by_id[cid]
+                            st.markdown(f"**{candidate.get('name', 'Кандидат')}**")
+                            st.write(
+                                "Интерес: "
+                                f"{candidate.get('potential_interest', 'неясно')} · "
+                                "актуальность: "
+                                f"{candidate.get('actuality', 'неясно')} · "
+                                "теплота: "
+                                f"{candidate.get('warmth', 'неясно')}"
+                            )
+                            obstacles = candidate.get("obstacles") or []
+                            if obstacles:
+                                st.caption(
+                                    "На что обратить внимание: "
+                                    + "; ".join(str(x) for x in obstacles)
+                                )
+                            portrait = str(
+                                candidate.get("short_portrait") or ""
+                            ).strip()
+                            if portrait:
+                                st.caption(portrait)
+
+                if st.button(
+                    "✅ Выбрать и передать Неоне",
+                    type="primary",
+                    disabled=len(chosen_ids) < needed_count,
+                    key=f"stagirite_confirm_people_{task.get('id', task.get('created_at'))}",
+                    use_container_width=True,
+                ):
+                    _save_stagirite_candidate_selection(owner_id, chosen_ids)
+                    task_id = str(task.get("id") or "")
+                    if task_id:
+                        _update_task(
+                            owner_id,
+                            task_id,
+                            {"status": "В работе"},
+                        )
+                    st.session_state["stagirite_open_agent"] = "Неона"
+                    st.rerun()
+            else:
+                st.info(
+                    "Свободное время найдено. Неонии пока нужно подготовить "
+                    "кандидатов для этого поручения."
+                )
+                if st.button(
+                    "➡️ Открыть Неонию",
+                    key=f"stagirite_to_neonia_{task.get('id', task.get('created_at'))}",
+                    use_container_width=True,
+                ):
+                    st.session_state["stagirite_open_agent"] = "Неония"
+                    st.rerun()
+
+        elif slots and selected_count >= needed_count:
             st.success(
-                f"Владелец выбрал {selected_count} человек(а). "
-                "Время найдено, люди выбраны — следующий этап: Неона начинает "
-                "персональные диалоги и согласовывает встречи."
+                f"Время найдено, вы выбрали {selected_count} человек(а). "
+                "Следующий этап — Неона готовит персональные сообщения и ведёт диалоги."
             )
             if st.button(
-                "➡️ Открыть Неону для выбранных людей",
+                "➡️ Продолжить с Неоной",
                 key=f"stagirite_to_neona_{task.get('id', task.get('created_at'))}",
                 use_container_width=True,
             ):
                 st.session_state["stagirite_open_agent"] = "Неона"
                 st.rerun()
-        elif slots:
-            st.info(
-                "Стагирит нашёл время. Следующий человеческий выбор — кому предложить "
-                "эти встречи. После сохранения выбора Стагирит увидит его автоматически."
-            )
-            if st.button(
-                "➡️ Открыть Неонию для выбора людей",
-                key=f"stagirite_to_neonia_{task.get('id', task.get('created_at'))}",
-                use_container_width=True,
-            ):
-                st.session_state["stagirite_open_agent"] = "Неония"
-                st.rerun()
 
     if result.get("content"):
-        st.markdown("**✍️ Подготовленный материал**")
+        st.markdown("**✍️ Готовый материал**")
         st.markdown(str(result["content"]))
 
     if result.get("content_error"):
-        st.error(str(result["content_error"]))
+        st.error("Не удалось подготовить материал. Попробуйте ещё раз чуть позже.")
 
     if result.get("note"):
         st.info(str(result["note"]))
-
 
 def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_fn) -> None:
     owner_id = int(owner_telegram_id)
@@ -622,11 +760,6 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
             ),
             height=120,
             key=f"stagirite_assignment_{owner_id}",
-        )
-
-        st.caption(
-            "Экономный режим: календарь, сохранённые данные и маршрутизация "
-            "проверяются без OpenAI. ИИ вызывается только там, где нужен новый текст."
         )
 
         if st.button(
@@ -652,8 +785,7 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
 
         with st.expander("🎙 Продиктовать поручение"):
             st.caption(
-                "Голос распознаётся только после записи. Обычное открытие этого блока "
-                "не тратит OpenAI."
+                "Запишите поручение и нажмите «Распознать поручение»."
             )
             if hasattr(st, "audio_input"):
                 audio = st.audio_input(
@@ -672,8 +804,8 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
                         )
                         st.session_state["stagirite_voice_ready_text"] = transcript
                         st.rerun()
-                    except Exception as exc:
-                        st.error(f"Не удалось распознать поручение: {exc}")
+                    except Exception:
+                        st.error("Не удалось распознать поручение. Попробуйте ещё раз.")
             else:
                 st.caption(
                     "В текущей версии Streamlit голосовой ввод этого блока недоступен. "
@@ -683,11 +815,6 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
     tasks, persistent = _load_tasks(owner_id)
 
     st.markdown("### 📋 Мои поручения")
-    if not persistent:
-        st.caption(
-            "Пока поручения хранятся в текущей сессии. После запуска SQL-файла "
-            "`stagirite_tasks.sql` история станет постоянной."
-        )
 
     if not tasks:
         st.info("Поручений пока нет.")
@@ -709,16 +836,12 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
                 except Exception:
                     pass
 
-            plan = task.get("plan") if isinstance(task.get("plan"), dict) else {}
-            steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
-            if steps:
-                with st.expander("Как Стагирит разложил задачу"):
-                    for step in steps:
-                        st.markdown(f"• {step}")
-
             _render_result(task, owner_id)
 
-            if status in {"Готово к утверждению", "Нужно решение владельца"}:
+            if (
+                "meetings" not in str(task.get("task_kind") or "")
+                and status in {"Готово к утверждению", "Нужно решение владельца"}
+            ):
                 c1, c2 = st.columns(2)
                 if c1.button(
                     "✅ Утвердить",
