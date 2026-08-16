@@ -1024,6 +1024,56 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                 f"назначено: {summary.get('scheduled', 0)}"
             )
 
+            # Человеческий прогресс по каждому выбранному контакту.
+            progress = (
+                result.get("contact_progress")
+                if isinstance(result.get("contact_progress"), dict)
+                else {}
+            )
+            names = _candidate_name_lookup(owner_id)
+            selected_ids_for_progress = []
+            for raw_id in (
+                result.get("selected_candidate_ids", [])
+                if isinstance(result.get("selected_candidate_ids"), list)
+                else []
+            ):
+                try:
+                    cid = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if cid not in selected_ids_for_progress:
+                    selected_ids_for_progress.append(cid)
+
+            if selected_ids_for_progress:
+                st.markdown("**👥 Ход работы по людям**")
+                for cid in selected_ids_for_progress:
+                    item = (
+                        progress.get(str(cid))
+                        if isinstance(progress.get(str(cid)), dict)
+                        else {}
+                    )
+                    name = names.get(cid, f"Контакт {cid}")
+                    state = str(item.get("status") or "awaiting_first_message")
+
+                    if state == "meeting_scheduled":
+                        line = "✅ встреча назначена"
+                        meeting_start = str(item.get("meeting_start_at") or "").strip()
+                        if meeting_start:
+                            parsed = _parse_iso_datetime(meeting_start)
+                            if parsed is not None:
+                                local = parsed.astimezone(BERLIN)
+                                line += f" · {local:%d.%m.%Y %H:%M} Германия"
+                    elif state == "dialogue":
+                        line = "💬 ответил(а), Неона ведёт диалог"
+                    elif state == "waiting_over_24h":
+                        line = "🕒 сообщение отправлено, ответа больше суток нет"
+                    elif state == "waiting_reply":
+                        line = "✉️ сообщение отправлено, ждём ответ"
+                    else:
+                        line = "📝 сообщение ещё не отправлено"
+
+                    st.write(f"**{name}** — {line}")
+
             if int(summary.get("scheduled", 0) or 0) >= needed:
                 st.success(
                     f"✅ Цель достигнута: назначено "
