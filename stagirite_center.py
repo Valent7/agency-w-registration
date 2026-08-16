@@ -11,6 +11,7 @@ import requests
 import streamlit as st
 
 import agency_calendar
+from team_center import publish_structure_message, structure_member_ids
 from workspace_persistence import persist_workspace_if_changed
 
 
@@ -1213,21 +1214,30 @@ ZOOM:
 ПРАВИЛА КОНТЕНТА:
 - Используй только факты из текущего паспорта версии и самого поручения.
 - Не приписывай Агентству функции, которых в паспорте нет.
-- Если Директор просит рассказать, «что сделали сегодня», используй раздел
-  «ГОТОВО И МОЖНО ПОКАЗЫВАТЬ ПАРТНЁРАМ».
+- Отдавай ТОЛЬКО текст, готовый к публикации. Никаких служебных разделов вроде
+  «Коротко о формате», «Что мы сделали сегодня», «операционная повестка»,
+  «готово и можно показывать партнёрам».
+- Если это АНОНС: 450–850 знаков, 3–5 коротких абзацев, максимум 3 конкретных
+  достижения/плюса. Сначала живой магнит, затем польза, затем приглашение.
+- Если это КОРОТКИЙ ПОСТ: 300–600 знаков.
+- Если одновременно нужны анонс и пост — дай два коротких блока с заголовками
+  «АНОНС» и «ПОСТ», без дополнительных объяснений.
+- Не перечисляй все функции Агентства. Выбирай только самые сильные и новые,
+  которые важны именно для этого поручения.
+- Если Директор просит рассказать, «что сделали сегодня», выбери 3 самых
+  значимых результата из паспорта, а не копируй весь список.
 - Отделяй уже готовое от дорожной карты.
 - Если в поручении не указано время встречи, не придумывай его:
   используй [ВРЕМЯ МСК] и при необходимости [ВРЕМЯ ГЕРМАНИЯ].
 - Если нужна Zoom-ссылка и она сохранена — вставь её в готовый анонс.
 - Если ссылки нет — используй [ССЫЛКА ZOOM].
-- Пиши человечески, тепло и содержательно, без рекламного крика.
-- Показывай конкретную пользу: что теперь человеку не нужно делать вручную.
+- Пиши человечески, тепло, ясно. Без канцелярита и рекламного крика.
+- Показывай конкретную пользу: какую рутину теперь снимает Агентство.
 - Не обещай доход, гарантированный результат или гарантированную встречу.
-- Если нужны пост и анонс — подготовь оба отдельно.
-- Если нужна иллюстрация — не говори, что она создана; дай короткое ТЗ
-  для визуального агента.
+- Если нужна иллюстрация — не говори, что она создана; дай отдельное короткое ТЗ.
 - Не объясняй внутреннюю кухню API, OpenAI, базы данных и экономику запросов.
-- Не добавляй длинных комментариев о своей работе: отдавай готовый материал.
+- Завершай сильной, короткой фразой или приглашением. Для Агентства допустим
+  девиз «Мы создаём своё настоящее».
 """.strip()
 
     return ask_openai_fn(
@@ -1690,8 +1700,140 @@ def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=No
                     st.rerun()
 
     if result.get("content"):
-        st.markdown("**✍️ Готовый материал**")
-        st.markdown(str(result["content"]))
+        st.markdown("**✍️ Материал Стагирита**")
+        st.caption(
+            "Это черновик. Отредактируйте его как хотите, затем сохраните и "
+            "утвердите. Без вашего утверждения массовой отправки не будет."
+        )
+
+        task_id = str(task.get("id") or task.get("created_at") or "content")
+        draft_key = f"stagirite_content_draft_{task_id}"
+
+        saved_text = str(
+            result.get("edited_content")
+            or result.get("content")
+            or ""
+        )
+        if draft_key not in st.session_state:
+            st.session_state[draft_key] = saved_text
+
+        draft = st.text_area(
+            "Текст для публикации",
+            key=draft_key,
+            height=260,
+        )
+
+        is_approved = bool(result.get("content_approved"))
+        published_at = str(result.get("published_at") or "").strip()
+        published_count = int(result.get("published_count") or 0)
+
+        c1, c2 = st.columns(2)
+
+        if c1.button(
+            "💾 Сохранить правки",
+            key=f"stagirite_save_content_{task_id}",
+            use_container_width=True,
+        ):
+            updated = dict(result)
+            updated["edited_content"] = str(draft).strip()
+            updated["content_approved"] = False
+            # Любая правка создаёт новую версию: её нужно снова утвердить.
+            updated.pop("published_at", None)
+            updated.pop("published_count", None)
+            _update_task(
+                owner_id,
+                task_id,
+                {"result": updated},
+            )
+            st.success("Правки сохранены. Теперь материал можно утвердить.")
+            st.rerun()
+
+        if c2.button(
+            "✅ Утвердить материал",
+            key=f"stagirite_approve_content_{task_id}",
+            use_container_width=True,
+        ):
+            clean = str(draft).strip()
+            if not clean:
+                st.warning("Материал пустой.")
+            else:
+                updated = dict(result)
+                updated["edited_content"] = clean
+                updated["content_approved"] = True
+                updated["content_approved_at"] = datetime.now(UTC).isoformat()
+                updated.pop("published_at", None)
+                updated.pop("published_count", None)
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {"result": updated, "status": "Готово к публикации"},
+                )
+                st.rerun()
+
+        if is_approved:
+            st.success("✅ Материал утверждён владельцем.")
+
+            recipients = structure_member_ids(owner_id)
+            recipients_count = len(recipients)
+            zoom_link = str(
+                result.get("zoom_link")
+                or _load_stagirite_settings(owner_id).get("zoom_link")
+                or ""
+            ).strip()
+
+            if published_at:
+                st.success(
+                    f"📣 Опубликовано всей структуре: {published_count} получател(я/ей)."
+                )
+                st.caption(
+                    "Партнёры видят материал в разделе «Сообщения» Агентства W. "
+                    "Им не нужно пересылать его дальше по цепочке."
+                )
+            elif recipients_count == 0:
+                st.info(
+                    "В вашей структуре пока нет зарегистрированных получателей "
+                    "для внутренней публикации."
+                )
+            else:
+                st.caption(
+                    f"Получатели: вся ваша нижестоящая структура — "
+                    f"{recipients_count} человек(а), на любой глубине."
+                )
+                if st.button(
+                    f"📣 Отправить всей структуре ({recipients_count})",
+                    key=f"stagirite_publish_structure_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    try:
+                        count = publish_structure_message(
+                            owner_id,
+                            str(
+                                result.get("edited_content")
+                                or draft
+                            ).strip(),
+                            subject="Анонс Агентства W",
+                            zoom_url=zoom_link,
+                        )
+                        updated = dict(result)
+                        updated["edited_content"] = str(
+                            result.get("edited_content")
+                            or draft
+                        ).strip()
+                        updated["content_approved"] = True
+                        updated["published_at"] = datetime.now(UTC).isoformat()
+                        updated["published_count"] = int(count)
+                        _update_task(
+                            owner_id,
+                            task_id,
+                            {"result": updated, "status": "Выполнено"},
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось опубликовать материал всей структуре. "
+                            f"{type(exc).__name__}: {exc}"
+                        )
 
     if result.get("content_error"):
         st.error("Не удалось подготовить материал. Попробуйте ещё раз чуть позже.")
