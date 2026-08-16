@@ -209,49 +209,52 @@ def _load_workspace(config: Config, owner_id: int) -> dict[str, Any]:
 
 
 def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]]:
-    """Компактный список активных диалогов без загрузки всего workspace.
-
-    Раньше каждая проверка входящих скачивала encrypted_state целиком, включая
-    контакты и кандидатов. При worker каждые 15 секунд это создавало большой
-    Supabase Egress. Теперь источником истины служит маленькая таблица
-    agency_dialog_states, которая и так создаётся после отправки первого
-    утверждённого сообщения.
-    """
-    response = requests.get(
-        f"{config.supabase_url}/rest/v1/agency_dialog_states",
-        headers=_headers(config),
-        params={
-            "owner_telegram_id": f"eq.{int(owner_id)}",
-            "select": "contact_telegram_id,context",
-            "order": "updated_at.desc",
-            "limit": 500,
-        },
-        timeout=20,
-    )
-    if response.status_code == 404:
-        raise DialogError(
-            "Таблица agency_dialog_states ещё не создана. "
-            "Выполните SQL настройки диалогов Неоны."
-        )
-    response.raise_for_status()
-    rows = response.json()
-
+    workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
-    for row in rows if isinstance(rows, list) else []:
+    for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
+        if not isinstance(event, dict) or event.get("kind") != "first_message":
+            continue
         try:
-            contact_id = int(row.get("contact_telegram_id"))
+            contact_id = int(event.get("telegram_id"))
         except (TypeError, ValueError):
             continue
-        context = row.get("context") if isinstance(row.get("context"), dict) else {}
         allowed[contact_id] = {
-            "sent_at": str(
-                context.get("first_message_sent_at")
-                or context.get("sent_at")
-                or ""
-            ),
-            "recipient_name": str(context.get("recipient_name") or ""),
+            "sent_at": str(event.get("sent_at") or ""),
+            "recipient_name": str(event.get("recipient_name") or ""),
         }
     return allowed
+
+
+
+def _load_stagirite_zoom_link(config: Config, owner_id: int) -> tuple[str, str]:
+    """Берёт сохранённую владельцем ссылку Zoom из настроек Стагирита."""
+    try:
+        response = requests.get(
+            f"{config.supabase_url}/rest/v1/agency_stagirite_tasks",
+            headers=_headers(config),
+            params={
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "task_kind": "eq.settings",
+                "select": "result,updated_at",
+                "order": "updated_at.desc",
+                "limit": 1,
+            },
+            timeout=20,
+        )
+        if not response.ok:
+            return "", ""
+        rows = response.json()
+        if not isinstance(rows, list) or not rows:
+            return "", ""
+        result = rows[0].get("result")
+        if not isinstance(result, dict):
+            return "", ""
+        return (
+            str(result.get("zoom_link") or "").strip(),
+            str(result.get("zoom_note") or "").strip(),
+        )
+    except Exception:
+        return "", ""
 
 
 def _dialog_state(config: Config, owner_id: int, contact_id: int) -> dict[str, Any] | None:
@@ -680,6 +683,14 @@ def _schedule_reply(
                         stage,
                         context,
                     )
+                zoom_link = ""
+                zoom_note = ""
+                if "zoom" in meeting_format.lower() or "зум" in meeting_format.lower():
+                    zoom_link, zoom_note = _load_stagirite_zoom_link(
+                        config,
+                        owner_id,
+                    )
+
                 created = _create_meeting(
                     config,
                     {
@@ -693,7 +704,7 @@ def _schedule_reply(
                         "start_at": start_utc.isoformat(),
                         "end_at": end_utc.isoformat(),
                         "meeting_format": meeting_format,
-                        "meeting_link": None,
+                        "meeting_link": zoom_link or None,
                         "status": "Подтверждена",
                         "notes": "Назначено Неоной после подтверждения человека в Telegram.",
                         "source": "Неона — Telegram диалог",
@@ -702,9 +713,17 @@ def _schedule_reply(
                 confirmed_start = datetime.fromisoformat(str(created["start_at"]).replace("Z", "+00:00")).astimezone(UTC)
                 context["meeting_id"] = created.get("id")
                 stage = "scheduled"
+
+                zoom_part = ""
+                if zoom_link:
+                    zoom_part = f" Ссылка Zoom: {zoom_link}."
+                    if zoom_note:
+                        zoom_part += f" {zoom_note}"
+
                 return (
                     prefix
-                    + f"Договорились! Встреча с {owner_name} назначена: {_format_slot(confirmed_start, tz_name)}. Формат — {meeting_format}. Встреча действительно внесена в календарь.",
+                    + f"Договорились! Встреча с {owner_name} назначена: {_format_slot(confirmed_start, tz_name)}. Формат — {meeting_format}. Встреча действительно внесена в календарь."
+                    + zoom_part,
                     stage,
                     context,
                 )
@@ -1227,7 +1246,7 @@ def _owners(config: Config) -> list[tuple[int, str]]:
     return [(owner_id, names.get(owner_id, "Владелец")) for owner_id in ids]
 
 
-def worker_forever(poll_seconds: int = 30) -> None:
+def worker_forever(poll_seconds: int = 15) -> None:
     config = load_config()
     print("Neona Telegram worker started", flush=True)
     while True:
@@ -1246,6 +1265,6 @@ def worker_forever(poll_seconds: int = 30) -> None:
 
 if __name__ == "__main__":
     # Постоянный рабочий цикл Неоны.
-    # Интервал 30 секунд достаточно быстрый для живого диалога
+    # Интервал 15 секунд достаточно быстрый для живого диалога
     # и не вызывает OpenAI, если новых сообщений нет.
     worker_forever(poll_seconds=15)

@@ -52,6 +52,154 @@ def _db_available() -> bool:
     return bool(url and key)
 
 
+
+def _settings_key(owner_id: int) -> str:
+    return f"stagirite_settings_{int(owner_id)}"
+
+
+def _load_stagirite_settings(owner_id: int) -> dict[str, Any]:
+    owner_id = int(owner_id)
+
+    if _db_available():
+        url, _ = _supabase_config()
+        try:
+            response = requests.get(
+                f"{url}/rest/v1/agency_stagirite_tasks",
+                headers=_db_headers(),
+                params={
+                    "owner_telegram_id": f"eq.{owner_id}",
+                    "task_kind": "eq.settings",
+                    "select": "id,result,updated_at",
+                    "order": "updated_at.desc",
+                    "limit": 1,
+                },
+                timeout=20,
+            )
+            if response.ok:
+                rows = response.json()
+                if isinstance(rows, list) and rows:
+                    result = rows[0].get("result")
+                    if isinstance(result, dict):
+                        st.session_state[_settings_key(owner_id)] = dict(result)
+                        return dict(result)
+        except Exception:
+            pass
+
+    return dict(
+        st.session_state.get(
+            _settings_key(owner_id),
+            {},
+        )
+        or {}
+    )
+
+
+def _save_stagirite_settings(owner_id: int, settings: dict[str, Any]) -> None:
+    owner_id = int(owner_id)
+    clean = {
+        "zoom_link": str(settings.get("zoom_link") or "").strip(),
+        "zoom_note": str(settings.get("zoom_note") or "").strip(),
+    }
+    st.session_state[_settings_key(owner_id)] = clean
+
+    if not _db_available():
+        return
+
+    url, _ = _supabase_config()
+    try:
+        lookup = requests.get(
+            f"{url}/rest/v1/agency_stagirite_tasks",
+            headers=_db_headers(),
+            params={
+                "owner_telegram_id": f"eq.{owner_id}",
+                "task_kind": "eq.settings",
+                "select": "id",
+                "order": "updated_at.desc",
+                "limit": 1,
+            },
+            timeout=20,
+        )
+        rows = lookup.json() if lookup.ok else []
+
+        payload = {
+            "owner_telegram_id": owner_id,
+            "assignment": "Системные настройки Стагирита",
+            "task_kind": "settings",
+            "status": "Настройки",
+            "plan": {},
+            "result": clean,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+
+        if isinstance(rows, list) and rows:
+            setting_id = str(rows[0].get("id") or "")
+            if setting_id:
+                response = requests.patch(
+                    f"{url}/rest/v1/agency_stagirite_tasks",
+                    headers=_db_headers("return=minimal"),
+                    params={"id": f"eq.{setting_id}"},
+                    json=payload,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                return
+
+        payload["created_at"] = datetime.now(UTC).isoformat()
+        response = requests.post(
+            f"{url}/rest/v1/agency_stagirite_tasks",
+            headers=_db_headers("return=minimal"),
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+    except Exception:
+        # Ссылка остаётся хотя бы в текущей сессии.
+        return
+
+
+def _valid_zoom_link(value: str) -> bool:
+    value = str(value or "").strip().lower()
+    return (
+        not value
+        or (
+            value.startswith("https://")
+            and "zoom" in value
+        )
+    )
+
+
+def _agency_current_release_brief() -> str:
+    """Факты, которые Стагириту разрешено использовать в контенте."""
+    return """
+ФАКТЫ О ТЕКУЩЕЙ ВЕРСИИ АГЕНТСТВА W (релиз 16.08.2026):
+
+ГОТОВО И МОЖНО ПОКАЗЫВАТЬ ПАРТНЁРАМ:
+- Подключён Стагирит — заместитель Директора и координатор работы Агентства.
+- Стагирит принимает поручение как желаемый результат, а не только как нажатие кнопки.
+- Он понимает обычные формулировки о встречах, Zoom, кандидатах и контенте.
+- Он проверяет календарь и находит свободное время для встречи.
+- Он передаёт работу Неонии и Неоне и отслеживает цель до назначенной встречи.
+- Неония для холодного списка проверяет Telegram-активность и предлагает только тех,
+  кто был онлайн сегодня или вчера.
+- Неония не предлагает для нового первого сообщения людей с явным отказом,
+  уже начатым диалогом или слишком недавним обращением.
+- Неона готовит персональное первое сообщение. Перед первой отправкой решение
+  и утверждение остаются за владельцем кабинета.
+- После ответа человека Неона продолжает диалог по контексту и ведёт к
+  осознанной встрече.
+- Стагирит умеет готовить посты, анонсы и сообщения по поручению владельца.
+- Главный принцип Агентства: ИИ берёт на себя рутину, человек принимает решения
+  и строит отношения.
+- Девиз: «Мы создаём своё настоящее».
+
+ВАЖНО:
+- WhatsApp и другие дополнительные каналы находятся в дорожной карте и ещё
+  не должны описываться как уже подключённые.
+- Нельзя обещать, что Агентство гарантирует встречи, партнёров или доход.
+- Нельзя писать, что Стагирит сам принимает человеческие решения вместо владельца.
+""".strip()
+
+
 def _load_tasks(owner_id: int) -> tuple[list[dict[str, Any]], bool]:
     """Возвращает поручения. При отсутствии SQL-таблицы использует session_state."""
     if _db_available():
@@ -70,13 +218,25 @@ def _load_tasks(owner_id: int) -> tuple[list[dict[str, Any]], bool]:
             )
             if response.ok:
                 rows = response.json()
-                return (rows if isinstance(rows, list) else []), True
+                rows = rows if isinstance(rows, list) else []
+                rows = [
+                    row
+                    for row in rows
+                    if str(row.get("task_kind") or "") != "settings"
+                ]
+                return rows, True
             if response.status_code not in {400, 404}:
                 response.raise_for_status()
         except Exception:
             pass
 
-    return list(st.session_state.get(_task_key(owner_id), [])), False
+    fallback_rows = list(st.session_state.get(_task_key(owner_id), []))
+    fallback_rows = [
+        row
+        for row in fallback_rows
+        if str(row.get("task_kind") or "") != "settings"
+    ]
+    return fallback_rows, False
 
 
 def _save_task(owner_id: int, task: dict[str, Any]) -> bool:
@@ -904,6 +1064,27 @@ def _refresh_meeting_task(
         state = states.get(contact_id, {})
 
         if meeting:
+            zoom_link = str(
+                result.get("zoom_link")
+                or _load_stagirite_settings(owner_id).get("zoom_link")
+                or ""
+            ).strip()
+            meeting_format = str(meeting.get("meeting_format") or "")
+            if (
+                zoom_link
+                and "zoom" in meeting_format.lower()
+                and not str(meeting.get("meeting_link") or "").strip()
+                and meeting.get("id")
+            ):
+                try:
+                    agency_calendar.update_meeting(
+                        str(meeting["id"]),
+                        {"meeting_link": zoom_link},
+                    )
+                    meeting["meeting_link"] = zoom_link
+                except Exception:
+                    pass
+
             counts["scheduled"] += 1
             item.update(
                 {
@@ -911,6 +1092,7 @@ def _refresh_meeting_task(
                     "meeting_id": meeting.get("id"),
                     "meeting_start_at": meeting.get("start_at"),
                     "meeting_format": meeting.get("meeting_format"),
+                    "meeting_link": meeting.get("meeting_link"),
                 }
             )
             progress[key] = item
@@ -997,26 +1179,55 @@ def _append_reserve_candidate(
 
 
 
-def _generate_content(ask_openai_fn, owner_name: str, assignment: str) -> str:
+def _generate_content(
+    ask_openai_fn,
+    owner_id: int,
+    owner_name: str,
+    assignment: str,
+) -> str:
+    settings = _load_stagirite_settings(owner_id)
+    zoom_link = str(settings.get("zoom_link") or "").strip()
+    zoom_note = str(settings.get("zoom_note") or "").strip()
+
+    zoom_context = (
+        f"Сохранённая ссылка Zoom владельца: {zoom_link}\n"
+        f"Дополнение к Zoom: {zoom_note or 'нет'}"
+        if zoom_link
+        else (
+            "Ссылка Zoom пока не сохранена. Если она нужна в готовом анонсе, "
+            "оставь аккуратный маркер [ССЫЛКА ZOOM], но не выдумывай ссылку."
+        )
+    )
+
     instructions = f"""
 Ты — Стагирит, заместитель Директора Агентства W.
 Директор: {owner_name}.
 
-Твоя задача сейчас — организовать создание контента по поручению Директора.
+Твоя задача — организовать создание готового контента по поручению Директора.
 
-Философия Агентства W:
-- ИИ берёт на себя рутину, человек принимает решения и строит отношения.
-- Главная ценность — возвращать человеку время.
-- Девиз: «Мы создаём своё настоящее».
-- Не обещай функций, которых ещё нет.
-- Не называй Агентство просто чат-ботом.
-- Текст должен быть человеческим, ясным и без рекламного крика.
+{_agency_current_release_brief()}
 
-Подготовь ровно то, что попросил Директор.
-Если нужны посты/анонсы — дай готовые тексты.
-Если нужны иллюстрации — НЕ выдумывай, что картинка уже создана; дай короткое техническое задание для визуального агента под каждый материал.
-Если запрос на несколько материалов — раздели их понятными заголовками.
-Не добавляй длинных объяснений о своей работе.
+ZOOM:
+{zoom_context}
+
+ПРАВИЛА КОНТЕНТА:
+- Используй только факты из текущего паспорта версии и самого поручения.
+- Не приписывай Агентству функции, которых в паспорте нет.
+- Если Директор просит рассказать, «что сделали сегодня», используй раздел
+  «ГОТОВО И МОЖНО ПОКАЗЫВАТЬ ПАРТНЁРАМ».
+- Отделяй уже готовое от дорожной карты.
+- Если в поручении не указано время встречи, не придумывай его:
+  используй [ВРЕМЯ МСК] и при необходимости [ВРЕМЯ ГЕРМАНИЯ].
+- Если нужна Zoom-ссылка и она сохранена — вставь её в готовый анонс.
+- Если ссылки нет — используй [ССЫЛКА ZOOM].
+- Пиши человечески, тепло и содержательно, без рекламного крика.
+- Показывай конкретную пользу: что теперь человеку не нужно делать вручную.
+- Не обещай доход, гарантированный результат или гарантированную встречу.
+- Если нужны пост и анонс — подготовь оба отдельно.
+- Если нужна иллюстрация — не говори, что она создана; дай короткое ТЗ
+  для визуального агента.
+- Не объясняй внутреннюю кухню API, OpenAI, базы данных и экономику запросов.
+- Не добавляй длинных комментариев о своей работе: отдавай готовый материал.
 """.strip()
 
     return ask_openai_fn(
@@ -1025,7 +1236,6 @@ def _generate_content(ask_openai_fn, owner_name: str, assignment: str) -> str:
         uploaded_files=[],
         use_web_search=False,
     )
-
 
 def _make_plan(intents: list[str], meeting_count: int) -> list[str]:
     plan: list[str] = []
@@ -1067,6 +1277,19 @@ def _process_assignment(owner_id: int, owner_name: str, assignment: str, ask_ope
         try:
             result["meetings"] = _find_meeting_day(owner_id, assignment, meeting_count)
             result["candidates"] = _candidate_snapshot(owner_id)
+            settings = _load_stagirite_settings(owner_id)
+            zoom_link = str(settings.get("zoom_link") or "").strip()
+            if (
+                zoom_link
+                and any(
+                    token in assignment.lower()
+                    for token in ("zoom", "зум")
+                )
+            ):
+                result["zoom_link"] = zoom_link
+                result["zoom_note"] = str(
+                    settings.get("zoom_note") or ""
+                ).strip()
             status = "Нужно решение владельца"
         except Exception as exc:
             result["meetings"] = {
@@ -1078,7 +1301,12 @@ def _process_assignment(owner_id: int, owner_name: str, assignment: str, ask_ope
 
     if "content" in intents:
         try:
-            content = _generate_content(ask_openai_fn, owner_name, assignment)
+            content = _generate_content(
+                ask_openai_fn,
+                owner_id,
+                owner_name,
+                assignment,
+            )
             if str(content).startswith("Ошибка OpenAI:"):
                 result["content_error"] = content
                 if status != "Ошибка":
@@ -1181,6 +1409,10 @@ def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=No
                 f"{slot.get('berlin', '')}"
             )
 
+        zoom_link = str(result.get("zoom_link") or "").strip()
+        if zoom_link:
+            st.markdown(f"**🔗 Zoom:** {zoom_link}")
+
         summary = (
             result.get("progress_summary")
             if isinstance(result.get("progress_summary"), dict)
@@ -1236,6 +1468,9 @@ def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=No
                             if parsed is not None:
                                 local = parsed.astimezone(BERLIN)
                                 line += f" · {local:%d.%m.%Y %H:%M} Германия"
+                        meeting_link = str(item.get("meeting_link") or "").strip()
+                        if meeting_link:
+                            line += f" · Zoom: {meeting_link}"
                     elif state == "dialogue":
                         line = "💬 ответил(а), Неона ведёт диалог"
                     elif state == "send_failed":
@@ -1481,6 +1716,41 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
         "Заместитель Директора. Скажите, какой результат нужен — "
         "Стагирит организует работу Агентства."
     )
+
+    settings = _load_stagirite_settings(owner_id)
+    with st.expander("🔗 Zoom для встреч и анонсов"):
+        st.caption(
+            "Сохраните постоянную ссылку один раз. Стагирит сможет вставлять "
+            "её в анонсы, а Неона — передавать человеку при подтверждённой Zoom-встрече."
+        )
+        zoom_link_value = st.text_input(
+            "Постоянная ссылка Zoom",
+            value=str(settings.get("zoom_link") or ""),
+            placeholder="https://....zoom.us/j/...",
+            key=f"stagirite_zoom_link_input_{owner_id}",
+        )
+        zoom_note_value = st.text_input(
+            "Дополнение (необязательно)",
+            value=str(settings.get("zoom_note") or ""),
+            placeholder="Например: код доступа или короткая подпись",
+            key=f"stagirite_zoom_note_input_{owner_id}",
+        )
+        if st.button(
+            "💾 Сохранить Zoom",
+            key=f"stagirite_save_zoom_{owner_id}",
+            use_container_width=True,
+        ):
+            if not _valid_zoom_link(zoom_link_value):
+                st.error("Проверьте ссылку Zoom: она должна начинаться с https://.")
+            else:
+                _save_stagirite_settings(
+                    owner_id,
+                    {
+                        "zoom_link": zoom_link_value,
+                        "zoom_note": zoom_note_value,
+                    },
+                )
+                st.success("✅ Zoom сохранён. Стагирит будет использовать его в работе.")
 
     def submit_assignment(clean_text: str) -> None:
         clean_text = str(clean_text or "").strip()
