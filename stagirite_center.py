@@ -159,6 +159,17 @@ def _extract_number_before(text: str, stem: str, default: int = 2) -> int:
     return default
 
 
+def _meeting_count_from_text(text: str) -> int:
+    """Понимает «одна встреча» как 1, а неопределённое «встречи» — как 2."""
+    lowered = str(text or "").lower()
+    explicit = _extract_number_before(lowered, r"встреч", default=0)
+    if explicit:
+        return explicit
+    if re.search(r"\bвстреч(?:а|у)\b", lowered):
+        return 1
+    return 2
+
+
 def _detect_intents(text: str) -> list[str]:
     lowered = text.lower()
     intents: list[str] = []
@@ -522,7 +533,7 @@ def _make_plan(intents: list[str], meeting_count: int) -> list[str]:
 
 def _process_assignment(owner_id: int, owner_name: str, assignment: str, ask_openai_fn) -> dict[str, Any]:
     intents = _detect_intents(assignment)
-    meeting_count = _extract_number_before(assignment, r"встреч", default=2)
+    meeting_count = _meeting_count_from_text(assignment)
     result: dict[str, Any] = {
         "intents": intents,
         "meeting_count": meeting_count,
@@ -602,6 +613,7 @@ def _status_icon(status: str) -> str:
         "Готово к утверждению": "🟢",
         "Нужно решение владельца": "🟡",
         "Нужно уточнение": "🟡",
+        "Нужен ваш выбор": "🟡",
         "Утверждено": "✅",
         "Выполнено": "✅",
         "В работе": "🔵",
@@ -624,12 +636,20 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
             )
 
         snapshot = _candidate_snapshot(owner_id)
-        selected_count = int(snapshot.get("selected", 0) or 0)
+        task_selected_ids = []
+        for value in result.get("selected_candidate_ids", []) if isinstance(result.get("selected_candidate_ids"), list) else []:
+            try:
+                normalized = int(value)
+            except (TypeError, ValueError):
+                continue
+            if normalized not in task_selected_ids:
+                task_selected_ids.append(normalized)
+        selected_count = len(task_selected_ids)
         needed_count = int(result.get("meeting_count", 2) or 2)
 
         st.caption(
             f"Неония подготовила кандидатов: {snapshot.get('candidates', 0)} · "
-            f"выбрано вами: {selected_count}"
+            f"выбрано для этого поручения: {selected_count}"
         )
 
         if slots and selected_count < needed_count:
@@ -643,14 +663,7 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                 )
 
                 by_id = {int(item["telegram_id"]): item for item in pool}
-                current_selected = [
-                    cid
-                    for cid in st.session_state.get(
-                        f"neonia_selected_candidates_{int(owner_id)}",
-                        [],
-                    )
-                    if cid in by_id
-                ]
+                current_selected = [cid for cid in task_selected_ids if cid in by_id]
 
                 chosen_ids = st.multiselect(
                     "Кандидаты Неонии",
@@ -696,10 +709,12 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                     _save_stagirite_candidate_selection(owner_id, chosen_ids)
                     task_id = str(task.get("id") or "")
                     if task_id:
+                        updated_result = dict(result)
+                        updated_result["selected_candidate_ids"] = [int(x) for x in chosen_ids]
                         _update_task(
                             owner_id,
                             task_id,
-                            {"status": "В работе"},
+                            {"status": "В работе", "result": updated_result},
                         )
                     st.session_state["stagirite_open_agent"] = "Неона"
                     st.rerun()
@@ -741,25 +756,49 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
 
 def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_fn) -> None:
     owner_id = int(owner_telegram_id)
+    assignment_key = f"stagirite_assignment_{owner_id}"
+    clear_key = f"stagirite_clear_assignment_{owner_id}"
+
+    # Меняем состояние текстового поля только ДО создания виджета Streamlit.
+    if st.session_state.pop(clear_key, False):
+        st.session_state[assignment_key] = ""
+    pending_voice = str(st.session_state.pop(f"stagirite_voice_pending_{owner_id}", "") or "").strip()
+    if pending_voice:
+        st.session_state[assignment_key] = pending_voice
 
     st.markdown("### 🧭 Стагирит")
     st.caption(
         "Заместитель Директора. Скажите, какой результат нужен — "
-        "Стагирит сам разложит поручение на работу Агентства."
+        "Стагирит организует работу Агентства."
     )
+
+    def submit_assignment(clean_text: str) -> None:
+        clean_text = str(clean_text or "").strip()
+        if not clean_text:
+            st.warning("Скажите Стагириту, какой результат вам нужен.")
+            return
+        with st.spinner("Стагирит выполняет поручение..."):
+            task = _process_assignment(
+                owner_id,
+                owner_name,
+                clean_text,
+                ask_openai_fn,
+            )
+            _save_task(owner_id, task)
+            st.session_state[f"stagirite_last_task_{owner_id}"] = task
+        st.session_state[clear_key] = True
+        st.rerun()
 
     with st.container(border=True):
         st.markdown("**🎯 Новое поручение**")
-        default_text = str(st.session_state.pop("stagirite_voice_ready_text", "") or "")
         assignment = st.text_area(
             "Поручение Стагириту",
-            value=default_text,
             placeholder=(
-                "Например: «На свободный день подготовь две встречи. "
-                "И сделай два поста и анонс для продвижения Агентства W»."
+                "Например: «На 17 августа подготовь одну встречу» "
+                "или «Сделай два поста и анонс Агентства W»."
             ),
-            height=120,
-            key=f"stagirite_assignment_{owner_id}",
+            height=105,
+            key=assignment_key,
         )
 
         if st.button(
@@ -768,92 +807,117 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
             type="primary",
             use_container_width=True,
         ):
-            clean = assignment.strip()
-            if not clean:
-                st.warning("Скажите Стагириту, какой результат вам нужен.")
-            else:
-                with st.spinner("Стагирит организует работу..."):
-                    task = _process_assignment(
-                        owner_id,
-                        owner_name,
-                        clean,
-                        ask_openai_fn,
-                    )
-                    _save_task(owner_id, task)
-                    st.session_state[f"stagirite_last_task_{owner_id}"] = task
-                st.rerun()
+            submit_assignment(assignment)
 
-        with st.expander("🎙 Продиктовать поручение"):
+        with st.expander("🎙 Сказать поручение голосом"):
             st.caption(
-                "Запишите поручение и нажмите «Распознать поручение»."
+                "Запишите поручение и остановите запись — Стагирит примет его автоматически."
             )
             if hasattr(st, "audio_input"):
                 audio = st.audio_input(
                     "Скажите поручение",
                     key=f"stagirite_audio_{owner_id}",
+                    label_visibility="collapsed",
                 )
-                if audio is not None and st.button(
-                    "📝 Распознать поручение",
-                    key=f"stagirite_transcribe_{owner_id}",
-                    use_container_width=True,
-                ):
-                    try:
-                        transcript = _transcribe_audio(
-                            audio.getvalue(),
-                            getattr(audio, "name", "stagirite-command.wav"),
-                        )
-                        st.session_state["stagirite_voice_ready_text"] = transcript
-                        st.rerun()
-                    except Exception:
-                        st.error("Не удалось распознать поручение. Попробуйте ещё раз.")
+                if audio is not None:
+                    audio_bytes = audio.getvalue()
+                    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+                    processed_key = f"stagirite_voice_processed_{owner_id}"
+                    if st.session_state.get(processed_key) != audio_hash:
+                        # Сначала запоминаем hash: rerun не создаст дубликат поручения.
+                        st.session_state[processed_key] = audio_hash
+                        try:
+                            with st.spinner("Стагирит слушает..."):
+                                transcript = _transcribe_audio(
+                                    audio_bytes,
+                                    getattr(audio, "name", "stagirite-command.wav"),
+                                )
+                            transcript = str(transcript or "").strip()
+                            if transcript:
+                                st.info(f"Вы сказали: {transcript}")
+                                submit_assignment(transcript)
+                            else:
+                                st.warning("Не удалось разобрать речь. Попробуйте ещё раз.")
+                        except Exception:
+                            st.error("Не удалось распознать поручение. Попробуйте ещё раз.")
             else:
-                st.caption(
-                    "В текущей версии Streamlit голосовой ввод этого блока недоступен. "
-                    "Текстовый режим работает полностью."
-                )
+                st.caption("Можно дать поручение текстом выше.")
 
     tasks, persistent = _load_tasks(owner_id)
 
-    st.markdown("### 📋 Мои поручения")
-
+    st.markdown("### 📋 Текущее поручение")
     if not tasks:
         st.info("Поручений пока нет.")
         return
 
-    for task in tasks[:10]:
-        status = str(task.get("status") or "planned")
-        assignment = str(task.get("assignment") or "").strip()
-        task_id = str(task.get("id") or task.get("created_at") or "")
-        created = str(task.get("created_at") or "")
+    # Показываем только последнее поручение полностью. Старые тесты не растягивают страницу.
+    task = tasks[0]
+    status = str(task.get("status") or "planned")
+    assignment_text = str(task.get("assignment") or "").strip()
+    task_id = str(task.get("id") or task.get("created_at") or "")
+    created = str(task.get("created_at") or "")
+    task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    task_kind = str(task.get("task_kind") or "")
 
-        with st.container(border=True):
-            st.markdown(f"#### {_status_icon(status)} {status}")
-            st.write(assignment)
-            if created:
-                try:
-                    parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                    st.caption(parsed.astimezone(BERLIN).strftime("%d.%m.%Y · %H:%M"))
-                except Exception:
-                    pass
+    display_status = status
+    if "meetings" in task_kind:
+        needed = int(task_result.get("meeting_count", 2) or 2)
+        selected_ids = task_result.get("selected_candidate_ids", [])
+        selected_count = len(selected_ids) if isinstance(selected_ids, list) else 0
+        if selected_count >= needed:
+            display_status = "В работе"
+        elif (task_result.get("meetings") or {}).get("slots"):
+            display_status = "Нужен ваш выбор"
 
-            _render_result(task, owner_id)
+    with st.container(border=True):
+        st.markdown(f"#### {_status_icon(display_status)} {display_status}")
+        st.write(assignment_text)
+        if created:
+            try:
+                parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                st.caption(parsed.astimezone(BERLIN).strftime("%d.%m.%Y · %H:%M"))
+            except Exception:
+                pass
 
-            if (
-                "meetings" not in str(task.get("task_kind") or "")
-                and status in {"Готово к утверждению", "Нужно решение владельца"}
+        _render_result(task, owner_id)
+
+        if (
+            "meetings" not in task_kind
+            and status in {"Готово к утверждению", "Нужно решение владельца"}
+        ):
+            c1, c2 = st.columns(2)
+            if c1.button(
+                "✅ Утвердить",
+                key=f"stagirite_approve_{task_id}",
+                use_container_width=True,
             ):
-                c1, c2 = st.columns(2)
-                if c1.button(
-                    "✅ Утвердить",
-                    key=f"stagirite_approve_{task_id}",
-                    use_container_width=True,
-                ):
-                    _update_task(owner_id, task_id, {"status": "Утверждено"})
-                    st.rerun()
-                if c2.button(
-                    "✅ Считать выполненным",
-                    key=f"stagirite_done_{task_id}",
-                    use_container_width=True,
-                ):
-                    _update_task(owner_id, task_id, {"status": "Выполнено"})
-                    st.rerun()
+                _update_task(owner_id, task_id, {"status": "Утверждено"})
+                st.rerun()
+            if c2.button(
+                "✅ Считать выполненным",
+                key=f"stagirite_done_{task_id}",
+                use_container_width=True,
+            ):
+                _update_task(owner_id, task_id, {"status": "Выполнено"})
+                st.rerun()
+
+    previous = tasks[1:]
+    if previous:
+        with st.expander(f"🗂 История поручений · {len(previous)}"):
+            for old in previous[:20]:
+                old_status = str(old.get("status") or "")
+                old_assignment = str(old.get("assignment") or "").strip()
+                old_created = str(old.get("created_at") or "")
+                when = ""
+                if old_created:
+                    try:
+                        parsed = datetime.fromisoformat(old_created.replace("Z", "+00:00"))
+                        when = parsed.astimezone(BERLIN).strftime("%d.%m · %H:%M")
+                    except Exception:
+                        pass
+                suffix = f" · {when}" if when else ""
+                st.markdown(
+                    f"**{_status_icon(old_status)} {old_status}**{suffix}  \n"
+                    f"{old_assignment}"
+                )
+
