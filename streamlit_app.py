@@ -22,6 +22,7 @@ from agency_calendar import (
 )
 from team_center import render_team_center
 from personal_tasks import render_personal_tasks
+from stagirite_center import render_stagirite_center
 from neola_partner_center import (
     activation_is_confirmed,
     activation_label,
@@ -2985,6 +2986,10 @@ if received_hash:
                 )
             )
 
+        pending_main_section = st.session_state.pop("agency_open_main_section", None)
+        if pending_main_section:
+            st.session_state["main_section"] = pending_main_section
+
         main_section = st.segmented_control(
             "Главное меню",
             ["☀️ День", "📅 Календарь", "🤖 Агенты", "👥 Команда", "🗺️ Развитие", "👤 Профиль"],
@@ -3130,6 +3135,10 @@ if received_hash:
                     "Главный координатор. Внутри него находятся специализированные "
                     "агенты Агентства W."
                 )
+                pending_agent = st.session_state.pop("stagirite_open_agent", None)
+                if pending_agent:
+                    st.session_state["selected_agent"] = pending_agent
+
                 selected_agent = st.selectbox(
                     "Откройте нужного агента внутри Стагирита",
                     ["Стагирит", "Неония", "Неона", "Неола"],
@@ -3158,7 +3167,14 @@ if received_hash:
             with st.container(border=True):
                 st.markdown(f"#### {selected_agent}")
                 st.write(agent_descriptions[selected_agent])
-                if selected_agent == "Неония":
+                if selected_agent == "Стагирит":
+                    render_stagirite_center(
+                        owner_telegram_id=int(telegram_id),
+                        owner_name=first_name,
+                        ask_openai_fn=ask_openai,
+                    )
+
+                elif selected_agent == "Неония":
                     st.caption(
                 "Неония анализирует проект, формирует портрет ЦА и затем "
                 "помогает владельцу разбирать контакты партиями по 10."

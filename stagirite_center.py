@@ -1,0 +1,666 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from datetime import date, datetime, time as dt_time, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import requests
+import streamlit as st
+
+import agency_calendar
+
+
+UTC = ZoneInfo("UTC")
+MSK = ZoneInfo("Europe/Moscow")
+BERLIN = ZoneInfo("Europe/Berlin")
+
+WORK_START = dt_time(10, 0)
+WORK_END = dt_time(20, 0)
+MEETING_MINUTES = 30
+BUFFER_MINUTES = 60
+
+
+def _supabase_config() -> tuple[str, str]:
+    return (
+        str(st.secrets.get("SUPABASE_URL") or "").rstrip("/"),
+        str(st.secrets.get("SUPABASE_SECRET_KEY") or ""),
+    )
+
+
+def _db_headers(prefer: str | None = None) -> dict[str, str]:
+    _, key = _supabase_config()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def _task_key(owner_id: int) -> str:
+    return f"stagirite_tasks_fallback_{int(owner_id)}"
+
+
+def _db_available() -> bool:
+    url, key = _supabase_config()
+    return bool(url and key)
+
+
+def _load_tasks(owner_id: int) -> tuple[list[dict[str, Any]], bool]:
+    """Возвращает поручения. При отсутствии SQL-таблицы использует session_state."""
+    if _db_available():
+        url, _ = _supabase_config()
+        try:
+            response = requests.get(
+                f"{url}/rest/v1/agency_stagirite_tasks",
+                headers=_db_headers(),
+                params={
+                    "owner_telegram_id": f"eq.{int(owner_id)}",
+                    "select": "*",
+                    "order": "created_at.desc",
+                    "limit": 30,
+                },
+                timeout=20,
+            )
+            if response.ok:
+                rows = response.json()
+                return (rows if isinstance(rows, list) else []), True
+            if response.status_code not in {400, 404}:
+                response.raise_for_status()
+        except Exception:
+            pass
+
+    return list(st.session_state.get(_task_key(owner_id), [])), False
+
+
+def _save_task(owner_id: int, task: dict[str, Any]) -> bool:
+    now = datetime.now(UTC).isoformat()
+    payload = {
+        "owner_telegram_id": int(owner_id),
+        "assignment": str(task.get("assignment") or ""),
+        "task_kind": str(task.get("task_kind") or "general"),
+        "status": str(task.get("status") or "planned"),
+        "plan": task.get("plan") or {},
+        "result": task.get("result") or {},
+        "created_at": str(task.get("created_at") or now),
+        "updated_at": now,
+    }
+
+    if _db_available():
+        url, _ = _supabase_config()
+        try:
+            response = requests.post(
+                f"{url}/rest/v1/agency_stagirite_tasks",
+                headers=_db_headers("return=representation"),
+                json=payload,
+                timeout=20,
+            )
+            if response.ok:
+                return True
+            if response.status_code not in {400, 404}:
+                response.raise_for_status()
+        except Exception:
+            pass
+
+    fallback = list(st.session_state.get(_task_key(owner_id), []))
+    payload["id"] = f"local-{hashlib.sha1((payload['assignment'] + now).encode()).hexdigest()[:12]}"
+    fallback.insert(0, payload)
+    st.session_state[_task_key(owner_id)] = fallback[:30]
+    return False
+
+
+def _update_task(owner_id: int, task_id: str, changes: dict[str, Any]) -> None:
+    changes = {**changes, "updated_at": datetime.now(UTC).isoformat()}
+    if task_id and not str(task_id).startswith("local-") and _db_available():
+        url, _ = _supabase_config()
+        try:
+            response = requests.patch(
+                f"{url}/rest/v1/agency_stagirite_tasks",
+                headers=_db_headers("return=minimal"),
+                params={"id": f"eq.{task_id}"},
+                json=changes,
+                timeout=20,
+            )
+            if response.ok:
+                return
+        except Exception:
+            pass
+
+    fallback = list(st.session_state.get(_task_key(owner_id), []))
+    for item in fallback:
+        if str(item.get("id")) == str(task_id):
+            item.update(changes)
+            break
+    st.session_state[_task_key(owner_id)] = fallback
+
+
+def _extract_number_before(text: str, stem: str, default: int = 2) -> int:
+    lowered = text.lower()
+    match = re.search(rf"\b(\d+)\s+[^.\n]{{0,18}}{stem}", lowered)
+    if match:
+        return max(1, min(10, int(match.group(1))))
+
+    words = {
+        "одну": 1, "один": 1, "одна": 1,
+        "две": 2, "два": 2,
+        "три": 3,
+        "четыре": 4,
+        "пять": 5,
+    }
+    for word, value in words.items():
+        if re.search(rf"\b{word}\b[^.\n]{{0,18}}{stem}", lowered):
+            return value
+    return default
+
+
+def _detect_intents(text: str) -> list[str]:
+    lowered = text.lower()
+    intents: list[str] = []
+
+    if any(x in lowered for x in ("встреч", "созвон", "календар", "свободн")):
+        intents.append("meetings")
+    if any(x in lowered for x in (
+        "пост", "анонс", "контент", "публикац", "иллюстрац",
+        "картин", "продвиж", "текст для чата", "сообщение команде",
+    )):
+        intents.append("content")
+    if any(x in lowered for x in ("команд", "структур", "партнёр", "партнер")):
+        intents.append("team")
+
+    return intents or ["general"]
+
+
+def _target_date_from_text(text: str) -> date | None:
+    lowered = text.lower()
+    today = datetime.now(MSK).date()
+    if "послезавтра" in lowered:
+        return today + timedelta(days=2)
+    if "завтра" in lowered:
+        return today + timedelta(days=1)
+    if "сегодня" in lowered:
+        return today
+
+    weekdays = {
+        "понедельник": 0, "понедельника": 0,
+        "вторник": 1, "вторника": 1,
+        "среда": 2, "среду": 2,
+        "четверг": 3, "четверга": 3,
+        "пятница": 4, "пятницу": 4,
+        "суббота": 5, "субботу": 5,
+        "воскресенье": 6,
+    }
+    for word, weekday in weekdays.items():
+        if word in lowered:
+            delta = (weekday - today.weekday()) % 7
+            if delta == 0:
+                delta = 7
+            return today + timedelta(days=delta)
+
+    match = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", lowered)
+    if match:
+        day = int(match.group(1))
+        month = int(match.group(2))
+        year = int(match.group(3)) if match.group(3) else today.year
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _active_meetings_for_day(owner_id: int, day: date) -> list[dict[str, Any]]:
+    start_msk = datetime.combine(day, dt_time.min, tzinfo=MSK)
+    end_msk = start_msk + timedelta(days=1)
+    return [
+        item for item in agency_calendar.list_meetings(
+            int(owner_id),
+            start_msk.astimezone(UTC),
+            end_msk.astimezone(UTC),
+        )
+        if item.get("status") not in {"Отменена", "Перенесена"}
+    ]
+
+
+def _free_slots_for_day(owner_id: int, day: date, needed: int) -> list[datetime]:
+    meetings = _active_meetings_for_day(owner_id, day)
+    existing = [
+        (_parse_utc(item["start_at"]), _parse_utc(item["end_at"]))
+        for item in meetings
+        if item.get("start_at") and item.get("end_at")
+    ]
+
+    now_utc = datetime.now(UTC)
+    cursor = datetime.combine(day, WORK_START, tzinfo=MSK)
+    day_end = datetime.combine(day, WORK_END, tzinfo=MSK)
+    chosen: list[datetime] = []
+
+    while cursor + timedelta(minutes=MEETING_MINUTES) <= day_end:
+        start_utc = cursor.astimezone(UTC)
+        end_utc = start_utc + timedelta(minutes=MEETING_MINUTES)
+
+        if start_utc >= now_utc + timedelta(minutes=60):
+            blocked = False
+            for ex_start, ex_end in existing:
+                if (
+                    start_utc < ex_end + timedelta(minutes=BUFFER_MINUTES)
+                    and end_utc > ex_start - timedelta(minutes=BUFFER_MINUTES)
+                ):
+                    blocked = True
+                    break
+
+            if not blocked:
+                for other in chosen:
+                    other_end = other + timedelta(minutes=MEETING_MINUTES)
+                    if (
+                        start_utc < other_end + timedelta(minutes=BUFFER_MINUTES)
+                        and end_utc > other - timedelta(minutes=BUFFER_MINUTES)
+                    ):
+                        blocked = True
+                        break
+
+            if not blocked:
+                chosen.append(start_utc)
+                if len(chosen) >= needed:
+                    return chosen
+
+        cursor += timedelta(minutes=30)
+
+    return chosen
+
+
+def _find_meeting_day(owner_id: int, text: str, count: int) -> dict[str, Any]:
+    explicit_day = _target_date_from_text(text)
+    start_day = explicit_day or datetime.now(MSK).date()
+
+    days = [explicit_day] if explicit_day else [
+        start_day + timedelta(days=offset) for offset in range(0, 14)
+    ]
+
+    best_day = None
+    best_slots: list[datetime] = []
+
+    for day in [d for d in days if d is not None]:
+        slots = _free_slots_for_day(owner_id, day, count)
+        if len(slots) > len(best_slots):
+            best_day, best_slots = day, slots
+        if len(slots) >= count:
+            best_day, best_slots = day, slots
+            break
+
+    if best_day is None:
+        return {
+            "found": False,
+            "message": "В ближайшие две недели не удалось найти подходящий свободный день.",
+            "slots": [],
+        }
+
+    labels = []
+    for start_utc in best_slots[:count]:
+        msk = start_utc.astimezone(MSK)
+        berlin = start_utc.astimezone(BERLIN)
+        labels.append({
+            "start_at": start_utc.isoformat(),
+            "msk": msk.strftime("%d.%m.%Y · %H:%M МСК"),
+            "berlin": berlin.strftime("%d.%m.%Y · %H:%M Германия"),
+        })
+
+    return {
+        "found": len(labels) >= count,
+        "day": best_day.isoformat(),
+        "slots": labels,
+        "message": (
+            f"Нашёл день, где можно подготовить {count} встреч(и)."
+            if len(labels) >= count
+            else f"На лучшем найденном дне свободно только {len(labels)} подходящих окон."
+        ),
+    }
+
+
+def _candidate_snapshot(owner_id: int) -> dict[str, int]:
+    candidates = st.session_state.get(f"neonia_candidates_{int(owner_id)}", [])
+    selected = st.session_state.get(f"neonia_selected_candidates_{int(owner_id)}", [])
+    contacts = st.session_state.get(f"neonia_telegram_contacts_{int(owner_id)}", [])
+    return {
+        "contacts": len(contacts) if isinstance(contacts, list) else 0,
+        "candidates": len(candidates) if isinstance(candidates, list) else 0,
+        "selected": len(selected) if isinstance(selected, list) else 0,
+    }
+
+
+def _generate_content(ask_openai_fn, owner_name: str, assignment: str) -> str:
+    instructions = f"""
+Ты — Стагирит, заместитель Директора Агентства W.
+Директор: {owner_name}.
+
+Твоя задача сейчас — организовать создание контента по поручению Директора.
+
+Философия Агентства W:
+- ИИ берёт на себя рутину, человек принимает решения и строит отношения.
+- Главная ценность — возвращать человеку время.
+- Девиз: «Мы создаём своё настоящее».
+- Не обещай функций, которых ещё нет.
+- Не называй Агентство просто чат-ботом.
+- Текст должен быть человеческим, ясным и без рекламного крика.
+
+Подготовь ровно то, что попросил Директор.
+Если нужны посты/анонсы — дай готовые тексты.
+Если нужны иллюстрации — НЕ выдумывай, что картинка уже создана; дай короткое техническое задание для визуального агента под каждый материал.
+Если запрос на несколько материалов — раздели их понятными заголовками.
+Не добавляй длинных объяснений о своей работе.
+""".strip()
+
+    return ask_openai_fn(
+        instructions,
+        assignment,
+        uploaded_files=[],
+        use_web_search=False,
+    )
+
+
+def _make_plan(intents: list[str], meeting_count: int) -> list[str]:
+    plan: list[str] = []
+    if "meetings" in intents:
+        plan.extend([
+            "Проверить календарь без обращения к OpenAI.",
+            f"Найти свободный день и {meeting_count} подходящих окна с часовым буфером.",
+            "Проверить, есть ли уже подготовленные кандидаты Неонии.",
+            "Передать выбранных владельцем людей Неоне для диалога и согласования встречи.",
+        ])
+    if "content" in intents:
+        plan.extend([
+            "Сформировать требуемые тексты одним запросом к ИИ.",
+            "Если нужна иллюстрация — подготовить визуальное задание.",
+            "Показать результат Директору на утверждение до публикации.",
+        ])
+    if "team" in intents and "content" not in intents:
+        plan.append("Проверить, относится ли поручение к структуре или коммуникации команды.")
+    if intents == ["general"]:
+        plan.extend([
+            "Понять ожидаемый результат.",
+            "Использовать уже имеющиеся данные Агентства.",
+            "Обратиться к ИИ только если без него нельзя выполнить поручение.",
+        ])
+    return plan
+
+
+def _process_assignment(owner_id: int, owner_name: str, assignment: str, ask_openai_fn) -> dict[str, Any]:
+    intents = _detect_intents(assignment)
+    meeting_count = _extract_number_before(assignment, r"встреч", default=2)
+    result: dict[str, Any] = {
+        "intents": intents,
+        "meeting_count": meeting_count,
+    }
+    status = "Готово к утверждению"
+
+    if "meetings" in intents:
+        try:
+            result["meetings"] = _find_meeting_day(owner_id, assignment, meeting_count)
+            result["candidates"] = _candidate_snapshot(owner_id)
+            status = "Нужно решение владельца"
+        except Exception as exc:
+            result["meetings"] = {
+                "found": False,
+                "message": f"Не удалось прочитать календарь: {exc}",
+                "slots": [],
+            }
+            status = "Ошибка"
+
+    if "content" in intents:
+        try:
+            content = _generate_content(ask_openai_fn, owner_name, assignment)
+            if str(content).startswith("Ошибка OpenAI:"):
+                result["content_error"] = content
+                if status != "Ошибка":
+                    status = "Ошибка"
+            else:
+                result["content"] = content
+        except Exception as exc:
+            result["content_error"] = f"{type(exc).__name__}: {exc}"
+            if status != "Ошибка":
+                status = "Ошибка"
+
+    if intents == ["general"]:
+        result["note"] = (
+            "Поручение сохранено. Для этой формулировки Стагириту пока требуется "
+            "уточнение или подключение дополнительного исполнительного модуля."
+        )
+        status = "Нужно уточнение"
+
+    return {
+        "assignment": assignment,
+        "task_kind": "+".join(intents),
+        "status": status,
+        "plan": {"steps": _make_plan(intents, meeting_count)},
+        "result": result,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _transcribe_audio(audio_bytes: bytes, filename: str = "stagirite-command.wav") -> str:
+    api_key = str(st.secrets.get("OPENAI_API_KEY") or "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY не найден.")
+
+    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+    cache_key = f"stagirite_voice_transcript_{audio_hash}"
+    cached = st.session_state.get(cache_key)
+    if cached:
+        return str(cached)
+
+    response = requests.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        data={"model": "gpt-4o-mini-transcribe", "language": "ru"},
+        files={"file": (filename, audio_bytes, "audio/wav")},
+        timeout=120,
+    )
+    response.raise_for_status()
+    transcript = str(response.json().get("text") or "").strip()
+    st.session_state[cache_key] = transcript
+    return transcript
+
+
+def _status_icon(status: str) -> str:
+    return {
+        "Готово к утверждению": "🟢",
+        "Нужно решение владельца": "🟡",
+        "Нужно уточнение": "🟡",
+        "Утверждено": "✅",
+        "Выполнено": "✅",
+        "Ошибка": "🔴",
+    }.get(status, "⚙️")
+
+
+def _render_result(task: dict[str, Any], owner_id: int) -> None:
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+
+    meetings = result.get("meetings")
+    if isinstance(meetings, dict):
+        st.markdown("**📅 Календарь**")
+        st.write(str(meetings.get("message") or ""))
+        slots = meetings.get("slots") or []
+        for idx, slot in enumerate(slots, start=1):
+            st.markdown(
+                f"**{idx}. {slot.get('msk', '')}**  \n"
+                f"{slot.get('berlin', '')}"
+            )
+
+        snapshot = result.get("candidates") or {}
+        if snapshot:
+            st.caption(
+                "Неония: "
+                f"контактов {snapshot.get('contacts', 0)} · "
+                f"подготовлено кандидатов {snapshot.get('candidates', 0)} · "
+                f"выбрано владельцем {snapshot.get('selected', 0)}"
+            )
+        if slots:
+            st.info(
+                "Стагирит нашёл время. Следующий человеческий выбор — кому предложить "
+                "эти встречи. После выбора диалог и согласование остаются зоной Неоны."
+            )
+            if st.button(
+                "➡️ Открыть Неонию для выбора людей",
+                key=f"stagirite_to_neonia_{task.get('id', task.get('created_at'))}",
+                use_container_width=True,
+            ):
+                st.session_state["stagirite_open_agent"] = "Неония"
+                st.rerun()
+
+    if result.get("content"):
+        st.markdown("**✍️ Подготовленный материал**")
+        st.markdown(str(result["content"]))
+
+    if result.get("content_error"):
+        st.error(str(result["content_error"]))
+
+    if result.get("note"):
+        st.info(str(result["note"]))
+
+
+def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_fn) -> None:
+    owner_id = int(owner_telegram_id)
+
+    st.markdown("### 🧭 Стагирит")
+    st.caption(
+        "Заместитель Директора. Скажите, какой результат нужен — "
+        "Стагирит сам разложит поручение на работу Агентства."
+    )
+
+    with st.container(border=True):
+        st.markdown("**🎯 Новое поручение**")
+        default_text = str(st.session_state.pop("stagirite_voice_ready_text", "") or "")
+        assignment = st.text_area(
+            "Поручение Стагириту",
+            value=default_text,
+            placeholder=(
+                "Например: «На свободный день подготовь две встречи. "
+                "И сделай два поста и анонс для продвижения Агентства W»."
+            ),
+            height=120,
+            key=f"stagirite_assignment_{owner_id}",
+        )
+
+        st.caption(
+            "Экономный режим: календарь, сохранённые данные и маршрутизация "
+            "проверяются без OpenAI. ИИ вызывается только там, где нужен новый текст."
+        )
+
+        if st.button(
+            "▶️ Выполнить поручение",
+            key=f"stagirite_run_{owner_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            clean = assignment.strip()
+            if not clean:
+                st.warning("Скажите Стагириту, какой результат вам нужен.")
+            else:
+                with st.spinner("Стагирит организует работу..."):
+                    task = _process_assignment(
+                        owner_id,
+                        owner_name,
+                        clean,
+                        ask_openai_fn,
+                    )
+                    _save_task(owner_id, task)
+                    st.session_state[f"stagirite_last_task_{owner_id}"] = task
+                st.rerun()
+
+        with st.expander("🎙 Продиктовать поручение"):
+            st.caption(
+                "Голос распознаётся только после записи. Обычное открытие этого блока "
+                "не тратит OpenAI."
+            )
+            if hasattr(st, "audio_input"):
+                audio = st.audio_input(
+                    "Скажите поручение",
+                    key=f"stagirite_audio_{owner_id}",
+                )
+                if audio is not None and st.button(
+                    "📝 Распознать поручение",
+                    key=f"stagirite_transcribe_{owner_id}",
+                    use_container_width=True,
+                ):
+                    try:
+                        transcript = _transcribe_audio(
+                            audio.getvalue(),
+                            getattr(audio, "name", "stagirite-command.wav"),
+                        )
+                        st.session_state["stagirite_voice_ready_text"] = transcript
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось распознать поручение: {exc}")
+            else:
+                st.caption(
+                    "В текущей версии Streamlit голосовой ввод этого блока недоступен. "
+                    "Текстовый режим работает полностью."
+                )
+
+    tasks, persistent = _load_tasks(owner_id)
+
+    st.markdown("### 📋 Мои поручения")
+    if not persistent:
+        st.caption(
+            "Пока поручения хранятся в текущей сессии. После запуска SQL-файла "
+            "`stagirite_tasks.sql` история станет постоянной."
+        )
+
+    if not tasks:
+        st.info("Поручений пока нет.")
+        return
+
+    for task in tasks[:10]:
+        status = str(task.get("status") or "planned")
+        assignment = str(task.get("assignment") or "").strip()
+        task_id = str(task.get("id") or task.get("created_at") or "")
+        created = str(task.get("created_at") or "")
+
+        with st.container(border=True):
+            st.markdown(f"#### {_status_icon(status)} {status}")
+            st.write(assignment)
+            if created:
+                try:
+                    parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    st.caption(parsed.astimezone(BERLIN).strftime("%d.%m.%Y · %H:%M"))
+                except Exception:
+                    pass
+
+            plan = task.get("plan") if isinstance(task.get("plan"), dict) else {}
+            steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+            if steps:
+                with st.expander("Как Стагирит разложил задачу"):
+                    for step in steps:
+                        st.markdown(f"• {step}")
+
+            _render_result(task, owner_id)
+
+            if status in {"Готово к утверждению", "Нужно решение владельца"}:
+                c1, c2 = st.columns(2)
+                if c1.button(
+                    "✅ Утвердить",
+                    key=f"stagirite_approve_{task_id}",
+                    use_container_width=True,
+                ):
+                    _update_task(owner_id, task_id, {"status": "Утверждено"})
+                    st.rerun()
+                if c2.button(
+                    "✅ Считать выполненным",
+                    key=f"stagirite_done_{task_id}",
+                    use_container_width=True,
+                ):
+                    _update_task(owner_id, task_id, {"status": "Выполнено"})
+                    st.rerun()
