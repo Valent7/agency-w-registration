@@ -25,6 +25,7 @@ from personal_tasks import render_personal_tasks
 from stagirite_center import (
     render_stagirite_center,
     register_first_message_for_stagirite,
+    register_first_message_failure_for_stagirite,
 )
 from neola_partner_center import (
     activation_is_confirmed,
@@ -2295,6 +2296,214 @@ def merge_candidate_results(existing, new_results):
     return merged
 
 
+
+def prepare_candidates_for_stagirite(
+    owner_id,
+    desired_count=5,
+):
+    """Неония сама добирает рабочий пул для поручения Стагирита."""
+    owner_id = int(owner_id)
+    desired_count = max(1, min(5, int(desired_count or 5)))
+
+    passport_key = f"neonia_target_audience_passport_{owner_id}"
+    contacts_key = f"neonia_telegram_contacts_{owner_id}"
+    candidates_key = f"neonia_candidates_{owner_id}"
+    offset_key = f"neonia_selection_offset_{owner_id}"
+
+    passport = st.session_state.get(passport_key)
+    contacts = st.session_state.get(contacts_key, [])
+    candidates = list(st.session_state.get(candidates_key, []) or [])
+    offset = int(st.session_state.get(offset_key, 0) or 0)
+
+    if not passport or not isinstance(contacts, list) or not contacts:
+        return {
+            "ok": False,
+            "added": 0,
+            "checked": 0,
+            "exhausted": True,
+            "message": "Неония пока не готова к подбору.",
+        }
+
+    def usable_ids(items):
+        ids = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("activity_eligible") is not True:
+                continue
+            if item.get("work_state") != "available":
+                continue
+            if bool(item.get("selection_blocked")):
+                continue
+            if item.get("status") in {
+                "Первое сообщение отправлено",
+                "Отправлено",
+            }:
+                continue
+            try:
+                cid = int(item.get("telegram_id"))
+            except (TypeError, ValueError):
+                continue
+            if cid not in ids:
+                ids.append(cid)
+        return ids
+
+    before_ids = set(usable_ids(candidates))
+    if len(before_ids) >= desired_count:
+        return {
+            "ok": True,
+            "added": 0,
+            "checked": 0,
+            "exhausted": False,
+        }
+
+    if offset >= len(contacts):
+        return {
+            "ok": True,
+            "added": 0,
+            "checked": 0,
+            "exhausted": True,
+        }
+
+    activity_by_id = run_telegram_async(
+        fetch_telegram_contact_activity(owner_id)
+    )
+
+    sent_events = st.session_state.get(
+        f"neona_first_message_sent_log_{owner_id}",
+        [],
+    )
+    if not isinstance(sent_events, list):
+        sent_events = []
+    already_sent_ids = set()
+    for event in sent_events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            already_sent_ids.add(int(event.get("telegram_id")))
+        except (TypeError, ValueError):
+            continue
+
+    known_contacts = st.session_state.get(
+        f"neonia_owner_known_contacts_{owner_id}",
+        {},
+    )
+    if not isinstance(known_contacts, dict):
+        known_contacts = {}
+    known_contact_ids = set()
+    for raw_id in known_contacts.keys():
+        try:
+            known_contact_ids.add(int(raw_id))
+        except (TypeError, ValueError):
+            continue
+
+    checked_total = 0
+    rounds = 0
+    blocked_counts_total = {}
+
+    while (
+        len(usable_ids(candidates)) < desired_count
+        and offset < len(contacts)
+        and rounds < 5
+    ):
+        rounds += 1
+        batch, new_offset, activity_stats = select_next_active_contacts(
+            contacts,
+            offset,
+            activity_by_id,
+            limit=10,
+        )
+        checked_total += int(activity_stats.get("checked", 0) or 0)
+        offset = int(new_offset)
+        st.session_state[offset_key] = offset
+
+        if not batch:
+            break
+
+        contact_contexts = run_telegram_async(
+            fetch_telegram_contact_contexts(
+                owner_id,
+                batch,
+            )
+        )
+        enriched = enrich_contact_workability(
+            contact_contexts,
+            already_sent_ids=already_sent_ids,
+            known_contact_ids=known_contact_ids,
+        )
+
+        blocked = [
+            item for item in enriched
+            if bool(item.get("selection_blocked"))
+        ]
+        workable = [
+            item for item in enriched
+            if not bool(item.get("selection_blocked"))
+        ]
+
+        for item in blocked:
+            reason = str(
+                item.get("block_reason")
+                or "не для нового обращения"
+            )
+            blocked_counts_total[reason] = (
+                blocked_counts_total.get(reason, 0) + 1
+            )
+
+        informative, empty_contexts = split_contacts_by_analysis_value(
+            workable
+        )
+        batch_results = [
+            build_no_data_candidate(item)
+            for item in empty_contexts
+        ]
+
+        if informative:
+            ai_results = analyze_contacts_for_target_audience(
+                passport["analysis"],
+                informative,
+            )
+            for item in ai_results:
+                item["analysis_cost_mode"] = "openai"
+            batch_results.extend(ai_results)
+
+        batch_results.sort(key=candidate_priority_key)
+        candidates = merge_candidate_results(
+            candidates,
+            batch_results,
+        )
+        st.session_state[candidates_key] = candidates
+        st.session_state[
+            f"neonia_current_workable_batch_{owner_id}"
+        ] = batch_results
+
+    if blocked_counts_total:
+        previous = st.session_state.get(
+            f"neonia_last_skipped_counts_{owner_id}",
+            {},
+        )
+        if not isinstance(previous, dict):
+            previous = {}
+        merged_counts = dict(previous)
+        for reason, count in blocked_counts_total.items():
+            merged_counts[reason] = merged_counts.get(reason, 0) + count
+        st.session_state[
+            f"neonia_last_skipped_counts_{owner_id}"
+        ] = merged_counts
+
+    st.session_state[offset_key] = offset
+    persist_workspace_if_changed(owner_id, force=True)
+
+    after_ids = set(usable_ids(candidates))
+    return {
+        "ok": True,
+        "added": max(0, len(after_ids - before_ids)),
+        "checked": checked_total,
+        "exhausted": offset >= len(contacts),
+        "available": len(after_ids),
+    }
+
+
 NEONA_FIRST_MESSAGE_FORBIDDEN = NEONA_FORBIDDEN_CLAIMS
 
 
@@ -3705,6 +3914,7 @@ if received_hash:
                         owner_telegram_id=int(telegram_id),
                         owner_name=first_name,
                         ask_openai_fn=ask_openai,
+                        prepare_candidates_fn=prepare_candidates_for_stagirite,
                     )
 
                 elif selected_agent == "Неония":
@@ -7004,11 +7214,20 @@ if received_hash:
                                                         st.rerun()
 
                                                     except Exception as exc:
-                                                        st.error(
+                                                        friendly_error = (
                                                             friendly_telegram_send_error(
                                                                 exc
                                                             )
                                                         )
+                                                        try:
+                                                            register_first_message_failure_for_stagirite(
+                                                                telegram_id,
+                                                                contact_id,
+                                                                reason=friendly_error,
+                                                            )
+                                                        except Exception:
+                                                            pass
+                                                        st.error(friendly_error)
 
                             latest_drafts = st.session_state.get(
                                 neona_drafts_key,

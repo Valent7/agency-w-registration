@@ -774,6 +774,68 @@ def register_first_message_for_stagirite(
         return
 
 
+
+def register_first_message_failure_for_stagirite(
+    owner_id: int,
+    contact_id: int,
+    *,
+    reason: str,
+) -> None:
+    """Фиксирует, что выбранного человека не удалось запустить в работу."""
+    owner_id = int(owner_id)
+    contact_id = int(contact_id)
+    tasks, _ = _load_tasks(owner_id)
+
+    for task in tasks:
+        if "meetings" not in str(task.get("task_kind") or ""):
+            continue
+        if str(task.get("status") or "") in {"Выполнено", "Ошибка"}:
+            continue
+
+        result = (
+            task.get("result")
+            if isinstance(task.get("result"), dict)
+            else {}
+        )
+        selected = []
+        for value in (
+            result.get("selected_candidate_ids", [])
+            if isinstance(result.get("selected_candidate_ids"), list)
+            else []
+        ):
+            try:
+                selected.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if contact_id not in selected:
+            continue
+
+        progress = (
+            dict(result.get("contact_progress"))
+            if isinstance(result.get("contact_progress"), dict)
+            else {}
+        )
+        progress[str(contact_id)] = {
+            **(
+                progress.get(str(contact_id))
+                if isinstance(progress.get(str(contact_id)), dict)
+                else {}
+            ),
+            "status": "send_failed",
+            "send_failed_at": datetime.now(UTC).isoformat(),
+            "send_failure_reason": str(reason or "Отправить сообщение не удалось"),
+        }
+
+        updated_result = dict(result)
+        updated_result["contact_progress"] = progress
+        _update_task(
+            owner_id,
+            str(task.get("id") or ""),
+            {"status": "В работе", "result": updated_result},
+        )
+        return
+
+
 def _refresh_meeting_task(
     owner_id: int,
     task: dict[str, Any],
@@ -851,6 +913,11 @@ def _refresh_meeting_task(
                     "meeting_format": meeting.get("meeting_format"),
                 }
             )
+            progress[key] = item
+            continue
+
+        if str(item.get("status") or "") == "send_failed":
+            counts["needs_reserve"] += 1
             progress[key] = item
             continue
 
@@ -1077,7 +1144,7 @@ def _status_icon(status: str) -> str:
     }.get(status, "⚙️")
 
 
-def _render_result(task: dict[str, Any], owner_id: int) -> None:
+def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=None) -> None:
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
 
     if "meetings" in str(task.get("task_kind") or ""):
@@ -1171,6 +1238,8 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                                 line += f" · {local:%d.%m.%Y %H:%M} Германия"
                     elif state == "dialogue":
                         line = "💬 ответил(а), Неона ведёт диалог"
+                    elif state == "send_failed":
+                        line = "⚠️ первое сообщение не отправлено — нужен другой кандидат или канал"
                     elif state == "waiting_over_24h":
                         line = "🕒 сообщение отправлено, ответа больше суток нет"
                     elif state == "waiting_reply":
@@ -1187,9 +1256,31 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                 )
             elif int(summary.get("needs_reserve", 0) or 0) > 0:
                 st.warning(
-                    "По одному из контактов ответа нет уже больше суток. "
-                    "Неона повторно ему не пишет. Можно выбрать резервного кандидата."
+                    "По одному из контактов нужен резерв: либо первое сообщение "
+                    "не удалось отправить, либо ответа нет больше суток. "
+                    "Стагирит продолжает искать следующий вариант."
                 )
+
+        # Стагирит сам просит Неонию добрать рабочий пул до 5 человек.
+        # Владелец не должен вручную ходить в Неонию ради следующей партии.
+        existing_pool = _meeting_candidate_pool(owner_id, limit=10)
+        auto_prepare_result = None
+        if (
+            slots
+            and prepare_candidates_fn is not None
+            and len(existing_pool) < 5
+        ):
+            with st.spinner("Стагирит просит Неонию подобрать ещё активных кандидатов..."):
+                try:
+                    auto_prepare_result = prepare_candidates_fn(
+                        owner_id,
+                        desired_count=5,
+                    )
+                except Exception:
+                    auto_prepare_result = {
+                        "ok": False,
+                        "message": "Не удалось автоматически продолжить подбор.",
+                    }
 
         snapshot = _candidate_snapshot(owner_id)
         task_selected_ids = []
@@ -1207,6 +1298,19 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
             f"Неония подготовила кандидатов: {snapshot.get('candidates', 0)} · "
             f"выбрано для этого поручения: {selected_count}"
         )
+        if isinstance(auto_prepare_result, dict):
+            added = int(auto_prepare_result.get("added", 0) or 0)
+            checked = int(auto_prepare_result.get("checked", 0) or 0)
+            if added > 0:
+                st.caption(
+                    f"Стагирит сам продолжил поиск: добавлено ещё {added} "
+                    f"кандидат(а), просмотрено контактов: {checked}."
+                )
+            elif auto_prepare_result.get("exhausted"):
+                st.caption(
+                    "Неония сама продолжила поиск, но больше пригодных активных "
+                    "кандидатов сейчас не нашла."
+                )
 
         if slots and selected_count < needed_count:
             pool = _meeting_candidate_pool(owner_id, limit=10)
@@ -1360,7 +1464,7 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
     if result.get("note"):
         st.info(str(result["note"]))
 
-def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_fn) -> None:
+def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_fn, prepare_candidates_fn=None) -> None:
     owner_id = int(owner_telegram_id)
     assignment_key = f"stagirite_assignment_{owner_id}"
     clear_key = f"stagirite_clear_assignment_{owner_id}"
@@ -1517,7 +1621,7 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
             except Exception:
                 pass
 
-        _render_result(task, owner_id)
+        _render_result(task, owner_id, prepare_candidates_fn)
 
         if (
             "meetings" not in task_kind
