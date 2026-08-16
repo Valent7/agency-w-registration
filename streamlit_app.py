@@ -22,7 +22,10 @@ from agency_calendar import (
 )
 from team_center import render_team_center
 from personal_tasks import render_personal_tasks
-from stagirite_center import render_stagirite_center
+from stagirite_center import (
+    render_stagirite_center,
+    register_first_message_for_stagirite,
+)
 from neola_partner_center import (
     activation_is_confirmed,
     activation_label,
@@ -6807,6 +6810,11 @@ if received_hash:
                                                     else ""
                                                 )
                                             )
+                                            st.caption(
+                                                "Теперь Неона ждёт нового ответа человека "
+                                                "и продолжит диалог сама. Стагирит отслеживает "
+                                                "результат поручения до назначенной встречи."
+                                            )
                                             if (
                                                 contact.get("source")
                                                 == "Знакомый — выбран директором"
@@ -6924,19 +6932,31 @@ if received_hash:
                                                             sent_log_key
                                                         ] = sent_log
 
+                                                        baseline_incoming_id = int(
+                                                            send_result.get(
+                                                                "baseline_incoming_message_id",
+                                                                0,
+                                                            )
+                                                        )
                                                         try:
                                                             initialize_dialog_after_first_message(
                                                                 telegram_id,
                                                                 contact_id,
-                                                                baseline_incoming_id=int(
-                                                                    send_result.get(
-                                                                        "baseline_incoming_message_id",
-                                                                        0,
-                                                                    )
-                                                                ),
+                                                                baseline_incoming_id=baseline_incoming_id,
                                                                 sent_at=send_result[
                                                                     "sent_at"
                                                                 ],
+                                                            )
+                                                            register_first_message_for_stagirite(
+                                                                telegram_id,
+                                                                contact_id,
+                                                                sent_at=send_result[
+                                                                    "sent_at"
+                                                                ],
+                                                                message_id=send_result[
+                                                                    "message_id"
+                                                                ],
+                                                                baseline_incoming_id=baseline_incoming_id,
                                                             )
                                                         except Exception as dialog_exc:
                                                             draft[

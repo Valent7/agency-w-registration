@@ -495,6 +495,336 @@ def _save_stagirite_candidate_selection(
     persist_workspace_if_changed(owner_id, force=True)
 
 
+def _dialog_states_for_contacts(
+    owner_id: int,
+    contact_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    if not contact_ids or not _db_available():
+        return {}
+
+    url, _ = _supabase_config()
+    normalized = sorted({int(value) for value in contact_ids})
+    try:
+        response = requests.get(
+            f"{url}/rest/v1/agency_dialog_states",
+            headers=_db_headers(),
+            params={
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "contact_telegram_id": (
+                    "in.(" + ",".join(str(value) for value in normalized) + ")"
+                ),
+                "select": (
+                    "contact_telegram_id,last_incoming_message_id,stage,"
+                    "context,updated_at"
+                ),
+            },
+            timeout=20,
+        )
+        if not response.ok:
+            return {}
+        rows = response.json()
+        result = {}
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                contact_id = int(row.get("contact_telegram_id"))
+            except (TypeError, ValueError):
+                continue
+            result[contact_id] = row
+        return result
+    except Exception:
+        return {}
+
+
+def _meetings_for_task(
+    owner_id: int,
+    target_day_iso: str,
+    contact_ids: list[int],
+) -> list[dict[str, Any]]:
+    if not target_day_iso or not contact_ids:
+        return []
+    try:
+        target_day = date.fromisoformat(str(target_day_iso))
+    except Exception:
+        return []
+
+    start_msk = datetime.combine(target_day, dt_time.min, tzinfo=MSK)
+    end_msk = start_msk + timedelta(days=1)
+    try:
+        rows = agency_calendar.list_meetings(
+            int(owner_id),
+            start_msk.astimezone(UTC),
+            end_msk.astimezone(UTC),
+        )
+    except Exception:
+        return []
+
+    wanted = {int(value) for value in contact_ids}
+    result = []
+    for row in rows:
+        try:
+            contact_id = int(row.get("contact_telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in wanted:
+            continue
+        if row.get("status") in {"Отменена", "Перенесена"}:
+            continue
+        result.append(row)
+    return result
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _candidate_name_lookup(owner_id: int) -> dict[int, str]:
+    candidates = st.session_state.get(
+        f"neonia_candidates_{int(owner_id)}",
+        [],
+    )
+    result: dict[int, str] = {}
+    if not isinstance(candidates, list):
+        return result
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        try:
+            contact_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        result[contact_id] = str(item.get("name") or "Кандидат")
+    return result
+
+
+def register_first_message_for_stagirite(
+    owner_id: int,
+    contact_id: int,
+    *,
+    sent_at: str,
+    message_id: int | str = 0,
+    baseline_incoming_id: int = 0,
+) -> None:
+    """Привязывает отправку Неоны к активному поручению Стагирита."""
+    owner_id = int(owner_id)
+    contact_id = int(contact_id)
+    tasks, _ = _load_tasks(owner_id)
+
+    for task in tasks:
+        if "meetings" not in str(task.get("task_kind") or ""):
+            continue
+        if str(task.get("status") or "") in {"Выполнено", "Ошибка"}:
+            continue
+
+        result = (
+            task.get("result")
+            if isinstance(task.get("result"), dict)
+            else {}
+        )
+        selected = []
+        for value in (
+            result.get("selected_candidate_ids", [])
+            if isinstance(result.get("selected_candidate_ids"), list)
+            else []
+        ):
+            try:
+                selected.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if contact_id not in selected:
+            continue
+
+        progress = (
+            result.get("contact_progress")
+            if isinstance(result.get("contact_progress"), dict)
+            else {}
+        )
+        progress = dict(progress)
+        progress[str(contact_id)] = {
+            **(
+                progress.get(str(contact_id))
+                if isinstance(progress.get(str(contact_id)), dict)
+                else {}
+            ),
+            "first_message_sent_at": str(sent_at or ""),
+            "telegram_message_id": int(message_id or 0),
+            "baseline_incoming_id": int(baseline_incoming_id or 0),
+        }
+
+        updated_result = dict(result)
+        updated_result["contact_progress"] = progress
+        _update_task(
+            owner_id,
+            str(task.get("id") or ""),
+            {"status": "В работе", "result": updated_result},
+        )
+        return
+
+
+def _refresh_meeting_task(
+    owner_id: int,
+    task: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Собирает фактический прогресс без OpenAI."""
+    result = (
+        dict(task.get("result"))
+        if isinstance(task.get("result"), dict)
+        else {}
+    )
+    selected_ids: list[int] = []
+    for value in (
+        result.get("selected_candidate_ids", [])
+        if isinstance(result.get("selected_candidate_ids"), list)
+        else []
+    ):
+        try:
+            contact_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in selected_ids:
+            selected_ids.append(contact_id)
+
+    if not selected_ids:
+        return result, str(task.get("status") or "")
+
+    progress = (
+        dict(result.get("contact_progress"))
+        if isinstance(result.get("contact_progress"), dict)
+        else {}
+    )
+    states = _dialog_states_for_contacts(owner_id, selected_ids)
+
+    meeting_block = (
+        result.get("meetings")
+        if isinstance(result.get("meetings"), dict)
+        else {}
+    )
+    target_day = str(meeting_block.get("day") or "")
+    meetings = _meetings_for_task(owner_id, target_day, selected_ids)
+    meeting_by_contact = {}
+    for meeting in meetings:
+        try:
+            meeting_by_contact[int(meeting.get("contact_telegram_id"))] = meeting
+        except (TypeError, ValueError):
+            continue
+
+    now = datetime.now(UTC)
+    counts = {
+        "selected": len(selected_ids),
+        "sent": 0,
+        "waiting": 0,
+        "dialogue": 0,
+        "scheduled": 0,
+        "needs_reserve": 0,
+    }
+
+    for contact_id in selected_ids:
+        key = str(contact_id)
+        item = (
+            dict(progress.get(key))
+            if isinstance(progress.get(key), dict)
+            else {}
+        )
+        meeting = meeting_by_contact.get(contact_id)
+        state = states.get(contact_id, {})
+
+        if meeting:
+            counts["scheduled"] += 1
+            item.update(
+                {
+                    "status": "meeting_scheduled",
+                    "meeting_id": meeting.get("id"),
+                    "meeting_start_at": meeting.get("start_at"),
+                    "meeting_format": meeting.get("meeting_format"),
+                }
+            )
+            progress[key] = item
+            continue
+
+        sent_at = _parse_iso_datetime(item.get("first_message_sent_at"))
+        if sent_at is None:
+            item["status"] = "awaiting_first_message"
+            progress[key] = item
+            continue
+
+        counts["sent"] += 1
+        baseline = int(item.get("baseline_incoming_id") or 0)
+        try:
+            last_incoming = int(state.get("last_incoming_message_id") or 0)
+        except (TypeError, ValueError):
+            last_incoming = 0
+
+        stage = str(state.get("stage") or "idle")
+        replied = last_incoming > baseline
+
+        if stage == "scheduled":
+            # Если таблица календаря ещё не успела прочитаться, не теряем факт.
+            counts["scheduled"] += 1
+            item["status"] = "meeting_scheduled"
+        elif replied:
+            counts["dialogue"] += 1
+            item["status"] = "dialogue"
+            item["dialogue_stage"] = stage
+        else:
+            counts["waiting"] += 1
+            item["status"] = "waiting_reply"
+            if now - sent_at >= timedelta(hours=24):
+                item["status"] = "waiting_over_24h"
+                counts["needs_reserve"] += 1
+
+        progress[key] = item
+
+    result["contact_progress"] = progress
+    result["progress_summary"] = counts
+
+    needed = int(result.get("meeting_count", 1) or 1)
+    status = "Выполнено" if counts["scheduled"] >= needed else "В работе"
+    return result, status
+
+
+def _append_reserve_candidate(
+    owner_id: int,
+    task: dict[str, Any],
+    contact_id: int,
+) -> None:
+    result = (
+        dict(task.get("result"))
+        if isinstance(task.get("result"), dict)
+        else {}
+    )
+    selected = []
+    for value in (
+        result.get("selected_candidate_ids", [])
+        if isinstance(result.get("selected_candidate_ids"), list)
+        else []
+    ):
+        try:
+            selected.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    contact_id = int(contact_id)
+    if contact_id not in selected:
+        selected.append(contact_id)
+
+    result["selected_candidate_ids"] = selected
+    _save_stagirite_candidate_selection(owner_id, selected)
+    _update_task(
+        int(owner_id),
+        str(task.get("id") or ""),
+        {"status": "В работе", "result": result},
+    )
+
+
+
 def _generate_content(ask_openai_fn, owner_name: str, assignment: str) -> str:
     instructions = f"""
 Ты — Стагирит, заместитель Директора Агентства W.
@@ -644,6 +974,29 @@ def _status_icon(status: str) -> str:
 def _render_result(task: dict[str, Any], owner_id: int) -> None:
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
 
+    if "meetings" in str(task.get("task_kind") or ""):
+        refreshed_result, refreshed_status = _refresh_meeting_task(
+            owner_id,
+            task,
+        )
+        if (
+            refreshed_result != result
+            or refreshed_status != str(task.get("status") or "")
+        ):
+            task_id = str(task.get("id") or "")
+            if task_id:
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {
+                        "status": refreshed_status,
+                        "result": refreshed_result,
+                    },
+                )
+            task["status"] = refreshed_status
+            task["result"] = refreshed_result
+        result = refreshed_result
+
     meetings = result.get("meetings")
     if isinstance(meetings, dict):
         st.markdown("**📅 Свободное время**")
@@ -654,6 +1007,33 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                 f"**{idx}. {slot.get('msk', '')}**  \n"
                 f"{slot.get('berlin', '')}"
             )
+
+        summary = (
+            result.get("progress_summary")
+            if isinstance(result.get("progress_summary"), dict)
+            else {}
+        )
+        if summary:
+            needed = int(result.get("meeting_count", 1) or 1)
+            st.markdown(
+                "**🎯 Цель:** "
+                f"{needed} встреч(а) · "
+                f"отправлено: {summary.get('sent', 0)} · "
+                f"ждём ответ: {summary.get('waiting', 0)} · "
+                f"диалог: {summary.get('dialogue', 0)} · "
+                f"назначено: {summary.get('scheduled', 0)}"
+            )
+
+            if int(summary.get("scheduled", 0) or 0) >= needed:
+                st.success(
+                    f"✅ Цель достигнута: назначено "
+                    f"{summary.get('scheduled', 0)} из {needed} встреч."
+                )
+            elif int(summary.get("needs_reserve", 0) or 0) > 0:
+                st.warning(
+                    "По одному из контактов ответа нет уже больше суток. "
+                    "Неона повторно ему не пишет. Можно выбрать резервного кандидата."
+                )
 
         snapshot = _candidate_snapshot(owner_id)
         task_selected_ids = []
@@ -763,6 +1143,51 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
             ):
                 st.session_state["stagirite_open_agent"] = "Неона"
                 st.rerun()
+
+        summary = (
+            result.get("progress_summary")
+            if isinstance(result.get("progress_summary"), dict)
+            else {}
+        )
+        if int(summary.get("needs_reserve", 0) or 0) > 0:
+            current_ids = set(task_selected_ids)
+            reserve_pool = [
+                item
+                for item in _meeting_candidate_pool(owner_id, limit=10)
+                if int(item.get("telegram_id")) not in current_ids
+            ]
+            if reserve_pool:
+                st.markdown("**🛟 Резервный кандидат**")
+                reserve_by_id = {
+                    int(item["telegram_id"]): item
+                    for item in reserve_pool
+                }
+                reserve_id = st.selectbox(
+                    "Кого добавить в работу",
+                    options=list(reserve_by_id.keys()),
+                    format_func=lambda cid: _candidate_label(
+                        reserve_by_id[cid]
+                    ),
+                    key=(
+                        "stagirite_reserve_"
+                        f"{task.get('id', task.get('created_at'))}"
+                    ),
+                )
+                if st.button(
+                    "➕ Добавить резервного кандидата",
+                    key=(
+                        "stagirite_add_reserve_"
+                        f"{task.get('id', task.get('created_at'))}"
+                    ),
+                    use_container_width=True,
+                ):
+                    _append_reserve_candidate(
+                        owner_id,
+                        task,
+                        int(reserve_id),
+                    )
+                    st.session_state["stagirite_open_agent"] = "Неона"
+                    st.rerun()
 
     if result.get("content"):
         st.markdown("**✍️ Готовый материал**")
@@ -881,10 +1306,41 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
 
     display_status = status
     if "meetings" in task_kind:
-        needed = int(task_result.get("meeting_count", 2) or 2)
+        refreshed_result, refreshed_status = _refresh_meeting_task(
+            owner_id,
+            task,
+        )
+        task_result = refreshed_result
+        if (
+            refreshed_result != task.get("result")
+            or refreshed_status != status
+        ):
+            if task_id:
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {
+                        "status": refreshed_status,
+                        "result": refreshed_result,
+                    },
+                )
+            task["result"] = refreshed_result
+            task["status"] = refreshed_status
+            status = refreshed_status
+
+        needed = int(task_result.get("meeting_count", 1) or 1)
+        summary = (
+            task_result.get("progress_summary")
+            if isinstance(task_result.get("progress_summary"), dict)
+            else {}
+        )
+        scheduled = int(summary.get("scheduled", 0) or 0)
         selected_ids = task_result.get("selected_candidate_ids", [])
         selected_count = len(selected_ids) if isinstance(selected_ids, list) else 0
-        if selected_count >= needed:
+
+        if scheduled >= needed:
+            display_status = "Выполнено"
+        elif selected_count >= 1:
             display_status = "В работе"
         elif (task_result.get("meetings") or {}).get("slots"):
             display_status = "Нужен ваш выбор"
