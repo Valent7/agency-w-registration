@@ -209,18 +209,47 @@ def _load_workspace(config: Config, owner_id: int) -> dict[str, Any]:
 
 
 def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]]:
-    workspace = _load_workspace(config, owner_id)
+    """Компактный список активных диалогов без загрузки всего workspace.
+
+    Раньше каждая проверка входящих скачивала encrypted_state целиком, включая
+    контакты и кандидатов. При worker каждые 15 секунд это создавало большой
+    Supabase Egress. Теперь источником истины служит маленькая таблица
+    agency_dialog_states, которая и так создаётся после отправки первого
+    утверждённого сообщения.
+    """
+    response = requests.get(
+        f"{config.supabase_url}/rest/v1/agency_dialog_states",
+        headers=_headers(config),
+        params={
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "select": "contact_telegram_id,context",
+            "order": "updated_at.desc",
+            "limit": 500,
+        },
+        timeout=20,
+    )
+    if response.status_code == 404:
+        raise DialogError(
+            "Таблица agency_dialog_states ещё не создана. "
+            "Выполните SQL настройки диалогов Неоны."
+        )
+    response.raise_for_status()
+    rows = response.json()
+
     allowed: dict[int, dict[str, Any]] = {}
-    for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
-        if not isinstance(event, dict) or event.get("kind") != "first_message":
-            continue
+    for row in rows if isinstance(rows, list) else []:
         try:
-            contact_id = int(event.get("telegram_id"))
+            contact_id = int(row.get("contact_telegram_id"))
         except (TypeError, ValueError):
             continue
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
         allowed[contact_id] = {
-            "sent_at": str(event.get("sent_at") or ""),
-            "recipient_name": str(event.get("recipient_name") or ""),
+            "sent_at": str(
+                context.get("first_message_sent_at")
+                or context.get("sent_at")
+                or ""
+            ),
+            "recipient_name": str(context.get("recipient_name") or ""),
         }
     return allowed
 
@@ -1198,7 +1227,7 @@ def _owners(config: Config) -> list[tuple[int, str]]:
     return [(owner_id, names.get(owner_id, "Владелец")) for owner_id in ids]
 
 
-def worker_forever(poll_seconds: int = 15) -> None:
+def worker_forever(poll_seconds: int = 30) -> None:
     config = load_config()
     print("Neona Telegram worker started", flush=True)
     while True:
@@ -1217,6 +1246,6 @@ def worker_forever(poll_seconds: int = 15) -> None:
 
 if __name__ == "__main__":
     # Постоянный рабочий цикл Неоны.
-    # Интервал 15 секунд достаточно быстрый для живого диалога
+    # Интервал 30 секунд достаточно быстрый для живого диалога
     # и не вызывает OpenAI, если новых сообщений нет.
     worker_forever(poll_seconds=15)
