@@ -1630,6 +1630,85 @@ async def fetch_telegram_contact_contexts(
 
 
 
+NEONIA_OUTREACH_COOLDOWN_DAYS = 7
+
+
+def _parse_message_time(value):
+    """Пытается привести сохранённое время сообщения к aware datetime."""
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _latest_owner_outreach_at(source):
+    recent = source.get("recent_messages") or []
+    if not isinstance(recent, list):
+        return None
+
+    latest = None
+    for item in recent:
+        if not isinstance(item, dict):
+            continue
+        if item.get("direction") != "от владельца":
+            continue
+
+        dt = (
+            _parse_message_time(item.get("date"))
+            or _parse_message_time(item.get("created_at"))
+            or _parse_message_time(item.get("timestamp"))
+            or _parse_message_time(item.get("sent_at"))
+        )
+        if dt is None:
+            continue
+        if latest is None or dt > latest:
+            latest = dt
+    return latest
+
+
+def _cooldown_state(source, days=NEONIA_OUTREACH_COOLDOWN_DAYS):
+    """Если владельцу уже был исходящий контакт недавно — ставим паузу."""
+    last_outreach = _latest_owner_outreach_at(source)
+    if last_outreach is None:
+        return None
+
+    now_utc = datetime.now(timezone.utc)
+    age = now_utc - last_outreach.astimezone(timezone.utc)
+    if age.total_seconds() < 0:
+        return None
+
+    cooldown = timedelta(days=int(days))
+    if age >= cooldown:
+        return None
+
+    remaining = cooldown - age
+    remaining_days = max(1, int((remaining.total_seconds() + 86399) // 86400))
+    local_dt = last_outreach.astimezone(ZoneInfo("Europe/Berlin"))
+    return {
+        "work_state": "cooldown",
+        "work_state_label": (
+            f"Пауза после недавнего обращения — ещё {remaining_days} дн."
+        ),
+        "selection_blocked": True,
+        "block_reason": "слишком недавнее обращение",
+        "last_owner_outreach_at": local_dt.isoformat(),
+        "cooldown_until": (
+            last_outreach.astimezone(timezone.utc) + cooldown
+        ).isoformat(),
+    }
+
+
+
 def _normalize_dialogue_text(value):
     value = str(value or "").lower().replace("ё", "е")
     value = re.sub(r"\s+", " ", value).strip()
@@ -1713,6 +1792,10 @@ def classify_contact_for_new_outreach(
             "selection_blocked": True,
             "block_reason": "первое сообщение уже отправлено",
         }
+
+    cooldown = _cooldown_state(source)
+    if cooldown is not None:
+        return cooldown
 
     # В холодном списке не начинаем заново уже существующий двусторонний диалог.
     if inbound and outbound:
@@ -1879,6 +1962,18 @@ def build_no_data_candidate(source):
         ),
         "selection_blocked": bool(source.get("selection_blocked", False)),
         "block_reason": str(source.get("block_reason") or ""),
+        "last_owner_outreach_at": str(
+            source.get("last_owner_outreach_at") or ""
+        ),
+        "cooldown_until": str(source.get("cooldown_until") or ""),
+        "last_owner_outreach_at": str(
+            source.get("last_owner_outreach_at") or ""
+        ),
+        "cooldown_until": str(source.get("cooldown_until") or ""),
+        "last_owner_outreach_at": str(
+            source.get("last_owner_outreach_at") or ""
+        ),
+        "cooldown_until": str(source.get("cooldown_until") or ""),
         "work_state": str(source.get("work_state") or "available"),
         "work_state_label": str(
             source.get("work_state_label") or "Можно начинать новый разговор"
@@ -4974,7 +5069,8 @@ if received_hash:
                                     st.caption(
                                         "Здесь только люди, которые активны сегодня/вчера "
                                         "и подходят именно для нового обращения: без явного "
-                                        "отказа и без уже начатого диалога. Выберите до 5."
+                                        "отказа, без уже начатого диалога и без слишком "
+                                        "недавнего обращения. Выберите до 5."
                                     )
 
                                     skipped_counts = st.session_state.get(
@@ -4986,7 +5082,14 @@ if received_hash:
                                             "Почему некоторые активные контакты не показаны"
                                         ):
                                             for reason, count in skipped_counts.items():
-                                                st.write(f"• {reason}: {count}")
+                                                if reason == "слишком недавнее обращение":
+                                                    st.write(
+                                                        f"• Недавнее обращение — пауза "
+                                                        f"{NEONIA_OUTREACH_COOLDOWN_DAYS} дней: "
+                                                        f"{count}"
+                                                    )
+                                                else:
+                                                    st.write(f"• {reason}: {count}")
 
                                     batch_by_id = {
                                         int(item["telegram_id"]): item
