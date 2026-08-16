@@ -22,10 +22,18 @@ from agency_calendar import (
 )
 from team_center import render_team_center
 from personal_tasks import render_personal_tasks
-from stagirite_center import (
-    render_stagirite_center,
-    register_first_message_for_stagirite,
-    register_first_message_failure_for_stagirite,
+import stagirite_center as _stagirite_center
+
+render_stagirite_center = _stagirite_center.render_stagirite_center
+register_first_message_for_stagirite = getattr(
+    _stagirite_center,
+    "register_first_message_for_stagirite",
+    lambda *args, **kwargs: None,
+)
+register_first_message_failure_for_stagirite = getattr(
+    _stagirite_center,
+    "register_first_message_failure_for_stagirite",
+    lambda *args, **kwargs: None,
 )
 from neola_partner_center import (
     activation_is_confirmed,
@@ -3910,12 +3918,23 @@ if received_hash:
                 st.markdown(f"#### {selected_agent}")
                 st.write(agent_descriptions[selected_agent])
                 if selected_agent == "Стагирит":
-                    render_stagirite_center(
-                        owner_telegram_id=int(telegram_id),
-                        owner_name=first_name,
-                        ask_openai_fn=ask_openai,
-                        prepare_candidates_fn=prepare_candidates_for_stagirite,
-                    )
+                    try:
+                        render_stagirite_center(
+                            owner_telegram_id=int(telegram_id),
+                            owner_name=first_name,
+                            ask_openai_fn=ask_openai,
+                            prepare_candidates_fn=prepare_candidates_for_stagirite,
+                        )
+                    except TypeError as stagirite_type_error:
+                        # Защита на время поэтапного обновления Streamlit Cloud:
+                        # старая версия stagirite_center может ещё не знать новый callback.
+                        if "prepare_candidates_fn" not in str(stagirite_type_error):
+                            raise
+                        render_stagirite_center(
+                            owner_telegram_id=int(telegram_id),
+                            owner_name=first_name,
+                            ask_openai_fn=ask_openai,
+                        )
 
                 elif selected_agent == "Неония":
                     st.caption(
