@@ -160,21 +160,86 @@ def _extract_number_before(text: str, stem: str, default: int = 2) -> int:
 
 
 def _meeting_count_from_text(text: str) -> int:
-    """Понимает «одна встреча» как 1, а неопределённое «встречи» — как 2."""
-    lowered = str(text or "").lower()
-    explicit = _extract_number_before(lowered, r"встреч", default=0)
+    """Понимает естественные формулировки цели по встречам/Zoom."""
+    lowered = str(text or "").lower().replace("ё", "е")
+
+    explicit = _extract_number_before(
+        lowered,
+        r"(?:встреч|созвон|zoom|зум)",
+        default=0,
+    )
     if explicit:
         return explicit
+
+    # «Хотя бы один из них вышел в Zoom» = цель одна встреча.
+    if re.search(
+        r"\bхотя\s+бы\s+(?:один|одна|1)\b",
+        lowered,
+    ):
+        return 1
+    if re.search(r"\bодин\s+из\s+(?:них|кандидат)", lowered):
+        return 1
+
+    if any(
+        token in lowered
+        for token in (
+            "разговор в зум",
+            "разговор в zoom",
+            "в зуме",
+            "в zoom",
+            "zoom-встреч",
+            "зум-встреч",
+        )
+    ):
+        return 1
+
     if re.search(r"\bвстреч(?:а|у)\b", lowered):
         return 1
+
     return 2
 
 
 def _detect_intents(text: str) -> list[str]:
-    lowered = text.lower()
+    lowered = text.lower().replace("ё", "е")
     intents: list[str] = []
 
-    if any(x in lowered for x in ("встреч", "созвон", "календар", "свободн")):
+    meeting_words = (
+        "встреч",
+        "созвон",
+        "календар",
+        "свободн",
+        "zoom",
+        "зум",
+        "видеозвон",
+        "видеовстреч",
+        "разговор в зуме",
+        "разговор в zoom",
+    )
+    candidate_words = (
+        "кандидат",
+        "подобрать людей",
+        "подбери людей",
+        "найти людей",
+        "выбрать людей",
+        "контакт",
+    )
+
+    if any(x in lowered for x in meeting_words):
+        intents.append("meetings")
+    elif (
+        any(x in lowered for x in candidate_words)
+        and any(
+            x in lowered
+            for x in (
+                "разговор",
+                "пообщ",
+                "переговор",
+                "выйти на связь",
+            )
+        )
+    ):
+        # Человеческая формулировка вроде
+        # «подбери кандидатов, чтобы один вышел на разговор».
         intents.append("meetings")
     if any(x in lowered for x in (
         "пост", "анонс", "контент", "публикац", "иллюстрац",
@@ -185,6 +250,34 @@ def _detect_intents(text: str) -> list[str]:
         intents.append("team")
 
     return intents or ["general"]
+
+
+def _target_period_from_text(text: str) -> list[date] | None:
+    """Календарные диапазоны из обычной речи."""
+    lowered = str(text or "").lower().replace("ё", "е")
+    today = datetime.now(MSK).date()
+
+    if (
+        ("следующ" in lowered or "будущ" in lowered)
+        and "недел" in lowered
+    ):
+        days_to_monday = (7 - today.weekday()) % 7
+        if days_to_monday == 0:
+            days_to_monday = 7
+        monday = today + timedelta(days=days_to_monday)
+        return [monday + timedelta(days=offset) for offset in range(7)]
+
+    if (
+        ("этой недел" in lowered)
+        or ("текущ" in lowered and "недел" in lowered)
+    ):
+        days_to_sunday = 6 - today.weekday()
+        return [
+            today + timedelta(days=offset)
+            for offset in range(days_to_sunday + 1)
+        ]
+
+    return None
 
 
 def _target_date_from_text(text: str) -> date | None:
@@ -296,11 +389,18 @@ def _free_slots_for_day(owner_id: int, day: date, needed: int) -> list[datetime]
 
 def _find_meeting_day(owner_id: int, text: str, count: int) -> dict[str, Any]:
     explicit_day = _target_date_from_text(text)
+    target_period = _target_period_from_text(text)
     start_day = explicit_day or datetime.now(MSK).date()
 
-    days = [explicit_day] if explicit_day else [
-        start_day + timedelta(days=offset) for offset in range(0, 14)
-    ]
+    if explicit_day:
+        days = [explicit_day]
+    elif target_period:
+        days = target_period
+    else:
+        days = [
+            start_day + timedelta(days=offset)
+            for offset in range(0, 14)
+        ]
 
     best_day = None
     best_slots: list[datetime] = []
@@ -330,12 +430,17 @@ def _find_meeting_day(owner_id: int, text: str, count: int) -> dict[str, Any]:
             "berlin": berlin.strftime("%d.%m.%Y · %H:%M Германия"),
         })
 
+    lowered = str(text or "").lower()
+    meeting_word = "Zoom-встречу" if ("zoom" in lowered or "зум" in lowered) else "встречу"
+    if count > 1:
+        meeting_word = "Zoom-встречи" if ("zoom" in lowered or "зум" in lowered) else "встречи"
+
     return {
         "found": len(labels) >= count,
         "day": best_day.isoformat(),
         "slots": labels,
         "message": (
-            f"Нашёл день, где можно подготовить {count} встреч(и)."
+            f"Нашёл подходящий день и время для {count} {meeting_word}."
             if len(labels) >= count
             else f"На лучшем найденном дне свободно только {len(labels)} подходящих окон."
         ),
@@ -859,10 +964,11 @@ def _make_plan(intents: list[str], meeting_count: int) -> list[str]:
     plan: list[str] = []
     if "meetings" in intents:
         plan.extend([
-            "Проверить календарь без обращения к OpenAI.",
-            f"Найти свободный день и {meeting_count} подходящих окна с часовым буфером.",
-            "Проверить, есть ли уже подготовленные кандидаты Неонии.",
-            "Передать выбранных владельцем людей Неоне для диалога и согласования встречи.",
+            "Проверить календарь.",
+            f"Найти свободный день и время для цели: {meeting_count} встреч(а).",
+            "Взять активных и пригодных кандидатов Неонии.",
+            "Дать владельцу выбрать людей, с которыми начинать работу.",
+            "Передать выбранных людей Неоне и контролировать результат до назначенной встречи.",
         ])
     if "content" in intents:
         plan.extend([
@@ -1294,8 +1400,9 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
         assignment = st.text_area(
             "Поручение Стагириту",
             placeholder=(
-                "Например: «На 17 августа подготовь одну встречу» "
-                "или «Сделай два поста и анонс Агентства W»."
+                "Например: «Подбери несколько кандидатов, чтобы на следующей "
+                "неделе состоялась хотя бы одна Zoom-встреча» или "
+                "«Сделай два поста и анонс Агентства W»."
             ),
             height=105,
             key=assignment_key,
