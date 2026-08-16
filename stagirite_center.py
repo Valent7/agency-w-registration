@@ -331,13 +331,60 @@ def _find_meeting_day(owner_id: int, text: str, count: int) -> dict[str, Any]:
 
 
 def _candidate_snapshot(owner_id: int) -> dict[str, int]:
-    candidates = st.session_state.get(f"neonia_candidates_{int(owner_id)}", [])
-    selected = st.session_state.get(f"neonia_selected_candidates_{int(owner_id)}", [])
-    contacts = st.session_state.get(f"neonia_telegram_contacts_{int(owner_id)}", [])
+    """Живое состояние выбора Неонии."""
+    owner_id = int(owner_id)
+    candidates = st.session_state.get(f"neonia_candidates_{owner_id}", [])
+    contacts = st.session_state.get(f"neonia_telegram_contacts_{owner_id}", [])
+
+    raw_selected = st.session_state.get(
+        f"neonia_selected_candidates_{owner_id}",
+        [],
+    )
+    selected_ids: list[int] = []
+    for value in raw_selected if isinstance(raw_selected, list) else []:
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            continue
+        if normalized not in selected_ids:
+            selected_ids.append(normalized)
+
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("status") not in {
+                "Выбран владельцем",
+                "Сообщение подготовлено",
+                "Сообщение отредактировано",
+                "Первое сообщение утверждено",
+                "Отправлено",
+            }:
+                continue
+            try:
+                candidate_id = int(candidate.get("telegram_id"))
+            except (TypeError, ValueError):
+                continue
+            if candidate_id not in selected_ids:
+                selected_ids.append(candidate_id)
+
+    pending_ids: list[int] = []
+    prefix = f"owner_select_candidate_{owner_id}_"
+    for key, value in st.session_state.items():
+        if not str(key).startswith(prefix) or not bool(value):
+            continue
+        try:
+            candidate_id = int(str(key)[len(prefix):])
+        except (TypeError, ValueError):
+            continue
+        if candidate_id not in selected_ids and candidate_id not in pending_ids:
+            pending_ids.append(candidate_id)
+
     return {
         "contacts": len(contacts) if isinstance(contacts, list) else 0,
         "candidates": len(candidates) if isinstance(candidates, list) else 0,
-        "selected": len(selected) if isinstance(selected, list) else 0,
+        "selected": len(selected_ids),
+        "checked_pending": len(pending_ids),
     }
 
 
@@ -499,18 +546,41 @@ def _render_result(task: dict[str, Any], owner_id: int) -> None:
                 f"{slot.get('berlin', '')}"
             )
 
-        snapshot = result.get("candidates") or {}
-        if snapshot:
-            st.caption(
-                "Неония: "
-                f"контактов {snapshot.get('contacts', 0)} · "
-                f"подготовлено кандидатов {snapshot.get('candidates', 0)} · "
-                f"выбрано владельцем {snapshot.get('selected', 0)}"
+        snapshot = _candidate_snapshot(owner_id)
+        st.caption(
+            "Неония: "
+            f"контактов {snapshot.get('contacts', 0)} · "
+            f"подготовлено кандидатов {snapshot.get('candidates', 0)} · "
+            f"выбрано владельцем {snapshot.get('selected', 0)}"
+        )
+
+        pending_count = int(snapshot.get("checked_pending", 0) or 0)
+        selected_count = int(snapshot.get("selected", 0) or 0)
+        needed_count = int(result.get("meeting_count", 2) or 2)
+
+        if pending_count:
+            st.warning(
+                f"Вы отметили {pending_count} кандидат(а), но выбор ещё не сохранён. "
+                "В Неонии нажмите «✅ Сохранить выбор и передать Неоне»."
             )
-        if slots:
+
+        if slots and selected_count >= needed_count:
+            st.success(
+                f"Владелец выбрал {selected_count} человек(а). "
+                "Время найдено, люди выбраны — следующий этап: Неона начинает "
+                "персональные диалоги и согласовывает встречи."
+            )
+            if st.button(
+                "➡️ Открыть Неону для выбранных людей",
+                key=f"stagirite_to_neona_{task.get('id', task.get('created_at'))}",
+                use_container_width=True,
+            ):
+                st.session_state["stagirite_open_agent"] = "Неона"
+                st.rerun()
+        elif slots:
             st.info(
                 "Стагирит нашёл время. Следующий человеческий выбор — кому предложить "
-                "эти встречи. После выбора диалог и согласование остаются зоной Неоны."
+                "эти встречи. После сохранения выбора Стагирит увидит его автоматически."
             )
             if st.button(
                 "➡️ Открыть Неонию для выбора людей",
