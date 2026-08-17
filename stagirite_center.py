@@ -2079,7 +2079,12 @@ def _render_weekly_meeting_goal(
                 st.write(f"**{name}** — {line}")
 
 
-def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=None) -> None:
+def _render_result(
+    task: dict[str, Any],
+    owner_id: int,
+    prepare_candidates_fn=None,
+    generate_image_fn=None,
+) -> None:
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
 
     if "meetings" in str(task.get("task_kind") or ""):
@@ -2553,13 +2558,167 @@ def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=No
                             f"{type(exc).__name__}: {exc}"
                         )
 
+
+        st.markdown("### 🎨 Художник-иллюстратор")
+        st.caption(
+            "Художник получает смысл уже готового текста. "
+            "Изображение создаётся только по вашей команде — лишних расходов нет."
+        )
+
+        image_state_key = f"stagirite_artist_image_{task_id}"
+        image_meta_key = f"stagirite_artist_meta_{task_id}"
+        change_key = f"stagirite_artist_change_{task_id}"
+
+        format_label = st.selectbox(
+            "Формат иллюстрации",
+            options=[
+                "Квадрат — пост",
+                "Вертикальный — сторис / мобильный пост",
+                "Горизонтальный — анонс / обложка",
+            ],
+            key=f"stagirite_artist_format_{task_id}",
+        )
+        size_map = {
+            "Квадрат — пост": "1024x1024",
+            "Вертикальный — сторис / мобильный пост": "1024x1536",
+            "Горизонтальный — анонс / обложка": "1536x1024",
+        }
+        chosen_size = size_map[format_label]
+
+        current_image = st.session_state.get(image_state_key)
+        current_meta = st.session_state.get(image_meta_key, {})
+        if not isinstance(current_meta, dict):
+            current_meta = {}
+
+        if current_image:
+            st.image(
+                current_image,
+                caption="Иллюстрация Художника",
+                use_container_width=True,
+            )
+
+            source_changed = (
+                str(current_meta.get("source_text") or "").strip()
+                != str(draft or "").strip()
+            )
+            if source_changed:
+                st.warning(
+                    "После создания картинки текст был изменён. "
+                    "При необходимости перерисуйте иллюстрацию под новую версию."
+                )
+
+            st.download_button(
+                "⬇️ Сохранить PNG",
+                data=current_image,
+                file_name=(
+                    "agency_w_illustration_"
+                    + datetime.now(BERLIN).strftime("%Y%m%d")
+                    + ".png"
+                ),
+                mime="image/png",
+                key=f"stagirite_artist_download_{task_id}",
+                use_container_width=True,
+            )
+
+            change_request = st.text_input(
+                "Что изменить в картинке?",
+                placeholder=(
+                    "Например: больше людей, меньше технологий, "
+                    "светлее, без человека, добавить ощущение движения…"
+                ),
+                key=change_key,
+            )
+
+            if st.button(
+                "🔄 Перерисовать",
+                key=f"stagirite_artist_redraw_{task_id}",
+                use_container_width=True,
+                disabled=generate_image_fn is None,
+            ):
+                if generate_image_fn is None:
+                    st.warning("Художник ещё не подключён.")
+                else:
+                    with st.spinner("Художник создаёт новую версию..."):
+                        generated = generate_image_fn(
+                            str(draft).strip(),
+                            change_request=change_request,
+                            size=chosen_size,
+                        )
+                    if generated.get("ok"):
+                        st.session_state[image_state_key] = generated["image_bytes"]
+                        st.session_state[image_meta_key] = {
+                            "source_text": str(draft).strip(),
+                            "size": chosen_size,
+                            "change_request": str(change_request or "").strip(),
+                            "created_at": datetime.now(UTC).isoformat(),
+                        }
+                        st.rerun()
+                    else:
+                        st.error(
+                            str(
+                                generated.get("error")
+                                or "Не удалось создать иллюстрацию."
+                            )
+                        )
+
+        else:
+            st.info(
+                "Пока есть только текст. Когда он вас устраивает, "
+                "попросите Художника создать к нему иллюстрацию."
+            )
+            if st.button(
+                "🎨 Создать иллюстрацию",
+                key=f"stagirite_artist_create_{task_id}",
+                use_container_width=True,
+                type="primary",
+                disabled=generate_image_fn is None,
+            ):
+                if generate_image_fn is None:
+                    st.warning("Художник ещё не подключён.")
+                else:
+                    with st.spinner(
+                        "Художник ищет визуальную идею и рисует..."
+                    ):
+                        generated = generate_image_fn(
+                            str(draft).strip(),
+                            size=chosen_size,
+                        )
+                    if generated.get("ok"):
+                        st.session_state[image_state_key] = generated["image_bytes"]
+                        st.session_state[image_meta_key] = {
+                            "source_text": str(draft).strip(),
+                            "size": chosen_size,
+                            "change_request": "",
+                            "created_at": datetime.now(UTC).isoformat(),
+                        }
+                        st.rerun()
+                    else:
+                        st.error(
+                            str(
+                                generated.get("error")
+                                or "Не удалось создать иллюстрацию."
+                            )
+                        )
+
+        st.caption(
+            "Сейчас изображение можно сохранить как PNG и использовать вместе "
+            "с постом. Автоматическую доставку самой картинки по внутренней "
+            "рассылке подключим отдельным шагом после проверки Художника."
+        )
+
     if result.get("content_error"):
         st.error("Не удалось подготовить материал. Попробуйте ещё раз чуть позже.")
 
     if result.get("note"):
         st.info(str(result["note"]))
 
-def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_fn, prepare_candidates_fn=None) -> None:
+def render_stagirite_center(
+    owner_telegram_id: int,
+    owner_name: str,
+    ask_openai_fn,
+    prepare_candidates_fn=None,
+    generate_image_fn=None,
+) -> None:
     owner_id = int(owner_telegram_id)
     assignment_key = f"stagirite_assignment_{owner_id}"
     clear_key = f"stagirite_clear_assignment_{owner_id}"
@@ -2577,7 +2736,7 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
         "Стагирит организует работу Агентства."
     )
     st.caption(
-        "Контент: черновик → правка → утверждение → публикация структуре."
+        "Контент: Мастер текста → Художник → правка → утверждение → публикация."
     )
 
     settings = _load_stagirite_settings(owner_id)
@@ -2754,7 +2913,12 @@ def render_stagirite_center(owner_telegram_id: int, owner_name: str, ask_openai_
             except Exception:
                 pass
 
-        _render_result(task, owner_id, prepare_candidates_fn)
+        _render_result(
+            task,
+            owner_id,
+            prepare_candidates_fn=prepare_candidates_fn,
+            generate_image_fn=generate_image_fn,
+        )
 
         if (
             "meetings" not in task_kind

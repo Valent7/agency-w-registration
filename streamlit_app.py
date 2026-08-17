@@ -326,6 +326,154 @@ def ask_openai(
     except (KeyError, ValueError):
         return "Не удалось обработать ответ OpenAI."
         
+
+def generate_openai_illustration(
+    post_text,
+    *,
+    change_request="",
+    size="1024x1024",
+):
+    """Художник Агентства W. Рисует только по явной команде владельца."""
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        return {
+            "ok": False,
+            "error": "Ключ OpenAI не найден в настройках приложения.",
+        }
+
+    clean_text = str(post_text or "").strip()
+    if not clean_text:
+        return {
+            "ok": False,
+            "error": "Сначала нужен готовый текст поста или анонса.",
+        }
+
+    clean_change = str(change_request or "").strip()
+
+    art_direction = """
+Создай ОДНУ сильную редакционную иллюстрацию к публикации Агентства W.
+
+Передай не буквальный пересказ текста, а его главный человеческий смысл.
+Изображение должно остановить взгляд в Telegram/WhatsApp и поддержать
+желание прочитать публикацию.
+
+Визуальный язык:
+- современный premium editorial;
+- умный, взрослый, человечный образ ИИ;
+- тёмный графит / глубокий чёрный как возможная основа,
+  тёплые золотые или шампанские акценты;
+- живой свет, глубина, кинематографичная композиция;
+- технологии показывать через свет, связи, пространство и интерфейсные
+  намёки, а не через банального металлического робота;
+- если есть люди — естественные взрослые люди, живые эмоции,
+  достоинство и действие;
+- оставь немного свободного пространства для возможного заголовка.
+
+Не делай:
+- никаких надписей, букв, логотипов, водяных знаков или псевдотекста;
+- никаких экранов с нечитаемыми буквами;
+- никаких дешёвых неоновых роботов и клише «ИИ-мозг с микросхемами»;
+- никаких обещаний богатства, денег или криптомонет, если этого нет в тексте;
+- никаких перегруженных коллажей.
+
+Главное: одна ясная визуальная метафора, понятная за 1–2 секунды.
+""".strip()
+
+    prompt = art_direction + "\n\nТЕКСТ ПУБЛИКАЦИИ:\n" + clean_text[:6000]
+    if clean_change:
+        prompt += (
+            "\n\nПОЖЕЛАНИЕ ДИРЕКТОРА К НОВОЙ ВЕРСИИ:\n"
+            + clean_change[:1500]
+        )
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-5-mini",
+                "input": prompt,
+                "tools": [
+                    {
+                        "type": "image_generation",
+                        "model": "gpt-image-1",
+                        "quality": "medium",
+                        "size": size,
+                        "output_format": "png",
+                        "background": "opaque",
+                    }
+                ],
+                "tool_choice": {"type": "image_generation"},
+                "store": False,
+            },
+            timeout=300,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        image_b64 = ""
+        for item in data.get("output", []):
+            if (
+                item.get("type") == "image_generation_call"
+                and item.get("result")
+            ):
+                image_b64 = str(item["result"])
+                break
+
+        if not image_b64:
+            return {
+                "ok": False,
+                "error": (
+                    "Художник не вернул изображение. "
+                    "Попробуйте создать его ещё раз."
+                ),
+            }
+
+        try:
+            image_bytes = base64.b64decode(image_b64)
+        except Exception:
+            return {
+                "ok": False,
+                "error": "Не удалось прочитать готовое изображение.",
+            }
+
+        return {
+            "ok": True,
+            "image_bytes": image_bytes,
+            "mime_type": "image/png",
+            "size": size,
+        }
+
+    except requests.exceptions.HTTPError as error:
+        details = ""
+        if error.response is not None:
+            try:
+                payload = error.response.json()
+                details = str(
+                    payload.get("error", {}).get("message") or ""
+                ).strip()
+            except Exception:
+                details = error.response.text[:500]
+        return {
+            "ok": False,
+            "error": (
+                "OpenAI не смог создать иллюстрацию. "
+                + (details or "Попробуйте ещё раз чуть позже.")
+            ),
+        }
+
+    except requests.exceptions.RequestException:
+        return {
+            "ok": False,
+            "error": (
+                "Не удалось связаться с Художником. "
+                "Проверьте подключение и повторите попытку."
+            ),
+        }
+
 def save_member_to_supabase(telegram_data, referral_code):
     telegram_id = int(telegram_data["id"])
     member_code = f"W{telegram_id}"
@@ -4439,17 +4587,30 @@ if received_hash:
                             owner_name=first_name,
                             ask_openai_fn=ask_openai,
                             prepare_candidates_fn=prepare_candidates_for_stagirite,
+                            generate_image_fn=generate_openai_illustration,
                         )
                     except TypeError as stagirite_type_error:
-                        # Защита на время поэтапного обновления Streamlit Cloud:
-                        # старая версия stagirite_center может ещё не знать новый callback.
-                        if "prepare_candidates_fn" not in str(stagirite_type_error):
+                        # Защита на короткое время, пока Streamlit Cloud
+                        # подхватывает одновременно обновлённые файлы.
+                        error_text = str(stagirite_type_error)
+                        if (
+                            "prepare_candidates_fn" not in error_text
+                            and "generate_image_fn" not in error_text
+                        ):
                             raise
-                        render_stagirite_center(
-                            owner_telegram_id=int(telegram_id),
-                            owner_name=first_name,
-                            ask_openai_fn=ask_openai,
-                        )
+                        try:
+                            render_stagirite_center(
+                                owner_telegram_id=int(telegram_id),
+                                owner_name=first_name,
+                                ask_openai_fn=ask_openai,
+                                prepare_candidates_fn=prepare_candidates_for_stagirite,
+                            )
+                        except TypeError:
+                            render_stagirite_center(
+                                owner_telegram_id=int(telegram_id),
+                                owner_name=first_name,
+                                ask_openai_fn=ask_openai,
+                            )
 
                 elif selected_agent == "Неония":
                     st.caption(
