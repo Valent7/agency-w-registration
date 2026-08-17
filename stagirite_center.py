@@ -316,6 +316,39 @@ def _update_task(owner_id: int, task_id: str, changes: dict[str, Any]) -> None:
     st.session_state[_task_key(owner_id)] = fallback
 
 
+
+def _delete_task(owner_id: int, task_id: str) -> None:
+    """Удаляет поручение из Supabase или локального fallback."""
+    owner_id = int(owner_id)
+    task_id = str(task_id or "").strip()
+
+    if task_id and not task_id.startswith("local-") and _db_available():
+        url, _ = _supabase_config()
+        try:
+            response = requests.delete(
+                f"{url}/rest/v1/agency_stagirite_tasks",
+                headers=_db_headers("return=minimal"),
+                params={
+                    "id": f"eq.{task_id}",
+                    "owner_telegram_id": f"eq.{owner_id}",
+                },
+                timeout=20,
+            )
+            if response.ok:
+                return
+        except Exception:
+            pass
+
+    fallback = list(st.session_state.get(_task_key(owner_id), []))
+    fallback = [
+        item
+        for item in fallback
+        if str(item.get("id") or "") != task_id
+    ]
+    st.session_state[_task_key(owner_id)] = fallback
+
+
+
 def _extract_number_before(text: str, stem: str, default: int = 2) -> int:
     lowered = text.lower()
     match = re.search(rf"\b(\d+)\s+[^.\n]{{0,18}}{stem}", lowered)
@@ -2552,6 +2585,9 @@ def _render_weekly_meeting_goal(
 def _render_result(
     task: dict[str, Any],
     owner_id: int,
+    owner_name: str = "",
+    ask_openai_fn=None,
+    ask_claude_fn=None,
     prepare_candidates_fn=None,
     generate_image_fn=None,
 ) -> None:
@@ -2911,31 +2947,139 @@ def _render_result(
         published_at = str(result.get("published_at") or "").strip()
         published_count = int(result.get("published_count") or 0)
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
 
         if c1.button(
-            "💾 Сохранить правки",
+            "✏️ Сохранить правки",
             key=f"stagirite_save_content_{task_id}",
             use_container_width=True,
         ):
             updated = dict(result)
             updated["edited_content"] = str(draft).strip()
             updated["content_approved"] = False
-            # Любая правка создаёт новую версию: её нужно снова утвердить.
+            updated.pop("content_approved_at", None)
             updated.pop("published_at", None)
             updated.pop("published_count", None)
             _update_task(
                 owner_id,
                 task_id,
-                {"result": updated},
+                {
+                    "result": updated,
+                    "status": "Нужно решение владельца",
+                },
             )
-            st.success("Правки сохранены. Теперь материал можно утвердить.")
+            st.success("Правки сохранены.")
             st.rerun()
 
+        can_rewrite = (
+            callable(ask_openai_fn)
+            and str(task.get("assignment") or "").strip()
+        )
         if c2.button(
+            "🔄 Переписать",
+            key=f"stagirite_rewrite_content_{task_id}",
+            use_container_width=True,
+            disabled=not can_rewrite,
+        ):
+            with st.spinner("Стагирит возвращает материал Мастеру на новую версию..."):
+                content_pack = _generate_content(
+                    ask_openai_fn,
+                    ask_claude_fn,
+                    owner_id,
+                    owner_name,
+                    str(task.get("assignment") or "").strip(),
+                )
+
+            new_text = (
+                str(content_pack.get("text") or "").strip()
+                if isinstance(content_pack, dict)
+                else str(content_pack or "").strip()
+            )
+
+            if not new_text:
+                st.warning("Новая версия не получилась. Старый текст оставлен.")
+            else:
+                updated = dict(result)
+                updated["content"] = new_text
+                updated.pop("edited_content", None)
+                updated["content_approved"] = False
+                updated.pop("content_approved_at", None)
+                updated.pop("published_at", None)
+                updated.pop("published_count", None)
+
+                if isinstance(content_pack, dict):
+                    updated["content_master"] = {
+                        "engine": str(
+                            content_pack.get("master_engine") or "reserve"
+                        ),
+                        "model": str(
+                            content_pack.get("master_model") or ""
+                        ),
+                        "quality_score": int(
+                            content_pack.get("quality_score") or 0
+                        ),
+                        "rewrite_used": bool(
+                            content_pack.get("rewrite_used")
+                        ),
+                        "report_warning": bool(
+                            content_pack.get("report_warning")
+                        ),
+                    }
+
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {
+                        "result": updated,
+                        "status": "Нужно решение владельца",
+                    },
+                )
+                st.session_state[
+                    f"stagirite_content_draft_{task_id}"
+                ] = new_text
+                st.rerun()
+
+        delete_flag_key = f"stagirite_delete_content_confirm_{task_id}"
+        if c3.button(
+            "🗑 Удалить",
+            key=f"stagirite_delete_content_{task_id}",
+            use_container_width=True,
+        ):
+            st.session_state[delete_flag_key] = True
+            st.rerun()
+
+        if st.session_state.get(delete_flag_key):
+            st.warning(
+                "Удалить этот материал вместе с поручением? "
+                "Он исчезнет из текущей работы Стагирита."
+            )
+            d1, d2 = st.columns(2)
+            if d1.button(
+                "Да, удалить",
+                key=f"stagirite_delete_content_yes_{task_id}",
+                use_container_width=True,
+            ):
+                _delete_task(owner_id, task_id)
+                st.session_state.pop(
+                    f"stagirite_content_draft_{task_id}",
+                    None,
+                )
+                st.session_state.pop(delete_flag_key, None)
+                st.rerun()
+
+            if d2.button(
+                "Отмена",
+                key=f"stagirite_delete_content_no_{task_id}",
+                use_container_width=True,
+            ):
+                st.session_state.pop(delete_flag_key, None)
+                st.rerun()
+
+        if st.button(
             "✅ Утвердить материал",
             key=f"stagirite_approve_content_{task_id}",
             use_container_width=True,
+            type="primary",
         ):
             clean = str(draft).strip()
             if not clean:
@@ -2950,7 +3094,10 @@ def _render_result(
                 _update_task(
                     owner_id,
                     task_id,
-                    {"result": updated, "status": "Готово к публикации"},
+                    {
+                        "result": updated,
+                        "status": "Готово к публикации",
+                    },
                 )
                 st.rerun()
 
@@ -3400,7 +3547,24 @@ def render_stagirite_center(
 
     with st.container(border=True):
         st.markdown(f"#### {_status_icon(display_status)} {display_status}")
-        st.write(assignment_text)
+
+        is_content_task = (
+            "content" in task_kind
+            or isinstance(task_result.get("content_master"), dict)
+            or bool(task_result.get("content"))
+        )
+
+        if is_content_task:
+            st.caption("Поручение Директора")
+            if len(assignment_text) <= 260:
+                st.write(assignment_text)
+            else:
+                st.write(assignment_text[:240].rstrip() + "…")
+                with st.expander("Показать исходное поручение полностью"):
+                    st.write(assignment_text)
+        else:
+            st.write(assignment_text)
+
         if created:
             try:
                 parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
@@ -3411,12 +3575,16 @@ def render_stagirite_center(
         _render_result(
             task,
             owner_id,
+            owner_name=owner_name,
+            ask_openai_fn=ask_openai_fn,
+            ask_claude_fn=ask_claude_fn,
             prepare_candidates_fn=prepare_candidates_fn,
             generate_image_fn=generate_image_fn,
         )
 
         if (
             "meetings" not in task_kind
+            and not is_content_task
             and status in {"Готово к утверждению", "Нужно решение владельца"}
         ):
             c1, c2 = st.columns(2)
