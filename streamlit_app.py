@@ -327,6 +327,135 @@ def ask_openai(
         return "Не удалось обработать ответ OpenAI."
         
 
+
+def ask_claude(
+    system_prompt,
+    user_message,
+    *,
+    max_tokens=3200,
+):
+    """
+    Мастер контента Агентства W.
+    Поддерживает оба возможных имени секрета:
+    ANTHROPIC_API_KEY (правильное основное)
+    CLAUDE_API_KEY (если ключ ранее сохранили под таким именем).
+
+    Возвращает dict, чтобы Стагирит мог безопасно перейти
+    на резервный OpenAI, не показывая партнёру техническую ошибку.
+    """
+    api_key = (
+        st.secrets.get("ANTHROPIC_API_KEY")
+        or st.secrets.get("CLAUDE_API_KEY")
+    )
+    if not api_key:
+        return {
+            "ok": False,
+            "text": "",
+            "error_code": "missing_key",
+            "error": "Ключ Claude не найден.",
+        }
+
+    model = (
+        st.secrets.get("ANTHROPIC_MODEL")
+        or st.secrets.get("CLAUDE_MODEL")
+        or "claude-sonnet-5"
+    )
+
+    request_body = {
+        "model": str(model),
+        "max_tokens": int(max_tokens),
+        "system": str(system_prompt or ""),
+        "messages": [
+            {
+                "role": "user",
+                "content": str(user_message or ""),
+            }
+        ],
+    }
+
+    try:
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": str(api_key),
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=request_body,
+            timeout=180,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        text_parts = []
+        for item in data.get("content", []):
+            if item.get("type") == "text":
+                value = str(item.get("text") or "").strip()
+                if value:
+                    text_parts.append(value)
+
+        answer = "\n".join(text_parts).strip()
+        if not answer:
+            return {
+                "ok": False,
+                "text": "",
+                "error_code": "empty_response",
+                "error": "Claude не сформировал текст.",
+            }
+
+        return {
+            "ok": True,
+            "text": answer,
+            "model": str(data.get("model") or model),
+            "usage": (
+                data.get("usage")
+                if isinstance(data.get("usage"), dict)
+                else {}
+            ),
+        }
+
+    except requests.exceptions.HTTPError as error:
+        status_code = (
+            error.response.status_code
+            if error.response is not None
+            else None
+        )
+        details = ""
+        if error.response is not None:
+            try:
+                payload = error.response.json()
+                details = str(
+                    payload.get("error", {}).get("message")
+                    or ""
+                ).strip()
+            except Exception:
+                details = error.response.text[:500]
+
+        return {
+            "ok": False,
+            "text": "",
+            "error_code": f"http_{status_code or 'error'}",
+            "error": details or "Claude API вернул ошибку.",
+        }
+
+    except requests.exceptions.RequestException:
+        return {
+            "ok": False,
+            "text": "",
+            "error_code": "connection",
+            "error": "Не удалось связаться с Claude.",
+        }
+
+    except (KeyError, ValueError, TypeError):
+        return {
+            "ok": False,
+            "text": "",
+            "error_code": "parse",
+            "error": "Не удалось обработать ответ Claude.",
+        }
+
+
+
 def _extract_response_text(data):
     """Достаёт обычный текст из raw Responses API JSON."""
     parts = []
@@ -4912,6 +5041,7 @@ if received_hash:
                             owner_telegram_id=int(telegram_id),
                             owner_name=first_name,
                             ask_openai_fn=ask_openai,
+                            ask_claude_fn=ask_claude,
                             prepare_candidates_fn=prepare_candidates_for_stagirite,
                             generate_image_fn=generate_openai_illustration,
                         )
@@ -4922,6 +5052,7 @@ if received_hash:
                         if (
                             "prepare_candidates_fn" not in error_text
                             and "generate_image_fn" not in error_text
+                            and "ask_claude_fn" not in error_text
                         ):
                             raise
                         try:
@@ -4929,6 +5060,7 @@ if received_hash:
                                 owner_telegram_id=int(telegram_id),
                                 owner_name=first_name,
                                 ask_openai_fn=ask_openai,
+                                ask_claude_fn=ask_claude,
                                 prepare_candidates_fn=prepare_candidates_for_stagirite,
                             )
                         except TypeError:
