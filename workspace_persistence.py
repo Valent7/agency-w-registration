@@ -65,6 +65,9 @@ def get_workspace_state_keys(telegram_id):
         "sent_log": (
             f"neona_first_message_sent_log_{telegram_id}"
         ),
+        "blocked_first_messages": (
+            f"neona_first_message_blocked_{telegram_id}"
+        ),
     }
 
 
@@ -83,9 +86,15 @@ def collect_workspace_state(telegram_id):
         keys["sent_log"],
         [],
     )
+    blocked_first_messages = st.session_state.get(
+        keys["blocked_first_messages"],
+        [],
+    )
+    if not isinstance(blocked_first_messages, list):
+        blocked_first_messages = []
 
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -157,6 +166,11 @@ def collect_workspace_state(telegram_id):
             event
             for event in sent_log
             if isinstance(event, dict)
+        ],
+        "blocked_first_messages": [
+            item
+            for item in blocked_first_messages
+            if isinstance(item, dict)
         ],
     }
 
@@ -376,6 +390,21 @@ def _normalize_workspace_state(state):
             }
         )
 
+    blocked_raw = state.get("blocked_first_messages", [])
+    if not isinstance(blocked_raw, list):
+        blocked_raw = []
+    blocked_first_messages = []
+    for item in blocked_raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            contact_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        blocked_first_messages.append(
+            {**item, "telegram_id": contact_id}
+        )
+
     return {
         "passport": (
             state.get("passport")
@@ -400,6 +429,7 @@ def _normalize_workspace_state(state):
         "owner_known_contacts": owner_contacts,
         "neona_drafts": drafts,
         "sent_log": sent_log,
+        "blocked_first_messages": blocked_first_messages,
     }
 
 
@@ -571,6 +601,9 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["sent_log"]
         ] = state["sent_log"]
+        st.session_state[
+            keys["blocked_first_messages"]
+        ] = state["blocked_first_messages"]
 
         current_state = collect_workspace_state(
             telegram_id

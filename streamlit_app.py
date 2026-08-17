@@ -35,6 +35,16 @@ register_first_message_failure_for_stagirite = getattr(
     "register_first_message_failure_for_stagirite",
     lambda *args, **kwargs: None,
 )
+get_first_message_failures_for_stagirite = getattr(
+    _stagirite_center,
+    "get_first_message_failures_for_stagirite",
+    lambda *args, **kwargs: [],
+)
+mark_first_message_retry_for_stagirite = getattr(
+    _stagirite_center,
+    "mark_first_message_retry_for_stagirite",
+    lambda *args, **kwargs: None,
+)
 from neola_partner_center import (
     activation_is_confirmed,
     activation_label,
@@ -1276,6 +1286,443 @@ def friendly_telegram_send_error(error):
     )
 
 
+
+def _blocked_first_message_policy(reason, failed_at=None):
+    """Определяет, когда и как контакт можно вернуть в Telegram-выбор."""
+    reason_text = str(reason or "").lower().replace("ё", "е")
+    failed_dt = None
+    try:
+        if failed_at:
+            failed_dt = datetime.fromisoformat(
+                str(failed_at).replace("Z", "+00:00")
+            )
+    except Exception:
+        failed_dt = None
+    if failed_dt is None:
+        failed_dt = datetime.now(timezone.utc)
+    if failed_dt.tzinfo is None:
+        failed_dt = failed_dt.replace(tzinfo=timezone.utc)
+
+    if "нет в ваших telegram-контактах" in reason_text:
+        return {
+            "category": "not_contact",
+            "label": "Не находится в ваших Telegram-контактах",
+            "retry_after": "",
+            "can_retry_telegram": True,
+        }
+
+    if (
+        "ограничил новые обращения" in reason_text
+        or "временно ограничил отправку" in reason_text
+        or "peerflood" in reason_text
+        or "floodwait" in reason_text
+    ):
+        return {
+            "category": "temporary_limit",
+            "label": "Временное ограничение Telegram",
+            "retry_after": (
+                failed_dt + timedelta(days=30)
+            ).isoformat(),
+            "can_retry_telegram": True,
+        }
+
+    if "приватност" in reason_text:
+        return {
+            "category": "privacy",
+            "label": "Приватность Telegram не разрешает сообщение",
+            "retry_after": "",
+            "can_retry_telegram": False,
+        }
+
+    if (
+        "контакт заблокирован" in reason_text
+        or "заблокирован" in reason_text
+    ):
+        return {
+            "category": "blocked",
+            "label": "Telegram не разрешает сообщение этому контакту",
+            "retry_after": "",
+            "can_retry_telegram": False,
+        }
+
+    if "удален" in reason_text or "деактивирован" in reason_text:
+        return {
+            "category": "deactivated",
+            "label": "Аккаунт удалён или деактивирован",
+            "retry_after": "",
+            "can_retry_telegram": False,
+        }
+
+    return {
+        "category": "check_later",
+        "label": "Нужно проверить возможность отправки позже",
+        "retry_after": "",
+        "can_retry_telegram": True,
+    }
+
+
+def _archive_failed_first_message(
+    owner_id,
+    contact_id,
+    *,
+    contact=None,
+    draft=None,
+    reason="",
+    failed_at=None,
+    persist=True,
+):
+    """Убирает неотправленный контакт из активной Неоны в отдельную очередь."""
+    owner_id = int(owner_id)
+    contact_id = int(contact_id)
+    contact = dict(contact) if isinstance(contact, dict) else {}
+    draft = dict(draft) if isinstance(draft, dict) else {}
+    failed_at = str(
+        failed_at or datetime.now(timezone.utc).isoformat()
+    )
+    policy = _blocked_first_message_policy(
+        reason,
+        failed_at,
+    )
+
+    blocked_key = (
+        f"neona_first_message_blocked_{owner_id}"
+    )
+    queue = st.session_state.get(
+        blocked_key,
+        [],
+    )
+    if not isinstance(queue, list):
+        queue = []
+
+    old = next(
+        (
+            item
+            for item in queue
+            if isinstance(item, dict)
+            and int(item.get("telegram_id", 0) or 0)
+            == contact_id
+        ),
+        {},
+    )
+
+    item = {
+        **(old if isinstance(old, dict) else {}),
+        "telegram_id": contact_id,
+        "name": str(
+            contact.get("name")
+            or contact.get("first_name")
+            or old.get("name")
+            or "Кандидат"
+        ),
+        "username": str(
+            contact.get("username")
+            or old.get("username")
+            or ""
+        ),
+        "phone": str(
+            contact.get("phone")
+            or old.get("phone")
+            or ""
+        ),
+        "reason": str(
+            reason
+            or old.get("reason")
+            or "Telegram не отправил сообщение"
+        ),
+        "failed_at": failed_at,
+        "category": policy["category"],
+        "category_label": policy["label"],
+        "retry_after": policy["retry_after"],
+        "can_retry_telegram": bool(
+            policy["can_retry_telegram"]
+        ),
+        "draft_message": str(
+            draft.get("message")
+            or old.get("draft_message")
+            or ""
+        ),
+        "magnet": str(
+            draft.get("magnet")
+            or old.get("magnet")
+            or ""
+        ),
+        "status": "blocked_first_message",
+    }
+
+    queue = [
+        row
+        for row in queue
+        if not (
+            isinstance(row, dict)
+            and int(row.get("telegram_id", 0) or 0)
+            == contact_id
+        )
+    ]
+    queue.insert(0, item)
+    st.session_state[blocked_key] = queue
+
+    # Убираем из текущего списка Неоны.
+    selected_key = (
+        f"neonia_selected_candidates_{owner_id}"
+    )
+    selected = []
+    for raw in (
+        st.session_state.get(selected_key, [])
+        or []
+    ):
+        try:
+            cid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if cid != contact_id and cid not in selected:
+            selected.append(cid)
+    st.session_state[selected_key] = selected
+
+    # Черновик остаётся внутри архива, но его активная карточка исчезает.
+    drafts_key = (
+        f"neona_first_message_drafts_{owner_id}"
+    )
+    drafts = st.session_state.get(
+        drafts_key,
+        {},
+    )
+    if not isinstance(drafts, dict):
+        drafts = {}
+    drafts.pop(contact_id, None)
+    drafts.pop(str(contact_id), None)
+    st.session_state[drafts_key] = drafts
+
+    candidates_key = (
+        f"neonia_candidates_{owner_id}"
+    )
+    candidates = st.session_state.get(
+        candidates_key,
+        [],
+    )
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            try:
+                cid = int(
+                    candidate.get("telegram_id")
+                )
+            except (TypeError, ValueError):
+                continue
+            if cid == contact_id:
+                candidate["status"] = (
+                    "Первое сообщение не отправлено"
+                )
+                candidate["selection_blocked"] = True
+                candidate["work_state"] = "send_blocked"
+                candidate["block_reason"] = item["reason"]
+        st.session_state[
+            candidates_key
+        ] = candidates
+
+    owner_contacts_key = (
+        f"neonia_owner_known_contacts_{owner_id}"
+    )
+    owner_contacts = st.session_state.get(
+        owner_contacts_key,
+        {},
+    )
+    if (
+        isinstance(owner_contacts, dict)
+        and contact_id in owner_contacts
+    ):
+        owner_contacts[contact_id][
+            "status"
+        ] = "Первое сообщение не отправлено"
+        owner_contacts[contact_id][
+            "work_date"
+        ] = ""
+        st.session_state[
+            owner_contacts_key
+        ] = owner_contacts
+
+    if persist:
+        persist_workspace_if_changed(
+            owner_id,
+            force=True,
+        )
+
+    return item
+
+
+def _return_blocked_first_message_to_neona(
+    owner_id,
+    blocked_item,
+):
+    """Возвращает контакт в Неону; старое утверждение сбрасывается."""
+    owner_id = int(owner_id)
+    contact_id = int(
+        blocked_item.get("telegram_id")
+    )
+
+    blocked_key = (
+        f"neona_first_message_blocked_{owner_id}"
+    )
+    queue = st.session_state.get(
+        blocked_key,
+        [],
+    )
+    if not isinstance(queue, list):
+        queue = []
+    st.session_state[blocked_key] = [
+        row
+        for row in queue
+        if not (
+            isinstance(row, dict)
+            and int(row.get("telegram_id", 0) or 0)
+            == contact_id
+        )
+    ]
+
+    candidates_key = (
+        f"neonia_candidates_{owner_id}"
+    )
+    candidates = st.session_state.get(
+        candidates_key,
+        [],
+    )
+    if not isinstance(candidates, list):
+        candidates = []
+
+    candidate = None
+    for row in candidates:
+        if not isinstance(row, dict):
+            continue
+        try:
+            cid = int(
+                row.get("telegram_id")
+            )
+        except (TypeError, ValueError):
+            continue
+        if cid == contact_id:
+            candidate = row
+            break
+
+    if candidate is None:
+        candidate = {
+            "telegram_id": contact_id,
+            "name": (
+                blocked_item.get("name")
+                or "Кандидат"
+            ),
+            "username": (
+                blocked_item.get("username")
+                or ""
+            ),
+            "phone": (
+                blocked_item.get("phone")
+                or ""
+            ),
+            "source": "Повторный выбор Неоны",
+        }
+        candidates.append(candidate)
+
+    candidate["status"] = (
+        "Выбран владельцем повторно"
+    )
+    candidate["selection_blocked"] = False
+    candidate["work_state"] = "available"
+    candidate["block_reason"] = ""
+    st.session_state[
+        candidates_key
+    ] = candidates
+
+    selected_key = (
+        f"neonia_selected_candidates_{owner_id}"
+    )
+    selected = []
+    for raw in (
+        st.session_state.get(selected_key, [])
+        or []
+    ):
+        try:
+            cid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if cid not in selected:
+            selected.append(cid)
+    if contact_id not in selected:
+        selected.append(contact_id)
+    st.session_state[
+        selected_key
+    ] = selected
+
+    draft_message = str(
+        blocked_item.get("draft_message")
+        or ""
+    ).strip()
+
+    if draft_message:
+        drafts_key = (
+            f"neona_first_message_drafts_{owner_id}"
+        )
+        drafts = st.session_state.get(
+            drafts_key,
+            {},
+        )
+        if not isinstance(drafts, dict):
+            drafts = {}
+
+        drafts[contact_id] = {
+            "message": draft_message,
+            "magnet": str(
+                blocked_item.get("magnet")
+                or ""
+            ),
+            "approved": False,
+            "sent": False,
+            "status": (
+                "Повторный выбор — проверьте "
+                "и утвердите заново"
+            ),
+        }
+        st.session_state[
+            drafts_key
+        ] = drafts
+
+    try:
+        mark_first_message_retry_for_stagirite(
+            owner_id,
+            contact_id,
+        )
+    except Exception:
+        pass
+
+    persist_workspace_if_changed(
+        owner_id,
+        force=True,
+    )
+
+
+def _blocked_retry_is_due(item):
+    raw = str(
+        item.get("retry_after")
+        or ""
+    ).strip()
+
+    if not raw:
+        return True
+
+    try:
+        retry_at = datetime.fromisoformat(
+            raw.replace("Z", "+00:00")
+        )
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(
+                tzinfo=timezone.utc
+            )
+        return (
+            datetime.now(timezone.utc)
+            >= retry_at.astimezone(timezone.utc)
+        )
+    except Exception:
+        return True
+
 def count_first_messages_sent_today(sent_log):
     """Считает первые сообщения, отправленные сегодня по Берлину."""
 
@@ -2304,6 +2751,21 @@ def prepare_candidates_for_stagirite(
             excluded.add(int(value))
         except (TypeError, ValueError):
             continue
+
+    blocked_queue = st.session_state.get(
+        f"neona_first_message_blocked_{owner_id}",
+        [],
+    )
+    if isinstance(blocked_queue, list):
+        for item in blocked_queue:
+            if not isinstance(item, dict):
+                continue
+            try:
+                excluded.add(
+                    int(item.get("telegram_id"))
+                )
+            except (TypeError, ValueError):
+                continue
 
     passport_key = f"neonia_target_audience_passport_{owner_id}"
     contacts_key = f"neonia_telegram_contacts_{owner_id}"
@@ -5827,6 +6289,9 @@ if received_hash:
                     sent_log_key = (
                         f"neona_first_message_sent_log_{telegram_id}"
                     )
+                    blocked_first_messages_key = (
+                        f"neona_first_message_blocked_{telegram_id}"
+                    )
 
                     candidate_results = st.session_state.get(
                         candidates_key,
@@ -5954,6 +6419,107 @@ if received_hash:
                         for contact_id in selected_ids
                         if contact_id in candidate_by_id
                     ]
+
+                    # Миграция ошибок, случившихся до появления
+                    # отдельного архива Неоны.
+                    historical_failures = (
+                        get_first_message_failures_for_stagirite(
+                            telegram_id
+                        )
+                    )
+
+                    sent_ids = set()
+                    for event in sent_log_for_today:
+                        if not isinstance(event, dict):
+                            continue
+                        try:
+                            sent_ids.add(
+                                int(event.get("telegram_id"))
+                            )
+                        except (TypeError, ValueError):
+                            continue
+
+                    existing_blocked = st.session_state.get(
+                        blocked_first_messages_key,
+                        [],
+                    )
+                    existing_blocked_ids = set()
+                    if isinstance(existing_blocked, list):
+                        for item in existing_blocked:
+                            if not isinstance(item, dict):
+                                continue
+                            try:
+                                existing_blocked_ids.add(
+                                    int(item.get("telegram_id"))
+                                )
+                            except (TypeError, ValueError):
+                                continue
+
+                    drafts_snapshot = (
+                        st.session_state.get(
+                            neona_drafts_key,
+                            {},
+                        )
+                    )
+                    if not isinstance(
+                        drafts_snapshot,
+                        dict,
+                    ):
+                        drafts_snapshot = {}
+
+                    migrated_failure = False
+                    for failure in historical_failures:
+                        try:
+                            failed_id = int(
+                                failure.get("telegram_id")
+                            )
+                        except (TypeError, ValueError):
+                            continue
+
+                        if (
+                            failed_id not in selected_ids
+                            or failed_id in sent_ids
+                            or failed_id in existing_blocked_ids
+                        ):
+                            continue
+
+                        failed_contact = (
+                            candidate_by_id.get(
+                                failed_id,
+                                {
+                                    "telegram_id": failed_id,
+                                    "name": "Кандидат",
+                                },
+                            )
+                        )
+                        failed_draft = drafts_snapshot.get(
+                            failed_id,
+                            drafts_snapshot.get(
+                                str(failed_id),
+                                {},
+                            ),
+                        )
+
+                        _archive_failed_first_message(
+                            telegram_id,
+                            failed_id,
+                            contact=failed_contact,
+                            draft=failed_draft,
+                            reason=(
+                                failure.get("reason")
+                                or "Telegram не отправил сообщение"
+                            ),
+                            failed_at=failure.get("failed_at"),
+                            persist=False,
+                        )
+                        migrated_failure = True
+
+                    if migrated_failure:
+                        persist_workspace_if_changed(
+                            telegram_id,
+                            force=True,
+                        )
+                        st.rerun()
 
                     st.divider()
                     st.markdown("### 👥 Кого взять в работу")
@@ -6382,6 +6948,338 @@ if received_hash:
                         "Сегодня отправлено первых сообщений: "
                         f"{count_first_messages_sent_today(sent_log)} из 5"
                     )
+
+                    blocked_notice_key = (
+                        f"neona_blocked_notice_{telegram_id}"
+                    )
+                    blocked_notice = st.session_state.pop(
+                        blocked_notice_key,
+                        "",
+                    )
+                    if blocked_notice:
+                        st.warning(blocked_notice)
+
+                    blocked_queue = st.session_state.get(
+                        blocked_first_messages_key,
+                        [],
+                    )
+                    if not isinstance(blocked_queue, list):
+                        blocked_queue = []
+
+                    if blocked_queue:
+                        with st.expander(
+                            (
+                                "⛔ Не удалось отправить первое "
+                                f"сообщение · {len(blocked_queue)}"
+                            ),
+                            expanded=True,
+                        ):
+                            st.caption(
+                                "Эти люди убраны из текущей работы "
+                                "Неоны. Стагирит и Неония не будут "
+                                "автоматически предлагать их снова. "
+                                "Здесь вы сами решаете, когда вернуть "
+                                "человека в выбор."
+                            )
+
+                            current_contact_ids = set()
+                            for row in all_contacts:
+                                if not isinstance(row, dict):
+                                    continue
+                                try:
+                                    current_contact_ids.add(
+                                        int(row.get("telegram_id"))
+                                    )
+                                except (TypeError, ValueError):
+                                    continue
+
+                            for blocked_item in list(
+                                blocked_queue
+                            ):
+                                if not isinstance(
+                                    blocked_item,
+                                    dict,
+                                ):
+                                    continue
+                                try:
+                                    blocked_id = int(
+                                        blocked_item.get(
+                                            "telegram_id"
+                                        )
+                                    )
+                                except (TypeError, ValueError):
+                                    continue
+
+                                name = str(
+                                    blocked_item.get("name")
+                                    or "Кандидат"
+                                )
+                                username = str(
+                                    blocked_item.get("username")
+                                    or ""
+                                ).strip()
+
+                                label = f"**{name}**"
+                                if username:
+                                    label += (
+                                        " · @"
+                                        + username.lstrip("@")
+                                    )
+                                st.markdown(label)
+
+                                st.caption(
+                                    str(
+                                        blocked_item.get(
+                                            "category_label"
+                                        )
+                                        or (
+                                            "Telegram не отправил "
+                                            "сообщение"
+                                        )
+                                    )
+                                )
+                                st.write(
+                                    str(
+                                        blocked_item.get(
+                                            "reason"
+                                        )
+                                        or ""
+                                    )
+                                )
+
+                                failed_at = str(
+                                    blocked_item.get(
+                                        "failed_at"
+                                    )
+                                    or ""
+                                )
+                                if failed_at:
+                                    try:
+                                        failed_dt = (
+                                            datetime.fromisoformat(
+                                                failed_at.replace(
+                                                    "Z",
+                                                    "+00:00",
+                                                )
+                                            ).astimezone(
+                                                ZoneInfo(
+                                                    "Europe/Berlin"
+                                                )
+                                            )
+                                        )
+                                        st.caption(
+                                            "Попытка: "
+                                            f"{failed_dt:%d.%m.%Y %H:%M}"
+                                        )
+                                    except Exception:
+                                        pass
+
+                                retry_after = str(
+                                    blocked_item.get(
+                                        "retry_after"
+                                    )
+                                    or ""
+                                )
+                                if retry_after:
+                                    try:
+                                        retry_dt = (
+                                            datetime.fromisoformat(
+                                                retry_after.replace(
+                                                    "Z",
+                                                    "+00:00",
+                                                )
+                                            ).astimezone(
+                                                ZoneInfo(
+                                                    "Europe/Berlin"
+                                                )
+                                            )
+                                        )
+                                        st.caption(
+                                            "Повторно рассматривать "
+                                            "через Telegram: не раньше "
+                                            f"{retry_dt:%d.%m.%Y}."
+                                        )
+                                    except Exception:
+                                        pass
+
+                                category = str(
+                                    blocked_item.get(
+                                        "category"
+                                    )
+                                    or ""
+                                )
+                                is_contact_now = (
+                                    blocked_id
+                                    in current_contact_ids
+                                )
+                                retry_due = (
+                                    _blocked_retry_is_due(
+                                        blocked_item
+                                    )
+                                )
+                                can_retry = bool(
+                                    blocked_item.get(
+                                        "can_retry_telegram",
+                                        True,
+                                    )
+                                )
+
+                                if category == "not_contact":
+                                    if is_contact_now:
+                                        if st.button(
+                                            (
+                                                "↩️ Вернуть в выбор "
+                                                "Неоны"
+                                            ),
+                                            key=(
+                                                "return_blocked_"
+                                                f"{telegram_id}_"
+                                                f"{blocked_id}"
+                                            ),
+                                        ):
+                                            _return_blocked_first_message_to_neona(
+                                                telegram_id,
+                                                blocked_item,
+                                            )
+                                            st.rerun()
+                                    else:
+                                        if st.button(
+                                            (
+                                                "🔄 Обновить контакты "
+                                                "и проверить"
+                                            ),
+                                            key=(
+                                                "recheck_blocked_"
+                                                f"{telegram_id}_"
+                                                f"{blocked_id}"
+                                            ),
+                                        ):
+                                            try:
+                                                refreshed_contacts = (
+                                                    run_telegram_async(
+                                                        fetch_telegram_contacts(
+                                                            telegram_id
+                                                        )
+                                                    )
+                                                )
+                                                st.session_state[
+                                                    contacts_state_key
+                                                ] = (
+                                                    refreshed_contacts
+                                                )
+                                                persist_workspace_if_changed(
+                                                    telegram_id,
+                                                    force=True,
+                                                )
+
+                                                refreshed_ids = {
+                                                    int(
+                                                        row.get(
+                                                            "telegram_id"
+                                                        )
+                                                    )
+                                                    for row
+                                                    in refreshed_contacts
+                                                    if isinstance(
+                                                        row,
+                                                        dict,
+                                                    )
+                                                    and row.get(
+                                                        "telegram_id"
+                                                    )
+                                                    is not None
+                                                }
+
+                                                if (
+                                                    blocked_id
+                                                    in refreshed_ids
+                                                ):
+                                                    _return_blocked_first_message_to_neona(
+                                                        telegram_id,
+                                                        blocked_item,
+                                                    )
+                                                    st.session_state[
+                                                        blocked_notice_key
+                                                    ] = (
+                                                        f"{name} теперь "
+                                                        "найден(а) в ваших "
+                                                        "Telegram-контактах. "
+                                                        "Контакт возвращён "
+                                                        "в Неону; текст нужно "
+                                                        "утвердить заново."
+                                                    )
+                                                else:
+                                                    st.session_state[
+                                                        blocked_notice_key
+                                                    ] = (
+                                                        f"{name} пока не "
+                                                        "найден(а) в ваших "
+                                                        "Telegram-контактах. "
+                                                        "Оставляем в архиве."
+                                                    )
+                                                st.rerun()
+
+                                            except Exception as exc:
+                                                st.warning(
+                                                    (
+                                                        "Не удалось обновить "
+                                                        "Telegram-контакты: "
+                                                    )
+                                                    + str(exc)
+                                                )
+
+                                elif (
+                                    can_retry
+                                    and retry_due
+                                    and is_contact_now
+                                ):
+                                    if st.button(
+                                        (
+                                            "↩️ Повторно выбрать "
+                                            "для Неоны"
+                                        ),
+                                        key=(
+                                            "retry_blocked_"
+                                            f"{telegram_id}_"
+                                            f"{blocked_id}"
+                                        ),
+                                    ):
+                                        _return_blocked_first_message_to_neona(
+                                            telegram_id,
+                                            blocked_item,
+                                        )
+                                        st.rerun()
+
+                                elif (
+                                    can_retry
+                                    and not retry_due
+                                ):
+                                    st.info(
+                                        "Пока оставляем в резерве. "
+                                        "Автоматической повторной "
+                                        "отправки не будет."
+                                    )
+
+                                elif (
+                                    can_retry
+                                    and not is_contact_now
+                                ):
+                                    st.info(
+                                        "Сейчас человека нет среди "
+                                        "ваших Telegram-контактов. "
+                                        "Через Telegram повторно "
+                                        "не выбираем."
+                                    )
+
+                                else:
+                                    st.info(
+                                        "Через Telegram этот контакт "
+                                        "повторно не предлагаем. Позже "
+                                        "его можно будет использовать "
+                                        "через другой разрешённый канал."
+                                    )
+
+                                st.divider()
 
                     if not selected_contacts:
                         st.warning(
@@ -7299,7 +8197,23 @@ if received_hash:
                                                             )
                                                         except Exception:
                                                             pass
-                                                        st.error(friendly_error)
+
+                                                        _archive_failed_first_message(
+                                                            telegram_id,
+                                                            contact_id,
+                                                            contact=contact,
+                                                            draft=draft,
+                                                            reason=friendly_error,
+                                                        )
+                                                        st.session_state[
+                                                            f"neona_blocked_notice_{telegram_id}"
+                                                        ] = (
+                                                            f"{contact.get('name', 'Кандидат')}: "
+                                                            "первое сообщение не отправлено. "
+                                                            "Контакт убран из текущей работы "
+                                                            "и перенесён в архив Неоны."
+                                                        )
+                                                        st.rerun()
 
                             latest_drafts = st.session_state.get(
                                 neona_drafts_key,

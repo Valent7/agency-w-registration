@@ -1181,6 +1181,110 @@ def register_first_message_failure_for_stagirite(
         return
 
 
+
+def get_first_message_failures_for_stagirite(owner_id: int) -> list[dict[str, Any]]:
+    """Возвращает факты неудачной первой отправки из активных задач встреч."""
+    owner_id = int(owner_id)
+    tasks, _ = _load_tasks(owner_id)
+    found: dict[int, dict[str, Any]] = {}
+
+    for task in tasks:
+        if "meetings" not in str(task.get("task_kind") or ""):
+            continue
+        if str(task.get("status") or "") in {"Выполнено", "Ошибка"}:
+            continue
+        result = (
+            task.get("result")
+            if isinstance(task.get("result"), dict)
+            else {}
+        )
+        progress = (
+            result.get("contact_progress")
+            if isinstance(result.get("contact_progress"), dict)
+            else {}
+        )
+        for raw_id, item in progress.items():
+            if (
+                not isinstance(item, dict)
+                or str(item.get("status") or "") != "send_failed"
+            ):
+                continue
+            try:
+                contact_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            record = {
+                "telegram_id": contact_id,
+                "failed_at": str(item.get("send_failed_at") or ""),
+                "reason": str(
+                    item.get("send_failure_reason")
+                    or "Отправить сообщение не удалось"
+                ),
+                "task_id": str(task.get("id") or ""),
+                "assignment": str(task.get("assignment") or ""),
+            }
+            previous = found.get(contact_id)
+            if (
+                previous is None
+                or record["failed_at"]
+                > str(previous.get("failed_at") or "")
+            ):
+                found[contact_id] = record
+
+    return sorted(
+        found.values(),
+        key=lambda item: str(item.get("failed_at") or ""),
+        reverse=True,
+    )
+
+
+def mark_first_message_retry_for_stagirite(
+    owner_id: int,
+    contact_id: int,
+) -> None:
+    """Возвращает send_failed в ожидание нового решения владельца."""
+    owner_id = int(owner_id)
+    contact_id = int(contact_id)
+    tasks, _ = _load_tasks(owner_id)
+
+    for task in tasks:
+        if "meetings" not in str(task.get("task_kind") or ""):
+            continue
+        if str(task.get("status") or "") in {"Выполнено", "Ошибка"}:
+            continue
+
+        result = (
+            task.get("result")
+            if isinstance(task.get("result"), dict)
+            else {}
+        )
+        progress = (
+            dict(result.get("contact_progress"))
+            if isinstance(result.get("contact_progress"), dict)
+            else {}
+        )
+        item = progress.get(str(contact_id))
+        if (
+            not isinstance(item, dict)
+            or str(item.get("status") or "") != "send_failed"
+        ):
+            continue
+
+        item = dict(item)
+        item["status"] = "awaiting_first_message"
+        item.pop("send_failed_at", None)
+        item.pop("send_failure_reason", None)
+        progress[str(contact_id)] = item
+
+        updated_result = dict(result)
+        updated_result["contact_progress"] = progress
+        _update_task(
+            owner_id,
+            str(task.get("id") or ""),
+            {"status": "В работе", "result": updated_result},
+        )
+        return
+
 def _refresh_meeting_task(
     owner_id: int,
     task: dict[str, Any],
