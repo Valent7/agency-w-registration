@@ -467,6 +467,164 @@ def _build_stagirite_visual_brief(
 """.strip()
 
 
+
+def _review_stagirite_illustration(
+    api_key,
+    image_bytes,
+    visual_brief,
+    post_text,
+):
+    """
+    Стагирит смотрит на ГОТОВУЮ картинку и решает:
+    можно показывать или нужно один раз перерисовать.
+    """
+    image_data_url = (
+        "data:image/png;base64,"
+        + base64.b64encode(image_bytes).decode("ascii")
+    )
+
+    review_prompt = f"""
+Ты — Стагирит, арт-директор Агентства W.
+Перед тобой готовая иллюстрация Художника.
+
+ТЕКСТ ПОСТА:
+{str(post_text or '')[:5000]}
+
+ТВОЙ РЕЖИССЁРСКИЙ БРИФ:
+{str(visual_brief or '')[:5000]}
+
+Проверь изображение строго.
+
+Обязательные критерии:
+- картинка передаёт ГЛАВНУЮ мысль поста, а не просто тему «ИИ»;
+- композиция соответствует брифу;
+- персонажи и их действия понятны;
+- Стагирит, если показан, взрослый мужчина;
+- Неония/Неона/Неола, если показаны, взрослые женщины;
+- новичок — взрослый человек;
+- сын/дочь без явного указания детского возраста — взрослый;
+- нет животных-маскотов;
+- нет безликих золотых манекенов;
+- нет случайного ребёнка;
+- нет читаемых надписей/логотипов/псевдотекста;
+- человеческая часть действительно показывает жизнь человека;
+- виртуальный офис, если он нужен по смыслу, выглядит как работа команды;
+- изображение красиво и понятно без объяснения.
+
+Верни РОВНО две строки:
+VERDICT: PASS
+FIX: -
+
+или
+
+VERDICT: REDO
+FIX: <одна конкретная инструкция Художнику, что исправить>
+
+REDO ставь, если смысл текста визуально не читается или есть существенная
+ошибка персонажей/сцены. Не требуй идеальной мелочи.
+""".strip()
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-5-mini",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": review_prompt,
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": image_data_url,
+                                "detail": "high",
+                            },
+                        ],
+                    }
+                ],
+                "store": False,
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        review = _extract_response_text(
+            response.json()
+        )
+    except Exception:
+        return {
+            "pass": True,
+            "review": "Контроль изображения временно недоступен.",
+            "fix": "",
+        }
+
+    upper = review.upper()
+    passed = "VERDICT: PASS" in upper
+    fix = ""
+    for line in review.splitlines():
+        if line.strip().upper().startswith("FIX:"):
+            fix = line.split(":", 1)[1].strip()
+            break
+
+    return {
+        "pass": passed,
+        "review": review,
+        "fix": fix,
+    }
+
+
+def _call_artist_image(
+    api_key,
+    prompt,
+    size,
+):
+    """Один вызов Художника."""
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "gpt-5-mini",
+            "input": prompt,
+            "tools": [
+                {
+                    "type": "image_generation",
+                    "model": "gpt-image-1",
+                    "quality": "medium",
+                    "size": size,
+                    "output_format": "png",
+                    "background": "opaque",
+                }
+            ],
+            "tool_choice": {"type": "image_generation"},
+            "store": False,
+        },
+        timeout=300,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    image_b64 = ""
+    for item in data.get("output", []):
+        if (
+            item.get("type") == "image_generation_call"
+            and item.get("result")
+        ):
+            image_b64 = str(item["result"])
+            break
+
+    if not image_b64:
+        return b""
+    return base64.b64decode(image_b64)
+
 def generate_openai_illustration(
     post_text,
     *,
@@ -552,43 +710,12 @@ def generate_openai_illustration(
     )
 
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-5-mini",
-                "input": prompt,
-                "tools": [
-                    {
-                        "type": "image_generation",
-                        "model": "gpt-image-1",
-                        "quality": "medium",
-                        "size": size,
-                        "output_format": "png",
-                        "background": "opaque",
-                    }
-                ],
-                "tool_choice": {"type": "image_generation"},
-                "store": False,
-            },
-            timeout=300,
+        image_bytes = _call_artist_image(
+            api_key,
+            prompt,
+            size,
         )
-        response.raise_for_status()
-        data = response.json()
-
-        image_b64 = ""
-        for item in data.get("output", []):
-            if (
-                item.get("type") == "image_generation_call"
-                and item.get("result")
-            ):
-                image_b64 = str(item["result"])
-                break
-
-        if not image_b64:
+        if not image_bytes:
             return {
                 "ok": False,
                 "error": (
@@ -597,13 +724,43 @@ def generate_openai_illustration(
                 ),
             }
 
-        try:
-            image_bytes = base64.b64decode(image_b64)
-        except Exception:
-            return {
-                "ok": False,
-                "error": "Не удалось прочитать готовое изображение.",
-            }
+        review = _review_stagirite_illustration(
+            api_key,
+            image_bytes,
+            visual_brief,
+            clean_text,
+        )
+        auto_redrawn = False
+
+        # Один автоматический шанс исправить существенный промах.
+        if (
+            not review.get("pass")
+            and str(review.get("fix") or "").strip()
+        ):
+            fix = str(review["fix"]).strip()
+            corrected_prompt = (
+                artist_rules
+                + "\n\nРЕЖИССЁРСКИЙ БРИФ СТАГИРИТА:\n"
+                + visual_brief[:7000]
+                + "\n\nСтагирит проверил первую версию и НЕ ПРИНЯЛ её. "
+                + "Исправь именно это:\n"
+                + fix[:1500]
+                + "\nСохрани удачные части композиции, но исправь смысловую ошибку."
+            )
+            second_image = _call_artist_image(
+                api_key,
+                corrected_prompt,
+                size,
+            )
+            if second_image:
+                image_bytes = second_image
+                auto_redrawn = True
+                review = _review_stagirite_illustration(
+                    api_key,
+                    image_bytes,
+                    visual_brief,
+                    clean_text,
+                )
 
         return {
             "ok": True,
@@ -611,6 +768,9 @@ def generate_openai_illustration(
             "mime_type": "image/png",
             "size": size,
             "visual_brief": visual_brief,
+            "quality_review": str(review.get("review") or ""),
+            "quality_passed": bool(review.get("pass")),
+            "auto_redrawn": auto_redrawn,
         }
 
     except requests.exceptions.HTTPError as error:
