@@ -484,6 +484,109 @@ def _detect_intents(text: str) -> list[str]:
 
     return intents or ["general"]
 
+
+def _is_weekly_meeting_assignment(text: str) -> bool:
+    lowered = str(text or "").lower().replace("ё", "е")
+    return "недел" in lowered
+
+
+def _weekly_goal_from_text(text: str) -> tuple[int, int]:
+    """
+    Возвращает (минимум, желаемый максимум).
+    «от 3 до 5» -> (3, 5)
+    «минимум 3» / «хотя бы три» -> (3, 5)
+    «3 встречи за неделю» -> (3, 5)
+    """
+    lowered = str(text or "").lower().replace("ё", "е")
+
+    word_nums = {
+        "один": 1, "одна": 1, "одну": 1,
+        "два": 2, "две": 2,
+        "три": 3,
+        "четыре": 4,
+        "пять": 5,
+        "шесть": 6,
+        "семь": 7,
+    }
+
+    match = re.search(r"\bот\s+(\d+)\s+до\s+(\d+)\b", lowered)
+    if match:
+        low = max(1, min(10, int(match.group(1))))
+        high = max(low, min(10, int(match.group(2))))
+        return low, high
+
+    for low_word, low_value in word_nums.items():
+        for high_word, high_value in word_nums.items():
+            if re.search(
+                rf"\bот\s+{low_word}\s+до\s+{high_word}\b",
+                lowered,
+            ):
+                return low_value, max(low_value, high_value)
+
+    explicit = _meeting_count_from_text(lowered)
+    low = max(1, min(10, int(explicit or 3)))
+
+    # Для недельной цели одно число трактуем как минимум,
+    # а желаемый потолок — до пяти встреч.
+    return low, max(low, 5)
+
+
+def _weekly_period(text: str) -> tuple[date, date]:
+    period = _target_period_from_text(text)
+    today = datetime.now(BERLIN).date()
+
+    if period:
+        return period[0], period[-1]
+
+    # Если сказано просто «за неделю» — текущие 7 дней от сегодня.
+    return today, today + timedelta(days=6)
+
+
+def _meetings_for_period(
+    owner_id: int,
+    start_day_iso: str,
+    end_day_iso: str,
+    contact_ids: list[int],
+) -> list[dict[str, Any]]:
+    if not start_day_iso or not end_day_iso or not contact_ids:
+        return []
+    try:
+        start_day = date.fromisoformat(str(start_day_iso))
+        end_day = date.fromisoformat(str(end_day_iso))
+    except Exception:
+        return []
+
+    start_msk = datetime.combine(start_day, dt_time.min, tzinfo=MSK)
+    end_msk = datetime.combine(
+        end_day + timedelta(days=1),
+        dt_time.min,
+        tzinfo=MSK,
+    )
+
+    try:
+        rows = agency_calendar.list_meetings(
+            int(owner_id),
+            start_msk.astimezone(UTC),
+            end_msk.astimezone(UTC),
+        )
+    except Exception:
+        return []
+
+    wanted = {int(value) for value in contact_ids}
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            contact_id = int(row.get("contact_telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in wanted:
+            continue
+        if row.get("status") in {"Отменена", "Перенесена"}:
+            continue
+        result.append(row)
+    return result
+
+
 def _target_period_from_text(text: str) -> list[date] | None:
     """Календарные диапазоны из обычной речи."""
     lowered = str(text or "").lower().replace("ё", "е")
@@ -750,11 +853,19 @@ def _candidate_snapshot(owner_id: int) -> dict[str, int]:
 
 
 def _meeting_candidate_pool(owner_id: int, limit: int = 10) -> list[dict[str, Any]]:
-    """Последние подготовленные Неонией кандидаты для выбора прямо у Стагирита."""
+    """Кандидаты только из реальных Telegram-контактов владельца."""
     owner_id = int(owner_id)
     candidates = st.session_state.get(f"neonia_candidates_{owner_id}", [])
+    contacts = st.session_state.get(f"neonia_telegram_contacts_{owner_id}", [])
     if not isinstance(candidates, list):
         return []
+
+    owner_contact_ids: set[int] = set()
+    for contact in contacts if isinstance(contacts, list) else []:
+        try:
+            owner_contact_ids.add(int(contact.get("telegram_id")))
+        except (TypeError, ValueError, AttributeError):
+            continue
 
     usable: list[dict[str, Any]] = []
     for item in candidates:
@@ -763,6 +874,8 @@ def _meeting_candidate_pool(owner_id: int, limit: int = 10) -> list[dict[str, An
         try:
             contact_id = int(item.get("telegram_id"))
         except (TypeError, ValueError):
+            continue
+        if contact_id not in owner_contact_ids:
             continue
         if not str(item.get("name") or "").strip():
             continue
@@ -789,7 +902,7 @@ def _candidate_label(candidate: dict[str, Any]) -> str:
         candidate.get("telegram_activity_label")
         or "активность подтверждена"
     )
-    return f"{name}{username_part} · {activity} · интерес: {interest}"
+    return f"{name}{username_part} · в контактах · {activity} · интерес: {interest}"
 
 
 def _save_stagirite_candidate_selection(
@@ -1101,13 +1214,26 @@ def _refresh_meeting_task(
     )
     states = _dialog_states_for_contacts(owner_id, selected_ids)
 
-    meeting_block = (
-        result.get("meetings")
-        if isinstance(result.get("meetings"), dict)
+    weekly_goal = (
+        result.get("weekly_goal")
+        if isinstance(result.get("weekly_goal"), dict)
         else {}
     )
-    target_day = str(meeting_block.get("day") or "")
-    meetings = _meetings_for_task(owner_id, target_day, selected_ids)
+    if weekly_goal:
+        meetings = _meetings_for_period(
+            owner_id,
+            str(weekly_goal.get("period_start") or ""),
+            str(weekly_goal.get("period_end") or ""),
+            selected_ids,
+        )
+    else:
+        meeting_block = (
+            result.get("meetings")
+            if isinstance(result.get("meetings"), dict)
+            else {}
+        )
+        target_day = str(meeting_block.get("day") or "")
+        meetings = _meetings_for_task(owner_id, target_day, selected_ids)
     meeting_by_contact = {}
     for meeting in meetings:
         try:
@@ -1211,8 +1337,20 @@ def _refresh_meeting_task(
     result["contact_progress"] = progress
     result["progress_summary"] = counts
 
-    needed = int(result.get("meeting_count", 1) or 1)
-    status = "Выполнено" if counts["scheduled"] >= needed else "В работе"
+    if weekly_goal:
+        minimum = int(weekly_goal.get("minimum") or result.get("meeting_count") or 1)
+        desired = int(weekly_goal.get("desired") or minimum)
+        result["meeting_count"] = minimum
+        result["weekly_goal"]["scheduled"] = int(counts["scheduled"])
+        if counts["scheduled"] >= desired:
+            status = "Выполнено"
+        elif counts["scheduled"] >= minimum:
+            status = "Минимум выполнен"
+        else:
+            status = "В работе"
+    else:
+        needed = int(result.get("meeting_count", 1) or 1)
+        status = "Выполнено" if counts["scheduled"] >= needed else "В работе"
     return result, status
 
 
@@ -1401,26 +1539,44 @@ def _process_assignment(owner_id: int, owner_name: str, assignment: str, ask_ope
 
     if "meetings" in intents:
         try:
-            result["meetings"] = _find_meeting_day(owner_id, assignment, meeting_count)
-            result["candidates"] = _candidate_snapshot(owner_id)
             settings = _load_stagirite_settings(owner_id)
             zoom_link = str(settings.get("zoom_link") or "").strip()
-            if (
-                zoom_link
-                and any(
-                    token in assignment.lower()
-                    for token in ("zoom", "зум")
-                )
-            ):
+            if zoom_link:
                 result["zoom_link"] = zoom_link
                 result["zoom_note"] = str(
                     settings.get("zoom_note") or ""
                 ).strip()
-            status = "Нужно решение владельца"
+
+            if _is_weekly_meeting_assignment(assignment):
+                minimum, desired = _weekly_goal_from_text(assignment)
+                period_start, period_end = _weekly_period(assignment)
+                result["meeting_count"] = minimum
+                result["weekly_goal"] = {
+                    "minimum": minimum,
+                    "desired": desired,
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "reserve_target": 50,
+                    "daily_target": 5,
+                    "weekly_pool_ids": [],
+                    "daily_batches": {},
+                }
+                result["candidates"] = _candidate_snapshot(owner_id)
+                status = "В работе"
+            else:
+                # Разовая встреча с конкретной датой по-прежнему может
+                # использовать старый сценарий поиска свободного окна.
+                result["meetings"] = _find_meeting_day(
+                    owner_id,
+                    assignment,
+                    meeting_count,
+                )
+                result["candidates"] = _candidate_snapshot(owner_id)
+                status = "Нужно решение владельца"
         except Exception as exc:
             result["meetings"] = {
                 "found": False,
-                "message": f"Не удалось прочитать календарь: {exc}",
+                "message": f"Не удалось обработать поручение о встречах: {exc}",
                 "slots": [],
             }
             status = "Ошибка"
@@ -1494,8 +1650,329 @@ def _status_icon(status: str) -> str:
         "Утверждено": "✅",
         "Выполнено": "✅",
         "В работе": "🔵",
+        "Минимум выполнен": "🟢",
         "Ошибка": "🔴",
     }.get(status, "⚙️")
+
+
+
+def _render_weekly_meeting_goal(
+    task: dict[str, Any],
+    owner_id: int,
+    prepare_candidates_fn=None,
+) -> None:
+    result = (
+        dict(task.get("result"))
+        if isinstance(task.get("result"), dict)
+        else {}
+    )
+    goal = (
+        dict(result.get("weekly_goal"))
+        if isinstance(result.get("weekly_goal"), dict)
+        else {}
+    )
+    if not goal:
+        return
+
+    minimum = int(goal.get("minimum") or 3)
+    desired = int(goal.get("desired") or max(minimum, 5))
+    reserve_target = int(goal.get("reserve_target") or 50)
+    daily_target = int(goal.get("daily_target") or 5)
+    period_start = str(goal.get("period_start") or "")
+    period_end = str(goal.get("period_end") or "")
+
+    st.markdown("### 🎯 Недельная цель встреч")
+    st.markdown(
+        f"**{period_start} — {period_end}: минимум {minimum}, желательно {desired} встреч.**"
+    )
+    st.caption(
+        "Стагирит не бронирует время заранее. Сначала Неона получает согласие "
+        "человека и выясняет удобный день/время. Только после согласования "
+        "встреча появляется в календаре."
+    )
+
+    selected_all: list[int] = []
+    for value in (
+        result.get("selected_candidate_ids", [])
+        if isinstance(result.get("selected_candidate_ids"), list)
+        else []
+    ):
+        try:
+            cid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in selected_all:
+            selected_all.append(cid)
+
+    summary = (
+        result.get("progress_summary")
+        if isinstance(result.get("progress_summary"), dict)
+        else {}
+    )
+    st.markdown(
+        "**Ход недели:** "
+        f"первые сообщения — {summary.get('sent', 0)} · "
+        f"ждём ответ — {summary.get('waiting', 0)} · "
+        f"в диалоге — {summary.get('dialogue', 0)} · "
+        f"встреч назначено — {summary.get('scheduled', 0)}"
+    )
+
+    if int(summary.get("scheduled", 0) or 0) >= desired:
+        st.success(
+            f"✅ Недельная цель выполнена полностью: "
+            f"{summary.get('scheduled', 0)} встреч."
+        )
+    elif int(summary.get("scheduled", 0) or 0) >= minimum:
+        st.success(
+            f"✅ Минимальная цель выполнена. Уже назначено "
+            f"{summary.get('scheduled', 0)}; можно двигаться к {desired}."
+        )
+
+    today_key = datetime.now(BERLIN).date().isoformat()
+    daily_batches = (
+        dict(goal.get("daily_batches"))
+        if isinstance(goal.get("daily_batches"), dict)
+        else {}
+    )
+    today_info = (
+        dict(daily_batches.get(today_key))
+        if isinstance(daily_batches.get(today_key), dict)
+        else {}
+    )
+
+    # Формируем сегодняшнюю пятёрку только один раз в день.
+    if not today_info.get("candidate_ids") and prepare_candidates_fn is not None:
+        with st.spinner(
+            "Стагирит просит Неонию обновить недельный резерв и подготовить сегодняшних кандидатов..."
+        ):
+            try:
+                prepared = prepare_candidates_fn(
+                    owner_id,
+                    desired_count=daily_target,
+                    reserve_target=reserve_target,
+                    exclude_ids=selected_all,
+                )
+            except TypeError:
+                # Совместимость на коротком промежутке обновления файлов.
+                prepared = prepare_candidates_fn(
+                    owner_id,
+                    desired_count=daily_target,
+                )
+            except Exception:
+                prepared = {
+                    "ok": False,
+                    "candidate_ids": [],
+                    "reserve_ids": [],
+                }
+
+        if isinstance(prepared, dict):
+            reserve_ids: list[int] = []
+            for raw in prepared.get("reserve_ids", []) or []:
+                try:
+                    cid = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if cid not in reserve_ids:
+                    reserve_ids.append(cid)
+
+            candidate_ids: list[int] = []
+            for raw in prepared.get("candidate_ids", []) or []:
+                try:
+                    cid = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if cid in selected_all or cid in candidate_ids:
+                    continue
+                candidate_ids.append(cid)
+
+            # Недельный резерв динамический: каждый день Неония перепроверяет
+            # активность и оставляет только реальных Telegram-контактов.
+            goal["weekly_pool_ids"] = reserve_ids[:reserve_target]
+            today_info = {
+                "candidate_ids": candidate_ids[:daily_target],
+                "approved_ids": [],
+                "prepared_at": datetime.now(UTC).isoformat(),
+            }
+            daily_batches[today_key] = today_info
+            goal["daily_batches"] = daily_batches
+            result["weekly_goal"] = goal
+
+            task_id = str(task.get("id") or "")
+            if task_id:
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {"status": "В работе", "result": result},
+                )
+                task["result"] = result
+
+    weekly_pool_ids = [
+        int(value)
+        for value in goal.get("weekly_pool_ids", [])
+        if str(value).lstrip("-").isdigit()
+    ]
+    st.caption(
+        f"🧰 Недельный резерв: {len(weekly_pool_ids)} из {reserve_target} "
+        "активных контактов Telegram."
+    )
+    if len(weekly_pool_ids) < reserve_target:
+        st.caption(
+            "Если активных и пригодных контактов меньше 50, Стагирит не "
+            "додумывает людей — работает с теми, кого реально нашла Неония."
+        )
+
+    today_ids = []
+    for value in today_info.get("candidate_ids", []) or []:
+        try:
+            cid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in today_ids:
+            today_ids.append(cid)
+
+    approved_today = []
+    for value in today_info.get("approved_ids", []) or []:
+        try:
+            cid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if cid not in approved_today:
+            approved_today.append(cid)
+
+    candidates = _meeting_candidate_pool(owner_id, limit=200)
+    by_id = {
+        int(item["telegram_id"]): item
+        for item in candidates
+        if int(item.get("telegram_id")) in today_ids
+    }
+
+    if approved_today:
+        st.success(
+            f"✅ Сегодня передано Неоне: {len(approved_today)} человек(а). "
+            "Неона готовит персональные первые сообщения; отправка — только "
+            "после вашего утверждения."
+        )
+
+    remaining_today = [
+        cid for cid in today_ids
+        if cid not in approved_today and cid in by_id
+    ]
+
+    if remaining_today:
+        st.markdown(f"### 👥 Сегодняшние кандидаты — до {daily_target}")
+        st.caption(
+            "Все люди ниже находятся в ваших Telegram-контактах и были "
+            "активны сегодня или вчера. Выберите до пяти и передайте Неоне."
+        )
+
+        chosen_ids = st.multiselect(
+            "Кого взять сегодня в работу",
+            options=remaining_today,
+            format_func=lambda cid: _candidate_label(by_id[cid]),
+            max_selections=daily_target,
+            key=f"stagirite_weekly_choice_{task.get('id', task.get('created_at'))}_{today_key}",
+        )
+
+        if chosen_ids:
+            with st.expander("Коротко о выбранных"):
+                for cid in chosen_ids:
+                    candidate = by_id[cid]
+                    st.markdown(f"**{candidate.get('name', 'Кандидат')}**")
+                    st.caption(
+                        f"{candidate.get('telegram_activity_label', '')} · "
+                        f"интерес: {candidate.get('potential_interest', 'неясно')} · "
+                        f"теплота: {candidate.get('warmth', 'неясно')}"
+                    )
+
+        if st.button(
+            "✅ Утвердить сегодняшних и передать Неоне",
+            type="primary",
+            disabled=not chosen_ids,
+            key=f"stagirite_weekly_confirm_{task.get('id', task.get('created_at'))}_{today_key}",
+            use_container_width=True,
+        ):
+            chosen = [int(x) for x in chosen_ids]
+            _save_stagirite_candidate_selection(owner_id, chosen)
+
+            all_selected = list(selected_all)
+            for cid in chosen:
+                if cid not in all_selected:
+                    all_selected.append(cid)
+
+            approved = list(approved_today)
+            for cid in chosen:
+                if cid not in approved:
+                    approved.append(cid)
+
+            today_info["approved_ids"] = approved
+            daily_batches[today_key] = today_info
+            goal["daily_batches"] = daily_batches
+            result["weekly_goal"] = goal
+            result["selected_candidate_ids"] = all_selected
+
+            progress = (
+                dict(result.get("contact_progress"))
+                if isinstance(result.get("contact_progress"), dict)
+                else {}
+            )
+            for cid in chosen:
+                progress.setdefault(
+                    str(cid),
+                    {"status": "awaiting_first_message"},
+                )
+            result["contact_progress"] = progress
+
+            task_id = str(task.get("id") or "")
+            if task_id:
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {"status": "В работе", "result": result},
+                )
+            st.session_state["stagirite_open_agent"] = "Неона"
+            st.rerun()
+
+    elif not approved_today:
+        st.info(
+            "Сегодня Неония не нашла достаточного количества новых пригодных "
+            "кандидатов среди активных Telegram-контактов."
+        )
+
+    # Показываем человеческий прогресс только по уже взятым в работу людям.
+    progress = (
+        result.get("contact_progress")
+        if isinstance(result.get("contact_progress"), dict)
+        else {}
+    )
+    if selected_all:
+        names = _candidate_name_lookup(owner_id)
+        with st.expander("👥 Ход работы по людям"):
+            for cid in selected_all:
+                item = (
+                    progress.get(str(cid))
+                    if isinstance(progress.get(str(cid)), dict)
+                    else {}
+                )
+                state = str(item.get("status") or "awaiting_first_message")
+                name = names.get(cid, f"Контакт {cid}")
+
+                if state == "meeting_scheduled":
+                    line = "✅ встреча назначена"
+                    when = _parse_iso_datetime(item.get("meeting_start_at"))
+                    if when is not None:
+                        line += f" · {when.astimezone(BERLIN):%d.%m %H:%M} Германия"
+                elif state == "dialogue":
+                    line = "💬 Неона ведёт диалог"
+                elif state == "send_failed":
+                    line = "⚠️ Telegram не отправил — нужен другой кандидат или канал"
+                elif state == "waiting_over_24h":
+                    line = "🕒 ответа больше суток нет"
+                elif state == "waiting_reply":
+                    line = "✉️ сообщение отправлено, ждём ответ"
+                else:
+                    line = "📝 первое сообщение ещё не отправлено"
+
+                st.write(f"**{name}** — {line}")
 
 
 def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=None) -> None:
@@ -1524,8 +2001,22 @@ def _render_result(task: dict[str, Any], owner_id: int, prepare_candidates_fn=No
             task["result"] = refreshed_result
         result = refreshed_result
 
+    weekly_mode = isinstance(result.get("weekly_goal"), dict)
+    if weekly_mode:
+        _render_weekly_meeting_goal(
+            task,
+            owner_id,
+            prepare_candidates_fn=prepare_candidates_fn,
+        )
+        # renderer мог сохранить обновлённый result
+        result = (
+            task.get("result")
+            if isinstance(task.get("result"), dict)
+            else result
+        )
+
     meetings = result.get("meetings")
-    if isinstance(meetings, dict):
+    if (not weekly_mode) and isinstance(meetings, dict):
         st.markdown("**📅 Свободное время**")
         st.write(str(meetings.get("message") or ""))
         slots = meetings.get("slots") or []
