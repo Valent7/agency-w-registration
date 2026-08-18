@@ -7339,6 +7339,25 @@ if received_hash:
                                 )
                             )
 
+                    if (
+                        isinstance(weekly_neona_day, dict)
+                        and not weekly_neona_day.get("active")
+                        and str(
+                            weekly_neona_day.get("message") or ""
+                        ).strip()
+                        not in {
+                            "",
+                            "Активной недельной цели встреч сейчас нет.",
+                        }
+                    ):
+                        st.markdown("### 🎯 Сегодня от Стагирита")
+                        st.warning(
+                            str(
+                                weekly_neona_day.get("message")
+                                or "Стагирит пока не смог продолжить недельную цель."
+                            )
+                        )
+
                     selected_ids = []
                     for contact_id in st.session_state.get(
                         selected_candidates_key,

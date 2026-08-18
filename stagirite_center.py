@@ -2338,35 +2338,125 @@ def _normalize_int_ids(values) -> list[int]:
 
 def _active_weekly_meeting_task(owner_id: int) -> dict[str, Any] | None:
     """
-    Возвращает активную недельную цель встреч для текущего дня.
-    Никакого OpenAI: только Supabase/локальное состояние.
+    Находит или восстанавливает активную недельную цель встреч.
+
+    ВАЖНО:
+    Старые версии Агентства могли сохранить поручение с другим task_kind
+    или статусом. Поэтому технические метки больше НЕ являются источником
+    истины.
+
+    Источник истины:
+    1) result.weekly_goal, если он есть;
+    2) либо текст поручения, если в нём явно есть «недел...» + «встреч...».
+
+    Если недельная цель есть, но старая техническая метка неверна —
+    Стагирит сам чинит запись и продолжает работу.
     """
     owner_id = int(owner_id)
     today = datetime.now(BERLIN).date()
     tasks, _ = _load_tasks(owner_id)
 
     candidates: list[dict[str, Any]] = []
-    for raw_task in tasks:
-        if not isinstance(raw_task, dict):
-            continue
-        if "meetings" not in str(raw_task.get("task_kind") or ""):
-            continue
-        if str(raw_task.get("status") or "") in {"Выполнено", "Ошибка"}:
+
+    for raw in tasks:
+        if not isinstance(raw, dict):
             continue
 
+        raw_task = dict(raw)
+        assignment_text = str(raw_task.get("assignment") or "").strip()
+        assignment_lower = assignment_text.lower().replace("ё", "е")
+
         result = (
-            raw_task.get("result")
+            dict(raw_task.get("result"))
             if isinstance(raw_task.get("result"), dict)
             else {}
         )
+
         goal = (
-            result.get("weekly_goal")
+            dict(result.get("weekly_goal"))
             if isinstance(result.get("weekly_goal"), dict)
             else {}
         )
+
+        # ------------------------------------------------------
+        # MIGRATION 1:
+        # Вчерашнее поручение могло быть создано старой версией
+        # без weekly_goal, но сам текст однозначно говорит о неделе встреч.
+        # Восстанавливаем структуру цели автоматически.
+        # ------------------------------------------------------
+        looks_like_weekly_meeting = (
+            "недел" in assignment_lower
+            and (
+                "встреч" in assignment_lower
+                or "созвон" in assignment_lower
+                or "zoom" in assignment_lower
+                or "зум" in assignment_lower
+            )
+        )
+
+        if not goal and looks_like_weekly_meeting:
+            minimum, desired = _weekly_goal_from_text(assignment_text)
+            goal = {
+                "minimum": minimum,
+                "desired": desired,
+                "period_start": today.isoformat(),
+                "period_end": (today + timedelta(days=6)).isoformat(),
+                "reserve_target": 50,
+                "daily_target": 5,
+                "weekly_pool_ids": [],
+                "daily_batches": {},
+                "restored_at": datetime.now(UTC).isoformat(),
+                "restored_reason": "legacy_weekly_meeting_assignment",
+            }
+            result["meeting_count"] = minimum
+            result["weekly_goal"] = goal
+
+            task_id = str(raw_task.get("id") or "")
+            if task_id:
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {
+                        "task_kind": "meetings",
+                        "status": "В работе",
+                        "result": result,
+                    },
+                )
+
+            raw_task["task_kind"] = "meetings"
+            raw_task["status"] = "В работе"
+            raw_task["result"] = result
+
         if not goal:
             continue
 
+        # ------------------------------------------------------
+        # MIGRATION 2:
+        # Если weekly_goal существует, но task_kind/status старые —
+        # не отбрасываем задачу. Исправляем техническую оболочку.
+        # ------------------------------------------------------
+        task_id = str(raw_task.get("id") or "")
+        task_kind = str(raw_task.get("task_kind") or "")
+        raw_status = str(raw_task.get("status") or "")
+
+        shell_changes: dict[str, Any] = {}
+        if "meetings" not in task_kind:
+            shell_changes["task_kind"] = "meetings"
+
+        # Даже старое «Выполнено» не закрывает кампанию само по себе.
+        # Реальное завершение ниже проверяется по desired/scheduled и периоду.
+        if raw_status in {"Выполнено", "Ошибка", "Готово к утверждению"}:
+            shell_changes["status"] = "В работе"
+
+        if shell_changes and task_id:
+            _update_task(owner_id, task_id, shell_changes)
+            raw_task.update(shell_changes)
+
+        # ------------------------------------------------------
+        # MIGRATION 3:
+        # Старая трактовка «следующей недели» как будущего понедельника.
+        # Без явной даты старта переносим кампанию на сегодня + 6 дней.
+        # ------------------------------------------------------
         try:
             period_start = date.fromisoformat(
                 str(goal.get("period_start") or "")
@@ -2375,17 +2465,9 @@ def _active_weekly_meeting_task(owner_id: int) -> dict[str, Any] | None:
                 str(goal.get("period_end") or "")
             )
         except ValueError:
-            continue
+            period_start = today
+            period_end = today + timedelta(days=6)
 
-        # МИГРАЦИЯ СТАРОЙ ЛОГИКИ.
-        # Раньше «на следующей неделе» могло записаться как будущая
-        # календарная неделя. Для недельной кампании встреч это было
-        # неверно: владелец ожидал работу сразу.
-        #
-        # Если старт ещё впереди и в исходном поручении НЕТ явной даты
-        # старта («с 24 августа», «с будущего понедельника»), переносим
-        # уже существующую цель на сегодня + 6 дней.
-        assignment_text = str(raw_task.get("assignment") or "")
         if (
             period_start > today
             and not _has_explicit_weekly_start(assignment_text)
@@ -2393,75 +2475,87 @@ def _active_weekly_meeting_task(owner_id: int) -> dict[str, Any] | None:
             period_start = today
             period_end = today + timedelta(days=6)
 
-            migrated_goal = dict(goal)
-            migrated_goal["period_start"] = period_start.isoformat()
-            migrated_goal["period_end"] = period_end.isoformat()
-            migrated_goal["period_rebased_at"] = (
-                datetime.now(UTC).isoformat()
-            )
-            migrated_goal["period_rebased_reason"] = (
+            goal["period_start"] = period_start.isoformat()
+            goal["period_end"] = period_end.isoformat()
+            goal["period_rebased_at"] = datetime.now(UTC).isoformat()
+            goal["period_rebased_reason"] = (
                 "weekly_goal_starts_immediately"
             )
+            result["weekly_goal"] = goal
+            raw_task["result"] = result
 
-            migrated_result = (
-                dict(raw_task.get("result"))
-                if isinstance(raw_task.get("result"), dict)
-                else {}
-            )
-            migrated_result["weekly_goal"] = migrated_goal
-
-            task_id = str(raw_task.get("id") or "")
             if task_id:
                 _update_task(
                     owner_id,
                     task_id,
                     {
+                        "task_kind": "meetings",
                         "status": "В работе",
-                        "result": migrated_result,
+                        "result": result,
                     },
                 )
 
-            raw_task = dict(raw_task)
-            raw_task["result"] = migrated_result
-            goal = migrated_goal
-
-        if not (period_start <= today <= period_end):
+        # Истёкшая старая кампания сама не воскресает.
+        if today > period_end:
             continue
 
-        refreshed_result, refreshed_status = _refresh_meeting_task(
-            owner_id,
-            raw_task,
-        )
-        desired = int(goal.get("desired") or 5)
-        scheduled = int(
-            (
-                refreshed_result.get("progress_summary")
-                if isinstance(
-                    refreshed_result.get("progress_summary"),
-                    dict,
-                )
-                else {}
-            ).get("scheduled", 0)
-            or 0
-        )
+        # Если старая дата начала почему-то позади — это нормально.
+        # Цель активна пока сегодня внутри периода.
+        if today < period_start:
+            continue
 
+        # ------------------------------------------------------
+        # Реальный прогресс. Только он решает, закончена ли цель.
+        # ------------------------------------------------------
+        try:
+            refreshed_result, refreshed_status = _refresh_meeting_task(
+                owner_id,
+                raw_task,
+            )
+        except Exception:
+            refreshed_result = result
+            refreshed_status = "В работе"
+
+        desired = int(goal.get("desired") or 5)
+        progress_summary = (
+            refreshed_result.get("progress_summary")
+            if isinstance(
+                refreshed_result.get("progress_summary"),
+                dict,
+            )
+            else {}
+        )
+        scheduled = int(progress_summary.get("scheduled", 0) or 0)
+
+        # Цель действительно закончена только когда максимум достигнут.
         if scheduled >= desired:
+            if task_id:
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {
+                        "status": "Выполнено",
+                        "result": refreshed_result,
+                    },
+                )
             continue
 
         task = dict(raw_task)
+        task["task_kind"] = "meetings"
+        task["status"] = (
+            refreshed_status
+            if refreshed_status not in {"Выполнено", "Ошибка"}
+            else "В работе"
+        )
         task["result"] = refreshed_result
-        task["status"] = refreshed_status
 
-        task_id = str(task.get("id") or "")
-        if task_id and (
-            refreshed_result != result
-            or refreshed_status != str(raw_task.get("status") or "")
-        ):
+        if task_id:
             _update_task(
                 owner_id,
                 task_id,
                 {
-                    "status": refreshed_status,
+                    "task_kind": "meetings",
+                    "status": task["status"],
                     "result": refreshed_result,
                 },
             )
@@ -2471,7 +2565,6 @@ def _active_weekly_meeting_task(owner_id: int) -> dict[str, Any] | None:
     if not candidates:
         return None
 
-    # Самая свежая активная цель — текущая.
     candidates.sort(
         key=lambda item: str(
             item.get("created_at")
