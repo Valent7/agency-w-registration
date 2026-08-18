@@ -23,6 +23,7 @@ from agency_calendar import (
 )
 from team_center import render_team_center
 from personal_tasks import render_personal_tasks
+from agency_results import render_agency_results
 import stagirite_center as _stagirite_center
 
 render_stagirite_center = _stagirite_center.render_stagirite_center
@@ -5001,7 +5002,7 @@ if received_hash:
 
             with st.container(border=True):
                 st.markdown("**📊 Итоги**")
-                st.caption("Здесь будут итоги недели и месяца.")
+                render_agency_results(int(telegram_id))
 
         elif main_section == "📅 Календарь":
             render_agency_calendar(
