@@ -179,7 +179,7 @@ def _valid_zoom_link(value: str) -> bool:
 def _agency_current_release_brief() -> str:
     """Факты, которые Стагириту разрешено использовать в контенте."""
     return """
-ФАКТЫ О ТЕКУЩЕЙ ВЕРСИИ АГЕНТСТВА W (17.08.2026):
+ФАКТЫ О ТЕКУЩЕЙ ВЕРСИИ АГЕНТСТВА W (18.08.2026):
 
 ГОТОВО И МОЖНО ПОКАЗЫВАТЬ ПАРТНЁРАМ:
 - Стагирит — заместитель Директора и координатор работы Агентства.
@@ -194,6 +194,8 @@ def _agency_current_release_brief() -> str:
   Telegram-контактами владельца и учитывает активность сегодня/вчера.
 - Недельный резерв может быть до 50 контактов; ежедневно готовится
   рабочая пятёрка, а не весь резерв одновременно.
+- При активной недельной цели новая ежедневная пятёрка появляется у Неоны:
+  владельцу не нужно каждый день вручную проходить Стагирит → Неония → Неона.
 - Неона готовит персональное первое сообщение.
   Первую отправку обязательно утверждает владелец.
 - После ответа человека Неона продолжает диалог и ведёт к осознанной встрече.
@@ -1595,7 +1597,6 @@ def _append_reserve_candidate(
 
 
 def _content_mode_from_assignment(assignment: str) -> str:
-    """Локально определяет жанр, не тратя AI-вызов."""
     lowered = str(assignment or "").lower().replace("ё", "е")
 
     if any(
@@ -1603,10 +1604,8 @@ def _content_mode_from_assignment(assignment: str) -> str:
         for token in (
             "анонс",
             "приглаш",
-            "позови",
-            "пригласи",
-            "zoom-встреч",
-            "зум-встреч",
+            "zoom",
+            "зум",
             "продающ",
         )
     ):
@@ -1629,40 +1628,59 @@ def _content_mode_from_assignment(assignment: str) -> str:
     return "story"
 
 
-def _looks_like_report(text: str) -> bool:
-    """Последний локальный предохранитель от поста-отчёта."""
-    lowered = str(text or "").lower().replace("ё", "е")
-    dry_phrases = (
-        "представьте модельный рабочий день",
-        "недельная цель ставится",
-        "система ролей и правил",
-        "резерв держится",
-        "реальные telegram-контакты",
-        "рабочая пятерка",
-        "алгоритм работы",
-        "функционал системы",
-        "в рамках проекта",
-        "текущая реализация",
-        "операционная",
-        "согласно критериям",
-        "процесс устроен",
-    )
-    hits = sum(1 for phrase in dry_phrases if phrase in lowered)
+CHRONICLES_GENRES = (
+    "мини-новелла",
+    "фельетон",
+    "короткий рассказ",
+    "диалог",
+    "журнальная зарисовка",
+    "ироничное наблюдение",
+    "маленькая притча",
+    "письмо из недалёкого будущего",
+    "сцена из виртуального офиса",
+    "история одного решения",
+)
 
-    # Много нумерованных тезисов в обычной истории — тоже сигнал отчёта.
-    numbered = len(re.findall(r"(?m)^\s*\d+[.)]\s+", str(text or "")))
-    bullets = len(re.findall(r"(?m)^\s*[-•]\s+", str(text or "")))
+CHRONICLES_HUMAN_SITUATIONS = (
+    "утро предпринимателя, когда не хочется снова открывать десятки чатов",
+    "вечер дома, когда работа раньше продолжала сидеть за столом вместе с семьёй",
+    "прогулка, поездка или встреча с близкими, во время которой бизнес не останавливается",
+    "новичок, которому неловко в третий раз задавать один и тот же вопрос",
+    "директор, который раньше сам был секретарём, аналитиком, диспетчером и напоминалкой",
+    "человек, который впервые за долгое время не боится что-то забыть",
+    "маленькая рабочая проблема, которая раньше съедала целый час",
+    "момент, когда вместо десятка действий человеку остаётся одно решение",
+    "обычный выходной, в который работа перестаёт требовать постоянного присутствия",
+    "конец дня без ощущения, что половина дел опять потерялась между чатами",
+    "первый спокойный день взрослого новичка рядом с терпеливым наставником",
+    "ситуация, когда важный разговор начинается без массовой рассылки и давления",
+)
 
-    return hits >= 2 or numbered >= 3 or bullets >= 5
+CHRONICLES_BANNED_CLICHES = (
+    "Кружка остывает на столе",
+    "Кофе остыл",
+    "Представьте модельный рабочий день",
+    "Утро ещё не решило, каким будет",
+    "Пустое место в календаре",
+    "Что бы вы сделали с лишним часом?",
+    "Будущее уже наступило",
+    "ИИ меняет мир",
+)
 
 
 def _parse_editor_json(raw: str) -> dict[str, Any]:
-    """Мягко читает JSON от Стагирита-критика."""
     text = str(raw or "").strip()
     if not text:
         return {}
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+
+    text = re.sub(
+        r"^```(?:json)?\s*",
+        "",
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"\s*```$", "", text)
+
     try:
         value = json.loads(text)
         return value if isinstance(value, dict) else {}
@@ -1677,60 +1695,137 @@ def _parse_editor_json(raw: str) -> dict[str, Any]:
             return {}
 
 
-def _content_quality_score(review: dict[str, Any]) -> int:
-    scores = review.get("scores")
-    if not isinstance(scores, dict):
-        return 0
+def _recent_chronicles_history(
+    owner_id: int,
+    limit: int = 12,
+) -> list[dict[str, str]]:
+    """
+    Память редакции: какие способности, ситуации и жанры уже использовались.
+    Никаких AI-вызовов.
+    """
+    tasks, _ = _load_tasks(int(owner_id))
+    history: list[dict[str, str]] = []
 
-    wanted = (
-        "hook",
-        "scene",
-        "intrigue",
-        "humanity",
-        "humor",
-        "rhythm",
-        "ending",
-        "truth",
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+
+        result = (
+            task.get("result")
+            if isinstance(task.get("result"), dict)
+            else {}
+        )
+        content = str(
+            result.get("edited_content")
+            or result.get("content")
+            or ""
+        ).strip()
+        if not content:
+            continue
+
+        meta = (
+            result.get("content_master")
+            if isinstance(result.get("content_master"), dict)
+            else {}
+        )
+
+        history.append(
+            {
+                "assignment": str(
+                    task.get("assignment") or ""
+                )[:220],
+                "genre": str(
+                    meta.get("genre") or ""
+                )[:80],
+                "capability": str(
+                    meta.get("capability") or ""
+                )[:220],
+                "human_situation": str(
+                    meta.get("human_situation") or ""
+                )[:220],
+                "opening": content[:180],
+            }
+        )
+
+        if len(history) >= max(1, int(limit)):
+            break
+
+    return history
+
+
+def _chronicles_soft_cta_allowed(
+    recent_history: list[dict[str, str]],
+) -> bool:
+    """
+    Не превращаем сериал в рекламную ленту.
+    Примерно каждый третий выпуск может иметь мягкий вход.
+    """
+    return (len(recent_history) + 1) % 3 == 0
+
+
+def _chronicles_brief_fallback(
+    assignment: str,
+    recent_history: list[dict[str, str]],
+) -> dict[str, Any]:
+    used_genres = {
+        str(item.get("genre") or "")
+        for item in recent_history[:5]
+    }
+
+    genre = next(
+        (
+            value
+            for value in CHRONICLES_GENRES
+            if value not in used_genres
+        ),
+        CHRONICLES_GENRES[0],
     )
-    values = []
-    for key in wanted:
-        try:
-            values.append(max(0, min(10, int(scores.get(key, 0)))))
-        except (TypeError, ValueError):
-            values.append(0)
 
-    if not values:
-        return 0
-    return round(sum(values) / len(values))
+    index = len(recent_history) % len(
+        CHRONICLES_HUMAN_SITUATIONS
+    )
 
-
-def _content_mode_from_assignment(assignment: str) -> str:
-    lowered = str(assignment or "").lower().replace("ё", "е")
-    if any(
-        token in lowered
-        for token in (
-            "анонс",
-            "приглаш",
-            "zoom",
-            "зум",
-            "продающ",
-        )
-    ):
-        return "announcement"
-    if any(
-        token in lowered
-        for token in (
-            "список",
-            "тезис",
-            "инструкц",
-            "план ",
-            "пункты",
-            "чек-лист",
-            "чеклист",
-        )
-    ):
-        return "informational"
-    return "story"
+    return {
+        "series": "Хроники Агентства W",
+        "genre": genre,
+        "capability": (
+            "ИИ-команда забирает повторяющуюся рутину, "
+            "а человек оставляет за собой решения и отношения."
+        ),
+        "truth_for_story": [
+            (
+                "Стагирит координирует работу специализированных "
+                "агентов по цели Директора."
+            )
+        ],
+        "human_situation": CHRONICLES_HUMAN_SITUATIONS[index],
+        "human_problem": (
+            "человек вынужден держать в голове слишком много "
+            "повторяющихся мелких действий"
+        ),
+        "human_gain": (
+            "освободившееся внимание, время и спокойствие "
+            "для жизни и человеческих решений"
+        ),
+        "scene": (
+            "одна конкретная бытовая сцена с живым взрослым человеком"
+        ),
+        "intrigue": (
+            "показать необычное отсутствие привычной суеты, "
+            "а причину раскрыть не сразу"
+        ),
+        "humor": (
+            "лёгкая узнаваемая ирония над старым способом всё тащить самому"
+        ),
+        "ending": (
+            "короткий образ: работа продолжается, а человек наконец живёт"
+        ),
+        "cta_mode": (
+            "soft"
+            if _chronicles_soft_cta_allowed(recent_history)
+            else "none"
+        ),
+    }
 
 
 def _looks_like_report(text: str) -> bool:
@@ -1751,15 +1846,38 @@ def _looks_like_report(text: str) -> bool:
         "минимум три встречи",
         "до пятидесяти контактов",
         "активность «сегодня/вчера»",
+        "наша система позволяет",
+        "решение представляет собой",
     )
-    hits = sum(1 for phrase in dry if phrase in lowered)
-    numbered = len(re.findall(r"(?m)^\s*\d+[.)]\s+", str(text or "")))
-    bullets = len(re.findall(r"(?m)^\s*[-•]\s+", str(text or "")))
-    return hits >= 1 or numbered >= 3 or bullets >= 4
+
+    hits = sum(
+        1
+        for phrase in dry
+        if phrase in lowered
+    )
+    numbered = len(
+        re.findall(
+            r"(?m)^\s*\d+[.)]\s+",
+            str(text or ""),
+        )
+    )
+    bullets = len(
+        re.findall(
+            r"(?m)^\s*[-•]\s+",
+            str(text or ""),
+        )
+    )
+
+    return (
+        hits >= 1
+        or numbered >= 3
+        or bullets >= 4
+    )
 
 
 def _has_bad_story_voice(text: str) -> bool:
     lowered = str(text or "").lower().replace("ё", "е")
+
     bad_patterns = (
         r"\bя смотрю на календар",
         r"\bя включаюсь\b",
@@ -1770,53 +1888,68 @@ def _has_bad_story_voice(text: str) -> bool:
         r"\bдвигаю\b.*\bсозвон",
         r"\bпереношу\b.*\bвстреч",
     )
+
     return any(
         re.search(pattern, lowered, flags=re.S)
         for pattern in bad_patterns
     )
 
 
-def _parse_editor_json(raw: str) -> dict[str, Any]:
-    text = str(raw or "").strip()
-    if not text:
-        return {}
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else {}
-    except Exception:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if not match:
-            return {}
-        try:
-            value = json.loads(match.group(0))
-            return value if isinstance(value, dict) else {}
-        except Exception:
-            return {}
+def _starts_with_tired_cliche(text: str) -> bool:
+    opening = (
+        str(text or "")
+        .strip()
+        .lower()
+        .replace("ё", "е")[:260]
+    )
+
+    return any(
+        str(cliche)
+        .lower()
+        .replace("ё", "е")
+        in opening
+        for cliche in CHRONICLES_BANNED_CLICHES
+    )
 
 
-def _content_quality_score(review: dict[str, Any]) -> int:
+def _content_quality_score(
+    review: dict[str, Any],
+) -> int:
     scores = review.get("scores")
     if not isinstance(scores, dict):
         return 0
+
     keys = (
         "hook",
-        "readability",
-        "cinema",
+        "story",
         "intrigue",
-        "humanity",
         "humor",
-        "ending",
+        "humanity",
+        "desire",
+        "trust",
         "truth",
     )
+
     values = []
     for key in keys:
         try:
-            values.append(max(0, min(10, int(scores.get(key, 0)))))
+            values.append(
+                max(
+                    0,
+                    min(
+                        10,
+                        int(scores.get(key, 0)),
+                    ),
+                )
+            )
         except (TypeError, ValueError):
             values.append(0)
-    return round(sum(values) / len(values)) if values else 0
+
+    return (
+        round(sum(values) / len(values))
+        if values
+        else 0
+    )
 
 
 def _generate_content(
@@ -1827,17 +1960,52 @@ def _generate_content(
     assignment: str,
 ) -> dict[str, Any]:
     """
-    CLEAN STORY:
-    Стагирит задаёт только художественное направление.
-    Мастер пишет.
-    Стагирит проверяет, но не засоряет текст внутренней архитектурой.
+    Редакция «Хроники Агентства W».
+
+    1. Банк правды — текущие реальные возможности.
+    2. Банк человеческих ситуаций.
+    3. Банк жанров.
+    4. Стагирит выбирает новый угол, не повторяя недавние выпуски.
+    5. Мастер контента пишет рассказ.
+    6. Стагирит проверяет правду И притягательность для новичка.
+    7. При провале Мастер переписывает один раз.
     """
     mode = _content_mode_from_assignment(assignment)
     facts = _agency_current_release_brief()
+    recent = _recent_chronicles_history(
+        owner_id,
+        limit=12,
+    )
 
-    # ------------------------------------------------------------
-    # 1. Стагирит выбирает УГОЛ ИСТОРИИ, а не пересказывает архитектуру.
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # Не художественные задачи оставляем в том же конвейере,
+    # но без требования сериальной драматургии.
+    # --------------------------------------------------------
+    series_mode = mode == "story"
+    soft_cta_allowed = (
+        _chronicles_soft_cta_allowed(recent)
+        if series_mode
+        else False
+    )
+
+    recent_text = json.dumps(
+        recent[:8],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    genres_text = "\n".join(
+        f"- {value}"
+        for value in CHRONICLES_GENRES
+    )
+    situations_text = "\n".join(
+        f"- {value}"
+        for value in CHRONICLES_HUMAN_SITUATIONS
+    )
+
+    # --------------------------------------------------------
+    # 1. Стагирит выбирает материал из Банка правды.
+    # --------------------------------------------------------
     director_prompt = f"""
 Ты — Стагирит, редакционный директор Агентства W.
 
@@ -1847,41 +2015,87 @@ def _generate_content(
 Режим:
 {mode}
 
-Ниже есть факты о системе. Они нужны ТОЛЬКО чтобы не соврать.
-НЕ превращай их в содержание поста и НЕ перечисляй их Мастеру.
+ЦЕЛЬ РЕДАКЦИИ:
+Создавать бесконечную серию «Хроники Агентства W», после которой
+человек не чувствует, что ему что-то продают, а думает:
+«Вот бы и мне перестать тащить всё это на себе».
+
+БАНК ПРАВДЫ — это единственные факты, которые можно считать
+уже работающими:
 {facts}
 
-Поставь Мастеру контента КОРОТКУЮ художественную задачу — максимум 900 знаков.
+БАНК ЖАНРОВ:
+{genres_text}
 
-Для обычного поста определи:
-- кто герой сцены;
-- где и когда начинается действие;
-- маленькую бытовую деталь;
-- интригу или человеческое напряжение;
-- 2–3 действия Агентства, которые можно показать естественно;
-- где возможна лёгкая улыбка;
-- какой человеческий смысл должен остаться в финале.
+БАНК ЧЕЛОВЕЧЕСКИХ СИТУАЦИЙ:
+{situations_text}
 
-КРИТИЧЕСКИ ВАЖНО:
-- техническая архитектура остаётся за кадром;
-- не упоминай в брифе «50 контактов», «пятёрку», Telegram-фильтры,
-  недельные лимиты и другие технические детали, если Директор прямо
-  не попросил именно о них;
-- не заставляй перечислять всех агентов;
-- не заставляй продавать;
-- не задавай рассказ от первого лица ИИ/Стагирита;
-- по умолчанию нужен внешний живой рассказчик, как в журнальной колонке;
-- для темы «один день Агентства W» главный контраст:
-  виртуальная команда работает, а человек получает время жить.
+НЕДАВНИЕ ВЫПУСКИ:
+{recent_text}
 
-Верни только короткий творческий бриф.
+Твоя задача — выбрать НОВЫЙ угол истории.
+Не повторяй недавний жанр, открывающую сцену и главную способность,
+если есть другая честная возможность.
+
+Новые возможности Агентства должны постепенно появляться в новых
+историях, но только после того, как они попали в Банк правды.
+
+ВАЖНО:
+- выбери только ОДНУ главную способность Агентства;
+- максимум 1–2 факта нужны самому рассказу;
+- остальная техническая кухня остаётся за кадром;
+- сначала человеческая жизнь, потом незаметно Агентство;
+- герой — взрослый человек, не «система»;
+- главная ценность: время, нервы, внимание, отношения, свобода выбора;
+- юмор — наблюдательный, добрый, иногда чуть ехидный к старому способу работы;
+- интрига должна рождаться из ситуации, а не из кликбейта;
+- не использовать избитые начала:
+  {", ".join(CHRONICLES_BANNED_CLICHES)};
+- никаких гарантий дохода, встреч, партнёров;
+- не придумывать ещё не работающие возможности;
+- не объяснять архитектуру Агентства;
+- не перечислять агентов один за другим.
+
+CTA:
+{"В этом выпуске допустим ОДИН мягкий вход в самом конце: без давления, например предложить человеку посмотреть, какую его рутину уже можно передать Агентству." if soft_cta_allowed else "В этом выпуске НЕ должно быть призыва написать, купить, прийти или записаться. Финал работает только через желание узнать больше."}
+
+Верни ТОЛЬКО JSON:
+{{
+  "series": "Хроники Агентства W",
+  "genre": "...",
+  "capability": "одна реальная способность Агентства человеческим языком",
+  "truth_for_story": ["факт 1", "факт 2 при необходимости"],
+  "human_situation": "...",
+  "human_problem": "...",
+  "human_gain": "...",
+  "scene": "...",
+  "intrigue": "...",
+  "humor": "...",
+  "ending": "...",
+  "cta_mode": "none" или "soft"
+}}
 """.strip()
 
-    editorial_brief = ask_openai_fn(
+    raw_brief = ask_openai_fn(
         director_prompt,
         assignment,
         uploaded_files=[],
         use_web_search=False,
+    )
+    brief = _parse_editor_json(raw_brief)
+
+    if not brief:
+        brief = _chronicles_brief_fallback(
+            assignment,
+            recent,
+        )
+
+    # Принудительно не даём модели самовольно включать CTA.
+    brief["cta_mode"] = (
+        "soft"
+        if soft_cta_allowed
+        and str(brief.get("cta_mode") or "") == "soft"
+        else "none"
     )
 
     def write_with_master(
@@ -1889,6 +2103,7 @@ def _generate_content(
         user_text: str,
     ) -> tuple[str, dict[str, Any]]:
         claude_result = None
+
         if callable(ask_claude_fn):
             try:
                 claude_result = ask_claude_fn(
@@ -1902,13 +2117,20 @@ def _generate_content(
         if (
             isinstance(claude_result, dict)
             and claude_result.get("ok") is True
-            and str(claude_result.get("text") or "").strip()
+            and str(
+                claude_result.get("text") or ""
+            ).strip()
         ):
             return (
-                str(claude_result["text"]).strip(),
+                str(
+                    claude_result["text"]
+                ).strip(),
                 {
                     "engine": "primary",
-                    "model": str(claude_result.get("model") or ""),
+                    "model": str(
+                        claude_result.get("model")
+                        or ""
+                    ),
                 },
             )
 
@@ -1918,73 +2140,71 @@ def _generate_content(
             uploaded_files=[],
             use_web_search=False,
         )
+
         return (
             str(reserve or "").strip(),
-            {"engine": "reserve", "model": ""},
+            {
+                "engine": "reserve",
+                "model": "",
+            },
         )
 
-    # ------------------------------------------------------------
-    # 2. Мастер пишет. Здесь НЕТ длинной технической инструкции.
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 2. Мастер НЕ видит весь Банк правды.
+    # Только выбранный сюжет и 1–2 разрешённых факта.
+    # --------------------------------------------------------
     master_prompt = f"""
-Ты — Мастер контента Агентства W.
-Ты пишешь для взрослых людей, которые быстро чувствуют фальшь,
-канцелярит и рекламную пластмассу.
+Ты — Мастер контента редакции «Хроники Агентства W».
 
-Творческий бриф Стагирита:
-{editorial_brief}
+Ты не технический копирайтер.
+Ты автор короткой современной прозы для взрослых людей.
 
-Исходная просьба Директора:
+РЕДАКЦИОННАЯ КАРТОЧКА:
+Жанр: {brief.get("genre", "короткий рассказ")}
+Человеческая ситуация: {brief.get("human_situation", "")}
+Проблема человека: {brief.get("human_problem", "")}
+Что человек получает обратно: {brief.get("human_gain", "")}
+Сцена: {brief.get("scene", "")}
+Интрига: {brief.get("intrigue", "")}
+Юмор: {brief.get("humor", "")}
+Финальный образ: {brief.get("ending", "")}
+Главная способность Агентства: {brief.get("capability", "")}
+
+ФАКТЫ, КОТОРЫЕ РАЗРЕШЕНО ПОКАЗАТЬ В ЭТОМ РАССКАЗЕ:
+{json.dumps(brief.get("truth_for_story", []), ensure_ascii=False)}
+
+ИСХОДНАЯ ПРОСЬБА ДИРЕКТОРА:
 {assignment}
 
-НАША ЛИТЕРАТУРНАЯ ПЛАНКА:
-Это должна быть публикация, которую читают как маленький рассказ,
-а не как описание продукта.
+НАПИШИ ПУБЛИКАЦИЮ, КОТОРУЮ ХОЧЕТСЯ ДОЧИТАТЬ.
 
-Пиши:
-- конкретно;
-- образно;
-- тепло;
-- с наблюдательным лёгким юмором;
-- короткими живыми абзацами;
-- через людей, сцены, реплики и детали.
+ЛИТЕРАТУРНЫЕ ПРАВИЛА:
+- первые 2–3 строки открывают живую ситуацию;
+- не объясняй Агентство до того, как читателю станет интересен человек;
+- показывай пользу через изменение жизни;
+- диалог, жест, бытовая деталь и наблюдение лучше абстрактного «эффективно»;
+- допускается маленькая художественная условность,
+  но фактические действия Агентства не искажай;
+- не превращай агентов в список должностей;
+- не делай всех героев идеальными;
+- юмор должен быть узнаваемым, а не «шуткой ради шутки»;
+- оставь немного воздуха: не разжёвывай мораль;
+- никаких слов «воронка», «функционал», «экосистема» и «автоматизация»,
+  если без них можно обойтись;
+- не начинай с кофе/остывшей кружки/пустого календаря;
+- не заканчивай банальным вопросом «а что бы вы сделали с лишним часом?»;
+- не говори от первого лица ИИ или Стагирита без прямой просьбы.
 
-Не пиши:
-- отчёт;
-- инструкцию;
-- презентацию функций;
-- канцелярит;
-- рекламные лозунги;
-- «Представьте модельный рабочий день»;
-- технические числа и внутренние правила без необходимости;
-- риторический вопрос в финале просто потому, что «так принято».
+СКВОЗНАЯ МЫСЛЬ СЕРИАЛА:
+ИИ занимается рутиной не ради красивой технологии.
+Он возвращает человеку время и нервы для семьи, отношений,
+творчества, путешествий, развития и просто спокойной жизни.
 
-ПОВЕСТВОВАТЕЛЬ:
-По умолчанию — внешний рассказчик.
-Не говори от первого лица Стагирита, Неоны, Неонии, Неолы или «ИИ»,
-если Директор прямо не попросил такой формат.
+CTA:
+{"Только в самом конце можно сделать ОДНО мягкое приглашение без давления: предложить узнать, какую рутину человека уже можно передать Агентству W." if brief.get("cta_mode") == "soft" else "Призыва к действию нет. Пусть желание обратиться рождается из самой истории."}
 
-ФАКТЫ БЕЗОПАСНОСТИ:
-- Стагирит не переносит уже назначенную чужую встречу самовольно;
-- время встречи появляется после согласования с человеком;
-- первое сообщение утверждает владелец;
-- Неона ведёт диалог после ответа;
-- Неола работает со взрослым новичком.
-
-Эти факты нужны только чтобы не соврать.
-НЕ вставляй их все в текст.
-
-ОРИЕНТИР КАЧЕСТВА:
-Хороший пост похож на сцену из жизни:
-в нём можно увидеть комнату, жест, чашку, взгляд, движение,
-услышать одну реплику и улыбнуться одной детали.
-Агентство проявляется через действие.
-
-ФИНАЛ:
-короткий, человеческий, запоминающийся.
-Не объясняй после него мораль второй раз.
-
-Верни только готовый пост.
+Только готовый художественный текст.
+Без слов «бриф», «карточка», «редакция», «оценка».
 """.strip()
 
     draft, engine_meta = write_with_master(
@@ -1992,54 +2212,67 @@ def _generate_content(
         assignment,
     )
 
-    # ------------------------------------------------------------
-    # 3. Стагирит-критик. Проходной балл теперь 9, а не 8.
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 3. Стагирит проверяет не только красоту, но и МАГНИТ.
+    # --------------------------------------------------------
     critic_prompt = f"""
-Ты — Стагирит, строгий главный редактор.
-Не переписывай. Только оцени текст.
+Ты — Стагирит, главный редактор «Хроник Агентства W».
 
 Поручение:
 {assignment}
 
-Пост:
+Редакционная карточка:
+{json.dumps(brief, ensure_ascii=False)}
+
+Готовый текст:
 {draft}
 
-Проверь по 10-балльной шкале:
-hook — хочется читать со старта;
-readability — читается легко;
-cinema — видна сцена;
-intrigue — есть движение и любопытство;
-humanity — в центре человек, а не система;
-humor — есть естественная улыбка, если тема позволяет;
-ending — финал хочется запомнить;
-truth — нет фактической выдумки.
+Полный Банк правды:
+{facts}
+
+Главный вопрос:
+После чтения потенциальный новичок должен не услышать рекламу,
+а почувствовать: «Так можно было? Я тоже хочу вернуть себе время».
+
+Оцени по 10:
+hook — первая сцена удерживает;
+story — это рассказ/фельетон/новелла, а не презентация;
+intrigue — хочется узнать, чем закончится;
+humor — есть естественная улыбка, когда жанр позволяет;
+humanity — человек важнее технологии;
+desire — возникает желание примерить такую жизнь на себя;
+trust — нет рекламной липкости и преувеличений;
+truth — действия Агентства соответствуют Банку правды.
 
 FATAL=true, если:
-- это отчёт, инструкция или презентация;
-- текст объясняет архитектуру вместо истории;
-- ИИ рассказывает от первого лица без просьбы Директора;
-- Стагирит самовольно двигает/переносит уже назначенные встречи;
-- обычный пост самовольно превращён в рекламу/Zoom-анонс.
+- придумана ещё не работающая возможность;
+- техническая кухня стала сюжетом;
+- пост похож на инструкцию/отчёт;
+- обещается доход, встреча, партнёр или результат;
+- перечислены функции агентов;
+- начало построено на избитом «кофе остыл/кружка остывает»;
+- текст пытается продавать сильнее, чем рассказывать.
 
-Верни только JSON:
+Верни ТОЛЬКО JSON:
 {{
   "decision": "PASS" или "REWRITE",
   "fatal": true/false,
   "scores": {{
     "hook": 0,
-    "readability": 0,
-    "cinema": 0,
+    "story": 0,
     "intrigue": 0,
-    "humanity": 0,
     "humor": 0,
-    "ending": 0,
+    "humanity": 0,
+    "desire": 0,
+    "trust": 0,
     "truth": 0
   }},
-  "revision_brief": "3–6 конкретных замечаний автору"
+  "why_newcomer_reads": "одно предложение",
+  "revision_brief": "3–6 очень конкретных замечаний автору"
 }}
 
-PASS только при среднем уровне 9/10 и без слабого ключевого пункта.
+PASS только если truth >= 9, desire >= 8, hook >= 8,
+story >= 8, intrigue >= 8 и нет FATAL.
 """.strip()
 
     raw_review = ask_openai_fn(
@@ -2050,92 +2283,155 @@ PASS только при среднем уровне 9/10 и без слабог
     )
     review = _parse_editor_json(raw_review)
     score = _content_quality_score(review)
-    scores = review.get("scores") if isinstance(review.get("scores"), dict) else {}
 
-    weak_key = False
-    for key in ("hook", "readability", "cinema", "humanity", "ending", "truth"):
+    scores = (
+        review.get("scores")
+        if isinstance(
+            review.get("scores"),
+            dict,
+        )
+        else {}
+    )
+
+    def score_value(key: str) -> int:
         try:
-            if int(scores.get(key, 0)) < 8:
-                weak_key = True
+            return int(scores.get(key, 0))
         except (TypeError, ValueError):
-            weak_key = True
+            return 0
 
     needs_rewrite = (
-        str(review.get("decision") or "").upper() != "PASS"
+        str(
+            review.get("decision") or ""
+        ).upper()
+        != "PASS"
         or bool(review.get("fatal"))
-        or score < 9
-        or weak_key
+        or score_value("truth") < 9
+        or score_value("desire") < 8
+        or score_value("hook") < 8
+        or score_value("story") < 8
+        or score_value("intrigue") < 8
         or _looks_like_report(draft)
         or _has_bad_story_voice(draft)
+        or _starts_with_tired_cliche(draft)
     )
 
     final_text = draft
     rewrite_used = False
 
-    # ------------------------------------------------------------
-    # 4. Если не 9/10 — переписывает снова МАСТЕР.
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # 4. Один редакционный возврат автору.
+    # --------------------------------------------------------
     if needs_rewrite:
         revision = str(
             review.get("revision_brief")
             or (
-                "Первая версия не дотягивает до живой журнальной истории. "
-                "Убери объяснение системы, открой сцену через человека, "
-                "добавь естественное движение, одну улыбку и сильный финал."
+                "Перепиши как сильную человеческую историю. "
+                "Убери объяснение системы, добавь живую ситуацию, "
+                "интригу и узнаваемый юмор. Пусть желание узнать "
+                "Агентство рождается из жизни героя, а не из рекламы."
             )
         ).strip()
 
         rewrite_prompt = f"""
-Ты — Мастер контента Агентства W.
+Ты — Мастер контента «Хроник Агентства W».
+
 Первая версия не принята Стагиритом.
 
-Исходный творческий бриф:
-{editorial_brief}
+Редакционная карточка:
+{json.dumps(brief, ensure_ascii=False)}
 
 Первая версия:
 {draft}
 
-Замечания редактора:
+Замечания:
 {revision}
 
-ПЕРЕПИШИ, А НЕ ПОДПРАВЬ.
+Перепиши как НОВУЮ литературную версию, а не косметическую правку.
 
-Что должно получиться:
-- живой рассказ;
-- взрослый естественный язык;
-- никаких технических объяснений;
-- никаких внутренних терминов Агентства ради терминов;
-- никакого первого лица ИИ;
-- никакой самовольной перестановки встреч;
-- максимум 2–3 действия Агентства, встроенных в сюжет;
-- лёгкий юмор;
-- финал без банального вопроса к читателю.
+Обязательно:
+- человек и его жизнь на первом плане;
+- одна реальная способность Агентства проявляется в действии;
+- читатель узнаёт собственную усталость от рутины;
+- есть интрига;
+- есть лёгкая улыбка, если ситуация позволяет;
+- нет технической кухни;
+- нет рекламной речи;
+- нет выдуманных функций;
+- финал оставляет желание узнать больше;
+- не использовать «кофе остыл», «кружка остывает»,
+  «пустой календарь» и вопрос про «лишний час».
 
-Читатель должен подумать:
-«Я это вижу. Я улыбаюсь. Я хочу дочитать».
+CTA:
+{"Допустим только один мягкий вход в самом конце." if brief.get("cta_mode") == "soft" else "CTA запрещён."}
 
-Верни только новый пост.
+Верни только готовый текст.
 """.strip()
 
         rewritten, rewrite_meta = write_with_master(
             rewrite_prompt,
             assignment,
         )
+
         if rewritten:
             final_text = rewritten
             rewrite_used = True
-            if rewrite_meta.get("engine") == "primary":
+
+            if (
+                rewrite_meta.get("engine")
+                == "primary"
+            ):
                 engine_meta = rewrite_meta
 
     return {
         "text": final_text,
-        "master_engine": str(engine_meta.get("engine") or "reserve"),
-        "master_model": str(engine_meta.get("model") or ""),
+        "master_engine": str(
+            engine_meta.get("engine")
+            or "reserve"
+        ),
+        "master_model": str(
+            engine_meta.get("model")
+            or ""
+        ),
         "quality_score": int(score),
         "rewrite_used": bool(rewrite_used),
         "report_warning": bool(
             _looks_like_report(final_text)
             or _has_bad_story_voice(final_text)
+            or _starts_with_tired_cliche(
+                final_text
+            )
+        ),
+        "series": str(
+            brief.get("series")
+            or (
+                "Хроники Агентства W"
+                if series_mode
+                else ""
+            )
+        ),
+        "genre": str(
+            brief.get("genre")
+            or ""
+        ),
+        "capability": str(
+            brief.get("capability")
+            or ""
+        ),
+        "human_situation": str(
+            brief.get("human_situation")
+            or ""
+        ),
+        "human_gain": str(
+            brief.get("human_gain")
+            or ""
+        ),
+        "cta_mode": str(
+            brief.get("cta_mode")
+            or "none"
+        ),
+        "newcomer_reason": str(
+            review.get("why_newcomer_reads")
+            or ""
         ),
     }
 
@@ -2260,6 +2556,27 @@ def _process_assignment(
                         ),
                         "report_warning": bool(
                             content_pack.get("report_warning")
+                        ),
+                        "series": str(
+                            content_pack.get("series") or ""
+                        ),
+                        "genre": str(
+                            content_pack.get("genre") or ""
+                        ),
+                        "capability": str(
+                            content_pack.get("capability") or ""
+                        ),
+                        "human_situation": str(
+                            content_pack.get("human_situation") or ""
+                        ),
+                        "human_gain": str(
+                            content_pack.get("human_gain") or ""
+                        ),
+                        "cta_mode": str(
+                            content_pack.get("cta_mode") or "none"
+                        ),
+                        "newcomer_reason": str(
+                            content_pack.get("newcomer_reason") or ""
                         ),
                     }
         except Exception as exc:
@@ -3639,6 +3956,27 @@ def _render_result(
                         ),
                         "report_warning": bool(
                             content_pack.get("report_warning")
+                        ),
+                        "series": str(
+                            content_pack.get("series") or ""
+                        ),
+                        "genre": str(
+                            content_pack.get("genre") or ""
+                        ),
+                        "capability": str(
+                            content_pack.get("capability") or ""
+                        ),
+                        "human_situation": str(
+                            content_pack.get("human_situation") or ""
+                        ),
+                        "human_gain": str(
+                            content_pack.get("human_gain") or ""
+                        ),
+                        "cta_mode": str(
+                            content_pack.get("cta_mode") or "none"
+                        ),
+                        "newcomer_reason": str(
+                            content_pack.get("newcomer_reason") or ""
                         ),
                     }
 
