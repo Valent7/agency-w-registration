@@ -3535,7 +3535,21 @@ def _render_result(
             or result.get("content")
             or ""
         )
-        if draft_key not in st.session_state:
+
+        # Кнопка «Переписать» не может менять значение уже созданного
+        # st.text_area в том же проходе Streamlit. Поэтому новый текст
+        # передаём через отдельный служебный ключ и применяем ТОЛЬКО
+        # на следующем rerun — до создания виджета.
+        pending_draft_key = (
+            f"stagirite_content_pending_draft_{task_id}"
+        )
+        pending_text = st.session_state.pop(
+            pending_draft_key,
+            None,
+        )
+        if pending_text is not None:
+            st.session_state[draft_key] = str(pending_text)
+        elif draft_key not in st.session_state:
             st.session_state[draft_key] = saved_text
 
         draft = st.text_area(
@@ -3637,7 +3651,7 @@ def _render_result(
                     },
                 )
                 st.session_state[
-                    f"stagirite_content_draft_{task_id}"
+                    f"stagirite_content_pending_draft_{task_id}"
                 ] = new_text
                 st.rerun()
 
