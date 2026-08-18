@@ -3716,11 +3716,12 @@ def _render_result(
 
             if published_at:
                 st.success(
-                    f"📣 Опубликовано всей структуре: {published_count} получател(я/ей)."
+                    f"📣 Размещено во внутренних сообщениях: {published_count} получател(я/ей)."
                 )
                 st.caption(
-                    "Партнёры видят материал в разделе «Сообщения» Агентства W. "
-                    "Им не нужно пересылать его дальше по цепочке."
+                    "Сообщение размещено непосредственно каждому зарегистрированному "
+                    "человеку вашей нижестоящей структуры. Это внутренняя доставка "
+                    "Агентства W, а не подтверждение Telegram-доставки."
                 )
             elif recipients_count == 0:
                 st.info(
@@ -3733,7 +3734,7 @@ def _render_result(
                     f"{recipients_count} человек(а), на любой глубине."
                 )
                 if st.button(
-                    f"📣 Отправить всей структуре ({recipients_count})",
+                    f"📣 Разместить всей структуре ({recipients_count})",
                     key=f"stagirite_publish_structure_{task_id}",
                     use_container_width=True,
                     type="primary",
@@ -3746,7 +3747,7 @@ def _render_result(
                                 result.get("edited_content")
                                 or draft
                             ).strip(),
-                            subject="Анонс Агентства W",
+                            subject="Сообщение Агентства W",
                             zoom_url=zoom_link,
                         )
                         updated = dict(result)
@@ -3757,6 +3758,7 @@ def _render_result(
                         updated["content_approved"] = True
                         updated["published_at"] = datetime.now(UTC).isoformat()
                         updated["published_count"] = int(count)
+                        updated["published_delivery"] = "internal_structure"
                         _update_task(
                             owner_id,
                             task_id,

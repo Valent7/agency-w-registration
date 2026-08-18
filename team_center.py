@@ -148,11 +148,13 @@ def _member_by_code(
     return rows[0] if rows else None
 
 
+
 def _all_members() -> list[dict[str, Any]]:
-    """Читает реестр участников постранично."""
+    """Читает весь реестр участников постранично."""
     rows: list[dict[str, Any]] = []
     offset = 0
     page = 1000
+
     while True:
         batch = _get(
             "agency_members",
@@ -167,20 +169,29 @@ def _all_members() -> list[dict[str, Any]]:
             },
         )
         rows.extend(batch)
+
         if len(batch) < page:
             break
+
         offset += page
         if offset > 100000:
             break
+
     return rows
 
 
-def structure_members(owner_telegram_id: int) -> list[dict[str, Any]]:
+def structure_members(
+    owner_telegram_id: int,
+) -> list[dict[str, Any]]:
     """
-    Вся нижестоящая структура владельца любой глубины.
-    Не требует ручной пересылки от наставника к наставнику.
+    Вся нижестоящая структура владельца на любой глубине.
+
+    Используем реферальное дерево agency_members:
+    владелец -> его партнёры -> партнёры партнёров -> ...
     """
-    owner = _member_by_telegram(int(owner_telegram_id))
+    owner_telegram_id = int(owner_telegram_id)
+
+    owner = _member_by_telegram(owner_telegram_id)
     if not owner:
         return []
 
@@ -189,27 +200,36 @@ def structure_members(owner_telegram_id: int) -> list[dict[str, Any]]:
         return []
 
     members = _all_members()
+
     children: dict[str, list[dict[str, Any]]] = {}
     for member in members:
-        ref = str(member.get("referrer_code") or "").strip()
-        if not ref:
+        referrer_code = str(
+            member.get("referrer_code") or ""
+        ).strip()
+        if not referrer_code:
             continue
-        children.setdefault(ref, []).append(member)
+        children.setdefault(
+            referrer_code,
+            [],
+        ).append(member)
 
     result: list[dict[str, Any]] = []
-    seen_ids: set[int] = {int(owner_telegram_id)}
-    queue = [root_code]
+    seen_ids: set[int] = {owner_telegram_id}
     seen_codes: set[str] = set()
+    queue: list[str] = [root_code]
 
     while queue:
         parent_code = queue.pop(0)
+
         if parent_code in seen_codes:
             continue
         seen_codes.add(parent_code)
 
         for member in children.get(parent_code, []):
             try:
-                telegram_id = int(member.get("telegram_id"))
+                telegram_id = int(
+                    member.get("telegram_id")
+                )
             except (TypeError, ValueError):
                 continue
 
@@ -219,19 +239,35 @@ def structure_members(owner_telegram_id: int) -> list[dict[str, Any]]:
             seen_ids.add(telegram_id)
             result.append(member)
 
-            member_code = str(member.get("member_code") or "").strip()
+            member_code = str(
+                member.get("member_code") or ""
+            ).strip()
             if member_code:
                 queue.append(member_code)
 
     return result
 
 
-def structure_member_ids(owner_telegram_id: int) -> list[int]:
-    return [
-        int(member["telegram_id"])
-        for member in structure_members(owner_telegram_id)
-        if member.get("telegram_id") is not None
-    ]
+def structure_member_ids(
+    owner_telegram_id: int,
+) -> list[int]:
+    """Telegram ID всех зарегистрированных людей ниже владельца."""
+    ids: list[int] = []
+
+    for member in structure_members(
+        int(owner_telegram_id)
+    ):
+        try:
+            telegram_id = int(
+                member.get("telegram_id")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if telegram_id not in ids:
+            ids.append(telegram_id)
+
+    return ids
 
 
 def publish_structure_message(
@@ -242,43 +278,86 @@ def publish_structure_message(
     zoom_url: str = "",
 ) -> int:
     """
-    Публикует один утверждённый материал всей структуре внутри Агентства W.
+    Размещает утверждённое сообщение во внутренних сообщениях
+    ВСЕЙ нижестоящей структуры.
 
-    delivery_status='stored' означает: сообщение уже доступно во внутреннем
-    разделе «Сообщения» и не ставится в очередь Telegram-рассылки.
+    delivery_status='stored':
+    сообщение уже хранится в agency_team_messages и видно
+    получателю в разделе «Сообщения» Агентства W.
+
+    Это НЕ является заявлением о Telegram-доставке.
     """
+    sender_telegram_id = int(
+        sender_telegram_id
+    )
     body = str(body or "").strip()
-    if not body:
-        raise ValueError("Материал пустой.")
 
-    recipients = structure_member_ids(int(sender_telegram_id))
+    if not body:
+        raise ValueError(
+            "Сообщение пустое."
+        )
+
+    recipients = structure_member_ids(
+        sender_telegram_id
+    )
+
     if not recipients:
         return 0
 
-    now = datetime.now(UTC).isoformat()
+    created_at = datetime.now(
+        UTC
+    ).isoformat()
+
     payload: list[dict[str, Any]] = []
+
     for recipient_id in recipients:
+        if int(recipient_id) == sender_telegram_id:
+            continue
+
         payload.append(
             {
-                "sender_telegram_id": int(sender_telegram_id),
-                "recipient_telegram_id": int(recipient_id),
-                "subject": str(subject or "").strip() or None,
+                "sender_telegram_id": (
+                    sender_telegram_id
+                ),
+                "recipient_telegram_id": int(
+                    recipient_id
+                ),
+                "subject": (
+                    str(subject or "").strip()
+                    or None
+                ),
                 "body": body,
-                "zoom_url": str(zoom_url or "").strip() or None,
+                "zoom_url": (
+                    str(zoom_url or "").strip()
+                    or None
+                ),
                 "delivery_status": "stored",
-                "created_at": now,
+                "created_at": created_at,
             }
         )
 
-    # Не отправляем огромный JSON одним запросом.
+    if not payload:
+        return 0
+
+    # Безопасная пакетная запись для большой структуры.
     total = 0
-    for start in range(0, len(payload), 250):
-        chunk = payload[start:start + 250]
-        _post("agency_team_messages", chunk)
+    chunk_size = 250
+
+    for start in range(
+        0,
+        len(payload),
+        chunk_size,
+    ):
+        chunk = payload[
+            start:start + chunk_size
+        ]
+        _post(
+            "agency_team_messages",
+            chunk,
+        )
         total += len(chunk)
 
     return total
-
 
 def _display_name(member: dict[str, Any] | None) -> str:
     if not member:
