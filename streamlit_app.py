@@ -7,6 +7,7 @@ from neonia_contacts import render_neonia_contacts
 from neonia_chats import render_neonia_chats
 from neona_reglament import (
     NEONA_FIRST_MESSAGE_OPT_OUT,
+    NEONA_FIRST_MESSAGE_SIGNOFF,
     NEONA_FORBIDDEN_AI_LABELS,
     NEONA_FORBIDDEN_CLAIMS,
     build_neona_first_message_system_prompt,
@@ -3858,34 +3859,30 @@ def build_neona_safe_first_message(owner_name, contact):
         bridge = ""
 
     question = "Вам было бы интересно посмотреть, как это может пригодиться именно вам?"
-    opt_out = (
-        "Если тема вам сейчас неинтересна, просто скажите — "
-        "я больше не буду вас беспокоить."
-    )
 
-    return re.sub(
+    body = re.sub(
         r"\s+",
         " ",
-        f"{greeting} {identity} {bridge}{benefit} {question} {opt_out}",
+        f"{greeting} {identity} {bridge}{benefit} {question}",
     ).strip()
 
+    return f"{body}\n\n{NEONA_FIRST_MESSAGE_SIGNOFF}".strip()
 
-def ensure_neona_first_message_opt_out(message):
-    """Добавляет согласованный уважительный выход, если модель его пропустила."""
+
+def ensure_neona_first_message_signoff(message):
+    """Добавляет подпись к НОВОМУ сообщению, если модель её пропустила."""
 
     message = str(message or "").strip()
-    lowered = message.lower()
-    if (
-        "больше не буду вас беспокоить" in lowered
-        or "больше не буду вам писать" in lowered
+    if not message:
+        return message
+
+    lowered = message.lower().rstrip(" .!")
+    if lowered.endswith("с уважением, неона") or lowered.endswith(
+        "с уважением неона"
     ):
         return message
 
-    opt_out = (
-        "Если тема вам сейчас неинтересна, просто скажите — "
-        "я больше не буду вас беспокоить."
-    )
-    return f"{message} {opt_out}".strip()
+    return f"{message}\n\n{NEONA_FIRST_MESSAGE_SIGNOFF}".strip()
 
 
 def validate_neona_first_message(message, owner_name):
@@ -3915,9 +3912,6 @@ def validate_neona_first_message(message, owner_name):
     if message.count("?") != 1:
         errors.append("в первом сообщении должен быть один простой вопрос")
 
-    if not message.endswith(NEONA_FIRST_MESSAGE_OPT_OUT):
-        errors.append("уважительный выход должен стоять в самом конце")
-
     awkward_old_phrases = (
         "понятный путь входа",
         "путь входа",
@@ -3939,8 +3933,14 @@ def finalize_neona_first_message(message, owner_name, contact):
 
     message = normalize_neona_first_greeting(message, contact)
     message = ensure_neona_identity(message, owner_name)
-    message = ensure_neona_first_message_opt_out(message)
-    message = re.sub(r"\s+", " ", message).strip()
+    message = ensure_neona_first_message_signoff(message)
+    # Нормализуем пробелы внутри строк, но сохраняем отдельную строку подписи.
+    lines = []
+    for line in str(message or "").splitlines():
+        clean_line = re.sub(r"[ \t]+", " ", line).strip()
+        if clean_line:
+            lines.append(clean_line)
+    message = "\n\n".join(lines).strip()
     errors = validate_neona_first_message(message, owner_name)
 
     if errors:
