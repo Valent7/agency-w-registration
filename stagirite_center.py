@@ -572,14 +572,74 @@ def _weekly_goal_from_text(text: str) -> tuple[int, int]:
     return low, max(low, 5)
 
 
+
+def _has_explicit_weekly_start(text: str) -> bool:
+    """
+    True только когда Директор действительно задал отдельную дату старта:
+    «начать с 24 августа», «с будущего понедельника»,
+    «начиная с 01.09.2026».
+
+    Само выражение «на следующей неделе» для недельной кампании
+    НЕ откладывает старт: это рабочая цель на ближайшие 7 дней.
+    """
+    lowered = str(text or "").lower().replace("ё", "е")
+
+    # Явные глаголы/предлоги старта.
+    start_prefix = r"(?:начать|запустить|стартовать|начиная|начиная\s+с|с)"
+
+    # Числовые даты: 24.08, 24.08.2026, 24/08/2026, 24-08.
+    numeric_date = (
+        r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b"
+    )
+
+    months = (
+        "января|февраля|марта|апреля|мая|июня|июля|"
+        "августа|сентября|октября|ноября|декабря"
+    )
+    word_date = rf"\b\d{{1,2}}\s+(?:{months})\b"
+
+    weekdays = (
+        "понедельника|вторника|среды|четверга|пятницы|"
+        "субботы|воскресенья"
+    )
+    future_weekday = rf"\b(?:будущего|следующего)\s+(?:{weekdays})\b"
+
+    if re.search(
+        rf"\b(?:начать|запустить|стартовать|начиная)(?:\s+работу)?\s+"
+        rf"(?:с\s+)?(?:{numeric_date}|{word_date}|{future_weekday})",
+        lowered,
+    ):
+        return True
+
+    if re.search(
+        rf"\bс\s+(?:{numeric_date}|{word_date}|{future_weekday})",
+        lowered,
+    ):
+        return True
+
+    return False
+
 def _weekly_period(text: str) -> tuple[date, date]:
-    period = _target_period_from_text(text)
+    """
+    Недельная цель встреч — это активная кампания на ближайшие 7 дней.
+
+    «На следующей неделе хочу 3–5 встреч» НЕ означает ждать следующего
+    календарного понедельника. Стагирит начинает сегодня.
+
+    Отложенный старт допускается только при явной формулировке:
+    «начать с 24 августа», «с будущего понедельника» и т.п.
+    """
     today = datetime.now(BERLIN).date()
 
-    if period:
-        return period[0], period[-1]
+    if _has_explicit_weekly_start(text):
+        period = _target_period_from_text(text)
+        if period:
+            return period[0], period[-1]
 
-    # Если сказано просто «за неделю» — текущие 7 дней от сегодня.
+        explicit_day = _target_date_from_text(text)
+        if explicit_day and explicit_day >= today:
+            return explicit_day, explicit_day + timedelta(days=6)
+
     return today, today + timedelta(days=6)
 
 
@@ -2316,6 +2376,54 @@ def _active_weekly_meeting_task(owner_id: int) -> dict[str, Any] | None:
             )
         except ValueError:
             continue
+
+        # МИГРАЦИЯ СТАРОЙ ЛОГИКИ.
+        # Раньше «на следующей неделе» могло записаться как будущая
+        # календарная неделя. Для недельной кампании встреч это было
+        # неверно: владелец ожидал работу сразу.
+        #
+        # Если старт ещё впереди и в исходном поручении НЕТ явной даты
+        # старта («с 24 августа», «с будущего понедельника»), переносим
+        # уже существующую цель на сегодня + 6 дней.
+        assignment_text = str(raw_task.get("assignment") or "")
+        if (
+            period_start > today
+            and not _has_explicit_weekly_start(assignment_text)
+        ):
+            period_start = today
+            period_end = today + timedelta(days=6)
+
+            migrated_goal = dict(goal)
+            migrated_goal["period_start"] = period_start.isoformat()
+            migrated_goal["period_end"] = period_end.isoformat()
+            migrated_goal["period_rebased_at"] = (
+                datetime.now(UTC).isoformat()
+            )
+            migrated_goal["period_rebased_reason"] = (
+                "weekly_goal_starts_immediately"
+            )
+
+            migrated_result = (
+                dict(raw_task.get("result"))
+                if isinstance(raw_task.get("result"), dict)
+                else {}
+            )
+            migrated_result["weekly_goal"] = migrated_goal
+
+            task_id = str(raw_task.get("id") or "")
+            if task_id:
+                _update_task(
+                    owner_id,
+                    task_id,
+                    {
+                        "status": "В работе",
+                        "result": migrated_result,
+                    },
+                )
+
+            raw_task = dict(raw_task)
+            raw_task["result"] = migrated_result
+            goal = migrated_goal
 
         if not (period_start <= today <= period_end):
             continue
