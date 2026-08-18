@@ -2263,6 +2263,407 @@ def _status_icon(status: str) -> str:
 
 
 
+
+def _normalize_int_ids(values) -> list[int]:
+    normalized: list[int] = []
+    for value in values or []:
+        try:
+            contact_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in normalized:
+            normalized.append(contact_id)
+    return normalized
+
+
+def _active_weekly_meeting_task(owner_id: int) -> dict[str, Any] | None:
+    """
+    Возвращает активную недельную цель встреч для текущего дня.
+    Никакого OpenAI: только Supabase/локальное состояние.
+    """
+    owner_id = int(owner_id)
+    today = datetime.now(BERLIN).date()
+    tasks, _ = _load_tasks(owner_id)
+
+    candidates: list[dict[str, Any]] = []
+    for raw_task in tasks:
+        if not isinstance(raw_task, dict):
+            continue
+        if "meetings" not in str(raw_task.get("task_kind") or ""):
+            continue
+        if str(raw_task.get("status") or "") in {"Выполнено", "Ошибка"}:
+            continue
+
+        result = (
+            raw_task.get("result")
+            if isinstance(raw_task.get("result"), dict)
+            else {}
+        )
+        goal = (
+            result.get("weekly_goal")
+            if isinstance(result.get("weekly_goal"), dict)
+            else {}
+        )
+        if not goal:
+            continue
+
+        try:
+            period_start = date.fromisoformat(
+                str(goal.get("period_start") or "")
+            )
+            period_end = date.fromisoformat(
+                str(goal.get("period_end") or "")
+            )
+        except ValueError:
+            continue
+
+        if not (period_start <= today <= period_end):
+            continue
+
+        refreshed_result, refreshed_status = _refresh_meeting_task(
+            owner_id,
+            raw_task,
+        )
+        desired = int(goal.get("desired") or 5)
+        scheduled = int(
+            (
+                refreshed_result.get("progress_summary")
+                if isinstance(
+                    refreshed_result.get("progress_summary"),
+                    dict,
+                )
+                else {}
+            ).get("scheduled", 0)
+            or 0
+        )
+
+        if scheduled >= desired:
+            continue
+
+        task = dict(raw_task)
+        task["result"] = refreshed_result
+        task["status"] = refreshed_status
+
+        task_id = str(task.get("id") or "")
+        if task_id and (
+            refreshed_result != result
+            or refreshed_status != str(raw_task.get("status") or "")
+        ):
+            _update_task(
+                owner_id,
+                task_id,
+                {
+                    "status": refreshed_status,
+                    "result": refreshed_result,
+                },
+            )
+
+        candidates.append(task)
+
+    if not candidates:
+        return None
+
+    # Самая свежая активная цель — текущая.
+    candidates.sort(
+        key=lambda item: str(
+            item.get("created_at")
+            or item.get("updated_at")
+            or ""
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def ensure_weekly_candidates_for_neona(
+    owner_id: int,
+    prepare_candidates_fn=None,
+) -> dict[str, Any]:
+    """
+    Ежедневный мост Стагирит → Неония → Неона.
+
+    ВАЖНО:
+    - не требует захода на экран Стагирита;
+    - при первом открытии Неоны в новый день сам готовит текущую пятёрку;
+    - повторный rerun в тот же день не создаёт новую пятёрку;
+    - людей ещё НЕ считает выбранными владельцем.
+    """
+    owner_id = int(owner_id)
+    task = _active_weekly_meeting_task(owner_id)
+    if not task:
+        return {
+            "ok": False,
+            "active": False,
+            "candidate_ids": [],
+            "message": "Активной недельной цели встреч сейчас нет.",
+        }
+
+    result = (
+        dict(task.get("result"))
+        if isinstance(task.get("result"), dict)
+        else {}
+    )
+    goal = (
+        dict(result.get("weekly_goal"))
+        if isinstance(result.get("weekly_goal"), dict)
+        else {}
+    )
+
+    minimum = int(goal.get("minimum") or 3)
+    desired = int(goal.get("desired") or max(minimum, 5))
+    reserve_target = int(goal.get("reserve_target") or 50)
+    daily_target = int(goal.get("daily_target") or 5)
+
+    today_key = datetime.now(BERLIN).date().isoformat()
+    daily_batches = (
+        dict(goal.get("daily_batches"))
+        if isinstance(goal.get("daily_batches"), dict)
+        else {}
+    )
+    today_info = (
+        dict(daily_batches.get(today_key))
+        if isinstance(daily_batches.get(today_key), dict)
+        else {}
+    )
+
+    candidate_ids = _normalize_int_ids(
+        today_info.get("candidate_ids", [])
+    )
+    approved_ids = _normalize_int_ids(
+        today_info.get("approved_ids", [])
+    )
+
+    # Сегодняшняя пятёрка уже существует — ничего повторно не запускаем.
+    if candidate_ids:
+        return {
+            "ok": True,
+            "active": True,
+            "task_id": str(task.get("id") or ""),
+            "candidate_ids": candidate_ids,
+            "approved_ids": approved_ids,
+            "period_start": str(goal.get("period_start") or ""),
+            "period_end": str(goal.get("period_end") or ""),
+            "minimum": minimum,
+            "desired": desired,
+            "daily_target": daily_target,
+            "prepared_at": str(today_info.get("prepared_at") or ""),
+            "message": "",
+        }
+
+    if not callable(prepare_candidates_fn):
+        return {
+            "ok": False,
+            "active": True,
+            "task_id": str(task.get("id") or ""),
+            "candidate_ids": [],
+            "approved_ids": approved_ids,
+            "message": "Неония пока недоступна для автоматической подготовки.",
+        }
+
+    selected_all = _normalize_int_ids(
+        result.get("selected_candidate_ids", [])
+    )
+
+    try:
+        prepared = prepare_candidates_fn(
+            owner_id,
+            desired_count=daily_target,
+            reserve_target=reserve_target,
+            exclude_ids=selected_all,
+        )
+    except TypeError:
+        # Совместимость с коротким промежутком обновления файлов.
+        prepared = prepare_candidates_fn(
+            owner_id,
+            desired_count=daily_target,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "active": True,
+            "task_id": str(task.get("id") or ""),
+            "candidate_ids": [],
+            "approved_ids": approved_ids,
+            "message": f"Не удалось подготовить сегодняшних кандидатов: {exc}",
+        }
+
+    if not isinstance(prepared, dict):
+        prepared = {}
+
+    candidate_ids = []
+    for contact_id in _normalize_int_ids(
+        prepared.get("candidate_ids", [])
+    ):
+        if contact_id in selected_all:
+            continue
+        candidate_ids.append(contact_id)
+        if len(candidate_ids) >= daily_target:
+            break
+
+    reserve_ids = _normalize_int_ids(
+        prepared.get("reserve_ids", [])
+    )[:reserve_target]
+
+    goal["weekly_pool_ids"] = reserve_ids
+    today_info = {
+        "candidate_ids": candidate_ids,
+        "approved_ids": approved_ids,
+        "prepared_at": datetime.now(UTC).isoformat(),
+        "source": "stagirite_daily_bridge",
+    }
+    daily_batches[today_key] = today_info
+    goal["daily_batches"] = daily_batches
+    goal["last_daily_prepare_date"] = today_key
+    result["weekly_goal"] = goal
+
+    task_id = str(task.get("id") or "")
+    if task_id:
+        _update_task(
+            owner_id,
+            task_id,
+            {
+                "status": "В работе",
+                "result": result,
+            },
+        )
+
+    return {
+        "ok": True,
+        "active": True,
+        "task_id": task_id,
+        "candidate_ids": candidate_ids,
+        "approved_ids": approved_ids,
+        "period_start": str(goal.get("period_start") or ""),
+        "period_end": str(goal.get("period_end") or ""),
+        "minimum": minimum,
+        "desired": desired,
+        "daily_target": daily_target,
+        "prepared_at": str(today_info.get("prepared_at") or ""),
+        "available_reserve": int(
+            prepared.get("available_reserve")
+            or len(reserve_ids)
+        ),
+        "message": str(prepared.get("message") or ""),
+    }
+
+
+def accept_weekly_candidates_for_neona(
+    owner_id: int,
+    task_id: str,
+    selected_ids: list[int],
+) -> dict[str, Any]:
+    """
+    Владелец выбирает людей уже у Неоны.
+    Только здесь кандидаты становятся фактически выбранными.
+    """
+    owner_id = int(owner_id)
+    task_id = str(task_id or "").strip()
+    chosen = _normalize_int_ids(selected_ids)
+
+    if not task_id or not chosen:
+        return {"ok": False, "selected_ids": []}
+
+    tasks, _ = _load_tasks(owner_id)
+    task = next(
+        (
+            item
+            for item in tasks
+            if str(item.get("id") or "") == task_id
+        ),
+        None,
+    )
+    if not isinstance(task, dict):
+        return {"ok": False, "selected_ids": []}
+
+    result = (
+        dict(task.get("result"))
+        if isinstance(task.get("result"), dict)
+        else {}
+    )
+    goal = (
+        dict(result.get("weekly_goal"))
+        if isinstance(result.get("weekly_goal"), dict)
+        else {}
+    )
+    today_key = datetime.now(BERLIN).date().isoformat()
+    daily_batches = (
+        dict(goal.get("daily_batches"))
+        if isinstance(goal.get("daily_batches"), dict)
+        else {}
+    )
+    today_info = (
+        dict(daily_batches.get(today_key))
+        if isinstance(daily_batches.get(today_key), dict)
+        else {}
+    )
+
+    offered = set(
+        _normalize_int_ids(today_info.get("candidate_ids", []))
+    )
+    chosen = [
+        contact_id
+        for contact_id in chosen
+        if contact_id in offered
+    ]
+    if not chosen:
+        return {"ok": False, "selected_ids": []}
+
+    approved = _normalize_int_ids(
+        today_info.get("approved_ids", [])
+    )
+    for contact_id in chosen:
+        if contact_id not in approved:
+            approved.append(contact_id)
+    today_info["approved_ids"] = approved
+    today_info["approved_at"] = datetime.now(UTC).isoformat()
+    daily_batches[today_key] = today_info
+    goal["daily_batches"] = daily_batches
+    result["weekly_goal"] = goal
+
+    all_selected = _normalize_int_ids(
+        result.get("selected_candidate_ids", [])
+    )
+    for contact_id in chosen:
+        if contact_id not in all_selected:
+            all_selected.append(contact_id)
+    result["selected_candidate_ids"] = all_selected
+
+    progress = (
+        dict(result.get("contact_progress"))
+        if isinstance(result.get("contact_progress"), dict)
+        else {}
+    )
+    for contact_id in chosen:
+        previous = (
+            dict(progress.get(str(contact_id)))
+            if isinstance(progress.get(str(contact_id)), dict)
+            else {}
+        )
+        previous["status"] = str(
+            previous.get("status")
+            or "awaiting_first_message"
+        )
+        progress[str(contact_id)] = previous
+    result["contact_progress"] = progress
+
+    _save_stagirite_candidate_selection(owner_id, chosen)
+    _update_task(
+        owner_id,
+        task_id,
+        {
+            "status": "В работе",
+            "result": result,
+        },
+    )
+
+    return {
+        "ok": True,
+        "selected_ids": chosen,
+        "approved_ids": approved,
+    }
+
+
+
 def _render_weekly_meeting_goal(
     task: dict[str, Any],
     owner_id: int,

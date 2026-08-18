@@ -35,6 +35,23 @@ register_first_message_failure_for_stagirite = getattr(
     "register_first_message_failure_for_stagirite",
     lambda *args, **kwargs: None,
 )
+ensure_weekly_candidates_for_neona = getattr(
+    _stagirite_center,
+    "ensure_weekly_candidates_for_neona",
+    lambda *args, **kwargs: {
+        "ok": False,
+        "active": False,
+        "candidate_ids": [],
+    },
+)
+accept_weekly_candidates_for_neona = getattr(
+    _stagirite_center,
+    "accept_weekly_candidates_for_neona",
+    lambda *args, **kwargs: {
+        "ok": False,
+        "selected_ids": [],
+    },
+)
 get_first_message_failures_for_stagirite = getattr(
     _stagirite_center,
     "get_first_message_failures_for_stagirite",
@@ -6912,6 +6929,21 @@ if received_hash:
                         f"neona_first_message_blocked_{telegram_id}"
                     )
 
+                    # --------------------------------------------------
+                    # Стагирит → Неония → Неона без ежедневного захода
+                    # в Стагирита или Неонию.
+                    #
+                    # При первом открытии Неоны в новый день:
+                    # 1) находим активную недельную цель;
+                    # 2) Неония обновляет резерв/активность;
+                    # 3) готовится сегодняшняя пятёрка;
+                    # 4) ниже владелец выбирает, кого реально брать.
+                    # --------------------------------------------------
+                    weekly_neona_day = ensure_weekly_candidates_for_neona(
+                        telegram_id,
+                        prepare_candidates_fn=prepare_candidates_for_stagirite,
+                    )
+
                     candidate_results = st.session_state.get(
                         candidates_key,
                         [],
@@ -7007,6 +7039,305 @@ if received_hash:
                         except (TypeError, ValueError):
                             continue
                         candidate_by_id[normalized_id] = contact
+
+                    # --------------------------------------------------
+                    # Сегодняшняя пятёрка Стагирита прямо у Неоны.
+                    # --------------------------------------------------
+                    if (
+                        isinstance(weekly_neona_day, dict)
+                        and weekly_neona_day.get("active")
+                    ):
+                        daily_candidate_ids = []
+                        for raw_id in (
+                            weekly_neona_day.get("candidate_ids", [])
+                            or []
+                        ):
+                            try:
+                                candidate_id = int(raw_id)
+                            except (TypeError, ValueError):
+                                continue
+                            if (
+                                candidate_id in candidate_by_id
+                                and candidate_id not in daily_candidate_ids
+                            ):
+                                daily_candidate_ids.append(candidate_id)
+
+                        already_approved_daily = set()
+                        for raw_id in (
+                            weekly_neona_day.get("approved_ids", [])
+                            or []
+                        ):
+                            try:
+                                already_approved_daily.add(int(raw_id))
+                            except (TypeError, ValueError):
+                                continue
+
+                        daily_available_ids = [
+                            contact_id
+                            for contact_id in daily_candidate_ids
+                            if contact_id not in already_approved_daily
+                        ]
+
+                        st.markdown("### 🎯 Сегодня от Стагирита")
+                        st.caption(
+                            "Недельная цель продолжает работать сама: "
+                            "Стагирит запустил Неонию и подготовил сегодняшних "
+                            "кандидатов. Выберите людей — Неона сразу подготовит "
+                            "первые сообщения."
+                        )
+
+                        if daily_available_ids:
+                            chosen_daily_ids = st.multiselect(
+                                "Кого сегодня взять в работу",
+                                options=daily_available_ids,
+                                format_func=lambda contact_id: (
+                                    (
+                                        str(
+                                            candidate_by_id[
+                                                contact_id
+                                            ].get("name")
+                                            or "Кандидат"
+                                        )
+                                        + (
+                                            " · @"
+                                            + str(
+                                                candidate_by_id[
+                                                    contact_id
+                                                ].get("username")
+                                            )
+                                            if candidate_by_id[
+                                                contact_id
+                                            ].get("username")
+                                            else ""
+                                        )
+                                        + " · "
+                                        + str(
+                                            candidate_by_id[
+                                                contact_id
+                                            ].get(
+                                                "telegram_activity_label"
+                                            )
+                                            or "активность подтверждена"
+                                        )
+                                    )
+                                ),
+                                max_selections=int(
+                                    weekly_neona_day.get(
+                                        "daily_target",
+                                        5,
+                                    )
+                                    or 5
+                                ),
+                                key=(
+                                    "neona_stagirite_daily_choice_"
+                                    f"{telegram_id}_"
+                                    + datetime.now(
+                                        ZoneInfo("Europe/Berlin")
+                                    ).date().isoformat()
+                                ),
+                            )
+
+                            if st.button(
+                                "✅ Выбрать и подготовить сообщения",
+                                type="primary",
+                                disabled=not chosen_daily_ids,
+                                key=(
+                                    "neona_stagirite_daily_accept_"
+                                    f"{telegram_id}_"
+                                    + datetime.now(
+                                        ZoneInfo("Europe/Berlin")
+                                    ).date().isoformat()
+                                ),
+                                use_container_width=True,
+                            ):
+                                accepted = accept_weekly_candidates_for_neona(
+                                    telegram_id,
+                                    str(
+                                        weekly_neona_day.get(
+                                            "task_id"
+                                        )
+                                        or ""
+                                    ),
+                                    [
+                                        int(contact_id)
+                                        for contact_id
+                                        in chosen_daily_ids
+                                    ],
+                                )
+
+                                accepted_ids = [
+                                    int(contact_id)
+                                    for contact_id in (
+                                        accepted.get(
+                                            "selected_ids",
+                                            [],
+                                        )
+                                        if isinstance(
+                                            accepted,
+                                            dict,
+                                        )
+                                        else []
+                                    )
+                                ]
+
+                                passport = st.session_state.get(
+                                    passport_key
+                                )
+                                if not accepted_ids:
+                                    st.warning(
+                                        "Не удалось передать выбранных "
+                                        "кандидатов Неоне."
+                                    )
+                                elif not passport:
+                                    st.warning(
+                                        "Кандидаты выбраны, но паспорт ЦА "
+                                        "не найден — сообщения пока не создаю."
+                                    )
+                                    st.rerun()
+                                else:
+                                    selected_daily_contacts = [
+                                        candidate_by_id[contact_id]
+                                        for contact_id in accepted_ids
+                                        if contact_id in candidate_by_id
+                                    ]
+
+                                    drafts = st.session_state.get(
+                                        neona_drafts_key,
+                                        {},
+                                    )
+                                    if not isinstance(drafts, dict):
+                                        drafts = {}
+
+                                    with st.spinner(
+                                        "Неона готовит персональные "
+                                        "первые сообщения..."
+                                    ):
+                                        try:
+                                            generated = (
+                                                generate_neona_first_messages(
+                                                    first_name,
+                                                    passport["analysis"],
+                                                    selected_daily_contacts,
+                                                )
+                                            )
+                                        except Exception as exc:
+                                            generated = {}
+                                            st.error(
+                                                "Кандидаты переданы Неоне, "
+                                                "но сообщения пока не "
+                                                "подготовились: "
+                                                + str(exc)
+                                            )
+
+                                    if isinstance(generated, dict):
+                                        generated_ids = set()
+                                        for raw_id, draft in generated.items():
+                                            try:
+                                                contact_id = int(raw_id)
+                                            except (TypeError, ValueError):
+                                                continue
+                                            if not isinstance(draft, dict):
+                                                continue
+
+                                            previous = drafts.get(
+                                                contact_id,
+                                                drafts.get(
+                                                    str(contact_id),
+                                                    {},
+                                                ),
+                                            )
+                                            if (
+                                                isinstance(previous, dict)
+                                                and previous.get("sent")
+                                            ):
+                                                continue
+
+                                            draft = dict(draft)
+                                            draft["revision"] = int(
+                                                (
+                                                    previous.get(
+                                                        "revision",
+                                                        0,
+                                                    )
+                                                    if isinstance(
+                                                        previous,
+                                                        dict,
+                                                    )
+                                                    else 0
+                                                )
+                                                or 0
+                                            ) + 1
+                                            draft["approved"] = False
+                                            draft[
+                                                "validation_errors"
+                                            ] = []
+                                            draft["status"] = (
+                                                "Сообщение подготовлено"
+                                            )
+                                            drafts[contact_id] = draft
+                                            drafts.pop(
+                                                str(contact_id),
+                                                None,
+                                            )
+                                            generated_ids.add(
+                                                contact_id
+                                            )
+
+                                        st.session_state[
+                                            neona_drafts_key
+                                        ] = drafts
+
+                                        for candidate in candidate_results:
+                                            if not isinstance(
+                                                candidate,
+                                                dict,
+                                            ):
+                                                continue
+                                            try:
+                                                candidate_id = int(
+                                                    candidate.get(
+                                                        "telegram_id"
+                                                    )
+                                                )
+                                            except (
+                                                TypeError,
+                                                ValueError,
+                                            ):
+                                                continue
+                                            if candidate_id in generated_ids:
+                                                candidate["status"] = (
+                                                    "Сообщение подготовлено"
+                                                )
+
+                                        st.session_state[
+                                            candidates_key
+                                        ] = candidate_results
+                                        persist_workspace_if_changed(
+                                            telegram_id,
+                                            force=True,
+                                        )
+
+                                    st.rerun()
+
+                        elif daily_candidate_ids:
+                            st.success(
+                                "✅ Сегодняшние кандидаты уже переданы "
+                                "Неоне. Работайте с готовыми сообщениями ниже."
+                            )
+                        else:
+                            message = str(
+                                weekly_neona_day.get("message")
+                                or ""
+                            ).strip()
+                            st.info(
+                                message
+                                or (
+                                    "Сегодня Стагирит не нашёл новых "
+                                    "пригодных активных контактов. "
+                                    "Он попробует снова при следующем "
+                                    "открытии Неоны."
+                                )
+                            )
 
                     selected_ids = []
                     for contact_id in st.session_state.get(
