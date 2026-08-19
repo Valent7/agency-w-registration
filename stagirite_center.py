@@ -2056,6 +2056,194 @@ def _content_quality_score(
     )
 
 
+
+def _announcement_time_hint(assignment: str) -> str:
+    text = str(assignment or "")
+    patterns = (
+        r"\b(?:в|к)\s*(\d{1,2}[:.]\d{2}\s*(?:мск|москв\w*)?)",
+        r"\b(\d{1,2}[:.]\d{2}\s*(?:мск|москв\w*)?)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            return str(match.group(1)).replace(".", ":").strip()
+    return ""
+
+
+def _generate_announcement_content(
+    ask_openai_fn,
+    ask_claude_fn,
+    owner_id: int,
+    owner_name: str,
+    assignment: str,
+) -> dict[str, Any]:
+    """
+    Короткий надёжный маршрут для анонсов.
+
+    Анонс НЕ проходит через художественный конвейер «Хроник»,
+    потому что ему не нужны:
+    - Банк жанров;
+    - литературный критик;
+    - проверка интриги;
+    - художественное переписывание.
+
+    Это уменьшает число AI-вызовов и число точек отказа.
+    """
+    settings = _load_stagirite_settings(int(owner_id))
+    zoom_link = str(settings.get("zoom_link") or "").strip()
+    time_hint = _announcement_time_hint(assignment)
+
+    system_prompt = f"""
+Ты — Мастер коротких анонсов Агентства W.
+Стагирит уже понял поручение Директора.
+
+ПОРУЧЕНИЕ:
+{assignment}
+
+Имя Директора:
+{owner_name}
+
+Сохранённая постоянная Zoom-ссылка:
+{zoom_link or "не сохранена"}
+
+Время, явно указанное Директором:
+{time_hint or "не найдено отдельным парсером — используй только то, что есть в поручении"}
+
+Сделай готовый короткий анонс для людей.
+
+ПРАВИЛА:
+- 5–10 коротких строк;
+- сразу понятно: что происходит, когда и зачем прийти;
+- если тема дана Директором — сохрани её буквально по смыслу;
+- если указано «сегодня» — не заменяй это другой датой;
+- если указано время — не меняй его и не пересчитывай часовой пояс;
+- не придумывай программу встречи, спикеров, подарки, результаты или обещания;
+- не превращай анонс в художественную «Хронику»;
+- тон живой, тёплый, уверенный, без канцелярита;
+- допустим 1 лёгкий интригующий штрих;
+- если Zoom-ссылка сохранена — поставь её в конце отдельной строкой;
+- не упоминай внутреннюю техническую кухню Агентства;
+- верни ТОЛЬКО готовый текст анонса.
+""".strip()
+
+    text = ""
+    engine = "reserve"
+    model = ""
+    errors: list[str] = []
+
+    # Claude — основной Мастер текста.
+    if callable(ask_claude_fn):
+        try:
+            result = ask_claude_fn(
+                system_prompt,
+                str(assignment or ""),
+                max_tokens=1400,
+            )
+            if (
+                isinstance(result, dict)
+                and result.get("ok") is True
+                and str(result.get("text") or "").strip()
+            ):
+                text = str(result.get("text") or "").strip()
+                engine = "primary"
+                model = str(result.get("model") or "")
+            elif isinstance(result, dict) and result.get("error"):
+                errors.append(
+                    "Claude: " + str(result.get("error"))
+                )
+        except Exception as exc:
+            errors.append(
+                f"Claude: {type(exc).__name__}: {exc}"
+            )
+
+    # OpenAI — резерв, только если Claude не дал текст.
+    if not text and callable(ask_openai_fn):
+        try:
+            raw = ask_openai_fn(
+                system_prompt,
+                str(assignment or ""),
+                uploaded_files=[],
+                use_web_search=False,
+            )
+            candidate = str(raw or "").strip()
+            if candidate and not candidate.startswith("Ошибка OpenAI:"):
+                text = candidate
+                engine = "reserve"
+            elif candidate:
+                errors.append(candidate)
+        except Exception as exc:
+            errors.append(
+                f"OpenAI: {type(exc).__name__}: {exc}"
+            )
+
+    # Даже временная недоступность модели не должна лишать Директора
+    # возможности быстро объявить уже назначенную встречу.
+    if not text:
+        lines = ["📣 Встречаемся сегодня в Zoom!"]
+        lowered = str(assignment or "").lower().replace("ё", "е")
+
+        if "новост" in lowered and "агентств" in lowered:
+            lines.extend(
+                [
+                    "",
+                    "Тема встречи: Новости Агентства W.",
+                ]
+            )
+
+        if time_hint:
+            lines.append(f"⏰ Начало: {time_hint}.")
+
+        lines.extend(
+            [
+                "",
+                "До встречи!",
+            ]
+        )
+
+        if zoom_link:
+            lines.extend(
+                [
+                    "",
+                    f"🔗 Zoom: {zoom_link}",
+                ]
+            )
+
+        text = "\n".join(lines).strip()
+        engine = "deterministic_fallback"
+
+    # На всякий случай гарантируем наличие сохранённой ссылки,
+    # если Мастер её пропустил.
+    if (
+        zoom_link
+        and zoom_link not in text
+    ):
+        text = (
+            text.rstrip()
+            + "\n\n"
+            + f"🔗 Zoom: {zoom_link}"
+        )
+
+    return {
+        "text": text,
+        "master_engine": engine,
+        "master_model": model,
+        "quality_score": 0,
+        "rewrite_used": False,
+        "report_warning": False,
+        "series": "",
+        "genre": "анонс",
+        "capability": "",
+        "human_situation": "",
+        "human_gain": "",
+        "reader_entry": "",
+        "cta_mode": "none",
+        "newcomer_reason": "",
+        "announcement": True,
+        "announcement_time": time_hint,
+        "generation_errors": errors,
+    }
+
+
 def _generate_content(
     ask_openai_fn,
     ask_claude_fn,
@@ -2075,6 +2263,18 @@ def _generate_content(
     7. При провале Мастер переписывает один раз.
     """
     mode = _content_mode_from_assignment(assignment)
+
+    # Анонсы — отдельный быстрый контур.
+    # Не гоняем Zoom-приглашение через литературную редакцию «Хроник».
+    if mode == "announcement":
+        return _generate_announcement_content(
+            ask_openai_fn,
+            ask_claude_fn,
+            owner_id,
+            owner_name,
+            assignment,
+        )
+
     facts = _agency_current_release_brief()
     recent = _recent_chronicles_history(
         owner_id,
@@ -3222,6 +3422,10 @@ def _process_assignment(
             )
             if content.startswith("Ошибка OpenAI:"):
                 result["content_error"] = content
+                print(
+                    "[STAGIRITE_CONTENT_ERROR] "
+                    + content
+                )
                 if status != "Ошибка":
                     status = "Ошибка"
             else:
@@ -3267,9 +3471,20 @@ def _process_assignment(
                         "newcomer_reason": str(
                             content_pack.get("newcomer_reason") or ""
                         ),
+                        "announcement": bool(
+                            content_pack.get("announcement")
+                        ),
+                        "announcement_time": str(
+                            content_pack.get("announcement_time") or ""
+                        ),
                     }
         except Exception as exc:
-            result["content_error"] = f"{type(exc).__name__}: {exc}"
+            error_text = f"{type(exc).__name__}: {exc}"
+            result["content_error"] = error_text
+            print(
+                "[STAGIRITE_CONTENT_ERROR] "
+                + error_text
+            )
             if status != "Ошибка":
                 status = "Ошибка"
 
@@ -5298,7 +5513,11 @@ def _render_result(
             st.write(note)
 
     if result.get("content_error"):
-        st.error("Не удалось подготовить материал. Попробуйте ещё раз чуть позже.")
+        st.error("Не удалось подготовить материал.")
+        with st.expander("🔧 Техническая причина"):
+            st.code(
+                str(result.get("content_error") or "")
+            )
 
     if result.get("note"):
         st.info(str(result["note"]))
