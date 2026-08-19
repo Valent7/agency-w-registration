@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
+
+import base64
+import re
+import uuid
 
 import requests
 import streamlit as st
@@ -270,6 +274,349 @@ def structure_member_ids(
     return ids
 
 
+
+MEDIA_MARKER_RE = re.compile(
+    r"\[\[AGENCY_W_MEDIA:([A-Za-z0-9_-]+)\]\]"
+)
+
+
+def _normalize_image_bytes(value: Any) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if hasattr(value, "getvalue"):
+        data = value.getvalue()
+        if isinstance(data, bytes):
+            return data
+    try:
+        data = bytes(value)
+        if data:
+            return data
+    except Exception:
+        pass
+    raise ValueError("Не удалось прочитать данные изображения.")
+
+
+def _media_marker(media_id: str) -> str:
+    return f"[[AGENCY_W_MEDIA:{str(media_id).strip()}]]"
+
+
+def _media_ids_from_body(body: str) -> list[str]:
+    result: list[str] = []
+    for media_id in MEDIA_MARKER_RE.findall(str(body or "")):
+        clean = str(media_id or "").strip()
+        if clean and clean not in result:
+            result.append(clean)
+    return result
+
+
+def _body_without_media_markers(body: str) -> str:
+    clean = MEDIA_MARKER_RE.sub("", str(body or ""))
+    return re.sub(r"\n{3,}", "\n\n", clean).strip()
+
+
+def _save_team_media(
+    sender_telegram_id: int,
+    image_bytes: Any,
+    *,
+    mime_type: str = "image/png",
+    file_name: str = "",
+) -> str:
+    """
+    Сохраняет ОДНУ копию изображения.
+    В сообщения партнёров кладётся только media_id.
+    """
+    raw = _normalize_image_bytes(image_bytes)
+    if not raw:
+        raise ValueError("Изображение пустое.")
+
+    media_id = "awimg_" + uuid.uuid4().hex
+    encoded = base64.b64encode(raw).decode("ascii")
+
+    _post(
+        "agency_team_media",
+        {
+            "id": media_id,
+            "sender_telegram_id": int(sender_telegram_id),
+            "mime_type": str(mime_type or "image/png").strip(),
+            "file_name": (
+                str(file_name or "").strip()
+                or f"{media_id}.png"
+            ),
+            "image_base64": encoded,
+            "created_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    return media_id
+
+
+def _team_media(media_id: str) -> dict[str, Any] | None:
+    """
+    Читает одно внутреннее изображение.
+    Ошибка медиа не должна ломать весь раздел «Команда».
+    """
+    try:
+        rows = _get(
+            "agency_team_media",
+            {
+                "id": f"eq.{str(media_id).strip()}",
+                "select": "id,mime_type,file_name,image_base64,created_at",
+                "limit": 1,
+            },
+        )
+    except Exception:
+        return None
+    return rows[0] if rows else None
+
+
+def _render_message_media(media_id: str) -> None:
+    media = _team_media(media_id)
+    if not media:
+        st.caption("🖼️ Иллюстрация временно недоступна.")
+        return
+
+    encoded = str(media.get("image_base64") or "").strip()
+    if not encoded:
+        st.caption("🖼️ Иллюстрация временно недоступна.")
+        return
+
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except Exception:
+        st.caption("🖼️ Не удалось открыть иллюстрацию.")
+        return
+
+    st.image(
+        image_bytes,
+        caption="Иллюстрация к публикации",
+        use_container_width=True,
+    )
+
+
+def publish_structure_material(
+    sender_telegram_id: int,
+    body: str = "",
+    *,
+    image_bytes: Any | None = None,
+    subject: str = "",
+    zoom_url: str = "",
+    mime_type: str = "image/png",
+    file_name: str = "",
+) -> dict[str, Any]:
+    """
+    Размещает текст + иллюстрацию как ОДНО внутреннее сообщение.
+
+    Изображение хранится один раз в agency_team_media.
+    Каждый получатель получает маленькую ссылку-маркер на media_id.
+    """
+    sender_telegram_id = int(sender_telegram_id)
+    clean_body = str(body or "").strip()
+
+    media_id = ""
+    if image_bytes is not None:
+        media_id = _save_team_media(
+            sender_telegram_id,
+            image_bytes,
+            mime_type=mime_type,
+            file_name=file_name,
+        )
+
+    if not clean_body and not media_id:
+        raise ValueError("Публикация пуста.")
+
+    message_body = clean_body
+    if media_id:
+        marker = _media_marker(media_id)
+        message_body = (
+            f"{clean_body}\n\n{marker}"
+            if clean_body
+            else marker
+        )
+
+    recipients = structure_member_ids(sender_telegram_id)
+    if not recipients:
+        return {
+            "count": 0,
+            "media_id": media_id,
+            "mode": "combined",
+        }
+
+    created_at = datetime.now(UTC).isoformat()
+    payload: list[dict[str, Any]] = []
+
+    for recipient_id in recipients:
+        if int(recipient_id) == sender_telegram_id:
+            continue
+        payload.append(
+            {
+                "sender_telegram_id": sender_telegram_id,
+                "recipient_telegram_id": int(recipient_id),
+                "subject": str(subject or "").strip() or None,
+                "body": message_body,
+                "zoom_url": str(zoom_url or "").strip() or None,
+                "delivery_status": "stored",
+                "created_at": created_at,
+            }
+        )
+
+    total = 0
+    chunk_size = 250
+    for start in range(0, len(payload), chunk_size):
+        chunk = payload[start:start + chunk_size]
+        _post("agency_team_messages", chunk)
+        total += len(chunk)
+
+    return {
+        "count": total,
+        "media_id": media_id,
+        "mode": "combined",
+    }
+
+
+def _parse_db_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def attach_structure_image_to_published_message(
+    sender_telegram_id: int,
+    source_body: str,
+    image_bytes: Any,
+    *,
+    subject: str = "Сообщение Агентства W",
+    published_at: str = "",
+    mime_type: str = "image/png",
+    file_name: str = "",
+) -> dict[str, Any]:
+    """
+    Если текст уже размещён, НЕ дублирует пост.
+
+    Находит последнюю копию этого поста у каждого получателя структуры
+    и добавляет к ней ссылку на одну общую иллюстрацию.
+    Тогда партнёр видит картинку прямо в карточке исходного поста.
+
+    Если старые строки найти невозможно, безопасно размещает только
+    иллюстрацию отдельным внутренним сообщением — текст не дублируется.
+    """
+    sender_telegram_id = int(sender_telegram_id)
+    source_body = str(source_body or "").strip()
+    if not source_body:
+        raise ValueError("Не найден текст ранее размещённого поста.")
+
+    recipients = set(
+        structure_member_ids(sender_telegram_id)
+    )
+    if not recipients:
+        return {
+            "count": 0,
+            "media_id": "",
+            "mode": "attached",
+        }
+
+    try:
+        rows = _get(
+            "agency_team_messages",
+            {
+                "sender_telegram_id": f"eq.{sender_telegram_id}",
+                "select": (
+                    "id,recipient_telegram_id,subject,body,created_at"
+                ),
+                "order": "created_at.desc",
+                "limit": 2000,
+            },
+        )
+    except Exception:
+        rows = []
+
+    threshold = None
+    published_dt = _parse_db_datetime(published_at)
+    if published_dt is not None:
+        threshold = published_dt - timedelta(minutes=5)
+
+    chosen: dict[int, dict[str, Any]] = {}
+    expected_subject = str(subject or "").strip()
+
+    for row in rows:
+        try:
+            recipient_id = int(row.get("recipient_telegram_id"))
+        except (TypeError, ValueError):
+            continue
+
+        if recipient_id not in recipients or recipient_id in chosen:
+            continue
+
+        if _body_without_media_markers(
+            str(row.get("body") or "")
+        ) != source_body:
+            continue
+
+        row_subject = str(row.get("subject") or "").strip()
+        if expected_subject and row_subject != expected_subject:
+            continue
+
+        if threshold is not None:
+            row_dt = _parse_db_datetime(row.get("created_at"))
+            if row_dt is None or row_dt < threshold:
+                continue
+
+        chosen[recipient_id] = row
+
+    # Идеальный путь: прикрепляем к уже размещённому посту.
+    if chosen:
+        media_id = _save_team_media(
+            sender_telegram_id,
+            image_bytes,
+            mime_type=mime_type,
+            file_name=file_name,
+        )
+        marker = _media_marker(media_id)
+
+        updated = 0
+        for row in chosen.values():
+            message_id = row.get("id")
+            if message_id is None:
+                continue
+
+            clean_body = _body_without_media_markers(
+                str(row.get("body") or "")
+            )
+            new_body = f"{clean_body}\n\n{marker}"
+
+            _patch(
+                "agency_team_messages",
+                {"id": f"eq.{int(message_id)}"},
+                {"body": new_body},
+            )
+            updated += 1
+
+        return {
+            "count": updated,
+            "media_id": media_id,
+            "mode": "attached",
+        }
+
+    # Запасной путь: не дублируем сам текст.
+    fallback = publish_structure_material(
+        sender_telegram_id,
+        "",
+        image_bytes=image_bytes,
+        subject="Иллюстрация к публикации",
+        mime_type=mime_type,
+        file_name=file_name,
+    )
+    fallback["mode"] = "image_only"
+    return fallback
+
+
 def publish_structure_message(
     sender_telegram_id: int,
     body: str,
@@ -278,86 +625,20 @@ def publish_structure_message(
     zoom_url: str = "",
 ) -> int:
     """
-    Размещает утверждённое сообщение во внутренних сообщениях
-    ВСЕЙ нижестоящей структуры.
+    Размещает утверждённый ТЕКСТ во внутренних сообщениях
+    всей нижестоящей структуры.
 
-    delivery_status='stored':
-    сообщение уже хранится в agency_team_messages и видно
-    получателю в разделе «Сообщения» Агентства W.
-
-    Это НЕ является заявлением о Telegram-доставке.
+    delivery_status='stored' означает внутреннюю доставку Агентства W,
+    а не подтверждение Telegram-доставки.
     """
-    sender_telegram_id = int(
-        sender_telegram_id
+    result = publish_structure_material(
+        int(sender_telegram_id),
+        str(body or ""),
+        subject=subject,
+        zoom_url=zoom_url,
     )
-    body = str(body or "").strip()
+    return int(result.get("count") or 0)
 
-    if not body:
-        raise ValueError(
-            "Сообщение пустое."
-        )
-
-    recipients = structure_member_ids(
-        sender_telegram_id
-    )
-
-    if not recipients:
-        return 0
-
-    created_at = datetime.now(
-        UTC
-    ).isoformat()
-
-    payload: list[dict[str, Any]] = []
-
-    for recipient_id in recipients:
-        if int(recipient_id) == sender_telegram_id:
-            continue
-
-        payload.append(
-            {
-                "sender_telegram_id": (
-                    sender_telegram_id
-                ),
-                "recipient_telegram_id": int(
-                    recipient_id
-                ),
-                "subject": (
-                    str(subject or "").strip()
-                    or None
-                ),
-                "body": body,
-                "zoom_url": (
-                    str(zoom_url or "").strip()
-                    or None
-                ),
-                "delivery_status": "stored",
-                "created_at": created_at,
-            }
-        )
-
-    if not payload:
-        return 0
-
-    # Безопасная пакетная запись для большой структуры.
-    total = 0
-    chunk_size = 250
-
-    for start in range(
-        0,
-        len(payload),
-        chunk_size,
-    ):
-        chunk = payload[
-            start:start + chunk_size
-        ]
-        _post(
-            "agency_team_messages",
-            chunk,
-        )
-        total += len(chunk)
-
-    return total
 
 def _display_name(member: dict[str, Any] | None) -> str:
     if not member:
@@ -531,7 +812,15 @@ def _render_message_card(
         if subject:
             st.markdown(f"**{subject}**")
 
-        st.write(str(message.get("body") or ""))
+        raw_body = str(message.get("body") or "")
+        clean_body = _body_without_media_markers(raw_body)
+        media_ids = _media_ids_from_body(raw_body)
+
+        if clean_body:
+            st.write(clean_body)
+
+        for media_id in media_ids:
+            _render_message_media(media_id)
 
         zoom_url = str(message.get("zoom_url") or "").strip()
         if zoom_url:

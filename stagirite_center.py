@@ -12,9 +12,16 @@ import streamlit as st
 
 import agency_calendar
 try:
-    from team_center import publish_structure_message, structure_member_ids
+    from team_center import (
+        attach_structure_image_to_published_message,
+        publish_structure_material,
+        publish_structure_message,
+        structure_member_ids,
+    )
 except ImportError:
     publish_structure_message = None
+    publish_structure_material = None
+    attach_structure_image_to_published_message = None
 
     def structure_member_ids(owner_telegram_id: int) -> list[int]:
         return []
@@ -2876,6 +2883,30 @@ def _execute_general_director_task(
     return str(answer or "").strip()
 
 
+
+def _artist_image_bytes(value: Any) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if hasattr(value, "getvalue"):
+        data = value.getvalue()
+        if isinstance(data, bytes):
+            return data
+    try:
+        data = bytes(value)
+        if data:
+            return data
+    except Exception:
+        pass
+    return b""
+
+
+def _artist_image_hash(value: Any) -> str:
+    raw = _artist_image_bytes(value)
+    return hashlib.sha256(raw).hexdigest() if raw else ""
+
+
 def _create_artist_direction(
     ask_openai_fn,
     assignment: str,
@@ -4542,6 +4573,11 @@ def _render_result(
 
         task_id = str(task.get("id") or task.get("created_at") or "content")
         draft_key = f"stagirite_content_draft_{task_id}"
+        image_state_key = f"stagirite_artist_image_{task_id}"
+        image_meta_key = f"stagirite_artist_meta_{task_id}"
+        has_current_image = bool(
+            st.session_state.get(image_state_key)
+        )
 
         saved_text = str(
             result.get("edited_content")
@@ -4589,6 +4625,10 @@ def _render_result(
             updated.pop("content_approved_at", None)
             updated.pop("published_at", None)
             updated.pop("published_count", None)
+            updated.pop("image_published_at", None)
+            updated.pop("image_published_count", None)
+            updated.pop("image_published_hash", None)
+            updated.pop("image_media_id", None)
             _update_task(
                 owner_id,
                 task_id,
@@ -4635,6 +4675,10 @@ def _render_result(
                 updated.pop("content_approved_at", None)
                 updated.pop("published_at", None)
                 updated.pop("published_count", None)
+                updated.pop("image_published_at", None)
+                updated.pop("image_published_count", None)
+                updated.pop("image_published_hash", None)
+                updated.pop("image_media_id", None)
 
                 if isinstance(content_pack, dict):
                     updated["content_master"] = {
@@ -4744,6 +4788,10 @@ def _render_result(
                 updated["content_approved_at"] = datetime.now(UTC).isoformat()
                 updated.pop("published_at", None)
                 updated.pop("published_count", None)
+                updated.pop("image_published_at", None)
+                updated.pop("image_published_count", None)
+                updated.pop("image_published_hash", None)
+                updated.pop("image_media_id", None)
                 _update_task(
                     owner_id,
                     task_id,
@@ -4784,7 +4832,13 @@ def _render_result(
                     f"Получатели: вся ваша нижестоящая структура — "
                     f"{recipients_count} человек(а), на любой глубине."
                 )
-                if st.button(
+
+                if has_current_image:
+                    st.info(
+                        "Иллюстрация уже готова. Ниже можно разместить "
+                        "пост и картинку вместе одной кнопкой."
+                    )
+                elif st.button(
                     f"📣 Разместить всей структуре ({recipients_count})",
                     key=f"stagirite_publish_structure_{task_id}",
                     use_container_width=True,
@@ -4841,8 +4895,6 @@ def _render_result(
             "Художнику профессиональную задачу."
         )
 
-        image_state_key = f"stagirite_artist_image_{task_id}"
-        image_meta_key = f"stagirite_artist_meta_{task_id}"
         change_key = f"stagirite_artist_change_{task_id}"
 
         format_label = st.selectbox(
@@ -4905,6 +4957,194 @@ def _render_result(
                 key=f"stagirite_artist_download_{task_id}",
                 use_container_width=True,
             )
+
+            # ----------------------------------------------------
+            # Публикация иллюстрации партнёрам.
+            # Если пост уже размещён — дополняем СУЩЕСТВУЮЩИЕ
+            # сообщения картинкой, не дублируя текст.
+            # Если пост ещё не размещён — отправляем текст + картинку
+            # как одно внутреннее сообщение.
+            # ----------------------------------------------------
+            current_image_hash = _artist_image_hash(
+                current_image
+            )
+            published_image_hash = str(
+                result.get("image_published_hash")
+                or ""
+            ).strip()
+            image_published_count = int(
+                result.get("image_published_count")
+                or 0
+            )
+            image_already_published = bool(
+                current_image_hash
+                and published_image_hash
+                and current_image_hash == published_image_hash
+            )
+
+            image_recipients = structure_member_ids(
+                owner_id
+            )
+            image_recipients_count = len(
+                image_recipients
+            )
+
+            if image_already_published:
+                st.success(
+                    "🖼️ Иллюстрация размещена во внутренних сообщениях: "
+                    f"{image_published_count} получател(я/ей)."
+                )
+            elif published_image_hash and current_image_hash:
+                st.warning(
+                    "Эта версия иллюстрации ещё не размещена: "
+                    "после предыдущей публикации картинка была изменена."
+                )
+
+            can_publish_image = bool(
+                is_approved
+                and not source_changed
+                and image_recipients_count > 0
+                and publish_structure_material is not None
+            )
+
+            if not is_approved:
+                st.caption(
+                    "Сначала утвердите текст материала — затем его "
+                    "можно разместить вместе с иллюстрацией."
+                )
+            elif source_changed:
+                st.caption(
+                    "Сначала перерисуйте иллюстрацию под текущую версию текста."
+                )
+            elif image_recipients_count == 0:
+                st.caption(
+                    "В структуре пока нет зарегистрированных получателей."
+                )
+            elif not image_already_published:
+                already_text_published = bool(
+                    str(result.get("published_at") or "").strip()
+                )
+
+                image_button_label = (
+                    f"📣 Добавить иллюстрацию к посту у всей структуры "
+                    f"({image_recipients_count})"
+                    if already_text_published
+                    else
+                    f"📣 Разместить пост с иллюстрацией всей структуре "
+                    f"({image_recipients_count})"
+                )
+
+                if st.button(
+                    image_button_label,
+                    key=f"stagirite_publish_image_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                    disabled=not can_publish_image,
+                ):
+                    try:
+                        image_file_name = (
+                            "agency_w_illustration_"
+                            + datetime.now(BERLIN).strftime(
+                                "%Y%m%d_%H%M%S"
+                            )
+                            + ".png"
+                        )
+                        clean_post_text = str(
+                            result.get("edited_content")
+                            or draft
+                        ).strip()
+
+                        if already_text_published:
+                            if (
+                                attach_structure_image_to_published_message
+                                is None
+                            ):
+                                raise RuntimeError(
+                                    "Модуль прикрепления изображения не подключён."
+                                )
+
+                            publish_result = (
+                                attach_structure_image_to_published_message(
+                                    owner_id,
+                                    clean_post_text,
+                                    current_image,
+                                    subject="Сообщение Агентства W",
+                                    published_at=str(
+                                        result.get("published_at")
+                                        or ""
+                                    ),
+                                    file_name=image_file_name,
+                                )
+                            )
+                        else:
+                            publish_result = publish_structure_material(
+                                owner_id,
+                                clean_post_text,
+                                image_bytes=current_image,
+                                subject="Сообщение Агентства W",
+                                zoom_url=str(
+                                    result.get("zoom_link")
+                                    or _load_stagirite_settings(
+                                        owner_id
+                                    ).get("zoom_link")
+                                    or ""
+                                ).strip(),
+                                file_name=image_file_name,
+                            )
+
+                        count = int(
+                            publish_result.get("count")
+                            or 0
+                        )
+                        media_id = str(
+                            publish_result.get("media_id")
+                            or ""
+                        ).strip()
+                        publish_mode = str(
+                            publish_result.get("mode")
+                            or ""
+                        ).strip()
+
+                        updated = dict(result)
+                        updated["edited_content"] = clean_post_text
+                        updated["content_approved"] = True
+                        updated["image_published_at"] = (
+                            datetime.now(UTC).isoformat()
+                        )
+                        updated["image_published_count"] = count
+                        updated["image_published_hash"] = (
+                            current_image_hash
+                        )
+                        updated["image_media_id"] = media_id
+                        updated["image_published_mode"] = (
+                            publish_mode
+                        )
+
+                        if not already_text_published:
+                            updated["published_at"] = (
+                                datetime.now(UTC).isoformat()
+                            )
+                            updated["published_count"] = count
+                            updated["published_delivery"] = (
+                                "internal_structure_with_image"
+                            )
+
+                        _update_task(
+                            owner_id,
+                            task_id,
+                            {
+                                "result": updated,
+                                "status": "Выполнено",
+                            },
+                        )
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось разместить иллюстрацию "
+                            "во внутренних сообщениях. "
+                            f"{type(exc).__name__}: {exc}"
+                        )
 
             change_request = st.text_input(
                 "Что изменить в сцене?",
@@ -5034,9 +5274,9 @@ def _render_result(
                         )
 
         st.caption(
-            "Сейчас изображение можно сохранить как PNG и использовать вместе "
-            "с постом. Автоматическую доставку самой картинки по внутренней "
-            "рассылке подключим отдельным шагом после проверки Художника."
+            "Иллюстрацию можно сохранить как PNG или разместить партнёрам "
+            "прямо из Стагирита. Внутренняя публикация и Telegram-доставка "
+            "по-прежнему считаются разными каналами."
         )
 
     general_answer = str(
