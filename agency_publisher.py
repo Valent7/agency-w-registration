@@ -474,14 +474,32 @@ def _image_bytes(value: Any) -> bytes:
     return b""
 
 
-def _publication_caption(text: str) -> str:
-    """Короткая подпись к фото; полный длинный текст идёт следующим сообщением."""
+def _publication_parts(text: str) -> tuple[str, str]:
+    """
+    Возвращает подпись к изображению и, при необходимости,
+    отдельный длинный текст.
+
+    Короткий материал публикуется только один раз — под картинкой.
+    Длинный материал: под картинкой название, ниже сам текст.
+    """
     clean = str(text or "").strip()
-    first = clean.splitlines()[0].strip() if clean else ""
-    first = first.lstrip("# ").strip()
-    if first and len(first) <= 120:
-        return f"📖 {first}"
-    return "📖 Агентство W"
+    if not clean:
+        return "", ""
+
+    if len(clean) <= 950:
+        return clean, ""
+
+    lines = clean.splitlines()
+    first = lines[0].strip() if lines else ""
+    title = first.lstrip("# ").strip()
+
+    caption = title if title and len(title) <= 180 else "Агентство W"
+
+    remainder = clean
+    if first.startswith("#") and len(lines) > 1:
+        remainder = "\n".join(lines[1:]).strip()
+
+    return caption, remainder
 
 
 def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, Any]:
@@ -520,9 +538,12 @@ def _send_text_chunks(
     *,
     reply_to_message_id: int | None = None,
 ) -> list[int]:
+    """
+    Обычные последовательные сообщения без reply/цитаты.
+    reply_to_message_id оставлен только для совместимости.
+    """
     chunks = _split_telegram_text(text)
     message_ids: list[int] = []
-    anchor = int(reply_to_message_id) if reply_to_message_id else None
 
     for chunk in chunks:
         payload: dict[str, Any] = {
@@ -530,20 +551,13 @@ def _send_text_chunks(
             "text": chunk,
             "disable_web_page_preview": False,
         }
-        if anchor is not None:
-            payload["reply_parameters"] = {
-                "message_id": int(anchor),
-                "allow_sending_without_reply": True,
-            }
         result = _telegram_call("sendMessage", payload=payload)
         if isinstance(result, dict):
             try:
-                mid = int(result.get("message_id"))
-                message_ids.append(mid)
-                if anchor is None:
-                    anchor = mid
+                message_ids.append(int(result.get("message_id")))
             except (TypeError, ValueError):
                 pass
+
     return message_ids
 
 
@@ -587,11 +601,14 @@ def publish_to_publisher_destinations(
                 raise RuntimeError("Площадка или права Publisher больше не подтверждены.")
 
             photo_message_id: int | None = None
+            text_to_send = clean_text
+
             if raw_image:
+                caption, text_to_send = _publication_parts(clean_text)
                 photo_result = _send_photo(
                     chat_id,
                     raw_image,
-                    caption=_publication_caption(clean_text),
+                    caption=caption,
                 )
                 try:
                     photo_message_id = int(photo_result.get("message_id"))
@@ -599,11 +616,10 @@ def publish_to_publisher_destinations(
                     photo_message_id = None
 
             text_message_ids = []
-            if clean_text:
+            if text_to_send:
                 text_message_ids = _send_text_chunks(
                     chat_id,
-                    clean_text,
-                    reply_to_message_id=photo_message_id,
+                    text_to_send,
                 )
 
             results.append({
