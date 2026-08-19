@@ -2572,8 +2572,446 @@ CTA:
         ),
     }
 
-def _make_plan(intents: list[str], meeting_count: int) -> list[str]:
+
+STAGIRITE_EXECUTION_INTENTS = {
+    "meetings",
+    "content",
+    "team",
+    "general",
+}
+
+
+def _normalize_stagirite_intents(
+    raw: Any,
+    fallback: list[str],
+) -> list[str]:
+    values = raw if isinstance(raw, list) else []
+    result: list[str] = []
+
+    for value in values:
+        clean = str(value or "").strip().lower()
+        if clean not in STAGIRITE_EXECUTION_INTENTS:
+            continue
+        if clean not in result:
+            result.append(clean)
+
+    return result or list(fallback or ["general"])
+
+
+def _needs_semantic_director(
+    assignment: str,
+    deterministic_intents: list[str],
+) -> bool:
+    """
+    Не тратим ИИ на очевидную маршрутизацию.
+
+    Семантический Замдиректор включается, когда:
+    - старый словарь видит только general;
+    - короткая человеческая фраза может иметь скрытый смысл;
+    - речь идёт о структуре, но непонятно, нужно ли создать сообщение;
+    - Директор просит подумать/разобраться/придумать решение.
+    """
+    lowered = str(assignment or "").lower().replace("ё", "е")
+    if deterministic_intents == ["general"]:
+        return True
+
+    if (
+        "team" in deterministic_intents
+        and "content" not in deterministic_intents
+    ):
+        return True
+
+    thinking_words = (
+        "подумай",
+        "разберись",
+        "предложи",
+        "придумай",
+        "реши",
+        "как лучше",
+        "что делать",
+        "помоги",
+        "организуй",
+        "сделай так",
+    )
+    if any(token in lowered for token in thinking_words):
+        return True
+
+    # Очень короткие поручения пожилого человека должны пониматься
+    # по смыслу, а не требовать «правильных ключевых слов».
+    words = [part for part in re.split(r"\s+", lowered) if part]
+    return len(words) <= 7 and len(lowered) <= 110
+
+
+def _understand_director_assignment(
+    ask_openai_fn,
+    assignment: str,
+    deterministic_intents: list[str],
+) -> dict[str, Any]:
+    """
+    Внутренний «мозг Замдиректора».
+
+    Пользователь сообщает ЧТО хочет получить.
+    Стагирит сам решает:
+    - какой это результат;
+    - кого подключить;
+    - что поручить специалисту;
+    - действительно ли нужен вопрос Директору.
+
+    Вызов происходит только при новом явном поручении, не на idle/rerun.
+    """
+    fallback = {
+        "goal": str(assignment or "").strip(),
+        "intents": list(deterministic_intents or ["general"]),
+        "execution_mode": (
+            "answer"
+            if deterministic_intents == ["general"]
+            else "delegate"
+        ),
+        "internal_brief": str(assignment or "").strip(),
+        "needs_clarification": False,
+        "clarification_question": "",
+        "requested_image": any(
+            token in str(assignment or "").lower().replace("ё", "е")
+            for token in (
+                "иллюстрац",
+                "картин",
+                "изображен",
+                "нарис",
+                "обложк",
+            )
+        ),
+        "steps": [],
+    }
+
+    if not callable(ask_openai_fn):
+        return fallback
+
+    facts = _agency_current_release_brief()
+
+    prompt = f"""
+Ты — Стагирит, универсальный ИИ-заместитель Директора Агентства W.
+
+Директор может быть человеком любого возраста и технической подготовки.
+Он НЕ обязан:
+- знать названия внутренних модулей;
+- писать промты;
+- перечислять шаги;
+- понимать архитектуру Агентства;
+- выбирать, кого из специалистов вызвать.
+
+Его задача — коротко сказать, ЧТО он хочет.
+Твоя задача — понять смысл и превратить его во внутреннее рабочее поручение.
+
+ПОРУЧЕНИЕ ДИРЕКТОРА:
+{assignment}
+
+Старый технический маршрутизатор предположил:
+{json.dumps(deterministic_intents, ensure_ascii=False)}
+
+РЕАЛЬНО РАБОТАЮЩИЕ ВОЗМОЖНОСТИ АГЕНТСТВА:
+{facts}
+
+Доступные направления исполнения:
+- meetings: цель по встречам, кандидаты, Неония, Неона, календарь;
+- content: пост, рассказ, Хроники, анонс, текст, творческий материал;
+- team: коммуникация/материал для структуры;
+- general: анализ, решение, план, совет, исследование задачи Замдиректором.
+
+ПРИНЦИПЫ:
+1. Не спрашивай Директора «как это сделать». Это твоя работа.
+2. Не требуй правильных терминов.
+3. Уточняющий вопрос допустим ТОЛЬКО если без конкретного человеческого
+   решения/данных невозможно выбрать безопасный или правильный результат.
+4. Если данных достаточно для разумного исполнения — действуй.
+5. Не придумывай техническую возможность, которой ещё нет.
+6. Если просьба ясна, но для физического действия нет исполнительного модуля,
+   не называй это «нужно уточнение»: execution_mode = "unsupported",
+   а internal_brief объясняет, что именно нужно подключить.
+7. Если попросили сообщить/написать что-то структуре, это обычно content + team.
+8. Если попросили «подумай», «предложи», «разберись», «составь план» —
+   это general + execution_mode "answer".
+9. requested_image=true только если Директор действительно попросил изображение,
+   иллюстрацию, картинку, обложку или рисунок.
+10. Внутренний brief должен быть профессиональным и подробным, даже если
+    поручение Директора состоит из трёх слов.
+
+Верни ТОЛЬКО JSON:
+{{
+  "goal": "какой конечный результат нужен Директору",
+  "intents": ["meetings"|"content"|"team"|"general"],
+  "execution_mode": "delegate"|"answer"|"clarify"|"unsupported",
+  "internal_brief": "подробное внутреннее задание самому Стагириту/исполнителю",
+  "needs_clarification": false,
+  "clarification_question": "",
+  "requested_image": false,
+  "steps": [
+    "внутренний шаг 1",
+    "внутренний шаг 2"
+  ]
+}}
+""".strip()
+
+    try:
+        raw = ask_openai_fn(
+            prompt,
+            str(assignment or ""),
+            uploaded_files=[],
+            use_web_search=False,
+        )
+        parsed = _parse_editor_json(raw)
+    except Exception:
+        parsed = {}
+
+    if not parsed:
+        return fallback
+
+    parsed["intents"] = _normalize_stagirite_intents(
+        parsed.get("intents"),
+        deterministic_intents,
+    )
+
+    mode = str(
+        parsed.get("execution_mode")
+        or fallback["execution_mode"]
+    ).strip().lower()
+    if mode not in {
+        "delegate",
+        "answer",
+        "clarify",
+        "unsupported",
+    }:
+        mode = fallback["execution_mode"]
+    parsed["execution_mode"] = mode
+
+    parsed["goal"] = str(
+        parsed.get("goal")
+        or fallback["goal"]
+    ).strip()
+
+    parsed["internal_brief"] = str(
+        parsed.get("internal_brief")
+        or parsed["goal"]
+        or fallback["internal_brief"]
+    ).strip()
+
+    parsed["needs_clarification"] = bool(
+        parsed.get("needs_clarification")
+        or mode == "clarify"
+    )
+    parsed["clarification_question"] = str(
+        parsed.get("clarification_question")
+        or ""
+    ).strip()
+
+    parsed["requested_image"] = bool(
+        parsed.get("requested_image")
+        or fallback["requested_image"]
+    )
+
+    steps = parsed.get("steps")
+    parsed["steps"] = [
+        str(item).strip()
+        for item in steps
+        if str(item).strip()
+    ] if isinstance(steps, list) else []
+
+    return parsed
+
+
+def _execute_general_director_task(
+    ask_openai_fn,
+    assignment: str,
+    understanding: dict[str, Any],
+) -> str:
+    """
+    Стагирит сам выполняет интеллектуальные поручения, для которых
+    не нужен отдельный технический модуль.
+    """
+    if not callable(ask_openai_fn):
+        return (
+            "Поручение понятно, но интеллектуальный исполнитель "
+            "сейчас недоступен."
+        )
+
+    facts = _agency_current_release_brief()
+    internal_brief = str(
+        understanding.get("internal_brief")
+        or assignment
+    ).strip()
+
+    prompt = f"""
+Ты — Стагирит, универсальный заместитель Директора Агентства W.
+
+Исходное короткое поручение:
+{assignment}
+
+Ты уже понял его как:
+{internal_brief}
+
+Факты о текущих возможностях Агентства:
+{facts}
+
+Выполни интеллектуальную часть поручения сам:
+- дай конкретный результат, а не рассуждение о том, как его можно сделать;
+- пиши простым человеческим языком;
+- не заставляй Директора разбираться во внутренней кухне;
+- если часть задачи требует ещё не подключённого технического действия,
+  честно отдели то, что уже сделал, от того, что пока нельзя выполнить;
+- не объявляй действие выполненным без фактического исполнения;
+- если можно принять разумное внутреннее решение самому — прими его.
+
+Верни только готовый результат для Директора.
+""".strip()
+
+    try:
+        answer = ask_openai_fn(
+            prompt,
+            str(assignment or ""),
+            uploaded_files=[],
+            use_web_search=False,
+        )
+    except Exception as exc:
+        return f"Не удалось выполнить интеллектуальную часть: {type(exc).__name__}"
+
+    return str(answer or "").strip()
+
+
+def _create_artist_direction(
+    ask_openai_fn,
+    assignment: str,
+    content_text: str,
+    content_meta: dict[str, Any] | None = None,
+    user_change_request: str = "",
+) -> str:
+    """
+    Стагирит как арт-директор сам пишет ОРИГИНАЛЬНЫЙ бриф
+    для каждой конкретной истории.
+
+    Постоянен только смысл:
+    виртуальный офис работает → человек живёт.
+    Человеческая сцена всегда извлекается из текущего текста.
+    """
+    meta = (
+        dict(content_meta)
+        if isinstance(content_meta, dict)
+        else {}
+    )
+
+    fallback_scene = str(
+        meta.get("human_situation")
+        or meta.get("human_gain")
+        or "конкретная человеческая сцена из текста"
+    ).strip()
+
+    if not callable(ask_openai_fn):
+        return (
+            "Создай кинематографичную иллюстрацию к данному тексту. "
+            "Слева — премиальный виртуальный офис Агентства W в работе. "
+            f"Справа — именно эта человеческая сцена: {fallback_scene}. "
+            "Правая часть обязана соответствовать рассказу, а не использовать "
+            "шаблонный завтрак, песочницу или семью, если их нет в тексте. "
+            "Без текста и псевдотекста на изображении."
+        )
+
+    prompt = f"""
+Ты — Стагирит, арт-директор Агентства W.
+
+Директор НЕ должен писать промт Художнику.
+Ты сам читаешь готовый текст и создаёшь профессиональное художественное
+задание, которое меняется вместе с каждой историей.
+
+ИСХОДНОЕ ПОРУЧЕНИЕ:
+{assignment}
+
+ГОТОВЫЙ ТЕКСТ:
+{content_text}
+
+МЕТАДАННЫЕ РЕДАКЦИИ:
+{json.dumps(meta, ensure_ascii=False)}
+
+ПОЖЕЛАНИЕ ДИРЕКТОРА К ПЕРЕРИСОВКЕ:
+{user_change_request or "нет"}
+
+ГЛАВНАЯ ФОРМУЛА ИЛЛЮСТРАЦИИ:
+«Пока виртуальный офис Агентства W берёт на себя рутину,
+человек получает обратно свою настоящую жизнь».
+
+ПОСТОЯННАЯ ЧАСТЬ:
+- премиальный виртуальный офис Агентства W;
+- ощущение умной, спокойной, бесшумной работы;
+- взрослые человеческие образы ИИ-агентов;
+- Стагирит — взрослый мудрый мужчина-координатор, не статуя, не животное;
+- Неония, Неона, Неола — взрослые женщины, если они действительно нужны сцене;
+- не перечислять всех агентов ради заполнения кадра.
+
+ПЕРЕМЕННАЯ ЧАСТЬ — САМОЕ ВАЖНОЕ:
+1. Найди в ЭТОМ тексте момент, где особенно ясно видно,
+   ЧТО человек получил обратно благодаря снятой рутине.
+2. Именно этот момент должен стать человеческой сценой иллюстрации.
+3. Если в рассказе женщина с ребёнком строит башню — рисуй эту сцену.
+4. Если в следующем рассказе прогулка, ужин, путешествие, разговор,
+   творчество или спокойная работа — рисуй уже ЭТУ сцену.
+5. НИКОГДА не тащи песочницу, завтрак, ребёнка или семью из прошлой истории.
+6. Ребёнок появляется только если он действительно есть в текущем тексте.
+7. Визуально должно читаться: ИИ работает → человек живёт.
+
+КОМПОЗИЦИЯ:
+- предпочтительно две связанные реальности или единая сцена с ясным
+  визуальным переходом;
+- человеческая часть эмоционально важнее технической;
+- связь можно показать мягким золотым светом/потоком;
+- кинематографично, тепло, премиально, без рекламной инфографики.
+
+ЗАПРЕЩЕНО:
+- текст, подписи, лозунги и псевдотекст в изображении;
+- совы, олени, животные-талисманы;
+- случайные дети;
+- золотые статуи/манекены вместо живых людей;
+- рекламный плакат вместо художественной сцены;
+- выдуманная человеческая ситуация, которой нет в рассказе.
+
+Верни ТОЛЬКО готовый подробный промт Художнику.
+Не объясняй свои решения.
+""".strip()
+
+    try:
+        raw = ask_openai_fn(
+            prompt,
+            str(content_text or "")[:12000],
+            uploaded_files=[],
+            use_web_search=False,
+        )
+        direction = str(raw or "").strip()
+    except Exception:
+        direction = ""
+
+    return direction or (
+        "Создай кинематографичную иллюстрацию к текущему рассказу. "
+        "Слева — виртуальный офис Агентства W в работе. "
+        f"Справа — точная человеческая сцена из текста: {fallback_scene}. "
+        "Не переносить визуальные детали из предыдущих историй. "
+        "Без текста и псевдотекста."
+    )
+
+
+def _make_plan(
+    intents: list[str],
+    meeting_count: int,
+    understanding: dict[str, Any] | None = None,
+) -> list[str]:
     plan: list[str] = []
+
+    semantic_steps = (
+        understanding.get("steps")
+        if isinstance(understanding, dict)
+        else []
+    )
+    if isinstance(semantic_steps, list):
+        for item in semantic_steps:
+            clean = str(item or "").strip()
+            if clean and clean not in plan:
+                plan.append(clean)
+
     if "meetings" in intents:
         plan.extend([
             "Проверить календарь.",
@@ -2605,11 +3043,75 @@ def _process_assignment(
     ask_openai_fn,
     ask_claude_fn=None,
 ) -> dict[str, Any]:
-    intents = _detect_intents(assignment)
+    deterministic_intents = _detect_intents(assignment)
+
+    if _needs_semantic_director(
+        assignment,
+        deterministic_intents,
+    ):
+        understanding = _understand_director_assignment(
+            ask_openai_fn,
+            assignment,
+            deterministic_intents,
+        )
+    else:
+        understanding = {
+            "goal": str(assignment or "").strip(),
+            "intents": list(deterministic_intents),
+            "execution_mode": (
+                "answer"
+                if deterministic_intents == ["general"]
+                else "delegate"
+            ),
+            "internal_brief": str(assignment or "").strip(),
+            "needs_clarification": False,
+            "clarification_question": "",
+            "requested_image": any(
+                token
+                in str(assignment or "").lower().replace("ё", "е")
+                for token in (
+                    "иллюстрац",
+                    "картин",
+                    "изображен",
+                    "нарис",
+                    "обложк",
+                )
+            ),
+            "steps": [],
+        }
+
+    intents = _normalize_stagirite_intents(
+        understanding.get("intents"),
+        deterministic_intents,
+    )
     meeting_count = _meeting_count_from_text(assignment)
     result: dict[str, Any] = {
         "intents": intents,
         "meeting_count": meeting_count,
+        "stagirite_understanding": {
+            "goal": str(
+                understanding.get("goal")
+                or assignment
+            ).strip(),
+            "execution_mode": str(
+                understanding.get("execution_mode")
+                or "delegate"
+            ).strip(),
+            "internal_brief": str(
+                understanding.get("internal_brief")
+                or assignment
+            ).strip(),
+            "needs_clarification": bool(
+                understanding.get("needs_clarification")
+            ),
+            "clarification_question": str(
+                understanding.get("clarification_question")
+                or ""
+            ).strip(),
+            "requested_image": bool(
+                understanding.get("requested_image")
+            ),
+        },
     }
     status = "Готово к утверждению"
 
@@ -2659,12 +3161,28 @@ def _process_assignment(
 
     if "content" in intents:
         try:
+            content_assignment = str(assignment or "").strip()
+            internal_brief = str(
+                understanding.get("internal_brief")
+                or ""
+            ).strip()
+            if (
+                internal_brief
+                and internal_brief != content_assignment
+            ):
+                content_assignment = (
+                    content_assignment
+                    + "\n\n"
+                    + "Внутреннее понимание Стагирита (не показывать читателю): "
+                    + internal_brief
+                )
+
             content_pack = _generate_content(
                 ask_openai_fn,
                 ask_claude_fn,
                 owner_id,
                 owner_name,
-                assignment,
+                content_assignment,
             )
             content = (
                 str(content_pack.get("text") or "").strip()
@@ -2725,17 +3243,54 @@ def _process_assignment(
                 status = "Ошибка"
 
     if intents == ["general"]:
-        result["note"] = (
-            "Поручение сохранено. Для этой формулировки Стагириту пока требуется "
-            "уточнение или подключение дополнительного исполнительного модуля."
-        )
-        status = "Нужно уточнение"
+        execution_mode = str(
+            understanding.get("execution_mode")
+            or "answer"
+        ).strip().lower()
+
+        if (
+            bool(understanding.get("needs_clarification"))
+            or execution_mode == "clarify"
+        ):
+            question = str(
+                understanding.get("clarification_question")
+                or "Какой конечный результат для вас предпочтительнее?"
+            ).strip()
+            result["note"] = question
+            status = "Нужно уточнение"
+
+        elif execution_mode == "unsupported":
+            result["note"] = (
+                str(
+                    understanding.get("internal_brief")
+                    or ""
+                ).strip()
+                or (
+                    "Поручение понятно, но для физического выполнения "
+                    "нужен ещё не подключённый исполнительный модуль."
+                )
+            )
+            status = "Нужен исполнительный модуль"
+
+        else:
+            result["general_answer"] = _execute_general_director_task(
+                ask_openai_fn,
+                assignment,
+                understanding,
+            )
+            status = "Готово к утверждению"
 
     return {
         "assignment": assignment,
         "task_kind": "+".join(intents),
         "status": status,
-        "plan": {"steps": _make_plan(intents, meeting_count)},
+        "plan": {
+            "steps": _make_plan(
+                intents,
+                meeting_count,
+                understanding=understanding,
+            )
+        },
         "result": result,
         "created_at": datetime.now(UTC).isoformat(),
     }
@@ -2770,6 +3325,7 @@ def _status_icon(status: str) -> str:
         "Готово к утверждению": "🟢",
         "Нужно решение владельца": "🟡",
         "Нужно уточнение": "🟡",
+        "Нужен исполнительный модуль": "🧩",
         "Нужен ваш выбор": "🟡",
         "Утверждено": "✅",
         "Выполнено": "✅",
@@ -4267,11 +4823,22 @@ def _render_result(
                         )
 
 
+        understanding = (
+            result.get("stagirite_understanding")
+            if isinstance(result.get("stagirite_understanding"), dict)
+            else {}
+        )
+        if bool(understanding.get("requested_image")):
+            st.success(
+                "🎨 Стагирит понял: к материалу нужна иллюстрация. "
+                "Промт Художнику он подготовит сам."
+            )
+
         st.markdown("### 🎨 Художник-иллюстратор")
         st.caption(
-            "Стагирит сначала превращает смысл поста в режиссёрский бриф, "
-            "а Художник рисует уже по этому брифу. "
-            "Изображение создаётся только по вашей команде."
+            "Вам не нужно придумывать промт. Стагирит сам читает текст, "
+            "находит сцену, где изменилась жизнь человека, и ставит "
+            "Художнику профессиональную задачу."
         )
 
         image_state_key = f"stagirite_artist_image_{task_id}"
@@ -4342,8 +4909,9 @@ def _render_result(
             change_request = st.text_input(
                 "Что изменить в сцене?",
                 placeholder=(
-                    "Например: слева виртуальный офис, справа завтрак директора "
-                    "со взрослым сыном; Неола работает со взрослым новичком…"
+                    "Можно написать совсем просто: «сделай теплее», "
+                    "«меньше офиса», «героиня старше». Стагирит сам "
+                    "превратит это в бриф Художнику."
                 ),
                 key=change_key,
             )
@@ -4360,9 +4928,20 @@ def _render_result(
                     with st.spinner(
                         "Стагирит уточняет бриф, Художник создаёт новую версию..."
                     ):
+                        artist_direction = _create_artist_direction(
+                            ask_openai_fn,
+                            str(task.get("assignment") or ""),
+                            str(draft).strip(),
+                            result.get("content_master")
+                            if isinstance(result.get("content_master"), dict)
+                            else {},
+                            user_change_request=str(
+                                change_request or ""
+                            ).strip(),
+                        )
                         generated = generate_image_fn(
                             str(draft).strip(),
-                            change_request=change_request,
+                            change_request=artist_direction,
                             size=chosen_size,
                         )
                     if generated.get("ok"):
@@ -4371,6 +4950,9 @@ def _render_result(
                             "source_text": str(draft).strip(),
                             "size": chosen_size,
                             "change_request": str(change_request or "").strip(),
+                            "artist_direction": str(
+                                artist_direction or ""
+                            ).strip(),
                             "created_at": datetime.now(UTC).isoformat(),
                             "quality_passed": bool(
                                 generated.get("quality_passed")
@@ -4409,8 +4991,17 @@ def _render_result(
                     with st.spinner(
                         "Стагирит ставит художественную задачу, Художник рисует..."
                     ):
+                        artist_direction = _create_artist_direction(
+                            ask_openai_fn,
+                            str(task.get("assignment") or ""),
+                            str(draft).strip(),
+                            result.get("content_master")
+                            if isinstance(result.get("content_master"), dict)
+                            else {},
+                        )
                         generated = generate_image_fn(
                             str(draft).strip(),
+                            change_request=artist_direction,
                             size=chosen_size,
                         )
                     if generated.get("ok"):
@@ -4419,6 +5010,9 @@ def _render_result(
                             "source_text": str(draft).strip(),
                             "size": chosen_size,
                             "change_request": "",
+                            "artist_direction": str(
+                                artist_direction or ""
+                            ).strip(),
                             "created_at": datetime.now(UTC).isoformat(),
                             "quality_passed": bool(
                                 generated.get("quality_passed")
@@ -4444,6 +5038,24 @@ def _render_result(
             "с постом. Автоматическую доставку самой картинки по внутренней "
             "рассылке подключим отдельным шагом после проверки Художника."
         )
+
+    general_answer = str(
+        result.get("general_answer")
+        or ""
+    ).strip()
+    if general_answer:
+        st.markdown("### 🧭 Решение Стагирита")
+        st.write(general_answer)
+
+    note = str(result.get("note") or "").strip()
+    if note and not result.get("content_error"):
+        status_now = str(task.get("status") or "")
+        if status_now == "Нужно уточнение":
+            st.info(note)
+        elif status_now == "Нужен исполнительный модуль":
+            st.warning(note)
+        else:
+            st.write(note)
 
     if result.get("content_error"):
         st.error("Не удалось подготовить материал. Попробуйте ещё раз чуть позже.")
