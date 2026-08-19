@@ -428,3 +428,206 @@ def remove_publisher_destination(
         int(chat_id),
         False,
     )
+
+def _split_telegram_text(text: str, limit: int = 3900) -> list[str]:
+    """Делит длинный пост без разрыва посреди абзаца, когда возможно."""
+    clean = str(text or "").strip()
+    if not clean:
+        return []
+    if len(clean) <= limit:
+        return [clean]
+
+    parts: list[str] = []
+    rest = clean
+    while len(rest) > limit:
+        cut = rest.rfind("\n\n", 0, limit)
+        if cut < int(limit * 0.55):
+            cut = rest.rfind("\n", 0, limit)
+        if cut < int(limit * 0.55):
+            cut = rest.rfind(" ", 0, limit)
+        if cut < 1:
+            cut = limit
+        chunk = rest[:cut].strip()
+        if chunk:
+            parts.append(chunk)
+        rest = rest[cut:].strip()
+    if rest:
+        parts.append(rest)
+    return parts
+
+
+def _image_bytes(value: Any) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if hasattr(value, "getvalue"):
+        data = value.getvalue()
+        if isinstance(data, bytes):
+            return data
+    try:
+        data = bytes(value)
+        if data:
+            return data
+    except Exception:
+        pass
+    return b""
+
+
+def _publication_caption(text: str) -> str:
+    """Короткая подпись к фото; полный длинный текст идёт следующим сообщением."""
+    clean = str(text or "").strip()
+    first = clean.splitlines()[0].strip() if clean else ""
+    first = first.lstrip("# ").strip()
+    if first and len(first) <= 120:
+        return f"📖 {first}"
+    return "📖 Агентство W"
+
+
+def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, Any]:
+    raw = _image_bytes(image_bytes)
+    if not raw:
+        raise ValueError("Изображение пустое.")
+
+    token = _bot_token()
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        data={
+            "chat_id": str(int(chat_id)),
+            "caption": str(caption or "")[:1000],
+        },
+        files={
+            "photo": (
+                "agency_w_publication.png",
+                raw,
+                "image/png",
+            )
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        description = str(data.get("description") or "") if isinstance(data, dict) else ""
+        raise RuntimeError(description or "Telegram не принял изображение.")
+    result = data.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _send_text_chunks(
+    chat_id: int,
+    text: str,
+    *,
+    reply_to_message_id: int | None = None,
+) -> list[int]:
+    chunks = _split_telegram_text(text)
+    message_ids: list[int] = []
+    anchor = int(reply_to_message_id) if reply_to_message_id else None
+
+    for chunk in chunks:
+        payload: dict[str, Any] = {
+            "chat_id": int(chat_id),
+            "text": chunk,
+            "disable_web_page_preview": False,
+        }
+        if anchor is not None:
+            payload["reply_parameters"] = {
+                "message_id": int(anchor),
+                "allow_sending_without_reply": True,
+            }
+        result = _telegram_call("sendMessage", payload=payload)
+        if isinstance(result, dict):
+            try:
+                mid = int(result.get("message_id"))
+                message_ids.append(mid)
+                if anchor is None:
+                    anchor = mid
+            except (TypeError, ValueError):
+                pass
+    return message_ids
+
+
+def publish_to_publisher_destinations(
+    owner_telegram_id: int,
+    text: str,
+    *,
+    image_bytes: Any | None = None,
+    destination_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    """
+    Публикует утверждённый материал только в площадки данного владельца.
+
+    Статус success означает: Telegram Bot API принял отправку.
+    Это не означает, что каждый участник площадки прочитал сообщение.
+    """
+    owner_telegram_id = int(owner_telegram_id)
+    clean_text = str(text or "").strip()
+    raw_image = _image_bytes(image_bytes) if image_bytes is not None else b""
+    if not clean_text and not raw_image:
+        raise ValueError("Публикация пуста.")
+
+    destinations = list_publisher_destinations(owner_telegram_id)
+    wanted = {int(x) for x in destination_ids} if destination_ids else None
+    destinations = [
+        item for item in destinations
+        if wanted is None or int(item.get("chat_id")) in wanted
+    ]
+
+    results: list[dict[str, Any]] = []
+    for item in destinations:
+        title = str(item.get("chat_title") or "Telegram-площадка").strip()
+        try:
+            chat_id = int(item.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            check = verify_publisher_destination(owner_telegram_id, chat_id)
+            if not bool(check.get("ok")):
+                raise RuntimeError("Площадка или права Publisher больше не подтверждены.")
+
+            photo_message_id: int | None = None
+            if raw_image:
+                photo_result = _send_photo(
+                    chat_id,
+                    raw_image,
+                    caption=_publication_caption(clean_text),
+                )
+                try:
+                    photo_message_id = int(photo_result.get("message_id"))
+                except (TypeError, ValueError):
+                    photo_message_id = None
+
+            text_message_ids = []
+            if clean_text:
+                text_message_ids = _send_text_chunks(
+                    chat_id,
+                    clean_text,
+                    reply_to_message_id=photo_message_id,
+                )
+
+            results.append({
+                "chat_id": chat_id,
+                "title": title,
+                "ok": True,
+                "status": "accepted_by_telegram",
+                "photo_message_id": photo_message_id,
+                "text_message_ids": text_message_ids,
+            })
+        except Exception as exc:
+            results.append({
+                "chat_id": chat_id,
+                "title": title,
+                "ok": False,
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+    success = sum(1 for item in results if item.get("ok") is True)
+    return {
+        "requested": len(destinations),
+        "accepted": success,
+        "failed": len(destinations) - success,
+        "results": results,
+    }
+

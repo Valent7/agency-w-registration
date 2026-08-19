@@ -26,6 +26,15 @@ except ImportError:
     def structure_member_ids(owner_telegram_id: int) -> list[int]:
         return []
 
+try:
+    from agency_publisher import (
+        list_publisher_destinations,
+        publish_to_publisher_destinations,
+    )
+except ImportError:
+    list_publisher_destinations = None
+    publish_to_publisher_destinations = None
+
 from workspace_persistence import persist_workspace_if_changed
 
 
@@ -3107,6 +3116,23 @@ def _artist_image_hash(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest() if raw else ""
 
 
+def _telegram_publication_hash(
+    text: str,
+    image: Any | None,
+    chat_ids: list[int],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(text or "").strip().encode("utf-8"))
+    digest.update(b"\0")
+    raw = _artist_image_bytes(image) if image is not None else b""
+    digest.update(raw)
+    digest.update(b"\0")
+    digest.update(
+        ",".join(str(int(x)) for x in sorted(set(chat_ids))).encode("ascii")
+    )
+    return digest.hexdigest()
+
+
 def _create_artist_direction(
     ask_openai_fn,
     assignment: str,
@@ -4793,6 +4819,17 @@ def _render_result(
         has_current_image = bool(
             st.session_state.get(image_state_key)
         )
+        current_image_for_publish = st.session_state.get(
+            image_state_key
+        )
+        telegram_destinations: list[dict[str, Any]] = []
+        if callable(list_publisher_destinations):
+            try:
+                telegram_destinations = list_publisher_destinations(
+                    owner_id
+                )
+            except Exception:
+                telegram_destinations = []
 
         saved_text = str(
             result.get("edited_content")
@@ -4844,6 +4881,10 @@ def _render_result(
             updated.pop("image_published_count", None)
             updated.pop("image_published_hash", None)
             updated.pop("image_media_id", None)
+            updated.pop("telegram_published_at", None)
+            updated.pop("telegram_published_hash", None)
+            updated.pop("telegram_published_count", None)
+            updated.pop("telegram_publish_results", None)
             _update_task(
                 owner_id,
                 task_id,
@@ -4894,6 +4935,10 @@ def _render_result(
                 updated.pop("image_published_count", None)
                 updated.pop("image_published_hash", None)
                 updated.pop("image_media_id", None)
+                updated.pop("telegram_published_at", None)
+                updated.pop("telegram_published_hash", None)
+                updated.pop("telegram_published_count", None)
+                updated.pop("telegram_publish_results", None)
 
                 if isinstance(content_pack, dict):
                     updated["content_master"] = {
@@ -5007,6 +5052,10 @@ def _render_result(
                 updated.pop("image_published_count", None)
                 updated.pop("image_published_hash", None)
                 updated.pop("image_media_id", None)
+                updated.pop("telegram_published_at", None)
+                updated.pop("telegram_published_hash", None)
+                updated.pop("telegram_published_count", None)
+                updated.pop("telegram_publish_results", None)
                 _update_task(
                     owner_id,
                     task_id,
@@ -5088,6 +5137,54 @@ def _render_result(
                     except Exception as exc:
                         st.error(
                             "Не удалось опубликовать материал всей структуре. "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+            # Telegram-площадки владельца. Если иллюстрация уже готова,
+            # кнопка будет ниже непосредственно под иллюстрацией.
+            if telegram_destinations and not has_current_image:
+                tg_ids = [
+                    int(item.get("chat_id"))
+                    for item in telegram_destinations
+                    if item.get("chat_id") is not None
+                ]
+                tg_hash = _telegram_publication_hash(
+                    str(result.get("edited_content") or draft).strip(),
+                    None,
+                    tg_ids,
+                )
+                tg_already = bool(
+                    str(result.get("telegram_published_hash") or "") == tg_hash
+                )
+                if tg_already:
+                    st.success(
+                        "📡 Telegram принял эту версию материала: "
+                        f"{int(result.get('telegram_published_count') or 0)} "
+                        "площадк(а/и)."
+                    )
+                elif st.button(
+                    f"📡 Опубликовать во всех моих Telegram-площадках ({len(tg_ids)})",
+                    key=f"stagirite_publish_telegram_text_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                    disabled=publish_to_publisher_destinations is None,
+                ):
+                    try:
+                        tg_result = publish_to_publisher_destinations(
+                            owner_id,
+                            str(result.get("edited_content") or draft).strip(),
+                            destination_ids=tg_ids,
+                        )
+                        updated = dict(result)
+                        updated["telegram_published_at"] = datetime.now(UTC).isoformat()
+                        updated["telegram_published_hash"] = tg_hash
+                        updated["telegram_published_count"] = int(tg_result.get("accepted") or 0)
+                        updated["telegram_publish_results"] = tg_result.get("results") or []
+                        _update_task(owner_id, task_id, {"result": updated})
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось передать материал в Telegram. "
                             f"{type(exc).__name__}: {exc}"
                         )
 
@@ -5358,6 +5455,73 @@ def _render_result(
                         st.error(
                             "Не удалось разместить иллюстрацию "
                             "во внутренних сообщениях. "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+            # ----------------------------------------------------
+            # Telegram-площадки: одна кнопка, все подключённые площадки.
+            # Статус означает только успешный ответ Telegram Bot API.
+            # ----------------------------------------------------
+            if (
+                is_approved
+                and not source_changed
+                and telegram_destinations
+            ):
+                tg_ids = [
+                    int(item.get("chat_id"))
+                    for item in telegram_destinations
+                    if item.get("chat_id") is not None
+                ]
+                clean_tg_text = str(
+                    result.get("edited_content") or draft
+                ).strip()
+                tg_hash = _telegram_publication_hash(
+                    clean_tg_text,
+                    current_image,
+                    tg_ids,
+                )
+                tg_already = bool(
+                    str(result.get("telegram_published_hash") or "") == tg_hash
+                )
+
+                if tg_already:
+                    st.success(
+                        "📡 Telegram принял пост с иллюстрацией: "
+                        f"{int(result.get('telegram_published_count') or 0)} "
+                        "площадк(а/и)."
+                    )
+                elif st.button(
+                    f"📡 Опубликовать пост с иллюстрацией во всех моих Telegram-площадках ({len(tg_ids)})",
+                    key=f"stagirite_publish_telegram_image_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                    disabled=publish_to_publisher_destinations is None,
+                ):
+                    try:
+                        tg_result = publish_to_publisher_destinations(
+                            owner_id,
+                            clean_tg_text,
+                            image_bytes=current_image,
+                            destination_ids=tg_ids,
+                        )
+                        updated = dict(result)
+                        updated["telegram_published_at"] = datetime.now(UTC).isoformat()
+                        updated["telegram_published_hash"] = tg_hash
+                        updated["telegram_published_count"] = int(
+                            tg_result.get("accepted") or 0
+                        )
+                        updated["telegram_publish_results"] = (
+                            tg_result.get("results") or []
+                        )
+                        _update_task(
+                            owner_id,
+                            task_id,
+                            {"result": updated},
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось передать пост в Telegram-площадки. "
                             f"{type(exc).__name__}: {exc}"
                         )
 
