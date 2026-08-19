@@ -1648,6 +1648,12 @@ def _append_reserve_candidate(
 def _content_mode_from_assignment(assignment: str) -> str:
     lowered = str(assignment or "").lower().replace("ё", "е")
 
+    if (
+        "непричесанн" in lowered
+        and "мысл" in lowered
+    ):
+        return "night_thought"
+
     if any(
         token in lowered
         for token in (
@@ -2066,6 +2072,233 @@ def _content_quality_score(
 
 
 
+
+def _night_thought_clean(text: str) -> str:
+    value = str(text or "").strip()
+
+    # Убираем оформление, списки и случайный заголовок.
+    value = re.sub(
+        r"(?im)^#{1,6}\s*неприч[её]санн(?:ые|ая)?\s+мысл(?:и|ь).*?$",
+        "",
+        value,
+    ).strip()
+    value = re.sub(r"(?m)^\s*[-•*]\s*", "", value)
+    value = re.sub(r"(?m)^\s*\d+[.)]\s*", "", value)
+    value = re.sub(r"\n{2,}", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _night_thought_limit(text: str, limit: int = 350) -> str:
+    value = _night_thought_clean(text)
+    if len(value) <= limit:
+        return value
+
+    clipped = value[:limit + 1]
+    # Предпочтительно закончить на последней законченной фразе.
+    sentence_ends = [
+        clipped.rfind("."),
+        clipped.rfind("!"),
+        clipped.rfind("?"),
+        clipped.rfind("…"),
+    ]
+    end = max(sentence_ends)
+    if end >= 120:
+        return clipped[:end + 1].strip()
+
+    # Иначе хотя бы не режем слово.
+    space = clipped.rfind(" ", 0, limit)
+    if space > 0:
+        return clipped[:space].rstrip(" ,;:-") + "…"
+
+    return clipped[:limit].rstrip(" ,;:-") + "…"
+
+
+def _night_thought_is_good(text: str) -> bool:
+    value = _night_thought_clean(text)
+    lowered = value.lower().replace("ё", "е")
+
+    if not value or len(value) > 350:
+        return False
+
+    # Это должна быть одна мысль, а не мини-рассказ или список.
+    if len(re.findall(r"\b(он|она|марк|анна|сын|дочь|утром|вечером)\b", lowered)) >= 3:
+        return False
+    if len(re.findall(r"(?m)^\s*\d+[.)]", value)) > 0:
+        return False
+    if value.count("\n") > 1:
+        return False
+
+    banned = (
+        "агентство w помогает",
+        "стагирит уже",
+        "неона уже",
+        "вот такая мысль",
+        "а что бы вы",
+        "представьте",
+    )
+    if any(part in lowered for part in banned):
+        return False
+
+    return len(value) >= 45
+
+
+def _generate_night_thought_content(
+    ask_openai_fn,
+    ask_claude_fn,
+    assignment: str,
+) -> dict[str, Any]:
+    """
+    Рубрика «Непричёсанные мысли на ночь».
+
+    Не рассказ.
+    Не хроника.
+    Не рекламный пост.
+    Один афористический удар <= 350 знаков.
+    """
+    prompt = f"""
+Ты — автор рубрики «Непричёсанные мысли на ночь».
+
+Поручение Директора:
+{assignment}
+
+ФОРМА:
+- ОДНА короткая мысль;
+- 1–3 предложения;
+- максимум 350 знаков с пробелами;
+- лучше 120–280 знаков;
+- без заголовка;
+- без списка;
+- без истории, героя, сцены и диалога;
+- без объяснения собственной мысли после финальной фразы.
+
+ИНТОНАЦИЯ:
+интеллектуальный афоризм: парадокс, ирония, точность, неожиданная развязка.
+По духу — европейская афористическая традиция XX века:
+мысль должна сначала показаться простой, а в последнем повороте
+слегка выбить стул из-под читателя.
+
+ВАЖНО:
+- не копируй и не перефразируй известные афоризмы;
+- не имитируй дословно конкретного автора;
+- никакой банальной мотивации;
+- никаких «верь в себя», «живи сейчас», «ИИ меняет мир»;
+- никакого рекламного упоминания Агентства W, если оно не нужно самой мысли;
+- не упоминай Неону, Стагирита, агентов;
+- не используй персонажей и имена;
+- юмор сухой, умный, иногда едкий;
+- после прочтения хочется остановиться на секунду и подумать.
+
+Верни ТОЛЬКО сам текст мысли. Не ставь кавычки.
+""".strip()
+
+    raw = ""
+    engine = "reserve"
+    model = ""
+
+    if callable(ask_claude_fn):
+        try:
+            result = ask_claude_fn(
+                prompt,
+                str(assignment or ""),
+                max_tokens=500,
+            )
+            if (
+                isinstance(result, dict)
+                and result.get("ok") is True
+                and str(result.get("text") or "").strip()
+            ):
+                raw = str(result.get("text") or "").strip()
+                engine = "primary"
+                model = str(result.get("model") or "")
+        except Exception:
+            raw = ""
+
+    if not raw and callable(ask_openai_fn):
+        try:
+            raw = str(
+                ask_openai_fn(
+                    prompt,
+                    str(assignment or ""),
+                    uploaded_files=[],
+                    use_web_search=False,
+                )
+                or ""
+            ).strip()
+            engine = "reserve"
+        except Exception:
+            raw = ""
+
+    first = _night_thought_limit(raw)
+
+    # Один короткий возврат автору, если он опять сделал рассказ/банальность.
+    if (
+        not _night_thought_is_good(first)
+        and callable(ask_claude_fn)
+    ):
+        retry_prompt = f"""
+Перепиши это в ОДИН афоризм рубрики «Непричёсанные мысли на ночь»:
+
+{first or raw}
+
+ЖЁСТКО:
+- максимум 350 знаков с пробелами;
+- 1–3 предложения;
+- никаких героев, историй, сцен, списков;
+- никакого Агентства W и ИИ;
+- одна парадоксальная мысль;
+- сухая умная ирония;
+- финальная фраза должна менять угол зрения;
+- только готовый текст.
+""".strip()
+        try:
+            retry = ask_claude_fn(
+                retry_prompt,
+                str(assignment or ""),
+                max_tokens=350,
+            )
+            if (
+                isinstance(retry, dict)
+                and retry.get("ok") is True
+                and str(retry.get("text") or "").strip()
+            ):
+                first = _night_thought_limit(
+                    str(retry.get("text") or "")
+                )
+                engine = "primary"
+                model = str(retry.get("model") or model)
+        except Exception:
+            pass
+
+    if not first:
+        first = (
+            "Мы так долго учились экономить время, "
+            "что теперь не знаем, на что его потратить. "
+            "Пожалуй, самая дорогая роскошь — не эффективность, а отсутствие необходимости быть эффективным."
+        )
+        first = _night_thought_limit(first)
+        engine = "deterministic_fallback"
+
+    return {
+        "text": first,
+        "master_engine": engine,
+        "master_model": model,
+        "quality_score": 0,
+        "rewrite_used": False,
+        "report_warning": False,
+        "series": "Непричёсанные мысли на ночь",
+        "genre": "афоризм",
+        "capability": "",
+        "human_situation": "",
+        "human_gain": "",
+        "reader_entry": "",
+        "cta_mode": "none",
+        "newcomer_reason": "",
+        "night_thought": True,
+        "character_count": len(first),
+    }
+
+
 def _announcement_time_hint(assignment: str) -> str:
     text = str(assignment or "")
     patterns = (
@@ -2272,6 +2505,15 @@ def _generate_content(
     7. При провале Мастер переписывает один раз.
     """
     mode = _content_mode_from_assignment(assignment)
+
+    # «Непричёсанные мысли на ночь» — отдельный сверхкороткий жанр.
+    # Никогда не пропускаем его через «Хроники».
+    if mode == "night_thought":
+        return _generate_night_thought_content(
+            ask_openai_fn,
+            ask_claude_fn,
+            assignment,
+        )
 
     # Анонсы — отдельный быстрый контур.
     # Не гоняем Zoom-приглашение через литературную редакцию «Хроник».
@@ -3502,6 +3744,12 @@ def _process_assignment(
                         ),
                         "announcement_time": str(
                             content_pack.get("announcement_time") or ""
+                        ),
+                        "night_thought": bool(
+                            content_pack.get("night_thought")
+                        ),
+                        "character_count": int(
+                            content_pack.get("character_count") or 0
                         ),
                     }
         except Exception as exc:
