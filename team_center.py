@@ -11,6 +11,13 @@ import uuid
 import requests
 import streamlit as st
 
+from agency_publisher import (
+    list_publisher_destinations,
+    remove_publisher_destination,
+    sync_publisher_destinations,
+    verify_publisher_destination,
+)
+
 
 UTC = ZoneInfo("UTC")
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -1410,6 +1417,168 @@ def _render_announcements(
                 st.rerun()
 
 
+
+def _publisher_type_label(chat_type: str) -> str:
+    return {
+        "group": "Группа",
+        "supergroup": "Группа",
+        "channel": "Канал",
+    }.get(str(chat_type or ""), "Telegram-площадка")
+
+
+def _render_publishing_destinations(
+    owner_telegram_id: int,
+) -> None:
+    """Личный реестр Telegram-групп и каналов владельца."""
+    owner_telegram_id = int(owner_telegram_id)
+
+    st.markdown("#### 📣 Мои площадки")
+    st.caption(
+        "Здесь будут только ваши Telegram-группы и каналы. "
+        "Технические chat_id скрыты: их Агентство определяет само."
+    )
+
+    with st.container(border=True):
+        st.markdown("**Подключить новую площадку**")
+        st.write(
+            "1. Добавьте `@AgencyWPublisherBot` администратором своей "
+            "группы или канала.\n\n"
+            "2. В группе можно отправить "
+            "`/start@AgencyWPublisherBot`. Для канала достаточно добавить "
+            "бота администратором.\n\n"
+            "3. Вернитесь сюда и нажмите кнопку ниже."
+        )
+
+        if st.button(
+            "🔎 Найти мои новые площадки",
+            key=f"publisher_sync_{owner_telegram_id}",
+            use_container_width=True,
+            type="primary",
+        ):
+            try:
+                result = sync_publisher_destinations()
+                st.session_state[
+                    f"publisher_sync_result_{owner_telegram_id}"
+                ] = dict(result or {})
+                st.rerun()
+            except Exception as exc:
+                st.error(
+                    "Не удалось проверить Telegram. "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+    sync_result = st.session_state.pop(
+        f"publisher_sync_result_{owner_telegram_id}",
+        None,
+    )
+    if isinstance(sync_result, dict):
+        connected = int(sync_result.get("connected") or 0)
+        if connected:
+            st.success(
+                "Telegram-площадки найдены и сохранены. "
+                "Ниже показаны площадки, принадлежащие вашему кабинету."
+            )
+        else:
+            st.info(
+                "Новых площадок пока не найдено. Если бота только что "
+                "добавили, подождите несколько секунд и нажмите ещё раз."
+            )
+
+    try:
+        destinations = list_publisher_destinations(
+            owner_telegram_id
+        )
+    except Exception as exc:
+        st.error(
+            "Реестр площадок пока не открылся. "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    if not destinations:
+        st.caption("Подключённых площадок пока нет.")
+        return
+
+    st.markdown("#### Подключено")
+
+    for item in destinations:
+        try:
+            chat_id = int(item.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+
+        title = str(
+            item.get("chat_title")
+            or "Telegram-площадка"
+        ).strip()
+        chat_type = str(item.get("chat_type") or "")
+        username = str(item.get("chat_username") or "").strip()
+        verified_at = str(item.get("verified_at") or "").strip()
+
+        with st.container(border=True):
+            st.markdown(f"**🟢 {title}**")
+            label = _publisher_type_label(chat_type)
+            subtitle = label
+            if username:
+                subtitle += f" · @{username}"
+            st.caption(subtitle)
+
+            if verified_at:
+                st.caption(
+                    "Последняя проверка: "
+                    + _format_dt(verified_at)
+                )
+
+            c1, c2 = st.columns(2)
+            if c1.button(
+                "✅ Проверить",
+                key=f"publisher_verify_{owner_telegram_id}_{chat_id}",
+                use_container_width=True,
+            ):
+                try:
+                    check = verify_publisher_destination(
+                        owner_telegram_id,
+                        chat_id,
+                    )
+                    if bool(check.get("ok")):
+                        st.success(
+                            "Площадка доступна. Publisher остаётся "
+                            "администратором и может быть использован "
+                            "для публикаций."
+                        )
+                    else:
+                        st.warning(
+                            "Площадка больше не доступна для публикаций."
+                        )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(
+                        "Проверка не удалась. "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+            if c2.button(
+                "🗑️ Убрать из реестра",
+                key=f"publisher_remove_{owner_telegram_id}_{chat_id}",
+                use_container_width=True,
+            ):
+                try:
+                    remove_publisher_destination(
+                        owner_telegram_id,
+                        chat_id,
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(
+                        "Не удалось убрать площадку. "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+    st.caption(
+        "Это пока только реестр. Отправку поста в подключённую площадку "
+        "проверим следующим отдельным шагом."
+    )
+
 def render_team_center(
     owner_telegram_id: int | str,
     member_code: str,
@@ -1418,7 +1587,7 @@ def render_team_center(
 ) -> None:
     """
     Рабочий центр Директора:
-    Партнёры | Сообщения | Инструкции | Объявления.
+    Партнёры | Сообщения | Инструкции | Объявления | Мои площадки.
     """
     owner_telegram_id = int(owner_telegram_id)
 
@@ -1431,6 +1600,7 @@ def render_team_center(
             "💬 Сообщения",
             "📚 Инструкции",
             "🔔 Объявления",
+            "📣 Мои площадки",
         ],
         default="👥 Партнёры",
         required=True,
@@ -1455,6 +1625,8 @@ def render_team_center(
             _render_instructions(owner_telegram_id)
         elif section == "🔔 Объявления":
             _render_announcements(owner_telegram_id)
+        elif section == "📣 Мои площадки":
+            _render_publishing_destinations(owner_telegram_id)
 
     except requests.HTTPError as exc:
         details = ""
