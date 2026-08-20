@@ -7942,7 +7942,7 @@ if received_hash:
                                 "⛔ Не удалось отправить первое "
                                 f"сообщение · {len(blocked_queue)}"
                             ),
-                            expanded=True,
+                            expanded=False,
                         ):
                             st.caption(
                                 "Эти люди убраны из текущей работы "
