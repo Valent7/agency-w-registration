@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from io import BytesIO
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+from PIL import Image, UnidentifiedImageError
 
 import agency_calendar
 try:
@@ -3335,6 +3337,109 @@ def _execute_general_director_task(
 
 
 
+
+def _prepare_uploaded_illustration(
+    uploaded_file: Any,
+    *,
+    max_side: int = 2048,
+    max_bytes: int = 12 * 1024 * 1024,
+) -> dict[str, Any]:
+    """
+    Проверяет пользовательскую иллюстрацию и приводит её к PNG.
+
+    Это локальная операция:
+    - без OpenAI/Claude;
+    - без генерации;
+    - без отправки файла во внешний ИИ-сервис.
+    """
+    if uploaded_file is None:
+        return {
+            "ok": False,
+            "error": "Файл не выбран.",
+        }
+
+    try:
+        raw = uploaded_file.getvalue()
+    except Exception:
+        try:
+            raw = bytes(uploaded_file)
+        except Exception:
+            raw = b""
+
+    if not raw:
+        return {
+            "ok": False,
+            "error": "Не удалось прочитать изображение.",
+        }
+
+    if len(raw) > max_bytes:
+        return {
+            "ok": False,
+            "error": "Файл слишком большой. Максимум 12 МБ.",
+        }
+
+    try:
+        with Image.open(BytesIO(raw)) as opened:
+            opened.load()
+            original_format = str(opened.format or "").upper()
+            width, height = opened.size
+
+            if width < 64 or height < 64:
+                return {
+                    "ok": False,
+                    "error": "Изображение слишком маленькое.",
+                }
+
+            # Для публикаций достаточно 2048 px по длинной стороне.
+            image = opened.copy()
+            longest = max(image.size)
+            resized = False
+            if longest > max_side:
+                ratio = max_side / float(longest)
+                new_size = (
+                    max(1, int(image.size[0] * ratio)),
+                    max(1, int(image.size[1] * ratio)),
+                )
+                image = image.resize(
+                    new_size,
+                    Image.Resampling.LANCZOS,
+                )
+                resized = True
+
+            # Telegram/Streamlit/Supabase получают единый предсказуемый PNG.
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA")
+
+            buffer = BytesIO()
+            image.save(
+                buffer,
+                format="PNG",
+                optimize=True,
+            )
+            png_bytes = buffer.getvalue()
+
+        return {
+            "ok": True,
+            "image_bytes": png_bytes,
+            "original_format": original_format,
+            "original_width": int(width),
+            "original_height": int(height),
+            "width": int(image.size[0]),
+            "height": int(image.size[1]),
+            "resized": bool(resized),
+        }
+
+    except (UnidentifiedImageError, OSError, ValueError):
+        return {
+            "ok": False,
+            "error": (
+                "Не удалось открыть картинку. "
+                "Используйте PNG, JPG/JPEG или WEBP."
+            ),
+        }
+
+
+
 def _artist_image_bytes(value: Any) -> bytes:
     if isinstance(value, bytes):
         return value
@@ -5455,6 +5560,97 @@ def _render_result(
             "Художнику профессиональную задачу."
         )
 
+        # --------------------------------------------------------
+        # Запасной путь: Директор может принести готовую картинку.
+        # Художник остаётся на месте; загрузка ничего не отключает.
+        # --------------------------------------------------------
+        upload_key = f"stagirite_artist_upload_{task_id}"
+        uploaded_illustration = st.file_uploader(
+            "📤 Загрузить свою иллюстрацию",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=False,
+            key=upload_key,
+            help=(
+                "Если подходящая картинка уже найдена или создана "
+                "в другом сервисе, загрузите её сюда. "
+                "Поддерживаются PNG, JPG/JPEG и WEBP до 12 МБ."
+            ),
+        )
+
+        if uploaded_illustration is not None:
+            try:
+                st.image(
+                    uploaded_illustration,
+                    caption="Предпросмотр вашей иллюстрации",
+                    use_container_width=True,
+                )
+            except Exception:
+                pass
+
+            if st.button(
+                "✅ Использовать эту иллюстрацию",
+                key=f"stagirite_artist_use_upload_{task_id}",
+                use_container_width=True,
+                type="primary",
+            ):
+                prepared_upload = _prepare_uploaded_illustration(
+                    uploaded_illustration
+                )
+                if not prepared_upload.get("ok"):
+                    st.error(
+                        str(
+                            prepared_upload.get("error")
+                            or "Не удалось загрузить иллюстрацию."
+                        )
+                    )
+                else:
+                    st.session_state[image_state_key] = (
+                        prepared_upload["image_bytes"]
+                    )
+                    st.session_state[image_meta_key] = {
+                        "source": "uploaded",
+                        "source_text": str(draft).strip(),
+                        "original_name": str(
+                            getattr(
+                                uploaded_illustration,
+                                "name",
+                                "",
+                            )
+                            or ""
+                        ),
+                        "original_format": str(
+                            prepared_upload.get("original_format")
+                            or ""
+                        ),
+                        "original_width": int(
+                            prepared_upload.get("original_width")
+                            or 0
+                        ),
+                        "original_height": int(
+                            prepared_upload.get("original_height")
+                            or 0
+                        ),
+                        "width": int(
+                            prepared_upload.get("width")
+                            or 0
+                        ),
+                        "height": int(
+                            prepared_upload.get("height")
+                            or 0
+                        ),
+                        "resized": bool(
+                            prepared_upload.get("resized")
+                        ),
+                        "created_at": datetime.now(UTC).isoformat(),
+                        "quality_passed": False,
+                        "auto_redrawn": False,
+                    }
+                    st.success(
+                        "Ваша иллюстрация принята. "
+                        "Теперь её можно публиковать вместе с постом."
+                    )
+                    st.rerun()
+
         change_key = f"stagirite_artist_change_{task_id}"
 
         format_label = st.selectbox(
@@ -5479,11 +5675,31 @@ def _render_result(
             current_meta = {}
 
         if current_image:
+            image_source = str(
+                current_meta.get("source") or "artist"
+            ).strip()
+
             st.image(
                 current_image,
-                caption="Иллюстрация Художника",
+                caption=(
+                    "Ваша загруженная иллюстрация"
+                    if image_source == "uploaded"
+                    else "Иллюстрация Художника"
+                ),
                 use_container_width=True,
             )
+
+            if image_source == "uploaded":
+                st.caption(
+                    "📤 Эта картинка загружена Директором. "
+                    "Она используется в публикации так же, "
+                    "как иллюстрация Художника."
+                )
+                if current_meta.get("resized"):
+                    st.caption(
+                        "Изображение было аккуратно уменьшено "
+                        "для удобной публикации."
+                    )
 
             if current_meta.get("auto_redrawn"):
                 st.caption(
@@ -5814,6 +6030,7 @@ def _render_result(
                     if generated.get("ok"):
                         st.session_state[image_state_key] = generated["image_bytes"]
                         st.session_state[image_meta_key] = {
+                            "source": "artist",
                             "source_text": str(draft).strip(),
                             "size": chosen_size,
                             "change_request": str(change_request or "").strip(),
@@ -5874,6 +6091,7 @@ def _render_result(
                     if generated.get("ok"):
                         st.session_state[image_state_key] = generated["image_bytes"]
                         st.session_state[image_meta_key] = {
+                            "source": "artist",
                             "source_text": str(draft).strip(),
                             "size": chosen_size,
                             "change_request": "",
@@ -5901,8 +6119,9 @@ def _render_result(
                         )
 
         st.caption(
-            "Иллюстрацию можно сохранить как PNG или разместить партнёрам "
-            "прямо из Стагирита. Внутренняя публикация и Telegram-доставка "
+            "Иллюстрацию можно создать у Художника или загрузить готовую. "
+            "Оба варианта публикуются одинаково. "
+            "Внутренняя публикация и Telegram-доставка "
             "по-прежнему считаются разными каналами."
         )
 
