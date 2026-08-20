@@ -4777,6 +4777,17 @@ def telegram_auth_is_valid(data, received_hash):
 if received_hash:
     if telegram_auth_is_valid(telegram_data, received_hash):
         first_name = telegram_data.get("first_name", "Пользователь")
+        # Для Неолы используем только личное имя, без фамилии.
+        # Telegram иногда хранит в first_name сразу несколько слов.
+        neola_first_name = (
+            candidate_first_name(
+                {
+                    "first_name": first_name,
+                    "name": first_name,
+                }
+            )
+            or "Партнёр"
+        )
         telegram_id = telegram_data.get("id", "")
         member_code, created = save_member_to_supabase(telegram_data, referral_code)
 
@@ -4839,7 +4850,7 @@ if received_hash:
             # показывает только безопасный экран загрузки скриншота.
             render_neola_agent(
                 int(telegram_id),
-                first_name,
+                neola_first_name,
                 "🔐 Активация доступа",
                 ask_openai,
             )
@@ -4931,7 +4942,7 @@ if received_hash:
                 with st.container(border=True):
                     render_neola_realtime_voice(
                         int(telegram_id),
-                        first_name,
+                        neola_first_name,
                         neola_ui_context,
                         neola_step,
                     )
@@ -9242,7 +9253,7 @@ if received_hash:
                         )
                         render_neola_realtime_voice(
                             int(telegram_id),
-                            first_name,
+                            neola_first_name,
                             "🤖 Агенты → 🧭 Стагирит → Неола",
                             neola_agent_step,
                         )
@@ -9251,7 +9262,7 @@ if received_hash:
                         # загрузки/подтверждения активации.
                         render_neola_agent(
                             int(telegram_id),
-                            first_name,
+                            neola_first_name,
                             neola_ui_context,
                             ask_openai,
                         )
