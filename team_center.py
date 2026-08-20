@@ -881,6 +881,303 @@ def _render_message_card(
                             st.rerun()
 
 
+def _message_counterparty_id(
+    message: dict[str, Any],
+    direction: str,
+) -> int:
+    field = (
+        "sender_telegram_id"
+        if direction == "in"
+        else "recipient_telegram_id"
+    )
+    return int(message[field])
+
+
+def _conversation_member_info(
+    telegram_id: int,
+) -> tuple[dict[str, Any] | None, str, str]:
+    member = _member_by_telegram(int(telegram_id))
+    name = _display_name(member)
+    username = str(
+        (member or {}).get("username") or ""
+    ).strip().lstrip("@")
+    return member, name, username
+
+
+def _conversation_latest_dt(
+    messages: list[dict[str, Any]],
+) -> datetime:
+    dates = [
+        _parse_db_datetime(item.get("created_at"))
+        for item in messages
+    ]
+    valid = [item for item in dates if item is not None]
+    if valid:
+        return max(valid)
+    return datetime.min.replace(tzinfo=UTC)
+
+
+def _conversation_search_text(
+    name: str,
+    username: str,
+) -> str:
+    return " ".join(
+        part
+        for part in [name, username, f"@{username}" if username else ""]
+        if part
+    ).casefold()
+
+
+def _render_grouped_messages(
+    messages: list[dict[str, Any]],
+    owner_telegram_id: int,
+    direction: str,
+) -> None:
+    """
+    Показывает сообщения компактно:
+    одна строка на человека, переписка скрыта внутри.
+    """
+    if not messages:
+        if direction == "in":
+            st.caption("Новых сообщений пока нет.")
+        else:
+            st.caption("Вы ещё ничего не отправляли.")
+        return
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for message in messages:
+        try:
+            other_id = _message_counterparty_id(
+                message,
+                direction,
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        grouped.setdefault(other_id, []).append(message)
+
+    if not grouped:
+        st.caption("Сообщений пока нет.")
+        return
+
+    people: list[dict[str, Any]] = []
+    for other_id, person_messages in grouped.items():
+        _, name, username = _conversation_member_info(other_id)
+        latest_dt = _conversation_latest_dt(person_messages)
+
+        unread_count = 0
+        if direction == "in":
+            unread_count = sum(
+                1
+                for item in person_messages
+                if not item.get("read_at")
+            )
+
+        people.append(
+            {
+                "telegram_id": other_id,
+                "name": name,
+                "username": username,
+                "messages": person_messages,
+                "latest_dt": latest_dt,
+                "unread_count": unread_count,
+            }
+        )
+
+    controls = st.columns([2.2, 1.3])
+    search = controls[0].text_input(
+        "Поиск",
+        placeholder="Имя, фамилия или @username",
+        key=f"team_message_search_{direction}_{owner_telegram_id}",
+        label_visibility="collapsed",
+    ).strip().casefold()
+
+    sort_mode = controls[1].selectbox(
+        "Сортировка",
+        [
+            "Последняя активность",
+            "Имя",
+            "@username",
+        ],
+        key=f"team_message_sort_{direction}_{owner_telegram_id}",
+        label_visibility="collapsed",
+    )
+
+    if search:
+        people = [
+            item
+            for item in people
+            if search in _conversation_search_text(
+                str(item["name"]),
+                str(item["username"]),
+            )
+        ]
+
+    if sort_mode == "Имя":
+        people.sort(
+            key=lambda item: (
+                str(item["name"]).casefold(),
+                str(item["username"]).casefold(),
+            )
+        )
+    elif sort_mode == "@username":
+        people.sort(
+            key=lambda item: (
+                0 if str(item["username"]).strip() else 1,
+                str(item["username"]).casefold(),
+                str(item["name"]).casefold(),
+            )
+        )
+    else:
+        people.sort(
+            key=lambda item: item["latest_dt"],
+            reverse=True,
+        )
+
+    if not people:
+        st.caption("По этому поиску сообщений не найдено.")
+        return
+
+    st.caption(
+        f"Диалогов: {len(people)}. "
+        "Нажмите на человека, чтобы открыть сообщения."
+    )
+
+    for person in people:
+        name = str(person["name"])
+        username = str(person["username"]).strip()
+        person_messages = list(person["messages"])
+        latest_dt = person["latest_dt"]
+        unread_count = int(person["unread_count"] or 0)
+
+        person_messages.sort(
+            key=lambda item: (
+                _parse_db_datetime(item.get("created_at"))
+                or datetime.min.replace(tzinfo=UTC)
+            )
+        )
+
+        username_text = f" · @{username}" if username else ""
+        unread_text = (
+            f" · 🔴 непрочитано {unread_count}"
+            if unread_count
+            else ""
+        )
+        latest_text = (
+            _format_dt(latest_dt.isoformat())
+            if latest_dt.year > 1
+            else "дата не указана"
+        )
+
+        title = (
+            f"👤 {name}{username_text}"
+            f" · {len(person_messages)} сообщ."
+            f" · последнее {latest_text}"
+            f"{unread_text}"
+        )
+
+        with st.expander(title, expanded=False):
+            for index, message in enumerate(person_messages):
+                if index:
+                    st.divider()
+
+                st.caption(
+                    _format_dt(message.get("created_at"))
+                )
+
+                subject = str(
+                    message.get("subject") or ""
+                ).strip()
+                if subject:
+                    st.markdown(f"**{subject}**")
+
+                raw_body = str(message.get("body") or "")
+                clean_body = _body_without_media_markers(
+                    raw_body
+                )
+                media_ids = _media_ids_from_body(raw_body)
+
+                if clean_body:
+                    st.write(clean_body)
+
+                for media_id in media_ids:
+                    _render_message_media(media_id)
+
+                zoom_url = str(
+                    message.get("zoom_url") or ""
+                ).strip()
+                if zoom_url:
+                    st.link_button(
+                        "🎥 Открыть Zoom",
+                        zoom_url,
+                        use_container_width=True,
+                    )
+
+                if (
+                    direction == "in"
+                    and not message.get("read_at")
+                ):
+                    try:
+                        _mark_read(int(message["id"]))
+                    except Exception:
+                        pass
+
+            if direction == "in":
+                latest_message = person_messages[-1]
+                latest_subject = str(
+                    latest_message.get("subject") or ""
+                ).strip()
+
+                st.divider()
+                with st.form(
+                    "reply_team_conversation_"
+                    f"{owner_telegram_id}_"
+                    f"{person['telegram_id']}"
+                ):
+                    reply_text = st.text_area(
+                        "↩️ Ответить",
+                        key=(
+                            "reply_conversation_text_"
+                            f"{owner_telegram_id}_"
+                            f"{person['telegram_id']}"
+                        ),
+                        height=100,
+                        placeholder="Напишите ответ...",
+                    )
+                    reply_zoom = st.text_input(
+                        "Ссылка Zoom — необязательно",
+                        key=(
+                            "reply_conversation_zoom_"
+                            f"{owner_telegram_id}_"
+                            f"{person['telegram_id']}"
+                        ),
+                    )
+                    submitted = st.form_submit_button(
+                        "Отправить ответ",
+                        use_container_width=True,
+                    )
+
+                    if submitted:
+                        if not reply_text.strip():
+                            st.warning("Напишите сообщение.")
+                        else:
+                            _send_team_message(
+                                owner_telegram_id,
+                                [int(person["telegram_id"])],
+                                reply_text,
+                                subject=(
+                                    f"Re: {latest_subject}"
+                                    if latest_subject
+                                    else "Ответ"
+                                ),
+                                zoom_url=reply_zoom,
+                                reply_to_id=int(
+                                    latest_message["id"]
+                                ),
+                            )
+                            st.success("Ответ отправлен.")
+                            st.rerun()
+
+
 def _render_messages(
     owner_telegram_id: int,
     member_code: str,
@@ -894,7 +1191,7 @@ def _render_messages(
 
     tabs = st.tabs(
         [
-            f"✍️ Написать",
+            "✍️ Написать",
             f"📥 Входящие ({unread_count})",
             "📤 Отправленные",
         ]
@@ -932,9 +1229,7 @@ def _render_messages(
                 body = st.text_area(
                     "Сообщение",
                     height=160,
-                    placeholder=(
-                        "Напишите сообщение партнёрам..."
-                    ),
+                    placeholder="Напишите сообщение партнёрам...",
                 )
                 zoom_url = st.text_input(
                     "Ссылка Zoom — необязательно",
@@ -974,27 +1269,19 @@ def _render_messages(
                         st.rerun()
 
     with tabs[1]:
-        if not inbox:
-            st.caption("Новых сообщений пока нет.")
-        else:
-            for message in inbox:
-                _render_message_card(
-                    message,
-                    owner_telegram_id,
-                    "in",
-                )
+        _render_grouped_messages(
+            inbox,
+            owner_telegram_id,
+            "in",
+        )
 
     with tabs[2]:
         outbox = _outbox(owner_telegram_id)
-        if not outbox:
-            st.caption("Вы ещё ничего не отправляли.")
-        else:
-            for message in outbox:
-                _render_message_card(
-                    message,
-                    owner_telegram_id,
-                    "out",
-                )
+        _render_grouped_messages(
+            outbox,
+            owner_telegram_id,
+            "out",
+        )
 
 
 def _incoming_owner(
