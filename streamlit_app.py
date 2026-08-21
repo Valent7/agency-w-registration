@@ -3653,36 +3653,47 @@ NEONA_FIRST_MESSAGE_FORBIDDEN = NEONA_FORBIDDEN_CLAIMS
 
 
 def candidate_first_name(contact):
-    """Возвращает безопасное имя: никогда не подставляет @username."""
+    """Возвращает безопасное человеческое имя без эмодзи и @username."""
 
-    raw_first_name = str(contact.get("first_name") or "").strip()
-    if raw_first_name:
-        # Telegram first_name sometimes contains initials/extra words (e.g. "Aigul SK").
-        # For a human greeting use only the first clean name token.
-        first_name = re.split(r"[\s|,/]+", raw_first_name, maxsplit=1)[0].strip(
-            " ,.!?;:()[]{}\"'"
-        )
-        if (
-            first_name
-            and len(first_name) <= 40
-            and not first_name.startswith("@")
-            and not any(character.isdigit() for character in first_name)
-        ):
-            return first_name
+    def clean_name_token(value):
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+
+        # Берём только первый словесный фрагмент, затем останавливаемся
+        # на первом эмодзи/декоративном символе. str.isalpha() работает
+        # и для кириллицы, и для латиницы.
+        raw = re.split(r"[\s|,/]+", raw, maxsplit=1)[0].strip()
+        chars = []
+        for character in raw:
+            if character.isalpha() or (
+                character in "-'’"
+                and chars
+            ):
+                chars.append(character)
+                continue
+            break
+
+        token = "".join(chars).strip("-'’")
+        if not token or len(token) > 40:
+            return ""
+        if any(character.isdigit() for character in token):
+            return ""
+        if token.isupper() and len(token) > 1:
+            token = token.title()
+        return token
+
+    first_name = clean_name_token(contact.get("first_name"))
+    if first_name:
+        return first_name
 
     full_name = str(contact.get("name") or "").strip()
-    if full_name:
-        first_word = full_name.split()[0].strip(" ,.!?;:()[]{}\"'")
-        if (
-            first_word
-            and len(first_word) <= 40
-            and not first_word.startswith("@")
-            and not any(character.isdigit() for character in first_word)
-        ):
-            return first_word
+    first_name = clean_name_token(full_name)
+    if first_name:
+        return first_name
 
     # Если имя очевидно читается в username, используем обычное имя.
-    # В остальных случаях лучше нейтральное «Здравствуйте!», чем обращение по нику.
+    # В остальных случаях лучше нейтральное «Здравствуйте!», чем ник.
     username = str(contact.get("username") or "").strip().lstrip("@").lower()
     possible_handles = [username]
     possible_handles.extend(
@@ -3706,6 +3717,7 @@ def candidate_first_name(contact):
         "olga": "Ольга",
         "anna": "Анна",
         "anya": "Анна",
+        "tatjana": "Tatjana",
         "tatiana": "Татьяна",
         "tatyana": "Татьяна",
         "valentina": "Валентина",
@@ -3724,12 +3736,11 @@ def candidate_first_name(contact):
     }
     for handle in possible_handles:
         handle_compact = re.sub(r"[^a-zа-яё]", "", handle)
-        for latin_name, russian_name in obvious_names.items():
+        for latin_name, human_name in obvious_names.items():
             if handle_compact.startswith(latin_name):
-                return russian_name
+                return human_name
 
     return ""
-
 
 def normalize_neona_first_greeting(message, contact):
     """Всегда начинает первое сообщение с человеческого приветствия по имени."""
@@ -3748,6 +3759,16 @@ def normalize_neona_first_greeting(message, contact):
     )
 
     # Убираем любое старое/модельное обращение, чтобы не получить два приветствия.
+    # Это важно для Telegram-имён с эмодзи: модель могла начать, например,
+    # «TATJANA🔥BUSINESS👑, здравствуйте!», а безопасное имя уже стало «Tatjana».
+    message = re.sub(
+        r"^[^\n]{0,80}?(?:здравствуйте|привет)\s*[!,.]?\s*",
+        "",
+        message,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
     if first_name:
         escaped_name = re.escape(first_name)
         message = re.sub(
@@ -3887,31 +3908,31 @@ def ensure_neona_first_message_signoff(message):
 
 
 def validate_neona_first_message(message, owner_name):
-    """Проверяет обязательные правила человеческого первого сообщения."""
+    """Возвращает редакторские подсказки. Они НЕ блокируют решение владельца."""
 
     message = str(message or "").strip()
     if not message:
         return ["сообщение пустое"]
 
-    errors = []
+    notes = []
     lowered = message.lower()
-    identity = neona_identity(owner_name)
 
-    # После приветствия Неона должна сразу представиться, а не вставлять
-    # внутреннее название магнита, сегмента или рекламный заголовок.
-    greeting_end = message.find("!")
-    if greeting_end == -1:
-        errors.append("нет человеческого приветствия")
-    else:
-        after_greeting = message[greeting_end + 1 :].lstrip()
-        if not after_greeting.lower().startswith("меня зовут неона"):
-            errors.append("после приветствия Неона должна сразу представиться")
+    if not re.match(r"^.{0,80}(?:здравствуйте|привет)[!,.]", message, re.I):
+        notes.append("проверьте, есть ли в начале человеческое приветствие")
 
-    if identity.lower() not in lowered[:350]:
-        errors.append("нет точного представления Неоны и владельца")
+    identity_patterns = (
+        r"(?i)\bменя\s+зовут\s+неона\b",
+        r"(?i)\bя\s*[—–-]?\s*неона\b",
+        r"(?i)\bнеона\s*[—–-]\s*секретарь[\s‑-]*референт\b",
+    )
+    if not any(re.search(pattern, message[:600]) for pattern in identity_patterns):
+        notes.append("проверьте, понятно ли человеку, что пишет Неона")
 
-    if message.count("?") != 1:
-        errors.append("в первом сообщении должен быть один простой вопрос")
+    question_count = message.count("?")
+    if question_count == 0:
+        notes.append("обычно лучше оставить один лёгкий вопрос, чтобы человеку было проще ответить")
+    elif question_count > 1:
+        notes.append("в сообщении больше одного вопроса — для первого контакта лучше один")
 
     awkward_old_phrases = (
         "понятный путь входа",
@@ -3920,34 +3941,36 @@ def validate_neona_first_message(message, owner_name):
         "своя ии-команда рядом даёт",
         "своя ии-команда рядом дает",
     )
-    for phrase in awkward_old_phrases:
-        if phrase in lowered:
-            errors.append("осталась старая или неестественная формулировка")
-            break
+    if any(phrase in lowered for phrase in awkward_old_phrases):
+        notes.append("есть старая канцелярская формулировка — её можно сделать живее")
 
-    return errors
+    forbidden_hits = [
+        phrase
+        for phrase in NEONA_FIRST_MESSAGE_FORBIDDEN
+        if str(phrase or "").strip().lower() in lowered
+    ]
+    if forbidden_hits:
+        notes.append(
+            "проверьте фактическую точность: найдено выражение, которое раньше считалось рискованным"
+        )
 
+    return notes
 
 
 def finalize_neona_first_message(message, owner_name, contact):
-    """Нормализует текст и заменяет небезопасный вариант шаблоном."""
+    """Нормализует текст, но не заменяет живой вариант жёстким шаблоном."""
 
     message = normalize_neona_first_greeting(message, contact)
     message = ensure_neona_identity(message, owner_name)
     message = ensure_neona_first_message_signoff(message)
-    # Нормализуем пробелы внутри строк, но сохраняем отдельную строку подписи.
+
     lines = []
     for line in str(message or "").splitlines():
         clean_line = re.sub(r"[ \t]+", " ", line).strip()
         if clean_line:
             lines.append(clean_line)
-    message = "\n\n".join(lines).strip()
-    errors = validate_neona_first_message(message, owner_name)
 
-    if errors:
-        return build_neona_safe_first_message(owner_name, contact)
-
-    return message
+    return "\n\n".join(lines).strip()
 
 
 def search_known_contacts(contacts, query, limit=20):
@@ -4006,7 +4029,7 @@ def search_known_contacts(contacts, query, limit=20):
 
 
 def ensure_neona_identity(message, owner_name):
-    """Гарантирует одно представление Неоны как секретаря-референта."""
+    """Гарантирует представление Неоны, не ломая живой/юмористический заход."""
 
     message = str(message or "").strip()
     identity = neona_identity(owner_name)
@@ -4021,45 +4044,38 @@ def ensure_neona_identity(message, owner_name):
     for pattern in old_identity_patterns:
         message = re.sub(pattern, identity, message, count=1)
 
-    # Убираем возможные повторы имени Неоны.
-    message = re.sub(
-        r"(?i)(?:\bменя\s+зовут\s+неона[\s,.;:…—–-]*){2,}",
-        "Меня зовут Неона, ",
-        message,
+    # Принимаем естественные варианты представления. Для эксперимента с юмором
+    # Неона может сначала дать короткий крючок, а затем представиться.
+    first_part = message[:600]
+    identity_patterns = (
+        r"(?i)\bменя\s+зовут\s+неона\b",
+        r"(?i)\bя\s*[—–-]?\s*неона\b",
+        r"(?i)\bнеона\s*[—–-]\s*секретарь[\s‑-]*референт\b",
+    )
+    has_identity = any(
+        re.search(pattern, first_part)
+        for pattern in identity_patterns
     )
 
-    has_identity = identity.lower() in message[:350].lower()
     if not has_identity:
-        # Если есть другое короткое представление как помощницы, нормализуем его.
-        helper_pattern = (
-            rf"(?i)меня\s+зовут\s+неона,?\s+я\s+помощница\s+"
-            rf"{re.escape(str(owner_name).strip())}[.]?"
-        )
-        message, replacements = re.subn(
-            helper_pattern,
-            identity,
+        # Если модель забыла представиться, вставляем утверждённое представление
+        # после приветствия. Это страховка, а не требование к стилю.
+        greeting_match = re.match(
+            r"^(.{1,140}?!)(?:\s+)(.*)$",
             message,
-            count=1,
+            flags=re.DOTALL,
         )
-
-        if replacements == 0:
-            greeting_match = re.match(
-                r"^(.{1,140}?[!?.])\s*(.*)$",
-                message,
-                flags=re.DOTALL,
-            )
-            if greeting_match:
-                greeting = greeting_match.group(1).strip()
-                remainder = greeting_match.group(2).strip()
-                message = f"{greeting} {identity}"
-                if remainder:
-                    message += f" {remainder}"
-            else:
-                message = f"{identity} {message}".strip()
+        if greeting_match:
+            greeting = greeting_match.group(1).strip()
+            remainder = greeting_match.group(2).strip()
+            message = f"{greeting} {identity}"
+            if remainder:
+                message += f" {remainder}"
+        else:
+            message = f"{identity} {message}".strip()
 
     message = re.sub(r"\s{2,}", " ", message).strip()
     return message[:1000]
-
 
 def generate_neona_first_message(
     owner_name,
@@ -4979,6 +4995,63 @@ if received_hash:
             mood_of_the_day = daily_moods[mood_index]
     
             st.info(f"Настрой дня: {mood_of_the_day}")
+
+            # Ежедневный мост Стагирит → Неония запускаем уже на «Моём дне».
+            # Поэтому первая команда дня (например, «Мысль дня») никак не влияет
+            # на подготовку кандидатов по активной недельной цели встреч.
+            daily_stagirite_candidates = ensure_weekly_candidates_for_neona(
+                telegram_id,
+                prepare_candidates_fn=prepare_candidates_for_stagirite,
+            )
+            if (
+                isinstance(daily_stagirite_candidates, dict)
+                and daily_stagirite_candidates.get("active")
+            ):
+                daily_ids = [
+                    int(value)
+                    for value in (
+                        daily_stagirite_candidates.get("candidate_ids", [])
+                        or []
+                    )
+                    if str(value).lstrip("-").isdigit()
+                ]
+                approved_ids = {
+                    int(value)
+                    for value in (
+                        daily_stagirite_candidates.get("approved_ids", [])
+                        or []
+                    )
+                    if str(value).lstrip("-").isdigit()
+                }
+                new_today = [
+                    value for value in daily_ids
+                    if value not in approved_ids
+                ]
+                if new_today:
+                    st.success(
+                        f"🎯 Стагирит подготовил на сегодня новых кандидатов: "
+                        f"{len(new_today)}. Откройте «🤖 Агенты → Неона»."
+                    )
+                elif daily_ids:
+                    st.caption(
+                        "🎯 Сегодняшняя пятёрка Стагирита уже передана Неоне."
+                    )
+                else:
+                    daily_message = str(
+                        daily_stagirite_candidates.get("message") or ""
+                    ).strip()
+                    st.info(
+                        daily_message
+                        or "🎯 Сегодня новых пригодных активных контактов пока нет."
+                    )
+            elif isinstance(daily_stagirite_candidates, dict):
+                daily_message = str(
+                    daily_stagirite_candidates.get("message") or ""
+                ).strip()
+                if daily_message:
+                    st.caption(
+                        "🎯 Стагирит: " + daily_message
+                    )
 
             candidates_key = (
                 f"neonia_candidates_{telegram_id}"
@@ -7852,9 +7925,8 @@ if received_hash:
                         sent_log = []
 
                     # Старые черновики сохраняются в рабочем пространстве.
-                    # После изменения регламента они не должны оставаться
-                    # утверждёнными: помечаем их как устаревшие и предлагаем
-                    # владельцу сформировать новый текст.
+                    # Проверка теперь только советует: она не снимает утверждение
+                    # владельца и не заставляет генерировать текст заново.
                     drafts_changed = False
                     for selected_contact_id in selected_ids:
                         existing_draft = drafts.get(
@@ -7866,27 +7938,28 @@ if received_hash:
                         if existing_draft.get("sent"):
                             continue
 
-                        rule_errors = validate_neona_first_message(
+                        rule_notes = validate_neona_first_message(
                             existing_draft.get("message", ""),
                             first_name,
                         )
-                        if rule_errors:
-                            needs_update = (
-                                bool(existing_draft.get("approved"))
-                                or existing_draft.get("status")
-                                != "Требуется сформировать заново"
-                                or existing_draft.get("validation_errors")
-                                != rule_errors
+                        changed = False
+                        if existing_draft.get("validation_errors") != rule_notes:
+                            existing_draft["validation_errors"] = rule_notes
+                            changed = True
+
+                        if existing_draft.get("status") in {
+                            "Требуется сформировать заново",
+                            "Нужно исправить перед утверждением",
+                        }:
+                            existing_draft["status"] = (
+                                "Черновик готов к решению владельца"
                             )
-                            if needs_update:
-                                existing_draft["approved"] = False
-                                existing_draft["status"] = (
-                                    "Требуется сформировать заново"
-                                )
-                                existing_draft["validation_errors"] = rule_errors
-                                drafts[int(selected_contact_id)] = existing_draft
-                                drafts.pop(str(selected_contact_id), None)
-                                drafts_changed = True
+                            changed = True
+
+                        if changed:
+                            drafts[int(selected_contact_id)] = existing_draft
+                            drafts.pop(str(selected_contact_id), None)
+                            drafts_changed = True
 
                     if drafts_changed:
                         st.session_state[neona_drafts_key] = drafts
@@ -8722,11 +8795,10 @@ if received_hash:
                                         if current_rule_errors and not draft.get(
                                             "sent"
                                         ):
-                                            st.error(
-                                                "Этот текст создан по старым правилам "
-                                                "или нарушает новый регламент. "
-                                                "Нажмите «Сформировать заново» либо "
-                                                "исправьте текст вручную."
+                                            st.caption(
+                                                "💡 Редактор Неоны заметил несколько "
+                                                "моментов. Это подсказки, а не запрет: "
+                                                "окончательное решение остаётся за вами."
                                             )
 
                                         action_columns = st.columns(4)
@@ -8858,25 +8930,15 @@ if received_hash:
                                                 )
                                                 draft["approved"] = bool(
                                                     approve_message
-                                                    and not validation_errors
                                                 )
                                                 draft["validation_errors"] = (
                                                     validation_errors
                                                 )
-                                                if approve_message and validation_errors:
-                                                    draft["status"] = (
-                                                        "Нужно исправить перед утверждением"
-                                                    )
-                                                    st.error(
-                                                        "Утвердить этот текст нельзя: "
-                                                        + "; ".join(validation_errors)
-                                                    )
-                                                else:
-                                                    draft["status"] = (
-                                                        "Первое сообщение утверждено"
-                                                        if approve_message
-                                                        else "Сообщение отредактировано"
-                                                    )
+                                                draft["status"] = (
+                                                    "Первое сообщение утверждено"
+                                                    if approve_message
+                                                    else "Сообщение отредактировано"
+                                                )
                                                 drafts[contact_id] = draft
                                                 drafts.pop(str(contact_id), None)
                                                 st.session_state[
@@ -8915,42 +8977,17 @@ if received_hash:
                                                     telegram_id,
                                                     force=True,
                                                 )
-                                                if not (
-                                                    approve_message
-                                                    and validation_errors
-                                                ):
-                                                    st.rerun()
+                                                st.rerun()
 
-                                        # Ошибка регламента всегда важнее старого
-                                        # сохранённого статуса «утверждено».
+                                        # Редакторские подсказки не отменяют решение владельца.
                                         if current_rule_errors:
-                                            if draft.get("approved"):
-                                                draft["approved"] = False
-                                                draft["status"] = (
-                                                    "Нужно исправить перед утверждением"
-                                                )
-                                                draft["validation_errors"] = (
-                                                    current_rule_errors
-                                                )
-                                                drafts[contact_id] = draft
-                                                drafts.pop(str(contact_id), None)
-                                                st.session_state[
-                                                    neona_drafts_key
-                                                ] = drafts
-                                                persist_workspace_if_changed(
-                                                    telegram_id,
-                                                    force=True,
-                                                )
-                                            st.warning(
-                                                "Черновик пока не утверждён. "
-                                                "Исправьте текст или сформируйте его заново."
-                                            )
                                             with st.expander(
-                                                "Почему текст пока не утверждается"
+                                                "💡 Советы редактора — необязательно"
                                             ):
                                                 for rule_error in current_rule_errors:
                                                     st.write(f"• {rule_error}")
-                                        elif draft.get("approved"):
+
+                                        if draft.get("approved"):
                                             st.success(
                                                 "✅ Сообщение утверждено владельцем"
                                             )
@@ -8987,10 +9024,7 @@ if received_hash:
                                                     "после нового входящего сообщения "
                                                     "Неона продолжает диалог сама."
                                                 )
-                                        elif (
-                                            draft.get("approved")
-                                            and not current_rule_errors
-                                        ):
+                                        elif draft.get("approved"):
                                             sent_today = (
                                                 count_first_messages_sent_today(
                                                     sent_log

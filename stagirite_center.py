@@ -248,7 +248,7 @@ def _load_tasks(owner_id: int) -> tuple[list[dict[str, Any]], bool]:
                     "owner_telegram_id": f"eq.{int(owner_id)}",
                     "select": "*",
                     "order": "created_at.desc",
-                    "limit": 30,
+                    "limit": 100,
                 },
                 timeout=20,
             )
@@ -307,7 +307,7 @@ def _save_task(owner_id: int, task: dict[str, Any]) -> bool:
     fallback = list(st.session_state.get(_task_key(owner_id), []))
     payload["id"] = f"local-{hashlib.sha1((payload['assignment'] + now).encode()).hexdigest()[:12]}"
     fallback.insert(0, payload)
-    st.session_state[_task_key(owner_id)] = fallback[:30]
+    st.session_state[_task_key(owner_id)] = fallback[:100]
     return False
 
 
