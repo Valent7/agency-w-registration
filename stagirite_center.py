@@ -3835,6 +3835,7 @@ def _telegram_publication_hash(
     text: str,
     image: Any | None,
     chat_ids: list[int],
+    video: Any | None = None,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(str(text or "").strip().encode("utf-8"))
@@ -3842,10 +3843,167 @@ def _telegram_publication_hash(
     raw = _artist_image_bytes(image) if image is not None else b""
     digest.update(raw)
     digest.update(b"\0")
+    raw_video = _artist_image_bytes(video) if video is not None else b""
+    digest.update(raw_video)
+    digest.update(b"\0")
     digest.update(
         ",".join(str(int(x)) for x in sorted(set(chat_ids))).encode("ascii")
     )
     return digest.hexdigest()
+
+
+MAX_PUBLISHER_VIDEO_BYTES = 49 * 1024 * 1024
+
+
+def _prepare_uploaded_video(
+    uploaded_file: Any,
+    *,
+    max_bytes: int = MAX_PUBLISHER_VIDEO_BYTES,
+) -> dict[str, Any]:
+    """
+    Проверяет готовый ролик для публикации через Telegram Publisher.
+
+    На этом этапе видео НЕ отправляется во внешний ИИ и НЕ перекодируется.
+    Для предсказуемой публикации принимаем только MP4 до 49 МБ.
+    """
+    if uploaded_file is None:
+        return {"ok": False, "error": "Файл не выбран."}
+
+    try:
+        raw = uploaded_file.getvalue()
+    except Exception:
+        try:
+            raw = bytes(uploaded_file)
+        except Exception:
+            raw = b""
+
+    if not raw:
+        return {"ok": False, "error": "Не удалось прочитать видео."}
+
+    name = str(getattr(uploaded_file, "name", "") or "").strip()
+    mime_type = str(getattr(uploaded_file, "type", "") or "video/mp4").strip()
+
+    if not name.lower().endswith(".mp4"):
+        return {
+            "ok": False,
+            "error": "Для отправки в Telegram сейчас используйте ролик в формате MP4.",
+        }
+
+    if len(raw) > int(max_bytes):
+        return {
+            "ok": False,
+            "error": (
+                "Ролик слишком большой для текущего Publisher. "
+                "Максимум 49 МБ. Используйте короткую/сжатую MP4-версию."
+            ),
+        }
+
+    return {
+        "ok": True,
+        "video_bytes": raw,
+        "file_name": name or "agency_w_video.mp4",
+        "mime_type": mime_type or "video/mp4",
+        "size_bytes": len(raw),
+        "size_mb": round(len(raw) / (1024 * 1024), 1),
+    }
+
+
+def _generate_video_announcement(
+    ask_openai_fn,
+    ask_claude_fn,
+    *,
+    owner_name: str,
+    assignment: str,
+    current_text: str,
+    video_file_name: str,
+    director_note: str = "",
+) -> dict[str, Any]:
+    """Стагирит координирует, а готовый анонс пишет Мастер контента."""
+    note = str(director_note or "").strip()
+    context_text = str(current_text or "").strip()
+
+    system_prompt = f"""
+Ты — Мастер контента Агентства W.
+Стагирит только координирует задачу и передал её тебе. ТЕКСТ ПИШЕШЬ ТЫ.
+
+Нужно написать короткий живой анонс к готовому видеоролику для публикации
+в Telegram-группах и каналах.
+
+Имя владельца кабинета: {owner_name or 'не указано'}
+Исходное поручение Директора:
+{str(assignment or '').strip() or 'не указано'}
+
+Имя видеофайла:
+{str(video_file_name or '').strip() or 'ролик'}
+
+Контекст текущего материала, если он есть:
+{context_text[:5000] or 'нет дополнительного текста'}
+
+Что Директор особенно просит учесть:
+{note or 'дополнительных указаний нет'}
+
+ПРАВИЛА:
+- начни с человеческого смысла/сцены или сильного вопроса, а не с перечня функций;
+- 4–8 коротких строк, удобно читать в Telegram;
+- объясни, зачем человеку посмотреть ролик;
+- если в исходных данных есть конкретные факты — используй их, но ничего не выдумывай;
+- не пиши техническим отчётом и не перечисляй функции сухим списком;
+- не обещай доход, гарантированный результат или несуществующие возможности;
+- не пиши, что Стагирит создал анонс: Стагирит управляет, Мастер контента пишет;
+- допустим один лёгкий интригующий штрих;
+- без хэштегов, если Директор их отдельно не попросил;
+- верни ТОЛЬКО готовый анонс, без комментариев и заголовков вроде «Вариант».
+""".strip()
+
+    text = ""
+    engine = ""
+    model = ""
+    errors: list[str] = []
+
+    if callable(ask_claude_fn):
+        try:
+            response = ask_claude_fn(
+                system_prompt,
+                note or str(assignment or "").strip(),
+                max_tokens=1200,
+            )
+            if (
+                isinstance(response, dict)
+                and response.get("ok") is True
+                and str(response.get("text") or "").strip()
+            ):
+                text = str(response.get("text") or "").strip()
+                engine = "master_content"
+                model = str(response.get("model") or "")
+            elif isinstance(response, dict) and response.get("error"):
+                errors.append("Claude: " + str(response.get("error")))
+        except Exception as exc:
+            errors.append(f"Claude: {type(exc).__name__}: {exc}")
+
+    if not text and callable(ask_openai_fn):
+        try:
+            raw = ask_openai_fn(
+                system_prompt,
+                note or str(assignment or "").strip(),
+                uploaded_files=[],
+                use_web_search=False,
+            )
+            candidate = str(raw or "").strip()
+            if candidate and not candidate.startswith("Ошибка OpenAI:"):
+                text = candidate
+                engine = "reserve"
+            elif candidate:
+                errors.append(candidate)
+        except Exception as exc:
+            errors.append(f"OpenAI: {type(exc).__name__}: {exc}")
+
+    return {
+        "ok": bool(text),
+        "text": text,
+        "engine": engine,
+        "model": model,
+        "error": "; ".join(errors) if errors else "",
+    }
 
 
 def _create_artist_direction(
@@ -5537,11 +5695,16 @@ def _render_result(
         draft_key = f"stagirite_content_draft_{task_id}"
         image_state_key = f"stagirite_artist_image_{task_id}"
         image_meta_key = f"stagirite_artist_meta_{task_id}"
+        video_state_key = f"stagirite_video_{task_id}"
+        video_meta_key = f"stagirite_video_meta_{task_id}"
         has_current_image = bool(
             st.session_state.get(image_state_key)
         )
         current_image_for_publish = st.session_state.get(
             image_state_key
+        )
+        has_current_video = bool(
+            st.session_state.get(video_state_key)
         )
         telegram_destinations: list[dict[str, Any]] = []
         if callable(list_publisher_destinations):
@@ -5921,29 +6084,42 @@ def _render_result(
                 "Промт Художнику он подготовит сам."
             )
 
-        st.markdown("### 🎨 Художник-иллюстратор")
+        st.markdown("### 📎 Готовые медиа")
         st.caption(
-            "Вам не нужно придумывать промт. Стагирит сам читает текст, "
-            "находит сцену, где изменилась жизнь человека, и ставит "
-            "Художнику профессиональную задачу."
+            "Можно загрузить свою картинку или готовый MP4-ролик. "
+            "Художник отвечает только за иллюстрации; анонс к ролику пишет "
+            "Мастер контента."
         )
 
         # --------------------------------------------------------
-        # Запасной путь: Директор может принести готовую картинку.
-        # Художник остаётся на месте; загрузка ничего не отключает.
+        # Директор может принести готовую картинку или ролик.
         # --------------------------------------------------------
         upload_key = f"stagirite_artist_upload_{task_id}"
-        uploaded_illustration = st.file_uploader(
-            "📤 Загрузить свою иллюстрацию",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=False,
-            key=upload_key,
-            help=(
-                "Если подходящая картинка уже найдена или создана "
-                "в другом сервисе, загрузите её сюда. "
-                "Поддерживаются PNG, JPG/JPEG и WEBP до 12 МБ."
-            ),
-        )
+        video_upload_key = f"stagirite_video_upload_{task_id}"
+        media_upload_cols = st.columns(2)
+        with media_upload_cols[0]:
+            uploaded_illustration = st.file_uploader(
+                "🖼️ Загрузить картинку",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=False,
+                key=upload_key,
+                help=(
+                    "Если подходящая картинка уже найдена или создана "
+                    "в другом сервисе, загрузите её сюда. "
+                    "Поддерживаются PNG, JPG/JPEG и WEBP до 12 МБ."
+                ),
+            )
+        with media_upload_cols[1]:
+            uploaded_video = st.file_uploader(
+                "🎬 Загрузить ролик",
+                type=["mp4"],
+                accept_multiple_files=False,
+                key=video_upload_key,
+                help=(
+                    "Готовый MP4-ролик для публикации в ваших Telegram-площадках. "
+                    "Текущий лимит — 49 МБ."
+                ),
+            )
 
         if uploaded_illustration is not None:
             try:
@@ -6018,6 +6194,56 @@ def _render_result(
                         "Теперь её можно публиковать вместе с постом."
                     )
                     st.rerun()
+
+        if uploaded_video is not None:
+            prepared_video = _prepare_uploaded_video(uploaded_video)
+            if prepared_video.get("ok"):
+                st.video(uploaded_video)
+                st.caption(
+                    "🎬 "
+                    + str(prepared_video.get("file_name") or "Ролик")
+                    + " · "
+                    + str(prepared_video.get("size_mb") or 0)
+                    + " МБ"
+                )
+                if st.button(
+                    "✅ Использовать этот ролик",
+                    key=f"stagirite_video_use_upload_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    st.session_state[video_state_key] = prepared_video["video_bytes"]
+                    st.session_state[video_meta_key] = {
+                        "source": "uploaded",
+                        "file_name": str(prepared_video.get("file_name") or "agency_w_video.mp4"),
+                        "mime_type": str(prepared_video.get("mime_type") or "video/mp4"),
+                        "size_bytes": int(prepared_video.get("size_bytes") or 0),
+                        "size_mb": float(prepared_video.get("size_mb") or 0),
+                        "created_at": datetime.now(UTC).isoformat(),
+                    }
+                    updated = dict(result)
+                    for key in (
+                        "video_announcement",
+                        "video_announcement_approved",
+                        "video_announcement_approved_at",
+                        "video_announcement_engine",
+                        "video_telegram_published_at",
+                        "video_telegram_published_hash",
+                        "video_telegram_published_count",
+                        "video_telegram_publish_results",
+                    ):
+                        updated.pop(key, None)
+                    _update_task(owner_id, task_id, {"result": updated})
+                    st.success("Ролик принят. Теперь Мастер контента может написать к нему анонс.")
+                    st.rerun()
+            else:
+                st.error(str(prepared_video.get("error") or "Не удалось подготовить ролик."))
+
+        st.markdown("### 🎨 Художник-иллюстратор")
+        st.caption(
+            "Если нужна новая иллюстрация, вам не надо придумывать промт. "
+            "Стагирит как арт-директор ставит Художнику задачу по смыслу текста."
+        )
 
         change_key = f"stagirite_artist_change_{task_id}"
 
@@ -6492,6 +6718,242 @@ def _render_result(
             "Внутренняя публикация и Telegram-доставка "
             "по-прежнему считаются разными каналами."
         )
+
+        # --------------------------------------------------------
+        # Готовый ролик: Стагирит управляет процессом,
+        # Мастер контента пишет анонс, Publisher отправляет в Telegram.
+        # --------------------------------------------------------
+        current_video = st.session_state.get(video_state_key)
+        video_meta = st.session_state.get(video_meta_key, {})
+        if not isinstance(video_meta, dict):
+            video_meta = {}
+
+        if current_video:
+            st.divider()
+            st.markdown("### 🎬 Ролик для площадок")
+            st.caption(
+                "Стагирит здесь только управляет процессом. "
+                "Анонс к ролику пишет Мастер контента."
+            )
+            st.video(current_video)
+            video_name = str(
+                video_meta.get("file_name") or "agency_w_video.mp4"
+            ).strip()
+            video_size_mb = float(video_meta.get("size_mb") or 0)
+            st.caption(f"{video_name} · {video_size_mb:.1f} МБ")
+
+            director_video_note = st.text_area(
+                "Что Мастеру контента важно знать о ролике — необязательно",
+                placeholder=(
+                    "Например: это короткий Reels об Агентстве W; "
+                    "главный смысл — ИИ-команда возвращает человеку время."
+                ),
+                key=f"stagirite_video_note_{task_id}",
+                height=90,
+            )
+
+            if st.button(
+                "✍️ Мастер контента: написать анонс",
+                key=f"stagirite_video_make_announcement_{task_id}",
+                use_container_width=True,
+                type="primary",
+                disabled=(not callable(ask_claude_fn) and not callable(ask_openai_fn)),
+            ):
+                with st.spinner(
+                    "Стагирит передал задачу Мастеру контента. Готовим анонс..."
+                ):
+                    announcement_pack = _generate_video_announcement(
+                        ask_openai_fn,
+                        ask_claude_fn,
+                        owner_name=owner_name,
+                        assignment=str(task.get("assignment") or ""),
+                        current_text=str(draft or ""),
+                        video_file_name=video_name,
+                        director_note=str(director_video_note or ""),
+                    )
+                if announcement_pack.get("ok"):
+                    announcement_text = str(
+                        announcement_pack.get("text") or ""
+                    ).strip()
+                    updated = dict(result)
+                    updated["video_announcement"] = announcement_text
+                    updated["video_announcement_approved"] = False
+                    updated["video_announcement_engine"] = str(
+                        announcement_pack.get("engine") or ""
+                    )
+                    updated["video_announcement_model"] = str(
+                        announcement_pack.get("model") or ""
+                    )
+                    updated.pop("video_announcement_approved_at", None)
+                    updated.pop("video_telegram_published_at", None)
+                    updated.pop("video_telegram_published_hash", None)
+                    updated.pop("video_telegram_published_count", None)
+                    updated.pop("video_telegram_publish_results", None)
+                    _update_task(owner_id, task_id, {"result": updated})
+                    st.session_state[
+                        f"stagirite_video_announcement_pending_{task_id}"
+                    ] = announcement_text
+                    st.rerun()
+                else:
+                    st.error(
+                        "Мастер контента не смог подготовить анонс. "
+                        + str(announcement_pack.get("error") or "Попробуйте ещё раз.")
+                    )
+
+            video_announcement_key = f"stagirite_video_announcement_{task_id}"
+            pending_video_announcement = st.session_state.pop(
+                f"stagirite_video_announcement_pending_{task_id}",
+                None,
+            )
+            saved_video_announcement = str(
+                result.get("video_announcement") or ""
+            ).strip()
+            if pending_video_announcement is not None:
+                st.session_state[video_announcement_key] = str(
+                    pending_video_announcement
+                )
+            elif video_announcement_key not in st.session_state:
+                st.session_state[video_announcement_key] = saved_video_announcement
+
+            video_announcement = st.text_area(
+                "Анонс к ролику",
+                key=video_announcement_key,
+                height=180,
+                placeholder=(
+                    "Нажмите «Мастер контента: написать анонс» "
+                    "или напишите свой текст."
+                ),
+            )
+
+            announcement_approved = bool(
+                result.get("video_announcement_approved")
+            ) and bool(saved_video_announcement) and (
+                str(video_announcement or "").strip() == saved_video_announcement
+            )
+
+            if bool(result.get("video_announcement_approved")) and not announcement_approved:
+                st.warning(
+                    "Анонс был изменён после утверждения. "
+                    "Утвердите новую версию перед публикацией."
+                )
+
+            if st.button(
+                "✅ Утвердить анонс к ролику",
+                key=f"stagirite_video_approve_announcement_{task_id}",
+                use_container_width=True,
+                disabled=not str(video_announcement or "").strip(),
+            ):
+                clean_announcement = str(video_announcement or "").strip()
+                updated = dict(result)
+                updated["video_announcement"] = clean_announcement
+                updated["video_announcement_approved"] = True
+                updated["video_announcement_approved_at"] = datetime.now(UTC).isoformat()
+                updated.pop("video_telegram_published_at", None)
+                updated.pop("video_telegram_published_hash", None)
+                updated.pop("video_telegram_published_count", None)
+                updated.pop("video_telegram_publish_results", None)
+                _update_task(owner_id, task_id, {"result": updated})
+                st.rerun()
+
+            if announcement_approved:
+                st.success("✅ Анонс к ролику утверждён владельцем.")
+
+            if not telegram_destinations:
+                st.info(
+                    "Сначала подключите Telegram-группы или каналы в разделе "
+                    "«Команда → Мои площадки»."
+                )
+            else:
+                video_dest_by_id = {
+                    int(item.get("chat_id")): item
+                    for item in telegram_destinations
+                    if item.get("chat_id") is not None
+                }
+                all_video_destination_ids = list(video_dest_by_id.keys())
+                selected_video_destination_ids = st.multiselect(
+                    "Куда отправить ролик",
+                    options=all_video_destination_ids,
+                    default=all_video_destination_ids,
+                    format_func=lambda chat_id: str(
+                        video_dest_by_id.get(chat_id, {}).get("chat_title")
+                        or "Telegram-площадка"
+                    ),
+                    key=f"stagirite_video_destinations_{task_id}",
+                )
+
+                selected_video_destination_ids = [
+                    int(x) for x in selected_video_destination_ids
+                ]
+                clean_video_announcement = str(
+                    video_announcement or ""
+                ).strip()
+                video_tg_hash = _telegram_publication_hash(
+                    clean_video_announcement,
+                    None,
+                    selected_video_destination_ids,
+                    video=current_video,
+                )
+                video_already_published = bool(
+                    str(result.get("video_telegram_published_hash") or "")
+                    == video_tg_hash
+                )
+
+                if video_already_published:
+                    st.success(
+                        "📡 Telegram уже принял эту версию ролика: "
+                        f"{int(result.get('video_telegram_published_count') or 0)} "
+                        "площадк(а/и)."
+                    )
+                elif st.button(
+                    (
+                        "📡 Отправить ролик с анонсом одним махом "
+                        f"({len(selected_video_destination_ids)})"
+                    ),
+                    key=f"stagirite_video_publish_telegram_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                    disabled=(
+                        publish_to_publisher_destinations is None
+                        or not announcement_approved
+                        or not selected_video_destination_ids
+                    ),
+                ):
+                    try:
+                        with st.spinner(
+                            "Publisher отправляет ролик в выбранные Telegram-площадки..."
+                        ):
+                            tg_result = publish_to_publisher_destinations(
+                                owner_id,
+                                clean_video_announcement,
+                                video_bytes=current_video,
+                                video_file_name=video_name,
+                                video_mime_type=str(
+                                    video_meta.get("mime_type") or "video/mp4"
+                                ),
+                                destination_ids=selected_video_destination_ids,
+                            )
+                        updated = dict(result)
+                        updated["video_telegram_published_at"] = datetime.now(UTC).isoformat()
+                        updated["video_telegram_published_hash"] = video_tg_hash
+                        updated["video_telegram_published_count"] = int(
+                            tg_result.get("accepted") or 0
+                        )
+                        updated["video_telegram_publish_results"] = (
+                            tg_result.get("results") or []
+                        )
+                        _update_task(owner_id, task_id, {"result": updated})
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось отправить ролик в Telegram-площадки. "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+            st.caption(
+                "Ролик хранится только в текущей сессии до публикации. "
+                "Мастер контента получает текстовый контекст и ваше описание, "
+                "сам видеофайл в ИИ не отправляется."
+            )
 
     general_answer = str(
         result.get("general_answer")

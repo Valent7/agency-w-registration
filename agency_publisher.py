@@ -474,6 +474,34 @@ def _image_bytes(value: Any) -> bytes:
     return b""
 
 
+def _video_bytes(value: Any) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if hasattr(value, "getvalue"):
+        data = value.getvalue()
+        if isinstance(data, bytes):
+            return data
+    try:
+        data = bytes(value)
+        if data:
+            return data
+    except Exception:
+        pass
+    return b""
+
+
+def _safe_video_file_name(file_name: str) -> str:
+    clean = str(file_name or "").strip()
+    if not clean:
+        return "agency_w_video.mp4"
+    # Для sendVideo используем MP4. Имя сохраняем только как имя файла.
+    if not clean.lower().endswith(".mp4"):
+        clean += ".mp4"
+    return clean
+
+
 def _publication_parts(text: str) -> tuple[str, str]:
     """
     Возвращает подпись к изображению и, при необходимости,
@@ -532,6 +560,65 @@ def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, 
     return result if isinstance(result, dict) else {}
 
 
+def _send_video(
+    chat_id: int,
+    video_bytes: Any,
+    caption: str = "",
+    *,
+    file_name: str = "agency_w_video.mp4",
+    mime_type: str = "video/mp4",
+) -> dict[str, Any]:
+    raw = _video_bytes(video_bytes)
+    if not raw:
+        raise ValueError("Видео пустое.")
+
+    token = _bot_token()
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/sendVideo",
+        data={
+            "chat_id": str(int(chat_id)),
+            "caption": str(caption or "")[:1000],
+            "supports_streaming": "true",
+        },
+        files={
+            "video": (
+                _safe_video_file_name(file_name),
+                raw,
+                str(mime_type or "video/mp4"),
+            )
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        description = str(data.get("description") or "") if isinstance(data, dict) else ""
+        raise RuntimeError(description or "Telegram не принял видео.")
+    result = data.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _send_video_by_file_id(
+    chat_id: int,
+    file_id: str,
+    caption: str = "",
+) -> dict[str, Any]:
+    clean_file_id = str(file_id or "").strip()
+    if not clean_file_id:
+        raise ValueError("Telegram file_id видео пустой.")
+    result = _telegram_call(
+        "sendVideo",
+        payload={
+            "chat_id": int(chat_id),
+            "video": clean_file_id,
+            "caption": str(caption or "")[:1000],
+            "supports_streaming": True,
+        },
+        timeout=45,
+    )
+    return result if isinstance(result, dict) else {}
+
+
 def _send_text_chunks(
     chat_id: int,
     text: str,
@@ -566,6 +653,9 @@ def publish_to_publisher_destinations(
     text: str,
     *,
     image_bytes: Any | None = None,
+    video_bytes: Any | None = None,
+    video_file_name: str = "agency_w_video.mp4",
+    video_mime_type: str = "video/mp4",
     destination_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """
@@ -577,7 +667,10 @@ def publish_to_publisher_destinations(
     owner_telegram_id = int(owner_telegram_id)
     clean_text = str(text or "").strip()
     raw_image = _image_bytes(image_bytes) if image_bytes is not None else b""
-    if not clean_text and not raw_image:
+    raw_video = _video_bytes(video_bytes) if video_bytes is not None else b""
+    if raw_image and raw_video:
+        raise ValueError("В одной публикации выберите либо изображение, либо видео.")
+    if not clean_text and not raw_image and not raw_video:
         raise ValueError("Публикация пуста.")
 
     destinations = list_publisher_destinations(owner_telegram_id)
@@ -588,6 +681,11 @@ def publish_to_publisher_destinations(
     ]
 
     results: list[dict[str, Any]] = []
+    # После первой загрузки Telegram возвращает file_id. Для остальных площадок
+    # того же владельца повторно используем его — это заметно ускоряет массовую
+    # публикацию большого ролика и не гоняет один и тот же файл по сети N раз.
+    reusable_video_file_id: str | None = None
+
     for item in destinations:
         title = str(item.get("chat_title") or "Telegram-площадка").strip()
         try:
@@ -601,6 +699,7 @@ def publish_to_publisher_destinations(
                 raise RuntimeError("Площадка или права Publisher больше не подтверждены.")
 
             photo_message_id: int | None = None
+            video_message_id: int | None = None
             text_to_send = clean_text
 
             if raw_image:
@@ -615,6 +714,35 @@ def publish_to_publisher_destinations(
                 except (TypeError, ValueError):
                     photo_message_id = None
 
+            if raw_video:
+                caption, text_to_send = _publication_parts(clean_text)
+                if reusable_video_file_id:
+                    video_result = _send_video_by_file_id(
+                        chat_id,
+                        reusable_video_file_id,
+                        caption=caption,
+                    )
+                else:
+                    video_result = _send_video(
+                        chat_id,
+                        raw_video,
+                        caption=caption,
+                        file_name=video_file_name,
+                        mime_type=video_mime_type,
+                    )
+                    video_info = (
+                        video_result.get("video")
+                        if isinstance(video_result.get("video"), dict)
+                        else {}
+                    )
+                    reusable_video_file_id = str(
+                        video_info.get("file_id") or ""
+                    ).strip() or None
+                try:
+                    video_message_id = int(video_result.get("message_id"))
+                except (TypeError, ValueError):
+                    video_message_id = None
+
             text_message_ids = []
             if text_to_send:
                 text_message_ids = _send_text_chunks(
@@ -628,6 +756,7 @@ def publish_to_publisher_destinations(
                 "ok": True,
                 "status": "accepted_by_telegram",
                 "photo_message_id": photo_message_id,
+                "video_message_id": video_message_id,
                 "text_message_ids": text_message_ids,
             })
         except Exception as exc:
