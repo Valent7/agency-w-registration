@@ -18,11 +18,13 @@ try:
         attach_structure_image_to_published_message,
         publish_structure_material,
         publish_structure_message,
+        publish_structure_video,
         structure_member_ids,
     )
 except ImportError:
     publish_structure_message = None
     publish_structure_material = None
+    publish_structure_video = None
     attach_structure_image_to_published_message = None
 
     def structure_member_ids(owner_telegram_id: int) -> list[int]:
@@ -6227,6 +6229,10 @@ def _render_result(
                         "video_announcement_approved",
                         "video_announcement_approved_at",
                         "video_announcement_engine",
+                        "video_structure_published_at",
+                        "video_structure_published_hash",
+                        "video_structure_published_count",
+                        "video_structure_media_id",
                         "video_telegram_published_at",
                         "video_telegram_published_hash",
                         "video_telegram_published_count",
@@ -6721,7 +6727,8 @@ def _render_result(
 
         # --------------------------------------------------------
         # Готовый ролик: Стагирит управляет процессом,
-        # Мастер контента пишет анонс, Publisher отправляет в Telegram.
+        # Мастер контента пишет анонс. После утверждения ролик можно
+        # отправить и внутренней структуре, и во внешние Telegram-площадки.
         # --------------------------------------------------------
         current_video = st.session_state.get(video_state_key)
         video_meta = st.session_state.get(video_meta_key, {})
@@ -6730,10 +6737,11 @@ def _render_result(
 
         if current_video:
             st.divider()
-            st.markdown("### 🎬 Ролик для площадок")
+            st.markdown("### 🎬 Ролик для структуры и площадок")
             st.caption(
                 "Стагирит здесь только управляет процессом. "
-                "Анонс к ролику пишет Мастер контента."
+                "Анонс к ролику пишет Мастер контента. После утверждения ролик "
+                "можно отправить партнёрам внутри Агентства и во внешние Telegram-площадки."
             )
             st.video(current_video)
             video_name = str(
@@ -6785,6 +6793,10 @@ def _render_result(
                         announcement_pack.get("model") or ""
                     )
                     updated.pop("video_announcement_approved_at", None)
+                    updated.pop("video_structure_published_at", None)
+                    updated.pop("video_structure_published_hash", None)
+                    updated.pop("video_structure_published_count", None)
+                    updated.pop("video_structure_media_id", None)
                     updated.pop("video_telegram_published_at", None)
                     updated.pop("video_telegram_published_hash", None)
                     updated.pop("video_telegram_published_count", None)
@@ -6848,6 +6860,10 @@ def _render_result(
                 updated["video_announcement"] = clean_announcement
                 updated["video_announcement_approved"] = True
                 updated["video_announcement_approved_at"] = datetime.now(UTC).isoformat()
+                updated.pop("video_structure_published_at", None)
+                updated.pop("video_structure_published_hash", None)
+                updated.pop("video_structure_published_count", None)
+                updated.pop("video_structure_media_id", None)
                 updated.pop("video_telegram_published_at", None)
                 updated.pop("video_telegram_published_hash", None)
                 updated.pop("video_telegram_published_count", None)
@@ -6857,6 +6873,88 @@ def _render_result(
 
             if announcement_approved:
                 st.success("✅ Анонс к ролику утверждён владельцем.")
+
+            clean_video_announcement = str(
+                video_announcement or ""
+            ).strip()
+
+            # ----------------------------------------------------
+            # Внутренняя структура Агентства W.
+            # Ролик + анонс получают все нижестоящие партнёры.
+            # ----------------------------------------------------
+            video_structure_ids = [
+                int(x) for x in structure_member_ids(owner_id)
+                if int(x) != int(owner_id)
+            ]
+            video_structure_hash = _telegram_publication_hash(
+                clean_video_announcement,
+                None,
+                video_structure_ids,
+                video=current_video,
+            ) if video_structure_ids else ""
+            video_structure_already = bool(
+                video_structure_hash
+                and str(result.get("video_structure_published_hash") or "")
+                == video_structure_hash
+            )
+
+            if not video_structure_ids:
+                st.caption(
+                    "Во внутренней структуре пока нет зарегистрированных получателей."
+                )
+            elif video_structure_already:
+                st.success(
+                    "📣 Ролик с анонсом уже размещён внутри Агентства: "
+                    f"{int(result.get('video_structure_published_count') or 0)} партнёр(а/ов)."
+                )
+            elif st.button(
+                (
+                    "📣 Отправить ролик с анонсом всей структуре "
+                    f"({len(video_structure_ids)})"
+                ),
+                key=f"stagirite_video_publish_structure_{task_id}",
+                use_container_width=True,
+                type="primary",
+                disabled=(
+                    publish_structure_video is None
+                    or not announcement_approved
+                ),
+            ):
+                try:
+                    with st.spinner(
+                        "Размещаем ролик с анонсом внутри Агентства W..."
+                    ):
+                        structure_result = publish_structure_video(
+                            owner_id,
+                            clean_video_announcement,
+                            current_video,
+                            subject="🎬 Ролик Агентства W",
+                            mime_type=str(
+                                video_meta.get("mime_type") or "video/mp4"
+                            ),
+                            file_name=video_name,
+                        )
+                    updated = dict(result)
+                    updated["video_structure_published_at"] = datetime.now(UTC).isoformat()
+                    updated["video_structure_published_hash"] = video_structure_hash
+                    updated["video_structure_published_count"] = int(
+                        structure_result.get("count") or 0
+                    )
+                    updated["video_structure_media_id"] = str(
+                        structure_result.get("media_id") or ""
+                    )
+                    _update_task(owner_id, task_id, {"result": updated})
+                    st.rerun()
+                except Exception as exc:
+                    st.error(
+                        "Не удалось разместить ролик внутри структуры. "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+            st.caption(
+                "Внутренняя структура Агентства и Telegram-площадки — два независимых канала: "
+                "можно использовать любой из них или оба."
+            )
 
             if not telegram_destinations:
                 st.info(
@@ -6884,9 +6982,6 @@ def _render_result(
                 selected_video_destination_ids = [
                     int(x) for x in selected_video_destination_ids
                 ]
-                clean_video_announcement = str(
-                    video_announcement or ""
-                ).strip()
                 video_tg_hash = _telegram_publication_hash(
                     clean_video_announcement,
                     None,

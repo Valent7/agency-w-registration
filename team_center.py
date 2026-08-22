@@ -45,6 +45,131 @@ def _headers(prefer: str | None = None) -> dict[str, str]:
     return headers
 
 
+TEAM_MEDIA_BUCKET = "agency-team-media"
+TEAM_MEDIA_STORAGE_PREFIX = "storage:"
+
+
+def _storage_headers(content_type: str = "application/json") -> dict[str, str]:
+    _, key = _config()
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": content_type,
+    }
+
+
+def _ensure_team_media_bucket() -> None:
+    """Создаёт приватный bucket для внутренних видео, если его ещё нет."""
+    url, _ = _config()
+    check = requests.get(
+        f"{url}/storage/v1/bucket/{TEAM_MEDIA_BUCKET}",
+        headers=_storage_headers(),
+        timeout=20,
+    )
+    if check.ok:
+        return
+    if check.status_code not in {400, 404}:
+        check.raise_for_status()
+
+    create = requests.post(
+        f"{url}/storage/v1/bucket",
+        headers=_storage_headers(),
+        json={
+            "id": TEAM_MEDIA_BUCKET,
+            "name": TEAM_MEDIA_BUCKET,
+            "public": False,
+            "file_size_limit": 52428800,
+            "allowed_mime_types": ["video/mp4"],
+        },
+        timeout=20,
+    )
+    if create.ok:
+        return
+    # Повторный запуск может попасть в гонку: bucket уже успели создать.
+    text = str(create.text or "").lower()
+    if create.status_code in {400, 409} and ("already" in text or "exist" in text):
+        return
+    create.raise_for_status()
+
+
+def _save_team_video(
+    sender_telegram_id: int,
+    video_bytes: Any,
+    *,
+    mime_type: str = "video/mp4",
+    file_name: str = "",
+) -> str:
+    """
+    Сохраняет ОДНУ копию MP4 в приватном Supabase Storage.
+    В agency_team_media хранится только служебная ссылка на объект.
+    """
+    raw = _normalize_image_bytes(video_bytes)
+    if not raw:
+        raise ValueError("Видеоролик пустой.")
+    if len(raw) > 49 * 1024 * 1024:
+        raise ValueError(
+            "Для внутренней структуры сейчас поддерживаются MP4 до 49 МБ."
+        )
+
+    _ensure_team_media_bucket()
+    media_id = "awvid_" + uuid.uuid4().hex
+    object_path = (
+        f"videos/{int(sender_telegram_id)}/{media_id}.mp4"
+    )
+    url, _ = _config()
+    upload = requests.post(
+        f"{url}/storage/v1/object/{TEAM_MEDIA_BUCKET}/{object_path}",
+        headers={
+            **_storage_headers(str(mime_type or "video/mp4")),
+            "x-upsert": "false",
+        },
+        data=raw,
+        timeout=120,
+    )
+    upload.raise_for_status()
+
+    _post(
+        "agency_team_media",
+        {
+            "id": media_id,
+            "sender_telegram_id": int(sender_telegram_id),
+            "mime_type": str(mime_type or "video/mp4").strip(),
+            "file_name": (
+                str(file_name or "").strip()
+                or f"{media_id}.mp4"
+            ),
+            # Сохраняем не base64, а указатель на приватный Storage-объект.
+            "image_base64": TEAM_MEDIA_STORAGE_PREFIX + object_path,
+            "created_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    return media_id
+
+
+def _signed_team_media_url(object_path: str, expires_in: int = 3600) -> str:
+    url, _ = _config()
+    response = requests.post(
+        f"{url}/storage/v1/object/sign/{TEAM_MEDIA_BUCKET}/{object_path}",
+        headers=_storage_headers(),
+        json={"expiresIn": int(expires_in)},
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json() if response.text.strip() else {}
+    signed = str(
+        (data or {}).get("signedURL")
+        or (data or {}).get("signedUrl")
+        or ""
+    ).strip()
+    if not signed:
+        raise RuntimeError("Supabase не вернул временную ссылку на ролик.")
+    if signed.startswith("http://") or signed.startswith("https://"):
+        return signed
+    if not signed.startswith("/"):
+        signed = "/" + signed
+    return f"{url}/storage/v1{signed}"
+
+
 def _get(
     table: str,
     params: dict[str, Any],
@@ -380,19 +505,36 @@ def _team_media(media_id: str) -> dict[str, Any] | None:
 def _render_message_media(media_id: str) -> None:
     media = _team_media(media_id)
     if not media:
-        st.caption("🖼️ Иллюстрация временно недоступна.")
+        st.caption("📎 Медиа временно недоступно.")
         return
 
-    encoded = str(media.get("image_base64") or "").strip()
-    if not encoded:
+    stored = str(media.get("image_base64") or "").strip()
+    mime_type = str(media.get("mime_type") or "").strip().lower()
+    file_name = str(media.get("file_name") or "").strip()
+
+    if mime_type.startswith("video/"):
+        if not stored.startswith(TEAM_MEDIA_STORAGE_PREFIX):
+            st.caption("🎬 Не удалось открыть видеоролик.")
+            return
+        object_path = stored[len(TEAM_MEDIA_STORAGE_PREFIX):].strip()
+        try:
+            signed_url = _signed_team_media_url(object_path)
+            st.video(signed_url)
+            st.caption(file_name or "Видеоролик к публикации")
+        except Exception:
+            st.caption("🎬 Видеоролик временно недоступен. Обновите страницу позже.")
+        return
+
+    if not stored:
         st.caption("🖼️ Иллюстрация временно недоступна.")
         return
 
     try:
-        image_bytes = base64.b64decode(encoded, validate=True)
+        image_bytes = base64.b64decode(stored, validate=True)
     except Exception:
         st.caption("🖼️ Не удалось открыть иллюстрацию.")
         return
+
 
     st.image(
         image_bytes,
@@ -478,6 +620,74 @@ def publish_structure_material(
         "count": total,
         "media_id": media_id,
         "mode": "combined",
+    }
+
+
+def publish_structure_video(
+    sender_telegram_id: int,
+    body: str,
+    video_bytes: Any,
+    *,
+    subject: str = "🎬 Ролик Агентства W",
+    mime_type: str = "video/mp4",
+    file_name: str = "",
+) -> dict[str, Any]:
+    """
+    Размещает ролик + анонс внутри Агентства W всей нижестоящей структуре.
+
+    Видео хранится одной копией в приватном Supabase Storage,
+    а у каждого партнёра в сообщении лежит только media_id.
+    """
+    sender_telegram_id = int(sender_telegram_id)
+    clean_body = str(body or "").strip()
+    if not clean_body:
+        raise ValueError("Анонс к ролику пустой.")
+
+    media_id = _save_team_video(
+        sender_telegram_id,
+        video_bytes,
+        mime_type=mime_type,
+        file_name=file_name,
+    )
+    marker = _media_marker(media_id)
+    message_body = f"{clean_body}\n\n{marker}"
+
+    recipients = structure_member_ids(sender_telegram_id)
+    if not recipients:
+        return {
+            "count": 0,
+            "media_id": media_id,
+            "mode": "video_combined",
+        }
+
+    created_at = datetime.now(UTC).isoformat()
+    payload: list[dict[str, Any]] = []
+    for recipient_id in recipients:
+        if int(recipient_id) == sender_telegram_id:
+            continue
+        payload.append(
+            {
+                "sender_telegram_id": sender_telegram_id,
+                "recipient_telegram_id": int(recipient_id),
+                "subject": str(subject or "").strip() or None,
+                "body": message_body,
+                "zoom_url": None,
+                "delivery_status": "stored",
+                "created_at": created_at,
+            }
+        )
+
+    total = 0
+    chunk_size = 250
+    for start in range(0, len(payload), chunk_size):
+        chunk = payload[start:start + chunk_size]
+        _post("agency_team_messages", chunk)
+        total += len(chunk)
+
+    return {
+        "count": total,
+        "media_id": media_id,
+        "mode": "video_combined",
     }
 
 
