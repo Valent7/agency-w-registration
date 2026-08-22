@@ -54,6 +54,11 @@ accept_weekly_candidates_for_neona = getattr(
         "selected_ids": [],
     },
 )
+get_recent_daily_candidates_for_stagirite = getattr(
+    _stagirite_center,
+    "get_recent_daily_candidates_for_stagirite",
+    lambda *args, **kwargs: [],
+)
 get_first_message_failures_for_stagirite = getattr(
     _stagirite_center,
     "get_first_message_failures_for_stagirite",
@@ -3359,10 +3364,11 @@ def prepare_candidates_for_stagirite(
     exclude_ids=None,
 ):
     """
-    Для недельной цели:
-    1) без OpenAI собирает до 50 активных сегодня/вчера реальных контактов;
-    2) подробно проверяет только столько людей, сколько нужно для сегодняшней пятёрки;
-    3) возвращает reserve_ids + candidate_ids.
+    Ежедневная рабочая пятёрка Стагирита:
+    1) сначала использует уже сохранённый пул кандидатов Неонии из контактов и чатов;
+    2) не требует ежедневного захода пользователя к Неонии;
+    3) если готового пула пока мало, мягко дополняет его доступными Telegram-контактами;
+    4) возвращает reserve_ids + candidate_ids.
     """
     owner_id = int(owner_id)
     desired_count = max(1, min(10, int(desired_count or 5)))
@@ -3423,13 +3429,8 @@ def prepare_candidates_for_stagirite(
         except Exception:
             contacts = st.session_state.get(contacts_key, [])
 
-    if not isinstance(contacts, list) or not contacts:
-        return {
-            "ok": False,
-            "candidate_ids": [],
-            "reserve_ids": [],
-            "message": "Telegram-контакты пока не получены.",
-        }
+    if not isinstance(contacts, list):
+        contacts = []
 
     owner_contact_ids = {
         int(contact["telegram_id"])
@@ -3487,6 +3488,79 @@ def prepare_candidates_for_stagirite(
             already_sent_ids.add(int(event.get("telegram_id")))
         except (TypeError, ValueError):
             continue
+
+    # ----------------------------------------------------------
+    # ПЕРВЫЙ И ОСНОВНОЙ ИСТОЧНИК СТАГИРИТА — уже сохранённый пул
+    # кандидатов Неонии. Он может быть получен как из личных
+    # Telegram-контактов, так и из Telegram-чатов. Пользователю
+    # не нужно ежедневно возвращаться к Неонии.
+    # ----------------------------------------------------------
+    saved_candidates = list(
+        st.session_state.get(candidates_key, [])
+        or []
+    )
+    saved_pool = []
+    for item in saved_candidates:
+        if not isinstance(item, dict):
+            continue
+        try:
+            cid = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if cid in excluded or cid in already_sent_ids:
+            continue
+        if bool(item.get("selection_blocked")):
+            continue
+        if bool(item.get("telegram_warning")):
+            continue
+        if str(item.get("status") or "") == "Отправлено":
+            continue
+        saved_pool.append(item)
+
+    def _stagirite_saved_priority(item):
+        recommendation = str(item.get("recommendation") or "").strip()
+        recommendation_rank = {
+            "Передать Неоне": 0,
+            "Решает владелец": 1,
+            "Нужно больше данных": 2,
+            "Пока не подходит": 3,
+        }.get(recommendation, 1)
+        interest = str(item.get("potential_interest") or "").strip().lower()
+        interest_rank = {
+            "высокий": 0,
+            "средний": 1,
+            "неясно": 2,
+            "низкий": 3,
+        }.get(interest, 2)
+        try:
+            score_rank = -int(item.get("score") or 0)
+        except (TypeError, ValueError):
+            score_rank = 0
+        activity = str(item.get("last_seen_at") or "")
+        return (
+            recommendation_rank,
+            interest_rank,
+            score_rank,
+            -len(activity),
+            str(item.get("name") or "").lower(),
+        )
+
+    saved_pool.sort(key=_stagirite_saved_priority)
+    saved_ids = [int(item["telegram_id"]) for item in saved_pool]
+    if len(saved_ids) >= desired_count:
+        return {
+            "ok": True,
+            "candidate_ids": saved_ids[:desired_count],
+            "reserve_ids": saved_ids[:reserve_target],
+            "available_reserve": len(saved_ids[:reserve_target]),
+            "checked_detail": 0,
+            "exhausted": False,
+            "message": "Рабочая пятёрка подготовлена из уже найденного пула людей.",
+        }
+
+    # Если в готовом пуле пока меньше пяти, сохраняем найденных и только
+    # недостающее количество добираем из личных Telegram-контактов.
+    excluded.update(saved_ids)
 
     reserve_contacts = [
         item
@@ -3639,13 +3713,39 @@ def prepare_candidates_for_stagirite(
 
     persist_workspace_if_changed(owner_id, force=True)
 
+    combined_candidate_ids = []
+    for cid in saved_ids + detailed_usable:
+        if cid not in combined_candidate_ids:
+            combined_candidate_ids.append(cid)
+
+    combined_reserve_ids = []
+    for cid in saved_ids + reserve_ids:
+        if cid not in combined_reserve_ids:
+            combined_reserve_ids.append(cid)
+        if len(combined_reserve_ids) >= reserve_target:
+            break
+
+    if not combined_candidate_ids:
+        message = (
+            "Общий пул людей пока пуст. Один раз откройте Неонию и получите "
+            "или обновите список из Telegram-контактов либо чатов."
+        )
+    elif len(combined_candidate_ids) < desired_count:
+        message = (
+            f"Стагирит подготовил {len(combined_candidate_ids)} кандидат(а/ов). "
+            "В сохранённом пуле сейчас недостаточно новых людей для полной пятёрки."
+        )
+    else:
+        message = "Рабочая пятёрка подготовлена из сохранённого пула людей."
+
     return {
         "ok": True,
-        "candidate_ids": detailed_usable[:desired_count],
-        "reserve_ids": reserve_ids,
-        "available_reserve": len(reserve_ids),
+        "candidate_ids": combined_candidate_ids[:desired_count],
+        "reserve_ids": combined_reserve_ids,
+        "available_reserve": len(combined_reserve_ids),
         "checked_detail": checked,
-        "exhausted": len(detailed_usable) < desired_count,
+        "exhausted": len(combined_candidate_ids) < desired_count,
+        "message": message,
     }
 
 
@@ -4996,9 +5096,9 @@ if received_hash:
     
             st.info(f"Настрой дня: {mood_of_the_day}")
 
-            # Ежедневный мост Стагирит → Неония запускаем уже на «Моём дне».
-            # Поэтому первая команда дня (например, «Мысль дня») никак не влияет
-            # на подготовку кандидатов по активной недельной цели встреч.
+            # Ежедневная рабочая пятёрка Стагирита готовится уже на «Моём дне».
+            # После того как Неония однажды получила/обновила общий пул людей,
+            # владельцу не нужно ежедневно заходить к Неонии.
             daily_stagirite_candidates = ensure_weekly_candidates_for_neona(
                 telegram_id,
                 prepare_candidates_fn=prepare_candidates_for_stagirite,
@@ -5060,6 +5160,113 @@ if received_hash:
                 candidates_key,
                 [],
             )
+
+            # ------------------------------------------------------
+            # Видимая история: Сегодня / Вчера от Стагирита.
+            # Список показываем прямо на «Моём дне», без ежедневного
+            # захода пользователя в Неонию.
+            # ------------------------------------------------------
+            stagirite_candidate_by_id = {}
+            for item in candidate_results if isinstance(candidate_results, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    stagirite_candidate_by_id[int(item.get("telegram_id"))] = item
+                except (TypeError, ValueError):
+                    continue
+
+            for item in st.session_state.get(
+                f"neonia_telegram_contacts_{telegram_id}",
+                [],
+            ) or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    cid = int(item.get("telegram_id"))
+                except (TypeError, ValueError):
+                    continue
+                stagirite_candidate_by_id.setdefault(cid, item)
+
+            owner_known_for_day = st.session_state.get(
+                f"neonia_owner_known_contacts_{telegram_id}",
+                {},
+            )
+            if isinstance(owner_known_for_day, dict):
+                for raw_id, item in owner_known_for_day.items():
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        cid = int(item.get("telegram_id", raw_id))
+                    except (TypeError, ValueError):
+                        continue
+                    stagirite_candidate_by_id.setdefault(cid, item)
+
+            recent_daily_batches = get_recent_daily_candidates_for_stagirite(
+                int(telegram_id),
+                days=2,
+            )
+            recent_by_date = {
+                str(item.get("date") or ""): item
+                for item in recent_daily_batches
+                if isinstance(item, dict)
+            }
+            today_iso = berlin_today.isoformat()
+            yesterday_iso = (berlin_today - timedelta(days=1)).isoformat()
+
+            def _render_stagirite_day_list(day_iso, label, expanded):
+                day_info = recent_by_date.get(day_iso, {})
+                ids = [
+                    int(value)
+                    for value in (day_info.get("candidate_ids", []) or [])
+                    if str(value).lstrip("-").isdigit()
+                ]
+                approved = {
+                    int(value)
+                    for value in (day_info.get("approved_ids", []) or [])
+                    if str(value).lstrip("-").isdigit()
+                }
+                with st.expander(label, expanded=expanded):
+                    if not ids:
+                        st.caption(
+                            "Список пока пуст. Если общий пул людей уже загружен, "
+                            "Стагирит подготовит следующую рабочую пятёрку автоматически."
+                        )
+                        return
+                    for number, cid in enumerate(ids[:5], start=1):
+                        contact = stagirite_candidate_by_id.get(cid, {})
+                        name = str(contact.get("name") or contact.get("first_name") or "Кандидат")
+                        username = str(contact.get("username") or "").strip().lstrip("@")
+                        source = str(contact.get("source") or contact.get("source_chat_title") or "").strip()
+                        status = " · ✅ передан Неоне" if cid in approved else ""
+                        line = f"**{number}. {name}**"
+                        if username:
+                            line += f" · @{username}"
+                        line += status
+                        st.markdown(line)
+                        details = []
+                        if contact.get("potential_interest"):
+                            details.append(
+                                "интерес: " + str(contact.get("potential_interest"))
+                            )
+                        if contact.get("telegram_activity_label"):
+                            details.append(str(contact.get("telegram_activity_label")))
+                        if source:
+                            details.append("источник: " + source)
+                        if details:
+                            st.caption(" · ".join(details))
+
+            _render_stagirite_day_list(
+                today_iso,
+                "🎯 Сегодня от Стагирита",
+                True,
+            )
+            if yesterday_iso in recent_by_date:
+                _render_stagirite_day_list(
+                    yesterday_iso,
+                    "🕘 Вчера от Стагирита",
+                    False,
+                )
+
             selected_candidates = [
                 candidate
                 for candidate in candidate_results
@@ -5073,8 +5280,9 @@ if received_hash:
             ]
 
             st.info(
-                f"🎯 Неония: выбрано в работу {len(selected_candidates)}. "
-                "Анализ новых контактов — в разделе «🤖 Агенты → Неония»."
+                f"🎯 В работе сейчас: {len(selected_candidates)}. "
+                "К Неонии возвращайтесь только когда нужно получить или обновить "
+                "общий список людей из Telegram-контактов или чатов."
             )
 
             with st.container(border=True):
@@ -7015,14 +7223,10 @@ if received_hash:
                     )
 
                     # --------------------------------------------------
-                    # Стагирит → Неония → Неона без ежедневного захода
-                    # в Стагирита или Неонию.
-                    #
-                    # При первом открытии Неоны в новый день:
-                    # 1) находим активную недельную цель;
-                    # 2) Неония обновляет резерв/активность;
-                    # 3) готовится сегодняшняя пятёрка;
-                    # 4) ниже владелец выбирает, кого реально брать.
+                    # Стагирит → Неона без ежедневного захода к Неонии.
+                    # Неония используется владельцем для получения/обновления
+                    # общего пула людей из контактов или чатов. После этого
+                    # Стагирит ежедневно готовит рабочую пятёрку сам.
                     # --------------------------------------------------
                     weekly_neona_day = ensure_weekly_candidates_for_neona(
                         telegram_id,
@@ -7165,10 +7369,10 @@ if received_hash:
 
                         st.markdown("### 🎯 Сегодня от Стагирита")
                         st.caption(
-                            "Недельная цель продолжает работать сама: "
-                            "Стагирит запустил Неонию и подготовил сегодняшних "
-                            "кандидатов. Выберите людей — Неона сразу подготовит "
-                            "первые сообщения."
+                            "Стагирит подготовил сегодняшнюю рабочую пятёрку "
+                            "из уже найденного пула людей. Повторно заходить к "
+                            "Неонии не нужно. Выберите людей — Неона сразу "
+                            "подготовит первые сообщения."
                         )
 
                         if daily_available_ids:

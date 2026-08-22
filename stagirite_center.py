@@ -4742,27 +4742,161 @@ def _active_weekly_meeting_task(owner_id: int) -> dict[str, Any] | None:
     return candidates[0]
 
 
+
+DAILY_CANDIDATE_TASK_KIND = "daily_candidates"
+DAILY_CANDIDATE_ASSIGNMENT = "Ежедневная рабочая пятёрка Стагирита"
+
+
+def _daily_candidate_task(owner_id: int) -> dict[str, Any] | None:
+    """Постоянная фоновая задача Стагирита для ежедневной рабочей пятёрки.
+
+    Она не зависит от недельной цели встреч. Неония нужна владельцу, чтобы
+    однажды получить/обновить общий пул людей. После этого Стагирит ежедневно
+    работает с уже сохранённым пулом и показывает результат пользователю сам.
+    """
+    owner_id = int(owner_id)
+    tasks, _ = _load_tasks(owner_id)
+
+    for raw in tasks:
+        if not isinstance(raw, dict):
+            continue
+        result = raw.get("result") if isinstance(raw.get("result"), dict) else {}
+        if (
+            str(raw.get("task_kind") or "") == DAILY_CANDIDATE_TASK_KIND
+            or isinstance(result.get("daily_candidate_feed"), dict)
+        ):
+            return dict(raw)
+
+    now = datetime.now(UTC).isoformat()
+    task = {
+        "assignment": DAILY_CANDIDATE_ASSIGNMENT,
+        "task_kind": DAILY_CANDIDATE_TASK_KIND,
+        "status": "В работе",
+        "plan": {
+            "steps": [
+                "Использовать уже найденный пул контактов/кандидатов.",
+                "Подготовить рабочую пятёрку на новый день.",
+                "Передать выбранных владельцем людей Неоне.",
+            ]
+        },
+        "result": {
+            "daily_candidate_feed": {
+                "daily_target": 5,
+                "reserve_target": 50,
+                "daily_batches": {},
+                "created_at": now,
+            },
+            "selected_candidate_ids": [],
+        },
+        "created_at": now,
+    }
+    _save_task(owner_id, task)
+
+    tasks, _ = _load_tasks(owner_id)
+    for raw in tasks:
+        if not isinstance(raw, dict):
+            continue
+        result = raw.get("result") if isinstance(raw.get("result"), dict) else {}
+        if (
+            str(raw.get("task_kind") or "") == DAILY_CANDIDATE_TASK_KIND
+            or isinstance(result.get("daily_candidate_feed"), dict)
+        ):
+            return dict(raw)
+    return None
+
+
+def _candidate_feed_container(
+    result: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    weekly = result.get("weekly_goal")
+    if isinstance(weekly, dict) and weekly:
+        return "weekly_goal", dict(weekly)
+
+    daily = result.get("daily_candidate_feed")
+    if isinstance(daily, dict) and daily:
+        return "daily_candidate_feed", dict(daily)
+
+    return "daily_candidate_feed", {
+        "daily_target": 5,
+        "reserve_target": 50,
+        "daily_batches": {},
+    }
+
+
+def get_recent_daily_candidates_for_stagirite(
+    owner_id: int,
+    days: int = 2,
+) -> list[dict[str, Any]]:
+    """Возвращает сегодняшнюю и предыдущие рабочие пятёрки Стагирита."""
+    owner_id = int(owner_id)
+    days = max(1, min(14, int(days or 2)))
+    today = datetime.now(BERLIN).date()
+    wanted = [
+        (today - timedelta(days=offset)).isoformat()
+        for offset in range(days)
+    ]
+    best: dict[str, dict[str, Any]] = {}
+
+    tasks, _ = _load_tasks(owner_id)
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        for container_name in ("daily_candidate_feed", "weekly_goal"):
+            container = result.get(container_name)
+            if not isinstance(container, dict):
+                continue
+            batches = container.get("daily_batches")
+            if not isinstance(batches, dict):
+                continue
+            for day_key in wanted:
+                info = batches.get(day_key)
+                if not isinstance(info, dict):
+                    continue
+                current = best.get(day_key)
+                prepared_at = str(info.get("prepared_at") or "")
+                current_at = str((current or {}).get("prepared_at") or "")
+                if current is None or prepared_at >= current_at:
+                    best[day_key] = {
+                        "date": day_key,
+                        "candidate_ids": _normalize_int_ids(
+                            info.get("candidate_ids", [])
+                        ),
+                        "approved_ids": _normalize_int_ids(
+                            info.get("approved_ids", [])
+                        ),
+                        "prepared_at": prepared_at,
+                        "source": str(info.get("source") or container_name),
+                    }
+
+    return [best[day_key] for day_key in wanted if day_key in best]
+
 def ensure_weekly_candidates_for_neona(
     owner_id: int,
     prepare_candidates_fn=None,
 ) -> dict[str, Any]:
     """
-    Ежедневный мост Стагирит → Неония → Неона.
+    Ежедневная рабочая пятёрка Стагирита → Неона.
+
+    Неония нужна владельцу только для получения/обновления общего пула людей.
+    После появления пула Стагирит сам готовит ежедневную пятёрку.
 
     ВАЖНО:
-    - не требует захода на экран Стагирита;
-    - при первом открытии Неоны в новый день сам готовит текущую пятёрку;
+    - не требует ежедневного захода в Неонию;
+    - при первом открытии «Моего дня» или Неоны в новый день сам готовит текущую пятёрку;
     - повторный rerun в тот же день не создаёт новую пятёрку;
     - людей ещё НЕ считает выбранными владельцем.
     """
     owner_id = int(owner_id)
     task = _active_weekly_meeting_task(owner_id)
     if not task:
+        task = _daily_candidate_task(owner_id)
+    if not task:
         return {
             "ok": False,
             "active": False,
             "candidate_ids": [],
-            "message": "Активной недельной цели встреч сейчас нет.",
+            "message": "Стагирит пока не смог открыть ежедневную рабочую пятёрку.",
         }
 
     result = (
@@ -4770,14 +4904,10 @@ def ensure_weekly_candidates_for_neona(
         if isinstance(task.get("result"), dict)
         else {}
     )
-    goal = (
-        dict(result.get("weekly_goal"))
-        if isinstance(result.get("weekly_goal"), dict)
-        else {}
-    )
+    container_key, goal = _candidate_feed_container(result)
 
-    minimum = int(goal.get("minimum") or 3)
-    desired = int(goal.get("desired") or max(minimum, 5))
+    minimum = int(goal.get("minimum") or 0)
+    desired = int(goal.get("desired") or 5)
     reserve_target = int(goal.get("reserve_target") or 50)
     daily_target = int(goal.get("daily_target") or 5)
 
@@ -4881,7 +5011,7 @@ def ensure_weekly_candidates_for_neona(
     daily_batches[today_key] = today_info
     goal["daily_batches"] = daily_batches
     goal["last_daily_prepare_date"] = today_key
-    result["weekly_goal"] = goal
+    result[container_key] = goal
 
     task_id = str(task.get("id") or "")
     if task_id:
@@ -4947,11 +5077,7 @@ def accept_weekly_candidates_for_neona(
         if isinstance(task.get("result"), dict)
         else {}
     )
-    goal = (
-        dict(result.get("weekly_goal"))
-        if isinstance(result.get("weekly_goal"), dict)
-        else {}
-    )
+    container_key, goal = _candidate_feed_container(result)
     today_key = datetime.now(BERLIN).date().isoformat()
     daily_batches = (
         dict(goal.get("daily_batches"))
@@ -4985,7 +5111,7 @@ def accept_weekly_candidates_for_neona(
     today_info["approved_at"] = datetime.now(UTC).isoformat()
     daily_batches[today_key] = today_info
     goal["daily_batches"] = daily_batches
-    result["weekly_goal"] = goal
+    result[container_key] = goal
 
     all_selected = _normalize_int_ids(
         result.get("selected_candidate_ids", [])
@@ -7215,14 +7341,19 @@ def render_stagirite_center(
                 st.caption("Можно дать поручение текстом выше.")
 
     tasks, persistent = _load_tasks(owner_id)
+    visible_tasks = [
+        item for item in tasks
+        if str(item.get("task_kind") or "") != DAILY_CANDIDATE_TASK_KIND
+    ]
 
     st.markdown("### 📋 Текущее поручение")
-    if not tasks:
+    if not visible_tasks:
         st.info("Поручений пока нет.")
         return
 
-    # Показываем только последнее поручение полностью. Старые тесты не растягивают страницу.
-    task = tasks[0]
+    # Системная ежедневная пятёрка не занимает место пользовательского поручения.
+    # Показываем только последнее обычное поручение полностью.
+    task = visible_tasks[0]
     status = str(task.get("status") or "planned")
     assignment_text = str(task.get("assignment") or "").strip()
     task_id = str(task.get("id") or task.get("created_at") or "")
@@ -7329,7 +7460,7 @@ def render_stagirite_center(
                 _update_task(owner_id, task_id, {"status": "Выполнено"})
                 st.rerun()
 
-    previous = tasks[1:]
+    previous = visible_tasks[1:]
     if previous:
         with st.expander(f"🗂 История поручений · {len(previous)}"):
             for old in previous[:20]:
