@@ -218,6 +218,108 @@ def _patch(
     response.raise_for_status()
 
 
+def _is_zoom_invite(message: dict[str, Any]) -> bool:
+    """Определяет внутреннее приглашение Zoom без привязки к формулировке текста."""
+    zoom_url = str(message.get("zoom_url") or "").strip().casefold()
+    if zoom_url:
+        return True
+
+    haystack = " ".join(
+        [
+            str(message.get("subject") or ""),
+            _body_without_media_markers(str(message.get("body") or "")),
+        ]
+    ).casefold()
+    return "zoom.us/" in haystack or "zoom.com/" in haystack
+
+
+def _compact_zoom_invites(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Оставляет в диалоге только самое новое Zoom-приглашение."""
+    ordered = sorted(
+        list(messages or []),
+        key=lambda item: (
+            _parse_db_datetime(item.get("created_at"))
+            or datetime.min.replace(tzinfo=UTC)
+        ),
+        reverse=True,
+    )
+    result: list[dict[str, Any]] = []
+    latest_zoom_kept = False
+    for message in ordered:
+        if _is_zoom_invite(message):
+            if latest_zoom_kept:
+                continue
+            latest_zoom_kept = True
+        result.append(message)
+    return result
+
+
+def _hide_message_for_user(
+    message_id: int,
+    current_telegram_id: int,
+    direction: str,
+) -> None:
+    """Мягко удаляет сообщение только из списка текущего пользователя."""
+    now = datetime.now(UTC).isoformat()
+    if direction == "in":
+        filters = {
+            "id": f"eq.{int(message_id)}",
+            "recipient_telegram_id": f"eq.{int(current_telegram_id)}",
+        }
+        payload = {"recipient_hidden_at": now}
+    else:
+        filters = {
+            "id": f"eq.{int(message_id)}",
+            "sender_telegram_id": f"eq.{int(current_telegram_id)}",
+        }
+        payload = {"sender_hidden_at": now}
+
+    try:
+        _patch("agency_team_messages", filters, payload)
+    except requests.HTTPError as exc:
+        details = str(exc.response.text if exc.response is not None else "")
+        if "hidden_at" in details or "sender_hidden_at" in details or "recipient_hidden_at" in details:
+            raise RuntimeError(
+                "Сначала выполните TEAM_MESSAGES_CLEANUP.sql в Supabase."
+            ) from exc
+        raise
+
+
+def _hide_previous_zoom_invites(
+    sender_telegram_id: int,
+    recipient_ids: list[int],
+) -> None:
+    """Новое Zoom-приглашение заменяет старые в интерфейсе Агентства W."""
+    ids = sorted({int(value) for value in recipient_ids if int(value) != int(sender_telegram_id)})
+    if not ids:
+        return
+
+    now = datetime.now(UTC).isoformat()
+    # Небольшими партиями: структура может со временем стать большой.
+    for start in range(0, len(ids), 200):
+        chunk = ids[start:start + 200]
+        filters = {
+            "sender_telegram_id": f"eq.{int(sender_telegram_id)}",
+            "recipient_telegram_id": "in.(" + ",".join(str(value) for value in chunk) + ")",
+            "zoom_url": "not.is.null",
+        }
+        try:
+            _patch(
+                "agency_team_messages",
+                filters,
+                {
+                    "sender_hidden_at": now,
+                    "recipient_hidden_at": now,
+                },
+            )
+        except requests.HTTPError:
+            # До выполнения миграции просто оставляем старые записи;
+            # отображение всё равно сожмёт их до одного актуального приглашения.
+            return
+
+
 def _format_dt(value: str | None) -> str:
     if not value:
         return ""
@@ -591,6 +693,12 @@ def publish_structure_material(
             "mode": "combined",
         }
 
+    if str(zoom_url or "").strip():
+        _hide_previous_zoom_invites(
+            sender_telegram_id,
+            [int(value) for value in recipients],
+        )
+
     created_at = datetime.now(UTC).isoformat()
     payload: list[dict[str, Any]] = []
 
@@ -911,32 +1019,51 @@ def _send_team_message(
         )
     if not payload:
         return 0
+
+    if str(zoom_url or "").strip():
+        _hide_previous_zoom_invites(
+            int(sender_telegram_id),
+            [int(item["recipient_telegram_id"]) for item in payload],
+        )
+
     _post("agency_team_messages", payload)
     return len(payload)
 
 
 def _inbox(telegram_id: int) -> list[dict[str, Any]]:
-    return _get(
-        "agency_team_messages",
-        {
-            "recipient_telegram_id": f"eq.{int(telegram_id)}",
-            "select": "*",
-            "order": "created_at.desc",
-            "limit": 100,
-        },
-    )
+    params = {
+        "recipient_telegram_id": f"eq.{int(telegram_id)}",
+        "recipient_hidden_at": "is.null",
+        "select": "*",
+        "order": "created_at.desc",
+        "limit": 200,
+    }
+    try:
+        return _get("agency_team_messages", params)
+    except requests.HTTPError as exc:
+        details = str(exc.response.text if exc.response is not None else "")
+        if "recipient_hidden_at" not in details:
+            raise
+        params.pop("recipient_hidden_at", None)
+        return _get("agency_team_messages", params)
 
 
 def _outbox(telegram_id: int) -> list[dict[str, Any]]:
-    return _get(
-        "agency_team_messages",
-        {
-            "sender_telegram_id": f"eq.{int(telegram_id)}",
-            "select": "*",
-            "order": "created_at.desc",
-            "limit": 100,
-        },
-    )
+    params = {
+        "sender_telegram_id": f"eq.{int(telegram_id)}",
+        "sender_hidden_at": "is.null",
+        "select": "*",
+        "order": "created_at.desc",
+        "limit": 200,
+    }
+    try:
+        return _get("agency_team_messages", params)
+    except requests.HTTPError as exc:
+        details = str(exc.response.text if exc.response is not None else "")
+        if "sender_hidden_at" not in details:
+            raise
+        params.pop("sender_hidden_at", None)
+        return _get("agency_team_messages", params)
 
 
 def _mark_read(message_id: int) -> None:
@@ -1023,7 +1150,19 @@ def _render_message_card(
         else:
             st.markdown(f"**Кому: {other_name}**")
 
-        st.caption(_format_dt(message.get("created_at")))
+        header_cols = st.columns([6, 1.35])
+        header_cols[0].caption(_format_dt(message.get("created_at")))
+        if header_cols[1].button(
+            "🗑 Удалить",
+            key=f"team_single_hide_{direction}_{current_telegram_id}_{message.get('id')}",
+            use_container_width=True,
+        ):
+            _hide_message_for_user(
+                int(message["id"]),
+                int(current_telegram_id),
+                direction,
+            )
+            st.rerun()
 
         subject = str(message.get("subject") or "").strip()
         if subject:
@@ -1171,6 +1310,9 @@ def _render_grouped_messages(
 
     people: list[dict[str, Any]] = []
     for other_id, person_messages in grouped.items():
+        person_messages = _compact_zoom_invites(person_messages)
+        if not person_messages:
+            continue
         _, name, username = _conversation_member_info(other_id)
         latest_dt = _conversation_latest_dt(person_messages)
 
@@ -1263,7 +1405,8 @@ def _render_grouped_messages(
             key=lambda item: (
                 _parse_db_datetime(item.get("created_at"))
                 or datetime.min.replace(tzinfo=UTC)
-            )
+            ),
+            reverse=True,
         )
 
         username_text = f" · @{username}" if username else ""
@@ -1290,9 +1433,31 @@ def _render_grouped_messages(
                 if index:
                     st.divider()
 
-                st.caption(
+                header_cols = st.columns([6, 1.35])
+                header_cols[0].caption(
                     _format_dt(message.get("created_at"))
                 )
+                if header_cols[1].button(
+                    "🗑 Удалить",
+                    key=(
+                        f"team_message_hide_{direction}_"
+                        f"{owner_telegram_id}_{message.get('id')}"
+                    ),
+                    use_container_width=True,
+                    help=(
+                        "Убирает сообщение только из вашего списка в Агентстве W. "
+                        "Это не отзывает уже отправленное сообщение из Telegram."
+                    ),
+                ):
+                    try:
+                        _hide_message_for_user(
+                            int(message["id"]),
+                            int(owner_telegram_id),
+                            direction,
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
                 subject = str(
                     message.get("subject") or ""
@@ -1332,7 +1497,7 @@ def _render_grouped_messages(
                         pass
 
             if direction == "in":
-                latest_message = person_messages[-1]
+                latest_message = person_messages[0]
                 latest_subject = str(
                     latest_message.get("subject") or ""
                 ).strip()
@@ -1396,7 +1561,12 @@ def _render_messages(
 
     inbox = _inbox(owner_telegram_id)
     unread_count = sum(
-        not item.get("read_at") for item in inbox
+        not item.get("read_at") for item in _compact_zoom_invites(inbox)
+    )
+
+    st.caption(
+        "Новые сообщения всегда сверху. Из повторяющихся Zoom-приглашений "
+        "показывается только самое актуальное; любое сообщение можно удалить из своего списка."
     )
 
     tabs = st.tabs(
