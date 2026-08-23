@@ -98,6 +98,7 @@ from workspace_persistence import (
     persist_workspace_if_changed,
 )
 from person_card import render_person_card_2_0, render_neona_magnets_reference
+from scout_center import render_scout_center
 import asyncio
 import json
 import re
@@ -5320,7 +5321,7 @@ if received_hash:
 
                 selected_agent = st.selectbox(
                     "Откройте нужного агента внутри Стагирита",
-                    ["Стагирит", "Неония", "Неона", "Неола"],
+                    ["Стагирит", "Неония", "Неона", "Неола", "Разведчик W"],
                     key="selected_agent",
                 )
 
@@ -5340,6 +5341,10 @@ if received_hash:
                 "Неола": (
                     "Проводит онбординг, помогает новичку начать работу "
                     "и сопровождает его после регистрации."
+                ),
+                "Разведчик W": (
+                    "Исследует конкурентов по открытым источникам, проверяет факты, "
+                    "сравнивает их с W и предлагает, чему стоит научиться."
                 ),
             }
 
@@ -9507,6 +9512,12 @@ if received_hash:
                                     "Кнопка отправки появляется только после "
                                     "утверждения конкретного сообщения владельцем."
                                 )
+
+                elif selected_agent == "Разведчик W":
+                    render_scout_center(
+                        owner_telegram_id=int(telegram_id),
+                        owner_name=first_name,
+                    )
 
                 elif selected_agent == "Неола":
                     st.caption(
