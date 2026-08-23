@@ -203,6 +203,8 @@ def run_competitor_research(competitor_name: str, website: str = "") -> dict[str
 Ровно один итоговый статус из четырёх:
 **РЕКОМЕНДУЮ В ДОРОЖНУЮ КАРТУ** / **СТОИТ ПРОТЕСТИРОВАТЬ** / **НАБЛЮДАТЬ** / **НЕ РЕКОМЕНДУЮ**.
 После статуса — 2–4 предложения обоснования.
+После раздела 10 отчёт ЗАКАНЧИВАЕТСЯ. Не предлагай дополнительные услуги, новые исследования,
+чек-листы, отзывы или фразы «если хотите, могу...».
 
 Пиши компактно. Не перечисляй всё подряд. Ценность отчёта — в проверенных выводах.
 """.strip()
@@ -237,6 +239,14 @@ def run_competitor_research(competitor_name: str, website: str = "") -> dict[str
     data = response.json()
     report, sources = _extract_text_and_sources(data)
 
+    # Разведчик завершает отчёт рекомендацией Директору, без сервисных предложений в финале.
+    report = re.split(
+        r"\n(?:Если хотите|Если нужно|Могу также|Могу дополнительно)[,:]?",
+        report,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].rstrip()
+
     verdict_match = re.search(
         r"\*\*(РЕКОМЕНДУЮ В ДОРОЖНУЮ КАРТУ|СТОИТ ПРОТЕСТИРОВАТЬ|НАБЛЮДАТЬ|НЕ РЕКОМЕНДУЮ)\*\*",
         report,
@@ -259,9 +269,10 @@ def _storage_headers() -> dict[str, str]:
     key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "").strip()
     if not url or not key:
         raise RuntimeError("Supabase не настроен для истории Разведчика.")
+    # В Агентстве SUPABASE_SECRET_KEY используется как серверный apikey.
+    # Не передаём его как Bearer: новые Supabase secret keys не являются JWT.
     return {
         "apikey": key,
-        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Prefer": "return=minimal",
     }
@@ -289,7 +300,12 @@ def save_report(owner_telegram_id: int, result: dict[str, Any]) -> tuple[bool, s
         )
         if response.status_code == 404:
             return False, "Таблица истории Разведчика ещё не создана."
-        response.raise_for_status()
+        if not response.ok:
+            details = str(response.text or "").strip()[:700]
+            return False, (
+                f"Supabase вернул HTTP {response.status_code}. "
+                + (details or "Подробности не переданы.")
+            )
         return True, ""
     except Exception as exc:
         return False, str(exc)
@@ -405,11 +421,23 @@ def render_scout_center(owner_telegram_id: int, owner_name: str) -> None:
             st.success("Отчёт сохранён в истории Разведчика.")
         else:
             save_error = str(st.session_state.get("scout_last_save_error") or "").strip()
+            st.warning("Отчёт получен, но пока не сохранён в истории.")
             if save_error:
-                st.info(
-                    "Отчёт получен, но история пока не сохранена. "
-                    "Для постоянной истории выполните SQL-файл Разведчика в Supabase."
-                )
+                with st.expander("Техническая причина"):
+                    st.code(save_error)
+            if st.button(
+                "💾 Сохранить последний отчёт в историю",
+                type="primary",
+                key="scout_retry_save",
+            ):
+                saved, retry_error = save_report(owner_telegram_id, last)
+                st.session_state["scout_last_saved"] = saved
+                st.session_state["scout_last_save_error"] = retry_error
+                if saved:
+                    st.success("Отчёт сохранён в истории Разведчика.")
+                    st.rerun()
+                else:
+                    st.error("Сохранить отчёт пока не удалось. Откройте «Техническая причина».")
 
     recent = load_reports(owner_telegram_id)
     if recent:
