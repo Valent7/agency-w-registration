@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import neona_telegram_dialogs as core
+import neona_objections as objections
 
 
 BUFFER_MINUTES = 60
@@ -82,9 +83,15 @@ def _general_reply(config, owner_name, first_name, text, greet):
         else "Не повторяй приветствие: диалог уже начат."
     )
 
+    agency_core = str(getattr(core, "NEONA_DIALOG_CORE", "") or "").strip()
+
     instructions = f"""
+{agency_core}
+
 Ты Неона — секретарь-референт {owner_name} в Агентстве W.
 Пиши по-русски простым человеческим языком. Обычно 1–3 коротких предложения.
+
+{objections.NEONA_OBJECTION_RULES_TEXT}
 
 ТВОЙ ВНУТРЕННИЙ КОМПАС:
 Сначала человек — потом Агентство.
@@ -105,12 +112,15 @@ def _general_reply(config, owner_name, first_name, text, greet):
 но человек не должен ощущать, что его тащат к встрече.
 Не приглашай механически после каждой реплики.
 
-ЕСЛИ ЧЕЛОВЕК ЯВНО ОТКАЗАЛСЯ
-(«неинтересно», «не хочу», «не пишите», «мне это не нужно»):
-- не спорь;
-- не предлагай другой магнит;
-- не задавай новый вопрос;
-- коротко поблагодари за ответ и подтверди, что больше беспокоить не будешь.
+ЕСЛИ ЧЕЛОВЕК СТАВИТ ЯВНУЮ ГРАНИЦУ КОММУНИКАЦИИ
+(например: «не пишите», «не присылайте», «больше не беспокойте»):
+- немедленно остановись;
+- не спорь, не предлагай другой аргумент и не задавай новый вопрос;
+- коротко подтверди, что больше писать не будешь.
+
+Фразы вроде «нет времени», «мне это не нужно», «неинтересно», «у меня уже есть ИИ»
+считай мягким возражением, а не автоматическим запретом на разговор: их можно один раз
+спокойно прояснить по базе возражений.
 
 ЕСЛИ ЧЕЛОВЕК ЗАДАЁТ ВОПРОС:
 - ответь кратко, только если ответ точно следует из известных возможностей Агентства W;
@@ -136,6 +146,55 @@ def _general_reply(config, owner_name, first_name, text, greet):
 {greeting_rule}
 """.strip()
 
+    return _call_openai(config, instructions, text)
+
+
+def _respectful_stop_reply() -> str:
+    return "Поняла. Спасибо, что сказали. Больше писать вам не буду. Всего доброго."
+
+
+def _repeat_objection_close() -> str:
+    return (
+        "Поняла вас. Не буду уговаривать или возвращаться к этому вопросу. "
+        "Спасибо за откровенный ответ."
+    )
+
+
+def _objection_reply(config, owner_name, first_name, text, category, greet):
+    greeting_rule = (
+        f"Начни с «{core._greeting(first_name)}»"
+        if greet
+        else "Не повторяй приветствие: диалог уже начат."
+    )
+    agency_core = str(getattr(core, "NEONA_DIALOG_CORE", "") or "").strip()
+    competitor_block = (
+        objections.competitor_prompt_block(text)
+        if category == "competitor"
+        else ""
+    )
+    instructions = f"""
+{agency_core}
+
+Ты Неона — секретарь-референт {owner_name}.
+Человек высказал СОМНЕНИЕ или ВОЗРАЖЕНИЕ. Это первая содержательная попытка его прояснить.
+
+{objections.objection_prompt_block(category)}
+
+{competitor_block}
+
+КАК ОТВЕТИТЬ СЕЙЧАС:
+- сначала коротко покажи, что услышала человека;
+- не спорь и не говори «вы неправы»;
+- используй максимум ОДИН проверенный факт или смысл Агентства W;
+- не перечисляй функции;
+- не приглашай на встречу механически;
+- задай максимум ОДИН маленький вопрос, который помогает понять сомнение или увидеть релевантную пользу;
+- если точного факта нет, скажи, что лучше уточнить у {owner_name}, и не выдумывай;
+- 1–3 коротких предложения;
+- {greeting_rule}
+
+Верни только готовый ответ человеку.
+""".strip()
     return _call_openai(config, instructions, text)
 
 
@@ -286,6 +345,60 @@ def _process_message(
         else {}
     )
     greet = not greeted
+
+    classification = objections.classify_neona_reply(text)
+
+    # Явная просьба прекратить контакт важнее любой стадии диалога.
+    if classification.get("kind") == "hard_stop":
+        context["contact_boundary"] = "do_not_contact"
+        context["contact_boundary_at"] = datetime.now(core.UTC).isoformat()
+        context["last_objection_category"] = "hard_stop"
+        return _respectful_stop_reply(), "opted_out", True, context
+
+    # Если после прежнего явного отказа человек сам снова написал, это новый входящий
+    # контакт. Неона может ответить, но не делает никаких исходящих напоминаний сама.
+    if stage == "opted_out":
+        context.pop("contact_boundary", None)
+        context["contact_reinitiated_at"] = datetime.now(core.UTC).isoformat()
+        stage = "idle"
+
+    # Мягкое возражение не считаем окончательным отказом. Его можно содержательно
+    # отработать один раз. Повтор того же сомнения — уважительное завершение.
+    if stage == "idle" and classification.get("kind") == "objection":
+        category = str(classification.get("category") or "other")
+        counts = context.get("objection_counts")
+        counts = dict(counts) if isinstance(counts, dict) else {}
+        previous = int(counts.get(category) or 0)
+        last_category = str(context.get("last_objection_category") or "")
+        counts[category] = previous + 1
+        context["objection_counts"] = counts
+
+        if last_category == category and previous >= 1:
+            context["last_objection_category"] = category
+            context["soft_objection_closed"] = category
+            return _repeat_objection_close(), stage, True, context
+
+        context["last_objection_category"] = category
+        context.pop("soft_objection_closed", None)
+
+        return (
+            _objection_reply(
+                config,
+                owner_name,
+                first_name,
+                text,
+                category,
+                greet,
+            ),
+            stage,
+            True,
+            context,
+        )
+
+    # Новый содержательный ответ после возражения означает, что разговор снова движется.
+    if classification.get("kind") in {"interest", "question", "other"}:
+        context.pop("last_objection_category", None)
+        context.pop("soft_objection_closed", None)
 
     # Уже назначенная встреча.
     if stage == "scheduled":
