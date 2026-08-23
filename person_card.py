@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
@@ -30,15 +31,28 @@ def _safe_text(value: Any, fallback: str = "—") -> str:
     return text if text else fallback
 
 
-def _format_dt(value: Any) -> str:
+_BERLIN_TZ = ZoneInfo("Europe/Berlin")
+
+
+def _parse_dt(value: Any) -> datetime | None:
     raw = str(value or "").strip()
     if not raw:
-        return ""
+        return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return parsed.strftime("%d.%m.%Y %H:%M")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_BERLIN_TZ)
+        return parsed.astimezone(_BERLIN_TZ)
     except Exception:
-        return raw[:16].replace("T", " ")
+        return None
+
+
+def _format_dt(value: Any) -> str:
+    parsed = _parse_dt(value)
+    if parsed is not None:
+        return parsed.strftime("%d.%m.%Y %H:%M")
+    raw = str(value or "").strip()
+    return raw[:16].replace("T", " ") if raw else ""
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -117,10 +131,12 @@ def _boundary(context: dict[str, Any], stage: str) -> tuple[str, bool]:
         "no_contact",
         "blocked",
     }:
-        return "⛔ Не писать по собственной инициативе", True
+        return "⛔ Человек попросил не писать. Инициировать новый контакт нельзя.", True
     if raw:
         return raw, False
-    return "Общение разрешено в рамках действующего диалога", False
+    if stage == "scheduled":
+        return "Встреча согласована. Не инициировать дополнительные сообщения без необходимости.", False
+    return "Ждём ответа. Повторно не писать без нового входящего сообщения.", False
 
 
 def _next_action(
@@ -172,29 +188,33 @@ def _last_event(
     dialog_state: dict[str, Any],
     sent_event: dict[str, Any] | None,
 ) -> str:
-    candidates: list[tuple[str, str]] = []
+    candidates: list[tuple[datetime | None, str]] = []
 
-    analyzed_at = _format_dt(contact.get("analyzed_at"))
+    analyzed_raw = contact.get("analyzed_at")
+    analyzed_at = _format_dt(analyzed_raw)
     if analyzed_at:
-        candidates.append((str(contact.get("analyzed_at")), f"Неония обновила анализ · {analyzed_at}"))
+        candidates.append((_parse_dt(analyzed_raw), f"Неония обновила анализ · {analyzed_at}"))
 
     if sent_event:
-        sent_at = _format_dt(sent_event.get("sent_at"))
-        candidates.append((str(sent_event.get("sent_at") or ""), f"Первое сообщение отправлено · {sent_at}"))
+        sent_raw = sent_event.get("sent_at")
+        sent_at = _format_dt(sent_raw)
+        candidates.append((_parse_dt(sent_raw), f"Первое сообщение отправлено · {sent_at}"))
     elif draft:
         status = _safe_text(draft.get("status"), "Сообщение подготовлено")
-        candidates.append(("", status))
+        candidates.append((None, status))
 
-    updated_at = _format_dt(dialog_state.get("updated_at"))
-    if updated_at:
-        stage = _safe_text(dialog_state.get("stage"), "диалог обновлён")
+    # idle создаётся технически сразу после первого сообщения и не является
+    # отдельным значимым событием для Директора.
+    stage = _safe_text(dialog_state.get("stage"), "")
+    updated_raw = dialog_state.get("updated_at")
+    updated_at = _format_dt(updated_raw)
+    if updated_at and stage and stage != "idle":
         label = _STAGE_LABELS.get(stage, stage)
-        candidates.append((str(dialog_state.get("updated_at") or ""), f"Неона: {label} · {updated_at}"))
+        candidates.append((_parse_dt(updated_raw), f"Неона: {label} · {updated_at}"))
 
-    # ISO-строки сортируются хронологически; пустые уходят вниз.
-    dated = [item for item in candidates if item[0]]
+    dated = [item for item in candidates if item[0] is not None]
     if dated:
-        return sorted(dated, key=lambda item: item[0])[-1][1]
+        return max(dated, key=lambda item: item[0])[1]
     return candidates[-1][1] if candidates else "Карточка создана из текущих данных"
 
 
@@ -247,34 +267,44 @@ def render_person_card_2_0(
         st.info(f"➡️ **Следующий допустимый шаг:** {_next_action(contact, draft, stage_code, hard_boundary)}")
 
         owner_hint = _safe_text(contact.get("owner_hint"), "")
+        hypothesis = _safe_text(contact.get("short_portrait"), "")
         reasons = contact.get("reasons") if isinstance(contact.get("reasons"), list) else []
-        if owner_hint or reasons:
+        filtered_reasons: list[str] = []
+        for reason in reasons:
+            text = _safe_text(reason, "")
+            if not text or text == hypothesis or text in filtered_reasons:
+                continue
+            filtered_reasons.append(text)
+
+        if owner_hint or filtered_reasons:
             st.write("**Почему человек оказался в работе:**")
             if owner_hint:
                 st.write(owner_hint)
-            for reason in reasons[:3]:
-                text = _safe_text(reason, "")
-                if text:
-                    st.write(f"• {text}")
+            for text in filtered_reasons[:3]:
+                st.write(f"• {text}")
 
-        facts: list[str] = []
-        short_portrait = _safe_text(contact.get("short_portrait"), "")
-        if short_portrait:
-            facts.append(short_portrait)
-        project_name = _safe_text(contact.get("project_name"), "")
-        if project_name:
-            facts.append(f"Проект/компания: {project_name}")
-        project_evidence = _safe_text(contact.get("project_evidence"), "")
-        if project_evidence:
-            facts.append(f"Основание: {project_evidence}")
+        confirmed_facts: list[str] = []
         profile_about = _safe_text(contact.get("profile_about"), "")
         if profile_about:
-            facts.append(f"Bio: {profile_about}")
+            confirmed_facts.append(f"Bio профиля: {profile_about}")
 
-        if facts:
-            st.write("**Что известно сейчас:**")
-            for fact in facts[:5]:
+        project_name = _safe_text(contact.get("project_name"), "")
+        project_evidence = _safe_text(contact.get("project_evidence"), "")
+        if project_name and project_evidence:
+            confirmed_facts.append(f"Проект/компания: {project_name}")
+            confirmed_facts.append(f"Подтверждение связи: {project_evidence}")
+
+        st.write("**Подтверждено сейчас:**")
+        if confirmed_facts:
+            for fact in confirmed_facts[:5]:
                 st.write(f"• {fact}")
+        else:
+            st.caption("Подтверждённых сведений пока немного.")
+
+        if hypothesis:
+            st.write("**Гипотеза Неонии:**")
+            st.write(hypothesis)
+            st.caption("Это аналитический вывод, а не подтверждённый факт о человеке.")
 
         objections = _collect_objections(context)
         st.write(f"**Границы общения:** {boundary_label}")
@@ -289,11 +319,13 @@ def render_person_card_2_0(
         analyzed_at = _format_dt(contact.get("analyzed_at"))
         if analyzed_at:
             timeline.append(f"{analyzed_at} — анализ Неонии")
-        if draft:
-            timeline.append(f"{_safe_text(draft.get('status'), 'Первое сообщение подготовлено')}")
         if sent_event:
             timeline.append(f"{_format_dt(sent_event.get('sent_at'))} — первое сообщение отправлено")
-        if dialog_state:
+        elif draft:
+            timeline.append(f"{_safe_text(draft.get('status'), 'Первое сообщение подготовлено')}")
+
+        dialog_stage = _safe_text(dialog_state.get("stage"), "")
+        if dialog_state and dialog_stage and dialog_stage != "idle":
             updated = _format_dt(dialog_state.get("updated_at"))
             timeline.append(f"{updated} — {stage_label}" if updated else stage_label)
 

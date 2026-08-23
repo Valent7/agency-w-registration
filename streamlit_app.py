@@ -8904,36 +8904,40 @@ if received_hash:
                                             NEONA_MAGNET_NAMES
                                         ).index(selected_magnet)
 
-                                        magnet_columns = st.columns([3, 1])
-                                        chosen_magnet = magnet_columns[0].selectbox(
-                                            "🧲 Магнит первого сообщения",
-                                            options=list(NEONA_MAGNET_NAMES),
-                                            index=magnet_index,
-                                            key=(
-                                                "neona_magnet_select_"
-                                                f"{telegram_id}_{contact_id}_"
-                                                f"{draft_revision}"
-                                            ),
-                                        )
-                                        rewrite_for_magnet = magnet_columns[1].button(
-                                            "✨ Переписать",
-                                            disabled=bool(draft.get("sent")),
-                                            key=(
-                                                "neona_rewrite_for_magnet_"
-                                                f"{telegram_id}_{contact_id}_"
-                                                f"{draft_revision}"
-                                            ),
-                                        )
+                                        chosen_magnet = selected_magnet
+                                        rewrite_for_magnet = False
 
-                                        if (
-                                            chosen_magnet != selected_magnet
-                                            and not draft.get("sent")
-                                        ):
-                                            st.caption(
-                                                "Вы выбрали другой магнит. "
-                                                "Нажмите «✨ Переписать», "
-                                                "и Неона создаст новый текст под него."
+                                        if draft.get("sent"):
+                                            st.markdown(
+                                                f"**🧲 Использованный магнит:** {selected_magnet}"
                                             )
+                                        else:
+                                            magnet_columns = st.columns([3, 1])
+                                            chosen_magnet = magnet_columns[0].selectbox(
+                                                "🧲 Магнит первого сообщения",
+                                                options=list(NEONA_MAGNET_NAMES),
+                                                index=magnet_index,
+                                                key=(
+                                                    "neona_magnet_select_"
+                                                    f"{telegram_id}_{contact_id}_"
+                                                    f"{draft_revision}"
+                                                ),
+                                            )
+                                            rewrite_for_magnet = magnet_columns[1].button(
+                                                "✨ Переписать",
+                                                key=(
+                                                    "neona_rewrite_for_magnet_"
+                                                    f"{telegram_id}_{contact_id}_"
+                                                    f"{draft_revision}"
+                                                ),
+                                            )
+
+                                            if chosen_magnet != selected_magnet:
+                                                st.caption(
+                                                    "Вы выбрали другой магнит. "
+                                                    "Нажмите «✨ Переписать», "
+                                                    "и Неона создаст новый текст под него."
+                                                )
 
                                         if rewrite_for_magnet:
                                             with st.spinner(
