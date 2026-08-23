@@ -6,6 +6,13 @@
 в заблуждение.
 """
 
+from agency_core import agency_core_prompt
+
+NEONA_AGENCY_CORE = agency_core_prompt(
+    "Неона",
+    "вести уважительный человеческий диалог, разбирать сомнения фактами и приводить к осознанной встрече без давления",
+)
+
 NEONA_MASTER_TIMEZONE = "Europe/Moscow"
 NEONA_MASTER_TIME_LABEL = "МСК"
 NEONA_MEETING_FORMATS = ("Zoom", "Telegram", "WhatsApp")
@@ -404,6 +411,8 @@ def _neona_first_message_core_prompt(owner_name: str) -> str:
 
     return f"""
 Ты — Неона, секретарь-референт {owner_genitive} в Агентстве W.
+
+{NEONA_AGENCY_CORE}
 
 СЕЙЧАС ТЫ ПИШЕШЬ ТОЛЬКО ПЕРВОЕ СООБЩЕНИЕ.
 

@@ -12,6 +12,8 @@ import requests
 import streamlit as st
 from PIL import Image, UnidentifiedImageError
 
+from agency_core import agency_core_prompt, mission_test_prompt
+
 import agency_calendar
 try:
     from team_center import (
@@ -45,6 +47,16 @@ from workspace_persistence import persist_workspace_if_changed
 UTC = ZoneInfo("UTC")
 MSK = ZoneInfo("Europe/Moscow")
 BERLIN = ZoneInfo("Europe/Berlin")
+
+STAGIRITE_CORE = agency_core_prompt(
+    "Стагирит",
+    "координировать Агентство по целям Директора, распределять работу и возвращать результат на решение",
+)
+CONTENT_MASTER_CORE = agency_core_prompt(
+    "Мастер контента",
+    "создавать понятный человеческий контент, который служит миссии Агентства и не подменяет факты рекламой",
+)
+MISSION_TEST_CORE = mission_test_prompt()
 
 WORK_START = dt_time(10, 0)
 WORK_END = dt_time(20, 0)
@@ -214,7 +226,7 @@ def _agency_current_release_brief() -> str:
   Telegram-контактами владельца и учитывает активность сегодня/вчера.
 - Недельный резерв может быть до 50 контактов; ежедневно готовится
   рабочая пятёрка, а не весь резерв одновременно.
-- При активной недельной цели новая ежедневная пятёрка появляется у Неоны:
+- Ежедневная рабочая пятёрка готовится из уже сохранённого пула Неонии независимо от недельной цели:
   владельцу не нужно каждый день вручную проходить Стагирит → Неония → Неона.
 - Неона готовит персональное первое сообщение.
   Первую отправку обязательно утверждает владелец.
@@ -2213,6 +2225,8 @@ def _generate_night_thought_content(
     prompt = f"""
 Ты — автор рубрики «Непричёсанные мысли на ночь».
 
+{CONTENT_MASTER_CORE}
+
 Поручение Директора:
 {assignment}
 
@@ -2478,6 +2492,8 @@ def _generate_day_thought_content(
     prompt = f"""
 Ты — автор рубрики «Мысль дня».
 
+{CONTENT_MASTER_CORE}
+
 Поручение Директора:
 {assignment}
 
@@ -2700,6 +2716,9 @@ def _generate_announcement_content(
 
     system_prompt = f"""
 Ты — Мастер коротких анонсов Агентства W.
+
+{CONTENT_MASTER_CORE}
+
 Стагирит уже понял поручение Директора.
 
 ПОРУЧЕНИЕ:
@@ -2936,6 +2955,8 @@ def _generate_content(
     director_prompt = f"""
 Ты — Стагирит, редакционный директор Агентства W.
 
+{STAGIRITE_CORE}
+
 Поручение Директора:
 {assignment}
 
@@ -3096,6 +3117,8 @@ CTA:
     master_prompt = f"""
 Ты — Мастер контента редакции «Хроники Агентства W».
 
+{CONTENT_MASTER_CORE}
+
 Ты не технический копирайтер.
 Ты автор короткой современной прозы для взрослых людей.
 
@@ -3171,6 +3194,8 @@ CTA:
     # --------------------------------------------------------
     critic_prompt = f"""
 Ты — Стагирит, главный редактор «Хроник Агентства W».
+
+{STAGIRITE_CORE}
 
 Поручение:
 {assignment}
@@ -3294,6 +3319,8 @@ story >= 8, intrigue >= 8 и нет FATAL.
 
         rewrite_prompt = f"""
 Ты — Мастер контента «Хроник Агентства W».
+
+{CONTENT_MASTER_CORE}
 
 Первая версия не принята Стагиритом.
 
@@ -3521,6 +3548,10 @@ def _understand_director_assignment(
     prompt = f"""
 Ты — Стагирит, универсальный ИИ-заместитель Директора Агентства W.
 
+{STAGIRITE_CORE}
+
+{MISSION_TEST_CORE}
+
 Директор может быть человеком любого возраста и технической подготовки.
 Он НЕ обязан:
 - знать названия внутренних модулей;
@@ -3671,6 +3702,10 @@ def _execute_general_director_task(
 
     prompt = f"""
 Ты — Стагирит, универсальный заместитель Директора Агентства W.
+
+{STAGIRITE_CORE}
+
+{MISSION_TEST_CORE}
 
 Исходное короткое поручение:
 {assignment}
@@ -3926,6 +3961,9 @@ def _generate_video_announcement(
 
     system_prompt = f"""
 Ты — Мастер контента Агентства W.
+
+{CONTENT_MASTER_CORE}
+
 Стагирит только координирует задачу и передал её тебе. ТЕКСТ ПИШЕШЬ ТЫ.
 
 Нужно написать короткий живой анонс к готовому видеоролику для публикации

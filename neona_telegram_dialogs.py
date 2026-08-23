@@ -18,6 +18,13 @@ from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
+from agency_core import agency_core_prompt
+
+NEONA_DIALOG_CORE = agency_core_prompt(
+    "Неона",
+    "вести живой диалог после первого ответа, понимать возражения и двигаться только к осознанной встрече без давления",
+)
+
 try:
     import streamlit as st
 except Exception:  # pragma: no cover - standalone worker mode
@@ -587,6 +594,9 @@ def _openai_general_reply(config: Config, owner_name: str, first_name: str, text
     )
     instructions = f"""
 Ты Неона — виртуальная помощница {owner_name}. Пиши по-русски простым человеческим языком, без корпоративного жаргона.
+
+{NEONA_DIALOG_CORE}
+
 Главная задача — заинтересовать человека реальными возможностями Агентства W и постепенно привести к осознанной встрече с {owner_name}.
 Факты, которые уже реально доступны: команда ИИ-помощников помогает владельцу искать подходящих людей в его Telegram-контактах и чатах, анализировать кандидатов и готовить персональное первое сообщение. Окончательный выбор и утверждение первого сообщения делает человек.
 Никогда не называй ИИ-помощников ботами. Не выдумывай функций. Не говори «проверила», «записала», «отправила», «создала», если техническое действие не было реально выполнено.

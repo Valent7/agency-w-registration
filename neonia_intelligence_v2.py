@@ -7,6 +7,13 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from agency_core import agency_core_prompt
+
+NEONIA_CORE = agency_core_prompt(
+    "Неония",
+    "понимать проект и целевую аудиторию, находить подходящих людей по наблюдаемым данным и рекомендовать, не решая за Директора",
+)
+
 
 TARGET_STATUSES = {
     "green": ("🟢", "Сильный признак"),
@@ -97,8 +104,10 @@ def analyze_owner_project_target_profile(
     project_files,
     owner_note: str,
 ):
-    prompt = r"""
+    prompt = rf"""
 Ты — Неония, специалист по поиску целевой аудитории Агентства W.
+
+{NEONIA_CORE}
 
 ВНУТРЕННЕ изучи проект владельца, но НЕ показывай пользователю анализ проекта,
 структуру компании, CEO, основателей, администраторов каналов, юридических
@@ -302,8 +311,10 @@ def analyze_candidate_project_risk(
     project_url: str = "",
     evidence: str = "",
 ):
-    prompt = r'''
+    prompt = rf'''
 Ты — Неония, аналитик рисков Агентства W.
+
+{NEONIA_CORE}
 Проверяешь ПРОЕКТ, который продвигает найденный кандидат.
 
 Нельзя называть проект мошенничеством или фейком по впечатлению.

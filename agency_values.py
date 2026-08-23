@@ -1,5 +1,7 @@
 import streamlit as st
 
+from agency_core import AGENCY_W_MISSION, AGENCY_W_MOTTO, AGENCY_W_HUMAN_PRINCIPLE
+
 
 VALUE_CARDS = [
     (
@@ -119,7 +121,7 @@ def render_values_map():
     st.caption("Зачем существует Агентство и какую реальную работу оно снимает с человека.")
 
     st.markdown(
-        """
+        f"""
         <div style="
             border:1px solid rgba(212,175,55,.38);
             border-radius:20px;
@@ -128,19 +130,17 @@ def render_values_map():
             background:linear-gradient(135deg,rgba(212,175,55,.08),rgba(255,255,255,.02));
         ">
           <div style="font-size:1.45rem;font-weight:700;color:#e6c86e;margin-bottom:8px;">
-            Мы создаём своё настоящее
+            {AGENCY_W_MOTTO}
           </div>
           <div style="font-size:1.08rem;line-height:1.65;color:#eee7da;">
-            Агентство W создано для того, чтобы технологии возвращали человеку время.
-            ИИ может выполнять повторяющуюся работу 24/7, а человек — развиваться,
-            уделять больше внимания семье, близким, творчеству, путешествиям и самой жизни.
+            {AGENCY_W_MISSION}
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.info("ИИ берёт на себя рутину. Человек принимает решения, строит отношения и создаёт своё настоящее.")
+    st.info(f"{AGENCY_W_HUMAN_PRINCIPLE} {AGENCY_W_MISSION}")
 
     for card in VALUE_CARDS:
         _value_card(*card)
