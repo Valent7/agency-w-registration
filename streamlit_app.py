@@ -97,6 +97,7 @@ from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
 )
+from person_card import render_person_card_2_0
 import asyncio
 import json
 import re
@@ -8803,6 +8804,13 @@ if received_hash:
                                             "теплота — "
                                             f"{contact.get('warmth', 'неясно')}."
                                         )
+
+                                    render_person_card_2_0(
+                                        owner_telegram_id=int(telegram_id),
+                                        contact=contact,
+                                        draft=draft,
+                                        sent_log=sent_log,
+                                    )
 
                                     with st.expander(
                                         "Контекст для персонализации"
