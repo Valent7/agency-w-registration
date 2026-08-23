@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import requests
 import neona_telegram_dialogs as core
 import neona_objections as objections
+import neona_memory as memory
 
 
 BUFFER_MINUTES = 60
@@ -326,7 +327,7 @@ def _after_scheduled_reply(config, owner_name, first_name, text):
     return _call_openai(config, instructions, text)
 
 
-def _process_message(
+def _process_message_without_memory(
     config,
     owner_id,
     owner_name,
@@ -535,6 +536,51 @@ def _process_message(
         else stage
     )
     return reply, new_stage, True, context
+
+
+def _process_message(
+    config,
+    owner_id,
+    owner_name,
+    contact_id,
+    first_name,
+    username,
+    text,
+    message_dt,
+    state,
+):
+    """Сохраняет сильную рабочую политику Неоны и добавляет только слой памяти."""
+    previous_stage = str((state or {}).get("stage") or "idle")
+    reply, new_stage, greeted, context = _process_message_without_memory(
+        config,
+        owner_id,
+        owner_name,
+        contact_id,
+        first_name,
+        username,
+        text,
+        message_dt,
+        state,
+    )
+
+    # Память не участвует в принятии решения и не меняет сформированный ответ.
+    # Даже если извлечение памяти даст сбой, живой диалог продолжится как раньше.
+    try:
+        classification = objections.classify_neona_reply(text)
+        context = memory.remember_dialog_turn(
+            config,
+            context=context,
+            incoming_text=text,
+            reply_text=reply,
+            classification=classification,
+            previous_stage=previous_stage,
+            new_stage=new_stage,
+            message_dt=message_dt,
+        )
+    except Exception:
+        pass
+
+    return reply, new_stage, greeted, context
 
 
 def apply_policy():

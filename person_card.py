@@ -1,8 +1,8 @@
 """Карточка человека 2.0 — read-only слой общей памяти Агентства W.
 
-Первая версия ничего не меняет в данных и не вмешивается в работу Неонии,
-Неоны, Стагирита или Неолы. Она только собирает уже существующий контекст
-в одну понятную карточку для Директора.
+Карточка сама ничего не отправляет и не принимает решений. Она собирает
+существующий контекст и живую память диалога Неоны в одну понятную карточку
+для Директора.
 """
 
 from __future__ import annotations
@@ -286,6 +286,82 @@ def _collect_objections(context: dict[str, Any]) -> list[str]:
     return values[:5]
 
 
+def _relationship_memory(context: dict[str, Any]) -> dict[str, Any]:
+    raw = context.get("relationship_memory")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _memory_objections(memory: dict[str, Any]) -> list[str]:
+    result: list[str] = []
+    raw = memory.get("objections")
+    if not isinstance(raw, list):
+        return result
+    for item in raw:
+        if isinstance(item, dict):
+            text = _safe_text(item.get("summary"), "")
+        else:
+            text = _safe_text(item, "")
+        if text and text not in result:
+            result.append(text)
+    return result[-5:]
+
+
+def _render_memory_section(memory: dict[str, Any]) -> None:
+    if not memory:
+        st.caption("Живая память появится после первого нового ответа человека.")
+        return
+
+    st.write("**Последний смысл ответа человека:**")
+    st.write(_safe_text(memory.get("last_summary"), "Получен новый ответ."))
+
+    facts = memory.get("confirmed_facts") if isinstance(memory.get("confirmed_facts"), list) else []
+    needs = memory.get("goals_or_needs") if isinstance(memory.get("goals_or_needs"), list) else []
+    questions = memory.get("questions") if isinstance(memory.get("questions"), list) else []
+    preferences = memory.get("preferences") if isinstance(memory.get("preferences"), list) else []
+
+    if facts:
+        st.write("**Что человек сам сообщил:**")
+        for item in facts[-6:]:
+            st.write(f"• {_safe_text(item)}")
+    if needs:
+        st.write("**Цели / задачи / потребности, прозвучавшие в разговоре:**")
+        for item in needs[-5:]:
+            st.write(f"• {_safe_text(item)}")
+    if questions:
+        st.write("**Вопросы человека:**")
+        for item in questions[-5:]:
+            st.write(f"• {_safe_text(item)}")
+    if preferences:
+        st.write("**Явно выраженные предпочтения:**")
+        for item in preferences[-4:]:
+            st.write(f"• {_safe_text(item)}")
+
+    last_reply = _safe_text(memory.get("last_reply"), "")
+    if last_reply:
+        with st.expander("Последний ответ Неоны"):
+            st.write(last_reply)
+
+    turns = memory.get("turns") if isinstance(memory.get("turns"), list) else []
+    if turns:
+        with st.expander("Живая история диалога"):
+            for turn in turns[-8:]:
+                if not isinstance(turn, dict):
+                    continue
+                at = _format_dt(turn.get("at"))
+                summary = _safe_text(turn.get("summary"), "Новый ход диалога")
+                kind = _safe_text(turn.get("kind"), "other")
+                labels = {
+                    "interest": "интерес",
+                    "question": "вопрос",
+                    "objection": "возражение",
+                    "hard_stop": "граница общения",
+                    "other": "ответ",
+                }
+                label = labels.get(kind, kind)
+                prefix = f"{at} — " if at else ""
+                st.write(f"• {prefix}{label}: {summary}")
+
+
 def render_person_card_2_0(
     owner_telegram_id: int,
     contact: dict[str, Any],
@@ -304,6 +380,7 @@ def render_person_card_2_0(
 
     dialog_state = _load_owner_dialog_states(int(owner_telegram_id)).get(contact_id, {})
     context = dialog_state.get("context") if isinstance(dialog_state.get("context"), dict) else {}
+    relationship_memory = _relationship_memory(context)
     stage_code, stage_label = _current_stage(contact, draft, dialog_state)
     boundary_label, hard_boundary = _boundary(context, stage_code)
     sent_event = _first_message_event(contact_id, sent_log)
@@ -356,7 +433,7 @@ def render_person_card_2_0(
             st.write(hypothesis)
             st.caption("Это аналитический вывод, а не подтверждённый факт о человеке.")
 
-        objections = _collect_objections(context)
+        objections = _memory_objections(relationship_memory) or _collect_objections(context)
         st.write(f"**Границы общения:** {boundary_label}")
         if objections:
             st.write("**Зафиксированные возражения:**")
@@ -364,6 +441,10 @@ def render_person_card_2_0(
                 st.write(f"• {item}")
         else:
             st.caption("Возражения пока не зафиксированы в общей карточке.")
+
+        st.divider()
+        st.write("### 💬 Живая память Неоны")
+        _render_memory_section(relationship_memory)
 
         timeline: list[str] = []
         analyzed_at = _format_dt(contact.get("analyzed_at"))
@@ -375,7 +456,11 @@ def render_person_card_2_0(
             timeline.append(f"{_safe_text(draft.get('status'), 'Первое сообщение подготовлено')}")
 
         dialog_stage = _safe_text(dialog_state.get("stage"), "")
-        if dialog_state and dialog_stage and dialog_stage != "idle":
+        memory_at = _format_dt(relationship_memory.get("last_turn_at")) if relationship_memory else ""
+        if memory_at:
+            memory_summary = _safe_text(relationship_memory.get("last_summary"), "получен новый ответ")
+            timeline.append(f"{memory_at} — диалог Неоны: {memory_summary}")
+        elif dialog_state and dialog_stage and dialog_stage != "idle":
             updated = _format_dt(dialog_state.get("updated_at"))
             timeline.append(f"{updated} — {stage_label}" if updated else stage_label)
 
@@ -386,6 +471,6 @@ def render_person_card_2_0(
                         st.write(f"• {event}")
 
         st.caption(
-            "Первая версия карточки только читает уже существующие данные. "
-            "Она ничего не отправляет и не меняет решения агентов."
+            "Карточка сама ничего не отправляет и не принимает решений. "
+            "Живую память записывает Неона после реального входящего сообщения."
         )
