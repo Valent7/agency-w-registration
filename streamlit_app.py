@@ -97,7 +97,7 @@ from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
 )
-from person_card import render_person_card_2_0
+from person_card import render_person_card_2_0, render_neona_magnets_reference
 import asyncio
 import json
 import re
@@ -8815,11 +8815,48 @@ if received_hash:
                                     with st.expander(
                                         "Контекст для персонализации"
                                     ):
-                                        reasons = contact.get("reasons", [])
-                                        if reasons:
-                                            st.write("**Что известно о контакте:**")
-                                            for reason in reasons:
-                                                st.write(f"• {reason}")
+                                        profile_about = str(
+                                            contact.get("profile_about") or ""
+                                        ).strip()
+                                        if profile_about:
+                                            st.write("**Подтверждено для персонализации:**")
+                                            st.write(f"• Bio профиля: {profile_about}")
+                                        else:
+                                            st.caption(
+                                                "Подтверждённых сведений для персонализации "
+                                                "пока немного."
+                                            )
+
+                                        hypothesis = str(
+                                            contact.get("short_portrait") or ""
+                                        ).strip()
+                                        reasons = (
+                                            contact.get("reasons", [])
+                                            if isinstance(contact.get("reasons"), list)
+                                            else []
+                                        )
+                                        hypothesis_lines = []
+                                        if hypothesis:
+                                            hypothesis_lines.append(hypothesis)
+                                        for reason in reasons:
+                                            reason_text = str(reason or "").strip()
+                                            if (
+                                                reason_text
+                                                and reason_text not in hypothesis_lines
+                                                and reason_text.lower()
+                                                not in {"недостаточно данных", "данных пока немного"}
+                                            ):
+                                                hypothesis_lines.append(reason_text)
+
+                                        if hypothesis_lines:
+                                            st.write("**Гипотеза Неонии:**")
+                                            for item in hypothesis_lines[:3]:
+                                                st.write(f"• {item}")
+                                            st.caption(
+                                                "Это аналитические выводы для выбора подхода, "
+                                                "а не подтверждённые факты о человеке."
+                                            )
+
                                         st.write(
                                             "**Безопасная тема обращения:**"
                                         )
@@ -8829,12 +8866,6 @@ if received_hash:
                                                 "Нейтральное знакомство",
                                             )
                                         )
-                                        profile_about = str(
-                                            contact.get("profile_about") or ""
-                                        ).strip()
-                                        if profile_about:
-                                            st.write("**Bio:**")
-                                            st.write(profile_about)
 
                                     if not draft:
                                         if st.button(
@@ -8910,6 +8941,9 @@ if received_hash:
                                         if draft.get("sent"):
                                             st.markdown(
                                                 f"**🧲 Использованный магнит:** {selected_magnet}"
+                                            )
+                                            render_neona_magnets_reference(
+                                                selected_magnet=selected_magnet
                                             )
                                         else:
                                             magnet_columns = st.columns([3, 1])
