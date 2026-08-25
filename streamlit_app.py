@@ -104,6 +104,7 @@ import json
 import re
 import base64
 from pathlib import Path
+from io import BytesIO
 
 from PIL import Image
 from telethon import TelegramClient
@@ -890,7 +891,7 @@ def render_neona_speaks_for_message(
 
         send_col, discard_col = st.columns(2)
         send_clicked = send_col.button(
-            "📨 Отправить видео",
+            "⭕ Отправить как видео-кружок",
             type="primary",
             disabled=bool(disabled),
             key=f"neona_speaks_send_{owner_id}_{contact_id}_{video_id}",
@@ -2408,6 +2409,7 @@ async def send_telegram_first_video(
             file_obj,
             force_document=False,
             supports_streaming=True,
+            video_note=True,
         )
 
         sent_at = datetime.now(
@@ -9954,7 +9956,7 @@ if received_hash:
                                                         "sent_format"
                                                     ] = "heygen_video"
                                                     draft["status"] = (
-                                                        "Первое сообщение отправлено"
+                                                        "Первое видео-кружок отправлен"
                                                     )
                                                     drafts[contact_id] = draft
                                                     drafts.pop(
@@ -10034,7 +10036,7 @@ if received_hash:
                                                             continue
                                                         if candidate_id == contact_id:
                                                             candidate["status"] = (
-                                                                "Первое сообщение отправлено"
+                                                                "Первое видео-кружок отправлен"
                                                             )
                                                     st.session_state[
                                                         candidates_key
@@ -10044,7 +10046,7 @@ if received_hash:
                                                         owner_contacts[
                                                             contact_id
                                                         ]["status"] = (
-                                                            "Первое сообщение отправлено"
+                                                            "Первое видео-кружок отправлен"
                                                         )
                                                         st.session_state[
                                                             owner_contacts_key
@@ -10077,7 +10079,7 @@ if received_hash:
                                                     except Exception:
                                                         pass
                                                     st.error(
-                                                        "Видео Неоны не отправлено: "
+                                                        "Видео-кружок Неоны не отправлен: "
                                                         + friendly_error
                                                     )
 
@@ -10156,7 +10158,7 @@ if received_hash:
                                                             "telegram_message_id"
                                                         ] = send_result["message_id"]
                                                         draft["status"] = (
-                                                            "Первое сообщение отправлено"
+                                                            "Первое видео-кружок отправлен"
                                                         )
                                                         drafts[contact_id] = draft
                                                         drafts.pop(
@@ -10236,7 +10238,7 @@ if received_hash:
                                                                 continue
                                                             if candidate_id == contact_id:
                                                                 candidate["status"] = (
-                                                                    "Первое сообщение отправлено"
+                                                                    "Первое видео-кружок отправлен"
                                                                 )
                                                         st.session_state[
                                                             candidates_key
@@ -10246,7 +10248,7 @@ if received_hash:
                                                             owner_contacts[contact_id][
                                                                 "status"
                                                             ] = (
-                                                                "Первое сообщение отправлено"
+                                                                "Первое видео-кружок отправлен"
                                                             )
                                                             st.session_state[
                                                                 owner_contacts_key
