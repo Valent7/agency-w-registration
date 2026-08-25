@@ -482,6 +482,304 @@ def ask_claude(
 
 
 
+
+def _heygen_secret(*names):
+    """Возвращает первый заполненный HeyGen-секрет из Streamlit Secrets."""
+    for name in names:
+        value = st.secrets.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _heygen_config():
+    """
+    Поддерживаем несколько понятных имён секретов, чтобы не заставлять
+    владельца переименовывать уже сохранённые значения.
+    """
+    return {
+        "api_key": _heygen_secret(
+            "HEYGEN_API_KEY",
+            "HEYGEN_KEY",
+        ),
+        "avatar_id": _heygen_secret(
+            "HEYGEN_NEONA_AVATAR_ID",
+            "HEYGEN_AVATAR_ID",
+            "NEONA_HEYGEN_AVATAR_ID",
+        ),
+        "voice_id": _heygen_secret(
+            "HEYGEN_NEONA_VOICE_ID",
+            "HEYGEN_VOICE_ID",
+            "NEONA_HEYGEN_VOICE_ID",
+        ),
+    }
+
+
+def _heygen_error_message(response):
+    """Короткая безопасная ошибка без вывода API-ключа."""
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message") or error.get("detail")
+                if message:
+                    return str(message)
+            message = payload.get("message")
+            if message:
+                return str(message)
+    except Exception:
+        pass
+    return f"HeyGen API вернул HTTP {response.status_code}."
+
+
+def create_neona_heygen_video(text):
+    """
+    Запускает создание одного видео Неоны.
+    Никакой автоматической генерации: функция вызывается только по кнопке.
+    """
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return {
+            "ok": False,
+            "error": "Неоне нечего произнести: текст пуст.",
+        }
+
+    config = _heygen_config()
+    missing = [
+        label
+        for label, value in (
+            ("HEYGEN_API_KEY", config["api_key"]),
+            ("HEYGEN_AVATAR_ID", config["avatar_id"]),
+            ("HEYGEN_VOICE_ID", config["voice_id"]),
+        )
+        if not value
+    ]
+    if missing:
+        return {
+            "ok": False,
+            "error": (
+                "В Streamlit Secrets не найдено: "
+                + ", ".join(missing)
+                + "."
+            ),
+        }
+
+    # Для первого безопасного теста ограничиваем текст:
+    # случайно не отправим в HeyGen длинную переписку и не потратим кредиты.
+    clean_text = clean_text[:1200]
+
+    try:
+        response = requests.post(
+            "https://api.heygen.com/v2/video/generate",
+            headers={
+                "X-Api-Key": config["api_key"],
+                "Content-Type": "application/json",
+            },
+            json={
+                "video_inputs": [
+                    {
+                        "character": {
+                            "type": "avatar",
+                            "avatar_id": config["avatar_id"],
+                            "avatar_style": "normal",
+                        },
+                        "voice": {
+                            "type": "text",
+                            "input_text": clean_text,
+                            "voice_id": config["voice_id"],
+                        },
+                    }
+                ],
+                "dimension": {
+                    "width": 720,
+                    "height": 1280,
+                },
+            },
+            timeout=60,
+        )
+        if not response.ok:
+            return {
+                "ok": False,
+                "error": _heygen_error_message(response),
+            }
+
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        video_id = (
+            str((data or {}).get("video_id") or "").strip()
+            if isinstance(data, dict)
+            else ""
+        )
+        if not video_id:
+            return {
+                "ok": False,
+                "error": "HeyGen принял запрос, но не вернул video_id.",
+            }
+
+        return {
+            "ok": True,
+            "video_id": video_id,
+            "status": "pending",
+        }
+    except requests.exceptions.RequestException as exc:
+        return {
+            "ok": False,
+            "error": "Не удалось связаться с HeyGen: " + str(exc),
+        }
+    except (ValueError, TypeError, KeyError) as exc:
+        return {
+            "ok": False,
+            "error": "Не удалось обработать ответ HeyGen: " + str(exc),
+        }
+
+
+def get_neona_heygen_video(video_id):
+    """Проверяет готовность ранее запущенного видео."""
+    clean_id = str(video_id or "").strip()
+    if not clean_id:
+        return {
+            "ok": False,
+            "error": "Не найден идентификатор видео HeyGen.",
+        }
+
+    api_key = _heygen_config()["api_key"]
+    if not api_key:
+        return {
+            "ok": False,
+            "error": "HEYGEN_API_KEY не найден в Streamlit Secrets.",
+        }
+
+    try:
+        response = requests.get(
+            "https://api.heygen.com/v1/video_status.get",
+            headers={
+                "X-Api-Key": api_key,
+                "Accept": "application/json",
+            },
+            params={"video_id": clean_id},
+            timeout=45,
+        )
+        if not response.ok:
+            return {
+                "ok": False,
+                "error": _heygen_error_message(response),
+            }
+
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        data = data if isinstance(data, dict) else {}
+        status = str(data.get("status") or "unknown").strip().lower()
+        video_url = str(
+            data.get("video_url")
+            or data.get("url")
+            or ""
+        ).strip()
+
+        return {
+            "ok": True,
+            "video_id": clean_id,
+            "status": status,
+            "video_url": video_url,
+            "error": str(data.get("error") or "").strip(),
+        }
+    except requests.exceptions.RequestException as exc:
+        return {
+            "ok": False,
+            "error": "Не удалось проверить HeyGen: " + str(exc),
+        }
+    except (ValueError, TypeError, KeyError) as exc:
+        return {
+            "ok": False,
+            "error": "Не удалось обработать статус HeyGen: " + str(exc),
+        }
+
+
+def render_neona_heygen_test(owner_id):
+    """
+    Отдельный тестовый блок.
+    Он не вмешивается в Telegram-диалоги и ничего не создаёт сам.
+    """
+    state_key = f"neona_heygen_test_{int(owner_id)}"
+    state = st.session_state.get(state_key, {})
+    if not isinstance(state, dict):
+        state = {}
+
+    with st.expander("🎥 Голос и аватар Неоны — тест HeyGen", expanded=False):
+        st.caption(
+            "Видео создаётся только после вашего нажатия. "
+            "Это не связано с отправкой сообщений в Telegram."
+        )
+
+        test_text = st.text_area(
+            "Что должна сказать Неона",
+            value=(
+                "Здравствуйте! Я Неона, секретарь-референт Агентства W. "
+                "Рада знакомству."
+            ),
+            height=100,
+            max_chars=1200,
+            key=f"neona_heygen_test_text_{int(owner_id)}",
+        )
+
+        start_col, check_col = st.columns(2)
+
+        if start_col.button(
+            "🎬 Создать тестовое видео",
+            key=f"neona_heygen_create_{int(owner_id)}",
+            use_container_width=True,
+        ):
+            with st.spinner("HeyGen создаёт видео Неоны..."):
+                result = create_neona_heygen_video(test_text)
+            if result.get("ok"):
+                state = {
+                    "video_id": result["video_id"],
+                    "status": result.get("status", "pending"),
+                    "video_url": "",
+                }
+                st.session_state[state_key] = state
+                st.success(
+                    "Видео принято в работу. "
+                    "Теперь нажмите «Проверить готовность»."
+                )
+            else:
+                st.error(str(result.get("error") or "Ошибка HeyGen."))
+
+        video_id = str(state.get("video_id") or "").strip()
+        if check_col.button(
+            "🔄 Проверить готовность",
+            disabled=not bool(video_id),
+            key=f"neona_heygen_check_{int(owner_id)}",
+            use_container_width=True,
+        ):
+            with st.spinner("Проверяем готовность видео..."):
+                result = get_neona_heygen_video(video_id)
+            if result.get("ok"):
+                state.update(result)
+                st.session_state[state_key] = state
+            else:
+                st.error(str(result.get("error") or "Ошибка HeyGen."))
+
+        status = str(state.get("status") or "").lower()
+        video_url = str(state.get("video_url") or "").strip()
+
+        if video_url and status == "completed":
+            st.success("✅ Неона готова.")
+            st.video(video_url)
+        elif video_id:
+            if status == "failed":
+                st.error(
+                    "HeyGen не смог создать видео. "
+                    + str(state.get("error") or "")
+                )
+            else:
+                st.info(
+                    "Статус HeyGen: "
+                    + (status or "обрабатывается")
+                    + ". Обычно нужно немного подождать и проверить ещё раз."
+                )
+
+
 def _extract_response_text(data):
     """Достаёт обычный текст из raw Responses API JSON."""
     parts = []
@@ -7148,6 +7446,8 @@ if received_hash:
                         "к осознанной встрече с владельцем. Первое сообщение не "
                         "отправляется без утверждения владельца."
                     )
+
+                    render_neona_heygen_test(telegram_id)
 
                     with st.expander("📜 Задача и регламент Неоны"):
                         st.markdown(
