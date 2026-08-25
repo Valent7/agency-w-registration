@@ -9956,16 +9956,153 @@ if received_hash:
                                                 "и продолжит диалог сама. Стагирит отслеживает "
                                                 "результат поручения до назначенной встречи."
                                             )
+
+                                            # Исправительная повторная отправка.
+                                            # Нужна, если владелец удалил неудачное
+                                            # техническое видео и хочет заменить его
+                                            # настоящим Telegram-видеокружком.
+                                            with st.expander(
+                                                "↩️ Заменить удалённое видео-кружком",
+                                                expanded=False,
+                                            ):
+                                                st.warning(
+                                                    "Используйте только если прежнее видео "
+                                                    "действительно удалено из чата. "
+                                                    "Новый ролик HeyGen создаётся только "
+                                                    "после вашего нажатия и расходует API-кредиты."
+                                                )
+
+                                                confirm_key = (
+                                                    "neona_confirm_replacement_"
+                                                    f"{telegram_id}_{contact_id}"
+                                                )
+                                                confirmed_replacement = st.checkbox(
+                                                    "Я удалила прежнее видео и хочу отправить "
+                                                    "вместо него говорящую голову Неоны",
+                                                    key=confirm_key,
+                                                )
+
+                                                if confirmed_replacement:
+                                                    replacement_action = (
+                                                        render_neona_speaks_for_message(
+                                                            telegram_id,
+                                                            contact_id,
+                                                            str(
+                                                                draft.get("message")
+                                                                or ""
+                                                            ),
+                                                            disabled=False,
+                                                        )
+                                                    )
+
+                                                    if replacement_action.get(
+                                                        "send_clicked"
+                                                    ):
+                                                        try:
+                                                            with st.spinner(
+                                                                "Отправляем замену "
+                                                                "в Telegram..."
+                                                            ):
+                                                                video_bytes = (
+                                                                    download_neona_heygen_video(
+                                                                        replacement_action.get(
+                                                                            "video_url"
+                                                                        )
+                                                                    )
+                                                                )
+                                                                video_bytes = (
+                                                                    prepare_telegram_video_note(
+                                                                        video_bytes
+                                                                    )
+                                                                )
+                                                                replacement_result = (
+                                                                    run_telegram_async(
+                                                                        send_telegram_first_video(
+                                                                            telegram_id,
+                                                                            contact_id,
+                                                                            str(
+                                                                                contact.get(
+                                                                                    "username",
+                                                                                    "",
+                                                                                )
+                                                                                or ""
+                                                                            ),
+                                                                            video_bytes,
+                                                                            contact.get(
+                                                                                "source_chat_id"
+                                                                            ),
+                                                                        )
+                                                                    )
+                                                                )
+
+                                                            # Не считаем замену новым первым
+                                                            # сообщением и не перезапускаем
+                                                            # диалог/поручение Стагирита.
+                                                            draft[
+                                                                "replacement_video_sent_at"
+                                                            ] = replacement_result[
+                                                                "sent_at"
+                                                            ]
+                                                            draft[
+                                                                "replacement_video_message_id"
+                                                            ] = replacement_result[
+                                                                "message_id"
+                                                            ]
+                                                            draft[
+                                                                "replacement_video_format"
+                                                            ] = "telegram_video_note"
+                                                            drafts[contact_id] = draft
+                                                            drafts.pop(
+                                                                str(contact_id),
+                                                                None,
+                                                            )
+                                                            st.session_state[
+                                                                neona_drafts_key
+                                                            ] = drafts
+
+                                                            st.session_state.pop(
+                                                                replacement_action.get(
+                                                                    "state_key"
+                                                                ),
+                                                                None,
+                                                            )
+                                                            persist_workspace_if_changed(
+                                                                telegram_id,
+                                                                force=True,
+                                                            )
+                                                            st.session_state[
+                                                                f"neona_replacement_notice_{telegram_id}_{contact_id}"
+                                                            ] = (
+                                                                "✅ Говорящая голова Неоны "
+                                                                "отправлена как замена."
+                                                            )
+                                                            st.rerun()
+
+                                                        except Exception as exc:
+                                                            st.error(
+                                                                "Замена не отправлена: "
+                                                                + friendly_telegram_send_error(
+                                                                    exc
+                                                                )
+                                                            )
+
+                                                replacement_notice = st.session_state.pop(
+                                                    f"neona_replacement_notice_{telegram_id}_{contact_id}",
+                                                    None,
+                                                )
+                                                if replacement_notice:
+                                                    st.success(replacement_notice)
+
                                             if (
                                                 contact.get("source")
                                                 == "Знакомый — выбран директором"
                                             ):
                                                 st.info(
                                                     "Первое сообщение уже является частью "
-                                                    "истории и не редактируется. "
-                                                    "Повторно формировать его не нужно: "
-                                                    "после нового входящего сообщения "
-                                                    "Неона продолжает диалог сама."
+                                                    "истории. Обычная повторная отправка "
+                                                    "по-прежнему заблокирована; блок выше "
+                                                    "предназначен только для замены "
+                                                    "удалённого технического видео."
                                                 )
                                         elif draft.get("approved"):
                                             # -----------------------------------------
@@ -10242,8 +10379,9 @@ if received_hash:
                                                         draft[
                                                             "telegram_message_id"
                                                         ] = send_result["message_id"]
+                                                        draft["sent_format"] = "text"
                                                         draft["status"] = (
-                                                            "Первое видео-кружок отправлен"
+                                                            "Первое сообщение отправлено"
                                                         )
                                                         drafts[contact_id] = draft
                                                         drafts.pop(
