@@ -4940,6 +4940,54 @@ def get_recent_daily_candidates_for_stagirite(
 
     return [best[day_key] for day_key in wanted if day_key in best]
 
+
+def _shown_candidate_ids_for_stagirite(
+    owner_id: int,
+    *,
+    exclude_day: str = "",
+) -> set[int]:
+    """
+    Все кандидаты, которых Стагирит уже показывал Директору раньше.
+
+    Историю берём из сохранённых daily_batches во всех задачах Стагирита,
+    поэтому ротация переживает rerun, новый день и переход между
+    недельной целью и постоянной ежедневной пятёркой.
+    """
+    owner_id = int(owner_id)
+    exclude_day = str(exclude_day or "").strip()
+    shown: set[int] = set()
+
+    tasks, _ = _load_tasks(owner_id)
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        result = (
+            task.get("result")
+            if isinstance(task.get("result"), dict)
+            else {}
+        )
+        for container_name in ("daily_candidate_feed", "weekly_goal"):
+            container = result.get(container_name)
+            if not isinstance(container, dict):
+                continue
+            batches = container.get("daily_batches")
+            if not isinstance(batches, dict):
+                continue
+            for day_key, info in batches.items():
+                if exclude_day and str(day_key) == exclude_day:
+                    continue
+                if not isinstance(info, dict):
+                    continue
+                shown.update(
+                    _normalize_int_ids(info.get("candidate_ids", []))
+                )
+                shown.update(
+                    _normalize_int_ids(info.get("approved_ids", []))
+                )
+
+    return shown
+
+
 def ensure_weekly_candidates_for_neona(
     owner_id: int,
     prepare_candidates_fn=None,
@@ -4999,7 +5047,23 @@ def ensure_weekly_candidates_for_neona(
         today_info.get("approved_ids", [])
     )
 
-    # Сегодняшняя пятёрка уже существует — ничего повторно не запускаем.
+    # До исправления ротации сегодняшняя пятёрка могла повторять вчерашнюю.
+    # Если Директор ещё никого из неё не утвердил, один раз считаем такую
+    # запись устаревшей и пересобираем её из НОВЫХ людей.
+    previously_shown = _shown_candidate_ids_for_stagirite(
+        owner_id,
+        exclude_day=today_key,
+    )
+    stale_repeat = bool(
+        candidate_ids
+        and not approved_ids
+        and any(cid in previously_shown for cid in candidate_ids)
+    )
+    if stale_repeat:
+        candidate_ids = []
+        today_info = {}
+
+    # Сегодняшняя новая пятёрка уже существует — повторный rerun её не меняет.
     if candidate_ids:
         return {
             "ok": True,
@@ -5030,12 +5094,17 @@ def ensure_weekly_candidates_for_neona(
         result.get("selected_candidate_ids", [])
     )
 
+    # Главное правило ротации: вчера показан — сегодня место не занимает,
+    # даже если Директор его не выбирал. Решение «не выбрала» тоже учитываем.
+    excluded_for_today = set(selected_all)
+    excluded_for_today.update(previously_shown)
+
     try:
         prepared = prepare_candidates_fn(
             owner_id,
             desired_count=daily_target,
             reserve_target=reserve_target,
-            exclude_ids=selected_all,
+            exclude_ids=sorted(excluded_for_today),
         )
     except TypeError:
         # Совместимость с коротким промежутком обновления файлов.
@@ -5060,7 +5129,7 @@ def ensure_weekly_candidates_for_neona(
     for contact_id in _normalize_int_ids(
         prepared.get("candidate_ids", [])
     ):
-        if contact_id in selected_all:
+        if contact_id in excluded_for_today:
             continue
         candidate_ids.append(contact_id)
         if len(candidate_ids) >= daily_target:
@@ -5310,6 +5379,24 @@ def _render_weekly_meeting_goal(
         else {}
     )
 
+    previously_shown = _shown_candidate_ids_for_stagirite(
+        owner_id,
+        exclude_day=today_key,
+    )
+    current_ids = _normalize_int_ids(today_info.get("candidate_ids", []))
+    current_approved = _normalize_int_ids(today_info.get("approved_ids", []))
+    if (
+        current_ids
+        and not current_approved
+        and any(cid in previously_shown for cid in current_ids)
+    ):
+        # Миграция старой повторяющейся пятёрки: если её ещё не утвердили,
+        # сегодня сразу заменяем на свежую.
+        today_info = {}
+
+    excluded_for_today = set(selected_all)
+    excluded_for_today.update(previously_shown)
+
     # Формируем сегодняшнюю пятёрку только один раз в день.
     if not today_info.get("candidate_ids") and prepare_candidates_fn is not None:
         with st.spinner(
@@ -5320,7 +5407,7 @@ def _render_weekly_meeting_goal(
                     owner_id,
                     desired_count=daily_target,
                     reserve_target=reserve_target,
-                    exclude_ids=selected_all,
+                    exclude_ids=sorted(excluded_for_today),
                 )
             except TypeError:
                 # Совместимость на коротком промежутке обновления файлов.
@@ -5351,7 +5438,7 @@ def _render_weekly_meeting_goal(
                     cid = int(raw)
                 except (TypeError, ValueError):
                     continue
-                if cid in selected_all or cid in candidate_ids:
+                if cid in excluded_for_today or cid in candidate_ids:
                     continue
                 candidate_ids.append(cid)
 

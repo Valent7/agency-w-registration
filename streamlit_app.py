@@ -3511,13 +3511,27 @@ def prepare_candidates_for_stagirite(
             continue
         if cid in excluded or cid in already_sent_ids:
             continue
+        # Для первого сообщения Telegram берём только реальный контакт
+        # владельца. Кандидат из чата без добавления в контакты не должен
+        # занимать место в ежедневной пятёрке, потому что сообщение не уйдёт.
+        if cid not in owner_contact_ids:
+            continue
+        fresh_activity = activity_by_id.get(cid) or {}
+        if fresh_activity.get("activity_eligible") is not True:
+            continue
         if bool(item.get("selection_blocked")):
             continue
         if bool(item.get("telegram_warning")):
             continue
         if str(item.get("status") or "") == "Отправлено":
             continue
-        saved_pool.append(item)
+        saved_pool.append(
+            {
+                **item,
+                **fresh_activity,
+                "is_owner_contact": True,
+            }
+        )
 
     def _stagirite_saved_priority(item):
         recommendation = str(item.get("recommendation") or "").strip()
@@ -3538,12 +3552,29 @@ def prepare_candidates_for_stagirite(
             score_rank = -int(item.get("score") or 0)
         except (TypeError, ValueError):
             score_rank = 0
-        activity = str(item.get("last_seen_at") or "")
+        warmth_rank = {
+            "знакомый": 0,
+            "поверхностно знакомый": 1,
+            "холодный": 2,
+            "неясно": 3,
+        }.get(str(item.get("warmth") or "").strip().lower(), 3)
+
+        # Более свежая Telegram-активность выше. В старой версии сравнивалась
+        # длина ISO-строки, а она почти у всех одинакова и реально не ранжировала.
+        raw_activity = str(item.get("last_seen_at") or "").strip()
+        try:
+            activity_rank = -datetime.fromisoformat(
+                raw_activity.replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            activity_rank = 0.0
+
         return (
             recommendation_rank,
             interest_rank,
             score_rank,
-            -len(activity),
+            warmth_rank,
+            activity_rank,
             str(item.get("name") or "").lower(),
         )
 
@@ -3557,7 +3588,7 @@ def prepare_candidates_for_stagirite(
             "available_reserve": len(saved_ids[:reserve_target]),
             "checked_detail": 0,
             "exhausted": False,
-            "message": "Рабочая пятёрка подготовлена из уже найденного пула людей.",
+            "message": "Рабочая пятёрка: лучшие новые пригодные контакты из сохранённого пула Неонии.",
         }
 
     # Если в готовом пуле пока меньше пяти, сохраняем найденных и только
@@ -3738,7 +3769,7 @@ def prepare_candidates_for_stagirite(
             "В сохранённом пуле сейчас недостаточно новых людей для полной пятёрки."
         )
     else:
-        message = "Рабочая пятёрка подготовлена из сохранённого пула людей."
+        message = "Рабочая пятёрка: лучшие новые пригодные контакты из сохранённого пула Неонии."
 
     return {
         "ok": True,
