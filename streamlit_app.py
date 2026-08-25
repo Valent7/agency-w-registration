@@ -705,7 +705,7 @@ def render_neona_heygen_test(owner_id):
     if not isinstance(state, dict):
         state = {}
 
-    with st.expander("🎥 Голос и аватар Неоны — тест HeyGen", expanded=False):
+    with st.expander("🧪 Служебный тест HeyGen (можно не открывать)", expanded=False):
         st.caption(
             "Видео создаётся только после вашего нажатия. "
             "Это не связано с отправкой сообщений в Telegram."
@@ -778,6 +778,157 @@ def render_neona_heygen_test(owner_id):
                     + (status or "обрабатывается")
                     + ". Обычно нужно немного подождать и проверить ещё раз."
                 )
+
+
+
+def render_neona_speaks_for_message(
+    owner_id,
+    contact_id,
+    message_text,
+    *,
+    disabled=False,
+):
+    """
+    Рабочая кнопка «Неона говорит» для уже утверждённого текста.
+
+    Возвращает dict:
+    - video_url: готовое видео для предпросмотра;
+    - send_clicked: владелец явно нажал отправку видео;
+    - discarded: владелец решил не отправлять.
+    """
+    owner_id = int(owner_id)
+    contact_id = int(contact_id)
+    clean_text = str(message_text or "").strip()
+
+    text_fingerprint = hashlib.sha1(
+        clean_text.encode("utf-8")
+    ).hexdigest()[:16]
+
+    state_key = (
+        f"neona_heygen_message_{owner_id}_{contact_id}"
+    )
+    state = st.session_state.get(state_key, {})
+    if not isinstance(state, dict):
+        state = {}
+
+    # Если утверждённый текст изменился, старое видео нельзя случайно
+    # отправить как будто оно относится к новому тексту.
+    if (
+        state.get("text_fingerprint")
+        and state.get("text_fingerprint") != text_fingerprint
+    ):
+        state = {}
+        st.session_state[state_key] = state
+
+    st.markdown("#### 🎥 Неона говорит")
+    st.caption(
+        "Видео создаётся только по вашему решению и только из "
+        "утверждённого текста. Сначала вы его смотрите, "
+        "и лишь потом отдельно решаете — отправлять или нет."
+    )
+
+    create_col, check_col = st.columns(2)
+
+    can_create = bool(clean_text) and not bool(disabled)
+
+    if create_col.button(
+        "🎥 Неона говорит",
+        disabled=not can_create,
+        key=f"neona_speaks_create_{owner_id}_{contact_id}_{text_fingerprint}",
+        use_container_width=True,
+    ):
+        with st.spinner("Неона готовится говорить..."):
+            result = create_neona_heygen_video(clean_text)
+
+        if result.get("ok"):
+            state = {
+                "video_id": result["video_id"],
+                "status": result.get("status", "pending"),
+                "video_url": "",
+                "text_fingerprint": text_fingerprint,
+                "created_for_text": clean_text,
+            }
+            st.session_state[state_key] = state
+            st.success(
+                "Видео принято в работу. Через несколько секунд "
+                "нажмите «Проверить видео»."
+            )
+        else:
+            st.error(
+                str(result.get("error") or "Ошибка HeyGen.")
+            )
+
+    video_id = str(state.get("video_id") or "").strip()
+
+    if check_col.button(
+        "🔄 Проверить видео",
+        disabled=not bool(video_id),
+        key=f"neona_speaks_check_{owner_id}_{contact_id}",
+        use_container_width=True,
+    ):
+        with st.spinner("Проверяем видео Неоны..."):
+            result = get_neona_heygen_video(video_id)
+
+        if result.get("ok"):
+            state.update(result)
+            state["text_fingerprint"] = text_fingerprint
+            st.session_state[state_key] = state
+        else:
+            st.error(
+                str(result.get("error") or "Ошибка HeyGen.")
+            )
+
+    status = str(state.get("status") or "").strip().lower()
+    video_url = str(state.get("video_url") or "").strip()
+
+    send_clicked = False
+    discarded = False
+
+    if video_url and status == "completed":
+        st.success("✅ Видео Неоны готово к просмотру.")
+        st.video(video_url)
+
+        send_col, discard_col = st.columns(2)
+        send_clicked = send_col.button(
+            "📨 Отправить видео",
+            type="primary",
+            disabled=bool(disabled),
+            key=f"neona_speaks_send_{owner_id}_{contact_id}_{video_id}",
+            use_container_width=True,
+        )
+        discarded = discard_col.button(
+            "🗑 Не отправлять",
+            key=f"neona_speaks_discard_{owner_id}_{contact_id}_{video_id}",
+            use_container_width=True,
+        )
+
+        if discarded:
+            st.session_state.pop(state_key, None)
+            st.info(
+                "Видео снято с отправки. Новый ролик HeyGen "
+                "создаст только по следующему вашему нажатию."
+            )
+
+    elif video_id:
+        if status == "failed":
+            st.error(
+                "HeyGen не смог создать видео. "
+                + str(state.get("error") or "")
+            )
+        else:
+            st.info(
+                "Статус HeyGen: "
+                + (status or "обрабатывается")
+                + ". Нажмите «Проверить видео» ещё раз чуть позже."
+            )
+
+    return {
+        "video_url": video_url if status == "completed" else "",
+        "video_id": video_id,
+        "send_clicked": bool(send_clicked),
+        "discarded": bool(discarded),
+        "state_key": state_key,
+    }
 
 
 def _extract_response_text(data):
@@ -2167,6 +2318,130 @@ async def send_telegram_first_message(
         }
     finally:
         await client.disconnect()
+
+
+
+async def send_telegram_first_video(
+    owner_telegram_id,
+    recipient_telegram_id,
+    recipient_username,
+    video_bytes,
+    recipient_source_chat_id=None,
+):
+    """
+    Отправляет ОДНО утверждённое первое видео Неоны от аккаунта владельца.
+
+    Правила безопасности те же, что у первого текстового сообщения:
+    только реальный Telegram-контакт владельца, без обхода антиспама.
+    """
+    owner_telegram_id = int(owner_telegram_id)
+    recipient_telegram_id = int(recipient_telegram_id)
+
+    if owner_telegram_id == recipient_telegram_id:
+        raise RuntimeError(
+            "Нельзя отправить первое видео самому себе."
+        )
+
+    if not video_bytes:
+        raise RuntimeError("Видео Неоны пустое.")
+
+    session_string = load_telegram_session_from_supabase(
+        owner_telegram_id
+    )
+    if not session_string:
+        raise RuntimeError(
+            "Сессия Telegram не найдена. Подключите Telegram заново."
+        )
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telegram-сессия больше не авторизована. "
+                "Подключите Telegram заново."
+            )
+
+        entity = None
+        contacts_result = await client(
+            GetContactsRequest(hash=0)
+        )
+        for user in contacts_result.users:
+            if int(user.id) == recipient_telegram_id:
+                entity = user
+                break
+
+        if entity is None:
+            raise RuntimeError(
+                "Этого человека нет в ваших Telegram-контактах. "
+                "Первое видео ему через Telegram не отправляем."
+            )
+
+        baseline_incoming_message_id = 0
+        try:
+            async for previous_message in client.iter_messages(
+                entity,
+                limit=50,
+            ):
+                if previous_message.out:
+                    continue
+                if not getattr(previous_message, "message", None):
+                    continue
+                baseline_incoming_message_id = int(
+                    previous_message.id
+                )
+                break
+        except Exception:
+            baseline_incoming_message_id = 0
+
+        file_obj = BytesIO(video_bytes)
+        file_obj.name = "neona.mp4"
+
+        sent_message = await client.send_file(
+            entity,
+            file_obj,
+            force_document=False,
+            supports_streaming=True,
+        )
+
+        sent_at = datetime.now(
+            ZoneInfo("Europe/Berlin")
+        ).isoformat()
+
+        return {
+            "message_id": int(sent_message.id),
+            "sent_at": sent_at,
+            "baseline_incoming_message_id": int(
+                baseline_incoming_message_id
+            ),
+        }
+    finally:
+        await client.disconnect()
+
+
+def download_neona_heygen_video(video_url):
+    """Скачивает готовое HeyGen-видео только перед явной отправкой."""
+    clean_url = str(video_url or "").strip()
+    if not clean_url:
+        raise RuntimeError("Ссылка на готовое видео Неоны не найдена.")
+
+    response = requests.get(
+        clean_url,
+        timeout=120,
+    )
+    response.raise_for_status()
+
+    video_bytes = response.content
+    if not video_bytes:
+        raise RuntimeError("HeyGen вернул пустой видеофайл.")
+
+    return video_bytes
 
 
 def friendly_telegram_send_error(error):
@@ -9611,6 +9886,205 @@ if received_hash:
                                                     "Неона продолжает диалог сама."
                                                 )
                                         elif draft.get("approved"):
+                                            # -----------------------------------------
+                                            # Рабочий видео-режим Неоны.
+                                            # Владелец сначала смотрит ролик, затем
+                                            # отдельной кнопкой решает отправлять его.
+                                            # Обычная текстовая отправка остаётся ниже
+                                            # как основной и более экономный вариант.
+                                            # -----------------------------------------
+                                            heygen_action = (
+                                                render_neona_speaks_for_message(
+                                                    telegram_id,
+                                                    contact_id,
+                                                    str(
+                                                        draft.get("message")
+                                                        or ""
+                                                    ),
+                                                    disabled=bool(
+                                                        draft.get("sent")
+                                                    ),
+                                                )
+                                            )
+
+                                            if heygen_action.get(
+                                                "send_clicked"
+                                            ):
+                                                try:
+                                                    with st.spinner(
+                                                        "Отправляем видео Неоны "
+                                                        "в Telegram..."
+                                                    ):
+                                                        video_bytes = (
+                                                            download_neona_heygen_video(
+                                                                heygen_action.get(
+                                                                    "video_url"
+                                                                )
+                                                            )
+                                                        )
+                                                        send_result = (
+                                                            run_telegram_async(
+                                                                send_telegram_first_video(
+                                                                    telegram_id,
+                                                                    contact_id,
+                                                                    str(
+                                                                        contact.get(
+                                                                            "username",
+                                                                            "",
+                                                                        )
+                                                                        or ""
+                                                                    ),
+                                                                    video_bytes,
+                                                                    contact.get(
+                                                                        "source_chat_id"
+                                                                    ),
+                                                                )
+                                                            )
+                                                        )
+
+                                                    draft["sent"] = True
+                                                    draft["approved"] = True
+                                                    draft["sent_at"] = (
+                                                        send_result["sent_at"]
+                                                    )
+                                                    draft[
+                                                        "telegram_message_id"
+                                                    ] = send_result["message_id"]
+                                                    draft[
+                                                        "sent_format"
+                                                    ] = "heygen_video"
+                                                    draft["status"] = (
+                                                        "Первое сообщение отправлено"
+                                                    )
+                                                    drafts[contact_id] = draft
+                                                    drafts.pop(
+                                                        str(contact_id),
+                                                        None,
+                                                    )
+                                                    st.session_state[
+                                                        neona_drafts_key
+                                                    ] = drafts
+
+                                                    sent_log.append(
+                                                        {
+                                                            "telegram_id": contact_id,
+                                                            "recipient_name": contact.get(
+                                                                "name",
+                                                                "Кандидат",
+                                                            ),
+                                                            "sent_at": send_result[
+                                                                "sent_at"
+                                                            ],
+                                                            "message_id": send_result[
+                                                                "message_id"
+                                                            ],
+                                                            "kind": "first_video",
+                                                        }
+                                                    )
+                                                    st.session_state[
+                                                        sent_log_key
+                                                    ] = sent_log
+
+                                                    baseline_incoming_id = int(
+                                                        send_result.get(
+                                                            "baseline_incoming_message_id",
+                                                            0,
+                                                        )
+                                                    )
+                                                    try:
+                                                        initialize_dialog_after_first_message(
+                                                            telegram_id,
+                                                            contact_id,
+                                                            baseline_incoming_id=baseline_incoming_id,
+                                                            sent_at=send_result[
+                                                                "sent_at"
+                                                            ],
+                                                        )
+                                                        register_first_message_for_stagirite(
+                                                            telegram_id,
+                                                            contact_id,
+                                                            sent_at=send_result[
+                                                                "sent_at"
+                                                            ],
+                                                            message_id=send_result[
+                                                                "message_id"
+                                                            ],
+                                                            baseline_incoming_id=baseline_incoming_id,
+                                                        )
+                                                    except Exception as dialog_exc:
+                                                        draft[
+                                                            "dialog_activation_error"
+                                                        ] = str(dialog_exc)
+                                                        drafts[contact_id] = draft
+                                                        st.session_state[
+                                                            neona_drafts_key
+                                                        ] = drafts
+
+                                                    for candidate in candidate_results:
+                                                        try:
+                                                            candidate_id = int(
+                                                                candidate.get(
+                                                                    "telegram_id"
+                                                                )
+                                                            )
+                                                        except (
+                                                            TypeError,
+                                                            ValueError,
+                                                        ):
+                                                            continue
+                                                        if candidate_id == contact_id:
+                                                            candidate["status"] = (
+                                                                "Первое сообщение отправлено"
+                                                            )
+                                                    st.session_state[
+                                                        candidates_key
+                                                    ] = candidate_results
+
+                                                    if contact_id in owner_contacts:
+                                                        owner_contacts[
+                                                            contact_id
+                                                        ]["status"] = (
+                                                            "Первое сообщение отправлено"
+                                                        )
+                                                        st.session_state[
+                                                            owner_contacts_key
+                                                        ] = owner_contacts
+
+                                                    st.session_state.pop(
+                                                        heygen_action.get(
+                                                            "state_key"
+                                                        ),
+                                                        None,
+                                                    )
+                                                    persist_workspace_if_changed(
+                                                        telegram_id,
+                                                        force=True,
+                                                    )
+                                                    st.rerun()
+
+                                                except Exception as exc:
+                                                    friendly_error = (
+                                                        friendly_telegram_send_error(
+                                                            exc
+                                                        )
+                                                    )
+                                                    try:
+                                                        register_first_message_failure_for_stagirite(
+                                                            telegram_id,
+                                                            contact_id,
+                                                            reason=friendly_error,
+                                                        )
+                                                    except Exception:
+                                                        pass
+                                                    st.error(
+                                                        "Видео Неоны не отправлено: "
+                                                        + friendly_error
+                                                    )
+
+                                            st.markdown(
+                                                "**Или отправить обычным текстом:**"
+                                            )
+
                                             sent_today = (
                                                 count_first_messages_sent_today(
                                                     sent_log
