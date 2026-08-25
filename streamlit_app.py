@@ -103,6 +103,9 @@ import asyncio
 import json
 import re
 import base64
+import subprocess
+import tempfile
+import shutil
 from pathlib import Path
 from io import BytesIO
 
@@ -891,7 +894,7 @@ def render_neona_speaks_for_message(
 
         send_col, discard_col = st.columns(2)
         send_clicked = send_col.button(
-            "⭕ Отправить как видео-кружок",
+            "⭕ Отправить говорящей головой",
             type="primary",
             disabled=bool(disabled),
             key=f"neona_speaks_send_{owner_id}_{contact_id}_{video_id}",
@@ -2425,6 +2428,83 @@ async def send_telegram_first_video(
         }
     finally:
         await client.disconnect()
+
+
+
+def prepare_telegram_video_note(video_bytes):
+    """
+    Превращает вертикальное HeyGen-видео 720x1280 в квадратный MPEG4
+    для настоящего Telegram video note («говорящей головы»).
+
+    Центральная обрезка убирает верхнее/нижнее белое поле и оставляет
+    лицо/верх корпуса Неоны в центре. Telegram сам рисует квадрат кругом.
+    """
+    if not video_bytes:
+        raise RuntimeError("Видео Неоны пустое.")
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "На сервере не найден ffmpeg. "
+            "Нужен packages.txt со строкой ffmpeg."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="neona_video_note_") as temp_dir:
+        input_path = Path(temp_dir) / "input.mp4"
+        output_path = Path(temp_dir) / "neona_circle.mp4"
+        input_path.write_bytes(video_bytes)
+
+        command = [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            "crop=720:720:0:280,scale=480:480",
+            "-t",
+            "59",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            check=False,
+        )
+
+        if result.returncode != 0 or not output_path.exists():
+            details = result.stderr.decode(
+                "utf-8",
+                errors="ignore",
+            )[-1000:]
+            raise RuntimeError(
+                "Не удалось подготовить видео-кружок для Telegram. "
+                + details
+            )
+
+        prepared = output_path.read_bytes()
+        if not prepared:
+            raise RuntimeError(
+                "После подготовки получился пустой видеофайл."
+            )
+        return prepared
+
 
 
 def download_neona_heygen_video(video_url):
@@ -9922,6 +10002,11 @@ if received_hash:
                                                                 heygen_action.get(
                                                                     "video_url"
                                                                 )
+                                                            )
+                                                        )
+                                                        video_bytes = (
+                                                            prepare_telegram_video_note(
+                                                                video_bytes
                                                             )
                                                         )
                                                         send_result = (
