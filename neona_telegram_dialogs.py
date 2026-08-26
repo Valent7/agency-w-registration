@@ -855,6 +855,27 @@ def _process_message(
     return reply, new_stage, True, context
 
 
+async def _verified_sent_message(client: TelegramClient, entity, contact_id: int, message_id: int):
+    """Проверяет, что исходящее сообщение реально существует именно в нужном личном чате."""
+    if not message_id:
+        return None
+    for attempt in range(3):
+        try:
+            message = await client.get_messages(entity, ids=int(message_id))
+        except Exception:
+            message = None
+
+        if message is not None and bool(getattr(message, "out", False)):
+            peer = getattr(message, "peer_id", None)
+            peer_user_id = int(getattr(peer, "user_id", 0) or 0)
+            if not peer_user_id or peer_user_id == int(contact_id):
+                return message
+
+        if attempt < 2:
+            await asyncio.sleep(0.4)
+    return None
+
+
 async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dialogs: bool = True) -> dict[str, int]:
     _voice_diag_reset()
     """
@@ -965,6 +986,116 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 message for message in recent if int(message.id) > last_id
             ]
 
+            # Защита от ложного "отправлено": старая версия считала ответ
+            # успешным сразу после send_message(), не проверяя, что сообщение
+            # действительно осталось в нужном чате Telegram. Если в состоянии
+            # есть last_reply_id, но такого исходящего сообщения в чате нет,
+            # повторяем уже сформированный ответ из живой памяти.
+            state_context = (
+                state.get("context")
+                if isinstance(state.get("context"), dict)
+                else {}
+            )
+            last_incoming_message = next(
+                (message for message in recent if int(message.id) == last_id),
+                None,
+            )
+            last_incoming_is_audio = bool(
+                last_incoming_message is not None
+                and _telegram_message_kind(last_incoming_message) in {"voice", "audio"}
+            )
+            previous_reply_id = int(state_context.get("last_reply_id") or 0)
+
+            if not new_messages and previous_reply_id and last_incoming_message is not None:
+                previous_reply = await _verified_sent_message(
+                    client,
+                    entity,
+                    contact_id,
+                    previous_reply_id,
+                )
+                if previous_reply is None:
+                    if last_incoming_is_audio:
+                        _voice_diag_add(
+                            "saved_reply_missing",
+                            latest_message_id=last_id,
+                            missing_reply_id=previous_reply_id,
+                        )
+
+                    stored_reply = str(state_context.get("last_reply_text") or "").strip()
+                    if not stored_reply:
+                        relationship_memory = (
+                            state_context.get("relationship_memory")
+                            if isinstance(state_context.get("relationship_memory"), dict)
+                            else {}
+                        )
+                        stored_reply = str(relationship_memory.get("last_reply") or "").strip()
+
+                    if stored_reply:
+                        try:
+                            resent = await client.send_message(
+                                entity,
+                                stored_reply,
+                                parse_mode=None,
+                                link_preview=False,
+                            )
+                            verified_resent = await _verified_sent_message(
+                                client,
+                                entity,
+                                contact_id,
+                                int(resent.id),
+                            )
+                            if verified_resent is None:
+                                raise DialogError(
+                                    "Telegram вернул ID повторного ответа, но сообщение "
+                                    "не найдено в нужном чате после отправки."
+                                )
+
+                            repaired_context = {
+                                **state_context,
+                                "last_reply_id": int(resent.id),
+                                "last_reply_text": stored_reply,
+                                "last_reply_verified": True,
+                                "last_reply_retried_at": datetime.now(UTC).isoformat(),
+                            }
+                            _save_dialog_state(
+                                config,
+                                int(owner_id),
+                                contact_id,
+                                last_incoming_id=last_id,
+                                stage=str(state.get("stage") or "idle"),
+                                greeted=bool(state.get("greeted", False)),
+                                context=repaired_context,
+                            )
+                            stats["replied"] += 1
+                            if last_incoming_is_audio:
+                                _voice_diag_add(
+                                    "reply_sent_after_voice",
+                                    latest_message_id=last_id,
+                                    reply_id=int(resent.id),
+                                    verified=True,
+                                    recovered_missing_reply=True,
+                                )
+                            continue
+                        except Exception as exc:
+                            if last_incoming_is_audio:
+                                _voice_diag_add(
+                                    "dialog_or_send_error",
+                                    latest_message_id=last_id,
+                                    error=f"{type(exc).__name__}: {exc}",
+                                )
+                            stats["errors"] += 1
+                            continue
+
+                    # Если старая память по какой-то причине не содержит текста
+                    # ответа, безопасно переобрабатываем то же входящее сообщение.
+                    new_messages = [last_incoming_message]
+                    if last_incoming_is_audio:
+                        _voice_diag_add(
+                            "saved_reply_missing_reprocess",
+                            latest_message_id=last_id,
+                            missing_reply_id=previous_reply_id,
+                        )
+
             # Старая тестовая версия могла ошибочно поставить baseline прямо
             # на первом ответе. Один раз подхватываем такой ответ, если Неона
             # ещё ни разу не отвечала в этом диалоге.
@@ -1028,12 +1159,30 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         latest.date.astimezone(UTC),
                         state,
                     )
-                    sent = await client.send_message(entity, reply, parse_mode=None, link_preview=False)
+                    sent = await client.send_message(
+                        entity,
+                        reply,
+                        parse_mode=None,
+                        link_preview=False,
+                    )
+                    verified_sent = await _verified_sent_message(
+                        client,
+                        entity,
+                        contact_id,
+                        int(sent.id),
+                    )
+                    if verified_sent is None:
+                        raise DialogError(
+                            "Telegram вернул ID ответа, но сообщение не найдено "
+                            "в нужном чате после отправки."
+                        )
+
                     if any(_telegram_message_kind(item) in {"voice", "audio"} for item in new_messages):
                         _voice_diag_add(
                             "reply_sent_after_voice",
                             latest_message_id=int(latest.id),
                             reply_id=int(sent.id),
+                            verified=True,
                         )
                     _save_dialog_state(
                         config,
@@ -1042,7 +1191,12 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         last_incoming_id=int(latest.id),
                         stage=stage,
                         greeted=greeted,
-                        context={**context, "last_reply_id": int(sent.id)},
+                        context={
+                            **context,
+                            "last_reply_id": int(sent.id),
+                            "last_reply_text": reply,
+                            "last_reply_verified": True,
+                        },
                     )
                     stats["replied"] += 1
                 except Exception as exc:
