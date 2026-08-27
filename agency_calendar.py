@@ -190,6 +190,140 @@ def update_meeting(meeting_id: str, changes: dict[str, Any]) -> None:
         )
 
 
+
+
+def _parse_clock(value: Any) -> dt_time:
+    """Разбирает время из Supabase TIME (например 17:00:00)."""
+    raw = str(value or "").strip()
+    parts = raw.split(":")
+    if len(parts) < 2:
+        raise ValueError(f"Некорректное время: {raw}")
+    return dt_time(int(parts[0]), int(parts[1]))
+
+
+def list_recurring_blocks(owner_telegram_id: int) -> list[dict[str, Any]]:
+    """Возвращает постоянную занятость владельца по дням недели."""
+    response = requests.get(
+        f"{_supabase_url()}/rest/v1/agency_calendar_blocks",
+        headers=_supabase_headers(),
+        params={
+            "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+            "active": "eq.true",
+            "select": "*",
+            "order": "weekday.asc,start_time.asc",
+        },
+        timeout=30,
+    )
+    if response.status_code == 404:
+        raise CalendarStorageError(
+            "Таблица agency_calendar_blocks ещё не создана в Supabase."
+        )
+    if response.status_code >= 400:
+        raise CalendarStorageError(
+            f"Не удалось загрузить постоянную занятость: {response.text[:500]}"
+        )
+    rows = response.json()
+    return rows if isinstance(rows, list) else []
+
+
+def save_recurring_blocks(
+    owner_telegram_id: int,
+    *,
+    weekdays: list[int],
+    title: str,
+    start_time: dt_time,
+    end_time: dt_time,
+    meeting_format: str,
+    meeting_link: str = "",
+    notes: str = "",
+) -> None:
+    if not weekdays:
+        raise CalendarStorageError("Выберите хотя бы один день недели.")
+    if end_time <= start_time:
+        raise CalendarStorageError("Окончание должно быть позже начала.")
+
+    payload = [
+        {
+            "owner_telegram_id": int(owner_telegram_id),
+            "title": title.strip() or "Занято",
+            "weekday": int(weekday),
+            "start_time": start_time.strftime("%H:%M:%S"),
+            "end_time": end_time.strftime("%H:%M:%S"),
+            "timezone": "Europe/Moscow",
+            "meeting_format": meeting_format or None,
+            "meeting_link": meeting_link.strip() or None,
+            "notes": notes.strip() or None,
+            "active": True,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        for weekday in sorted(set(int(item) for item in weekdays))
+    ]
+
+    response = requests.post(
+        (
+            f"{_supabase_url()}/rest/v1/agency_calendar_blocks"
+            "?on_conflict=owner_telegram_id,weekday,start_time,end_time,title"
+        ),
+        headers={
+            **_supabase_headers(),
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        json=payload,
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise CalendarStorageError(
+            f"Не удалось сохранить постоянную занятость: {response.text[:500]}"
+        )
+
+
+def delete_recurring_block(block_id: str) -> None:
+    response = requests.delete(
+        f"{_supabase_url()}/rest/v1/agency_calendar_blocks",
+        headers={
+            **_supabase_headers(),
+            "Prefer": "return=minimal",
+        },
+        params={"id": f"eq.{block_id}"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise CalendarStorageError(
+            f"Не удалось удалить постоянную занятость: {response.text[:500]}"
+        )
+
+
+def _has_recurring_conflict(
+    start_utc: datetime,
+    end_utc: datetime,
+    blocks: list[dict[str, Any]],
+) -> bool:
+    """Проверяет пересечение со стандартной повторяющейся занятостью по МСК."""
+    start_msk = start_utc.astimezone(MSK)
+    end_msk = end_utc.astimezone(MSK)
+    if start_msk.date() != end_msk.date():
+        # Рабочие встречи Агентства короткие; для перехода через полночь
+        # считаем слот занятым консервативно.
+        return True
+
+    for block in blocks:
+        if not bool(block.get("active", True)):
+            continue
+        try:
+            weekday = int(block.get("weekday"))
+            block_start = _parse_clock(block.get("start_time"))
+            block_end = _parse_clock(block.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        if weekday != start_msk.weekday():
+            continue
+        candidate_start = start_msk.timetz().replace(tzinfo=None)
+        candidate_end = end_msk.timetz().replace(tzinfo=None)
+        if candidate_start < block_end and candidate_end > block_start:
+            return True
+    return False
+
+
 def _period_for_msk_day(day: date) -> tuple[datetime, datetime]:
     start = datetime.combine(day, dt_time.min, tzinfo=MSK)
     return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
@@ -271,6 +405,7 @@ def find_available_slots(
         range_start_msk.astimezone(UTC),
         range_end_msk.astimezone(UTC),
     )
+    blocks = list_recurring_blocks(owner_telegram_id)
 
     slots: list[dict[str, Any]] = []
     now_utc = datetime.now(UTC)
@@ -305,6 +440,7 @@ def find_available_slots(
                 start_utc > now_utc
                 and local_is_comfortable
                 and not _has_conflict(start_utc, end_utc, meetings)
+                and not _has_recurring_conflict(start_utc, end_utc, blocks)
             ):
                 slots.append(
                     {
@@ -417,6 +553,29 @@ def _render_meeting_card(meeting: dict[str, Any], key_prefix: str) -> None:
                 st.rerun()
 
 
+def _render_recurring_block_card(block: dict[str, Any], key_prefix: str) -> None:
+    title = str(block.get("title") or "Занято")
+    start_label = str(block.get("start_time") or "")[:5]
+    end_label = str(block.get("end_time") or "")[:5]
+    meeting_format = str(block.get("meeting_format") or "").strip()
+    link = str(block.get("meeting_link") or "").strip()
+    notes = str(block.get("notes") or "").strip()
+    with st.container(border=True):
+        st.markdown(f"### 🔒 {start_label}–{end_label} МСК · {title}")
+        if meeting_format:
+            st.write(f"**Постоянная занятость** · {meeting_format}")
+        else:
+            st.write("**Постоянная занятость**")
+        if notes:
+            st.caption(notes)
+        if link:
+            st.link_button(
+                f"Открыть {meeting_format or 'ссылку'}",
+                link,
+                width="stretch",
+            )
+
+
 def _render_day_meetings(
     owner_telegram_id: int,
     day: date,
@@ -424,14 +583,21 @@ def _render_day_meetings(
 ) -> None:
     range_start, range_end = _period_for_msk_day(day)
     meetings = list_meetings(owner_telegram_id, range_start, range_end)
+    blocks = [
+        block for block in list_recurring_blocks(owner_telegram_id)
+        if int(block.get("weekday", -1)) == day.weekday()
+    ]
 
     st.markdown(
         f"#### {WEEKDAY_NAMES[day.weekday()]}, {day.strftime('%d.%m.%Y')}"
     )
 
-    if not meetings:
-        st.caption("На этот день встреч нет.")
+    if not meetings and not blocks:
+        st.caption("На этот день встреч и постоянной занятости нет.")
         return
+
+    for block in blocks:
+        _render_recurring_block_card(block, key_prefix)
 
     for meeting in meetings:
         _render_meeting_card(meeting, key_prefix)
@@ -564,6 +730,112 @@ def _render_calendar_view(owner_telegram_id: int) -> None:
                     meeting,
                     f"month_{day_index}",
                 )
+
+
+
+def _render_recurring_blocks(owner_telegram_id: int) -> None:
+    st.markdown("### 🔒 Постоянная занятость")
+    st.caption(
+        "Эти интервалы повторяются каждую неделю и считаются занятыми "
+        "и для календаря, и для Неоны. Время задаётся по МСК."
+    )
+
+    weekday_options = list(range(7))
+    selected_weekdays = st.multiselect(
+        "Дни недели",
+        options=weekday_options,
+        default=[0, 1, 2, 3, 4],
+        format_func=lambda item: WEEKDAY_NAMES[item],
+        key="calendar_block_weekdays",
+    )
+    title = st.text_input(
+        "Название",
+        value="Командная встреча",
+        key="calendar_block_title",
+    )
+    time_columns = st.columns(2)
+    block_start = time_columns[0].time_input(
+        "Начало по МСК",
+        value=dt_time(17, 0),
+        step=1800,
+        key="calendar_block_start",
+    )
+    block_end = time_columns[1].time_input(
+        "Окончание по МСК",
+        value=dt_time(18, 0),
+        step=1800,
+        key="calendar_block_end",
+    )
+    block_format = st.selectbox(
+        "Формат",
+        MEETING_FORMATS,
+        key="calendar_block_format",
+    )
+    block_link = st.text_input(
+        "Постоянная ссылка — необязательно",
+        placeholder="Например, постоянная ссылка Zoom",
+        key="calendar_block_link",
+    )
+    block_notes = st.text_area(
+        "Заметка — необязательно",
+        placeholder="Например: ежедневная командная встреча",
+        key="calendar_block_notes",
+    )
+
+    if st.button(
+        "💾 Сохранить постоянную занятость",
+        type="primary",
+        width="stretch",
+        key="calendar_save_recurring_block",
+    ):
+        try:
+            save_recurring_blocks(
+                owner_telegram_id,
+                weekdays=selected_weekdays,
+                title=title,
+                start_time=block_start,
+                end_time=block_end,
+                meeting_format=block_format,
+                meeting_link=block_link,
+                notes=block_notes,
+            )
+            st.success("Постоянная занятость сохранена.")
+            st.rerun()
+        except CalendarStorageError as exc:
+            st.error(str(exc))
+
+    st.divider()
+    try:
+        blocks = list_recurring_blocks(owner_telegram_id)
+    except CalendarStorageError as exc:
+        st.error(str(exc))
+        return
+
+    if not blocks:
+        st.caption("Постоянной занятости пока нет.")
+        return
+
+    st.markdown("#### Уже сохранено")
+    for block in blocks:
+        block_id = str(block.get("id") or "")
+        weekday = int(block.get("weekday", 0))
+        title_label = str(block.get("title") or "Занято")
+        start_label = str(block.get("start_time") or "")[:5]
+        end_label = str(block.get("end_time") or "")[:5]
+        with st.container(border=True):
+            st.write(
+                f"**{WEEKDAY_NAMES[weekday]} · {start_label}–{end_label} МСК** — "
+                f"{title_label} · {block.get('meeting_format') or 'без формата'}"
+            )
+            if st.button(
+                "Удалить",
+                key=f"calendar_delete_block_{block_id}",
+            ):
+                try:
+                    delete_recurring_block(block_id)
+                    st.rerun()
+                except CalendarStorageError as exc:
+                    st.error(str(exc))
 
 
 def _render_new_meeting(owner_telegram_id: int, owner_name: str) -> None:
@@ -774,7 +1046,11 @@ def _render_new_meeting(owner_telegram_id: int, owner_name: str) -> None:
                 start_utc - timedelta(minutes=1),
                 end_utc + timedelta(minutes=1),
             )
-            if _has_conflict(start_utc, end_utc, latest_meetings):
+            latest_blocks = list_recurring_blocks(owner_telegram_id)
+            if (
+                _has_conflict(start_utc, end_utc, latest_meetings)
+                or _has_recurring_conflict(start_utc, end_utc, latest_blocks)
+            ):
                 st.error(
                     "Этот интервал уже занят. Нажмите «Найти 3 свободных "
                     "варианта» ещё раз."
@@ -838,31 +1114,52 @@ def render_agency_calendar(owner_telegram_id: int, owner_name: str) -> None:
         )
         return
 
-    calendar_tab, create_tab = st.tabs(["Календарь", "Назначить встречу"])
+    calendar_tab, create_tab, recurring_tab = st.tabs(
+        ["Календарь", "Назначить встречу", "Постоянная занятость"]
+    )
     with calendar_tab:
         _render_calendar_view(owner_telegram_id)
     with create_tab:
         _render_new_meeting(owner_telegram_id, owner_name)
+    with recurring_tab:
+        _render_recurring_blocks(owner_telegram_id)
 
 
 def render_today_meetings_compact(owner_telegram_id: int) -> None:
-    """Кратко показывает сегодняшние встречи на странице «Мой день»."""
+    """Кратко показывает сегодняшние встречи и постоянную занятость на «Мой день»."""
 
     today_msk = datetime.now(MSK).date()
     range_start, range_end = _period_for_msk_day(today_msk)
 
     try:
         meetings = list_meetings(owner_telegram_id, range_start, range_end)
+        blocks = [
+            block for block in list_recurring_blocks(owner_telegram_id)
+            if int(block.get("weekday", -1)) == today_msk.weekday()
+        ]
     except CalendarStorageError:
-        st.caption("Календарь ещё не подключён.")
+        st.caption("Календарь ещё не подключён полностью.")
         return
 
     active = [meeting for meeting in meetings if _meeting_is_active(meeting)]
-    if not active:
+    if not active and not blocks:
         st.caption("На сегодня встреч нет.")
         return
 
-    for meeting in active[:5]:
+    rows_shown = 0
+    for block in blocks:
+        if rows_shown >= 5:
+            break
+        st.write(
+            f"**{str(block.get('start_time') or '')[:5]} МСК** — "
+            f"{block.get('title') or 'Занято'} · "
+            f"{block.get('meeting_format') or 'Постоянная занятость'} · 🔒"
+        )
+        rows_shown += 1
+
+    for meeting in active:
+        if rows_shown >= 5:
+            break
         start_utc, _ = _meeting_datetimes(meeting)
         start_msk = start_utc.astimezone(MSK)
         st.write(
@@ -871,6 +1168,9 @@ def render_today_meetings_compact(owner_telegram_id: int) -> None:
             f"{meeting.get('meeting_format', 'Формат не указан')} · "
             f"{meeting.get('status', '')}"
         )
+        rows_shown += 1
 
-    if len(active) > 5:
-        st.caption(f"И ещё встреч: {len(active) - 5}")
+    extra = len(active) + len(blocks) - rows_shown
+    if extra > 0:
+        st.caption(f"И ещё событий: {extra}")
+
