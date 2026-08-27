@@ -23,6 +23,7 @@ from agency_calendar import (
 )
 from team_center import render_team_center
 from personal_tasks import render_personal_tasks
+from agency_diary import render_agency_diary
 from agency_results import render_agency_results
 import stagirite_center as _stagirite_center
 
@@ -5693,7 +5694,7 @@ if received_hash:
 
         main_section = st.segmented_control(
             "Главное меню",
-            ["☀️ День", "📅 Календарь", "🤖 Агенты", "👥 Команда", "🗺️ Развитие", "👤 Профиль"],
+            ["☀️ День", "📅 Календарь", "📖 Дневник", "🤖 Агенты", "👥 Команда", "🗺️ Развитие", "👤 Профиль"],
             default="☀️ День",
             required=True,
             label_visibility="collapsed",
@@ -5988,6 +5989,11 @@ if received_hash:
             render_agency_calendar(
                 owner_telegram_id=int(telegram_id),
                 owner_name=first_name,
+            )
+
+        elif main_section == "📖 Дневник":
+            render_agency_diary(
+                owner_telegram_id=int(telegram_id),
             )
 
         elif main_section == "🤖 Агенты":
