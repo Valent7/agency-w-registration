@@ -2431,6 +2431,79 @@ async def send_telegram_first_video(
         await client.disconnect()
 
 
+async def fetch_telegram_private_dialog(
+    owner_telegram_id,
+    recipient_telegram_id,
+    limit=40,
+):
+    """Читает недавний личный Telegram-диалог без отправки сообщений."""
+    owner_telegram_id = int(owner_telegram_id)
+    recipient_telegram_id = int(recipient_telegram_id)
+
+    session_string = load_telegram_session_from_supabase(
+        owner_telegram_id
+    )
+    if not session_string:
+        raise RuntimeError(
+            "Сессия Telegram не найдена. Подключите Telegram заново."
+        )
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telegram-сессия больше не авторизована."
+            )
+
+        contacts_result = await client(
+            GetContactsRequest(hash=0)
+        )
+        entity = None
+        for user in contacts_result.users:
+            if int(user.id) == recipient_telegram_id:
+                entity = user
+                break
+
+        if entity is None:
+            raise RuntimeError(
+                "Этого человека нет в ваших Telegram-контактах."
+            )
+
+        messages = []
+        async for item in client.iter_messages(
+            entity,
+            limit=max(10, min(int(limit), 80)),
+        ):
+            body = str(getattr(item, "message", "") or "").strip()
+            if not body:
+                continue
+            messages.append(
+                {
+                    "message_id": int(item.id),
+                    "direction": (
+                        "от владельца" if item.out else "от контакта"
+                    ),
+                    "text": body,
+                    "date": (
+                        item.date.isoformat()
+                        if getattr(item, "date", None)
+                        else ""
+                    ),
+                }
+            )
+
+        messages.reverse()
+        return messages
+    finally:
+        await client.disconnect()
+
 
 def prepare_telegram_video_note(video_bytes):
     """
@@ -8482,8 +8555,9 @@ if received_hash:
                     st.divider()
                     st.markdown("### 👥 Кого взять в работу")
                     st.caption(
-                        "У Неоны два независимых входа: холодные контакты из "
-                        "списка Неонии и ваши знакомые — тёплые или полутёплые. "
+                        "У Неоны три независимых входа: холодные контакты из "
+                        "списка Неонии, ваши знакомые — тёплые или полутёплые, "
+                        "и ручное решение Директора продолжить уже начатый диалог. "
                         "Неония рекомендует, но не блокирует личный выбор владельца."
                     )
 
@@ -8813,6 +8887,450 @@ if received_hash:
                                             "Неона получила его для работы."
                                         )
                                     st.rerun()
+
+                    # ---------------------------------------------------------
+                    # Ручной инструмент Директора: продолжить уже начатый диалог.
+                    # Не меняет автоматическую логику Неоны: без явного решения
+                    # Директора она по-прежнему ждёт нового входящего сообщения.
+                    # ---------------------------------------------------------
+                    st.markdown("#### 3. 💬 Продолжить диалог")
+                    st.write(
+                        "Ручной инструмент Директора. Выберите человека, с которым "
+                        "уже был двусторонний разговор. Неона прочитает контекст, "
+                        "подготовит продолжение, но ничего не отправит без вашего "
+                        "утверждения."
+                    )
+
+                    continue_search_key = (
+                        f"neona_continue_search_{telegram_id}"
+                    )
+                    continue_results_key = (
+                        f"neona_continue_results_{telegram_id}"
+                    )
+
+                    if not all_contacts:
+                        st.warning(
+                            "Сначала загрузите контакты Telegram в разделе Неонии."
+                        )
+                    else:
+                        continue_query = st.text_input(
+                            "Имя, @username или номер телефона",
+                            placeholder="Например: Татьяна, @username или +49...",
+                            key=continue_search_key,
+                        )
+
+                        if st.button(
+                            "💬 Найти диалог",
+                            key=f"neona_continue_find_{telegram_id}",
+                        ):
+                            continue_results = search_known_contacts(
+                                all_contacts,
+                                continue_query,
+                            )
+                            st.session_state[continue_results_key] = (
+                                continue_results
+                            )
+                            if not continue_results:
+                                st.warning(
+                                    "В загруженных Telegram-контактах совпадений "
+                                    "не найдено."
+                                )
+
+                        continue_results = st.session_state.get(
+                            continue_results_key,
+                            [],
+                        )
+                        if continue_results:
+                            continue_by_id = {
+                                int(item["telegram_id"]): item
+                                for item in continue_results
+                                if item.get("telegram_id") is not None
+                            }
+                            continue_options = [None] + list(
+                                continue_by_id.keys()
+                            )
+                            continue_contact_id = st.selectbox(
+                                "Выберите человека",
+                                options=continue_options,
+                                format_func=lambda contact_id: (
+                                    "Выберите контакт"
+                                    if contact_id is None
+                                    else (
+                                        f"{continue_by_id[contact_id].get('name') or 'Без имени'} "
+                                        + (
+                                            f"@{continue_by_id[contact_id].get('username')}"
+                                            if continue_by_id[contact_id].get("username")
+                                            else ""
+                                        )
+                                    )
+                                ),
+                                key=f"neona_continue_contact_{telegram_id}",
+                            )
+
+                            if continue_contact_id is not None:
+                                continue_contact = continue_by_id[
+                                    int(continue_contact_id)
+                                ]
+                                history_key = (
+                                    f"neona_continue_history_{telegram_id}_"
+                                    f"{int(continue_contact_id)}"
+                                )
+
+                                if st.button(
+                                    "📖 Открыть существующий диалог",
+                                    key=(
+                                        f"neona_continue_open_{telegram_id}_"
+                                        f"{int(continue_contact_id)}"
+                                    ),
+                                ):
+                                    try:
+                                        with st.spinner(
+                                            "Читаем последние сообщения диалога..."
+                                        ):
+                                            history = run_telegram_async(
+                                                fetch_telegram_private_dialog(
+                                                    telegram_id,
+                                                    continue_contact_id,
+                                                    limit=40,
+                                                )
+                                            )
+                                        st.session_state[history_key] = history
+                                    except Exception as exc:
+                                        st.error(
+                                            "Не удалось открыть диалог: "
+                                            + friendly_telegram_send_error(exc)
+                                        )
+
+                                history = st.session_state.get(
+                                    history_key,
+                                    [],
+                                )
+                                if history:
+                                    has_inbound = any(
+                                        item.get("direction") == "от контакта"
+                                        for item in history
+                                        if isinstance(item, dict)
+                                    )
+                                    has_outbound = any(
+                                        item.get("direction") == "от владельца"
+                                        for item in history
+                                        if isinstance(item, dict)
+                                    )
+                                    real_dialog_started = (
+                                        has_inbound and has_outbound
+                                    )
+
+                                    with st.expander(
+                                        "🧾 Последние сообщения — только для контекста",
+                                        expanded=False,
+                                    ):
+                                        for item in history[-12:]:
+                                            speaker = (
+                                                "Вы"
+                                                if item.get("direction") == "от владельца"
+                                                else (
+                                                    continue_contact.get("first_name")
+                                                    or continue_contact.get("name")
+                                                    or "Собеседник"
+                                                )
+                                            )
+                                            st.write(
+                                                f"**{speaker}:** {str(item.get('text') or '')}"
+                                            )
+
+                                    if not real_dialog_started:
+                                        st.info(
+                                            "Двустороннего диалога с этим человеком пока "
+                                            "нет. Для нового обращения используйте "
+                                            "«Первое сообщение»."
+                                        )
+                                    else:
+                                        st.success(
+                                            "Диалог найден. Теперь решение полностью "
+                                            "за Директором."
+                                        )
+                                        instruction_key = (
+                                            f"neona_continue_instruction_{telegram_id}_"
+                                            f"{int(continue_contact_id)}"
+                                        )
+                                        instruction = st.text_area(
+                                            "Что вы хотите поручить Неоне?",
+                                            placeholder=(
+                                                "Например: мягко напомни, что мы "
+                                                "остановились на выборе дня встречи."
+                                            ),
+                                            key=instruction_key,
+                                        )
+
+                                        continue_draft_key = (
+                                            f"neona_continue_draft_{telegram_id}_"
+                                            f"{int(continue_contact_id)}"
+                                        )
+                                        editor_key = (
+                                            f"neona_continue_editor_{telegram_id}_"
+                                            f"{int(continue_contact_id)}"
+                                        )
+
+                                        if st.button(
+                                            "✨ Неона, сформулируй продолжение",
+                                            disabled=not bool(instruction.strip()),
+                                            key=(
+                                                f"neona_continue_generate_{telegram_id}_"
+                                                f"{int(continue_contact_id)}"
+                                            ),
+                                        ):
+                                            history_text = "\n".join(
+                                                f"{item.get('direction')}: {str(item.get('text') or '')}"
+                                                for item in history[-30:]
+                                                if isinstance(item, dict)
+                                            )[:12000]
+                                            contact_first_name = str(
+                                                continue_contact.get("first_name")
+                                                or continue_contact.get("name")
+                                                or ""
+                                            ).strip().split()[0]
+                                            system_prompt = (
+                                                "Ты Неона, секретарь-референт Директора "
+                                                f"{first_name}. Директор вручную выбрал уже "
+                                                "начатый Telegram-диалог и поручил тебе "
+                                                "подготовить ОДНО естественное продолжение. "
+                                                "Это не новое первое сообщение и не твоя "
+                                                "самостоятельная инициатива. Сохрани нить "
+                                                "разговора. Пиши просто, по-человечески, "
+                                                "1–3 коротких предложения. Не называй себя "
+                                                "ботом или ИИ, не упоминай внутренний анализ, "
+                                                "не выдумывай факты и обещания. Если уместно, "
+                                                "закончи одним естественным вопросом. Верни "
+                                                "только готовый текст сообщения без пояснений."
+                                            )
+                                            user_prompt = (
+                                                f"Собеседник: {contact_first_name or 'человек'}\n"
+                                                f"Поручение Директора: {instruction.strip()}\n\n"
+                                                "Последние сообщения диалога:\n"
+                                                f"{history_text}"
+                                            )
+                                            with st.spinner(
+                                                "Неона читает контекст и формулирует ответ..."
+                                            ):
+                                                generated = ask_openai(
+                                                    system_prompt,
+                                                    user_prompt,
+                                                ).strip()
+                                            st.session_state[continue_draft_key] = {
+                                                "message": generated,
+                                                "approved": False,
+                                                "approved_text": "",
+                                                "instruction": instruction.strip(),
+                                            }
+                                            st.session_state[editor_key] = generated
+
+                                        continue_draft = st.session_state.get(
+                                            continue_draft_key,
+                                            {},
+                                        )
+                                        if isinstance(continue_draft, dict) and continue_draft.get("message"):
+                                            if editor_key not in st.session_state:
+                                                st.session_state[editor_key] = str(
+                                                    continue_draft.get("message") or ""
+                                                )
+                                            continuation_text = st.text_area(
+                                                "Продолжение диалога",
+                                                key=editor_key,
+                                                height=130,
+                                            )
+
+                                            if st.button(
+                                                "✅ Утвердить продолжение",
+                                                disabled=not bool(continuation_text.strip()),
+                                                key=(
+                                                    f"neona_continue_approve_{telegram_id}_"
+                                                    f"{int(continue_contact_id)}"
+                                                ),
+                                            ):
+                                                continue_draft["message"] = (
+                                                    continuation_text.strip()
+                                                )
+                                                continue_draft["approved"] = True
+                                                continue_draft["approved_text"] = (
+                                                    continuation_text.strip()
+                                                )
+                                                st.session_state[continue_draft_key] = (
+                                                    continue_draft
+                                                )
+                                                st.success(
+                                                    "Текст утверждён Директором."
+                                                )
+
+                                            approved_now = bool(
+                                                continue_draft.get("approved")
+                                                and str(
+                                                    continue_draft.get("approved_text")
+                                                    or ""
+                                                ).strip() == continuation_text.strip()
+                                            )
+                                            if continue_draft.get("approved") and not approved_now:
+                                                st.warning(
+                                                    "Текст изменён после утверждения. "
+                                                    "Утвердите новую версию ещё раз."
+                                                )
+
+                                            if approved_now:
+                                                st.caption(
+                                                    "Следующий шаг — видеокружок. "
+                                                    "Сначала вы его смотрите, затем отдельно "
+                                                    "решаете отправлять или нет."
+                                                )
+                                                followup_action = (
+                                                    render_neona_speaks_for_message(
+                                                        telegram_id,
+                                                        continue_contact_id,
+                                                        continuation_text.strip(),
+                                                        disabled=False,
+                                                    )
+                                                )
+
+                                                if followup_action.get(
+                                                    "send_clicked"
+                                                ):
+                                                    try:
+                                                        with st.spinner(
+                                                            "Отправляем видеокружок в Telegram..."
+                                                        ):
+                                                            video_bytes = (
+                                                                download_neona_heygen_video(
+                                                                    followup_action.get(
+                                                                        "video_url"
+                                                                    )
+                                                                )
+                                                            )
+                                                            video_bytes = (
+                                                                prepare_telegram_video_note(
+                                                                    video_bytes
+                                                                )
+                                                            )
+                                                            followup_result = (
+                                                                run_telegram_async(
+                                                                    send_telegram_first_video(
+                                                                        telegram_id,
+                                                                        continue_contact_id,
+                                                                        str(
+                                                                            continue_contact.get(
+                                                                                "username",
+                                                                                "",
+                                                                            )
+                                                                            or ""
+                                                                        ),
+                                                                        video_bytes,
+                                                                    )
+                                                                )
+                                                            )
+
+                                                        current_sent_log = (
+                                                            st.session_state.get(
+                                                                sent_log_key,
+                                                                [],
+                                                            )
+                                                        )
+                                                        if not isinstance(
+                                                            current_sent_log,
+                                                            list,
+                                                        ):
+                                                            current_sent_log = []
+                                                        current_sent_log.append(
+                                                            {
+                                                                "telegram_id": int(
+                                                                    continue_contact_id
+                                                                ),
+                                                                "recipient_name": (
+                                                                    continue_contact.get("name")
+                                                                    or "Без имени"
+                                                                ),
+                                                                "sent_at": followup_result[
+                                                                    "sent_at"
+                                                                ],
+                                                                "message_id": followup_result[
+                                                                    "message_id"
+                                                                ],
+                                                                "kind": (
+                                                                    "director_continue_dialog_video"
+                                                                ),
+                                                                "message": continuation_text.strip(),
+                                                            }
+                                                        )
+                                                        st.session_state[sent_log_key] = (
+                                                            current_sent_log
+                                                        )
+
+                                                        existing_owner_contact = owner_contacts.get(
+                                                            int(continue_contact_id),
+                                                            owner_contacts.get(
+                                                                str(continue_contact_id),
+                                                                {},
+                                                            ),
+                                                        )
+                                                        if isinstance(
+                                                            existing_owner_contact,
+                                                            dict,
+                                                        ):
+                                                            existing_owner_contact = {
+                                                                **existing_owner_contact,
+                                                                "status": (
+                                                                    "Продолжение отправлено — ждём ответа"
+                                                                ),
+                                                                "last_director_followup_at": (
+                                                                    followup_result["sent_at"]
+                                                                ),
+                                                            }
+                                                            owner_contacts[
+                                                                int(continue_contact_id)
+                                                            ] = existing_owner_contact
+                                                            owner_contacts.pop(
+                                                                str(continue_contact_id),
+                                                                None,
+                                                            )
+                                                            st.session_state[
+                                                                owner_contacts_key
+                                                            ] = owner_contacts
+
+                                                        st.session_state.pop(
+                                                            followup_action.get("state_key"),
+                                                            None,
+                                                        )
+                                                        st.session_state.pop(
+                                                            continue_draft_key,
+                                                            None,
+                                                        )
+                                                        st.session_state.pop(
+                                                            editor_key,
+                                                            None,
+                                                        )
+                                                        persist_workspace_if_changed(
+                                                            telegram_id,
+                                                            force=True,
+                                                        )
+                                                        st.session_state[
+                                                            f"neona_continue_notice_{telegram_id}_"
+                                                            f"{int(continue_contact_id)}"
+                                                        ] = (
+                                                            "✅ Продолжение отправлено видеокружком. "
+                                                            "Теперь Неона снова ждёт входящий ответ."
+                                                        )
+                                                        st.rerun()
+                                                    except Exception as exc:
+                                                        st.error(
+                                                            "Сообщение не отправлено: "
+                                                            + friendly_telegram_send_error(
+                                                                exc
+                                                            )
+                                                        )
+
+                                continue_notice = st.session_state.pop(
+                                    f"neona_continue_notice_{telegram_id}_"
+                                    f"{int(continue_contact_id)}",
+                                    None,
+                                )
+                                if continue_notice:
+                                    st.success(continue_notice)
 
                     drafts = st.session_state.get(
                         neona_drafts_key,
