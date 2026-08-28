@@ -34,7 +34,7 @@ async def instagram_webhook_receive(request: Request):
     # Следующим этапом подключим передачу входящего сообщения Неоне.
     if not isinstance(payload, dict):
         return PlainTextResponse("Bad Request", status_code=400)
-
+    print("INSTAGRAM_WEBHOOK_EVENT:", payload, flush=True)
     return PlainTextResponse("EVENT_RECEIVED", status_code=200)
 
 
