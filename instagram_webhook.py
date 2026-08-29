@@ -1,6 +1,9 @@
 import hashlib
+import json
 import os
 from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
@@ -16,6 +19,8 @@ CONTACT_EMAIL = "polesski.immobilien@gmail.com"
 # Keep these values in Render Environment, not in GitHub.
 INSTAGRAM_OWNER_ID = os.getenv("INSTAGRAM_OWNER_ID", "").strip()
 INSTAGRAM_OWNER_NAME = os.getenv("INSTAGRAM_OWNER_NAME", "").strip()
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
+INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0").strip() or "v23.0"
 
 
 def _page(title: str, body: str) -> HTMLResponse:
@@ -181,6 +186,63 @@ def _iter_instagram_text_messages(payload: dict):
             }
 
 
+
+def _send_instagram_text(sender_account_id: str, recipient_id: str, text: str) -> dict:
+    """Send one text reply through Instagram API with Instagram Login."""
+    if not INSTAGRAM_ACCESS_TOKEN:
+        raise RuntimeError("Missing INSTAGRAM_ACCESS_TOKEN")
+
+    sender_account_id = str(sender_account_id or "").strip()
+    recipient_id = str(recipient_id or "").strip()
+    text = str(text or "").strip()
+    if not sender_account_id or not recipient_id or not text:
+        raise RuntimeError("Instagram send requires sender account id, recipient id and text.")
+
+    endpoint = (
+        f"https://graph.instagram.com/{INSTAGRAM_API_VERSION}/"
+        f"{sender_account_id}/messages"
+    )
+    body = json.dumps(
+        {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    request = UrlRequest(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {INSTAGRAM_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Agency-W-Instagram-Webhook/1.0",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=25) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            payload = json.loads(raw) if raw else {}
+    except HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
+        raise RuntimeError(
+            f"Instagram API HTTP {exc.code}: {detail[:1200]}"
+        ) from exc
+    except URLError as exc:
+        raise RuntimeError(f"Instagram API connection error: {exc.reason}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("Instagram API returned an unexpected response.")
+    if payload.get("error"):
+        raise RuntimeError(f"Instagram API error: {payload['error']}")
+    return payload
+
 def _neona_config(core):
     required = {
         "SUPABASE_URL": os.getenv("SUPABASE_URL", "").strip(),
@@ -265,6 +327,30 @@ def _build_neona_draft(event: dict) -> None:
         state,
     )
 
+    reply_text = str(reply or "").strip()
+
+    print(
+        "INSTAGRAM_NEONA_DRAFT:",
+        {
+            "sender_id": event["sender_id"],
+            "incoming": text,
+            "draft": reply_text,
+            "stage": str(new_stage or "idle"),
+            "mid": message_id,
+        },
+        flush=True,
+    )
+
+    if not reply_text:
+        raise RuntimeError("Neona returned an empty Instagram reply.")
+
+    send_result = _send_instagram_text(
+        event["recipient_id"],
+        event["sender_id"],
+        reply_text,
+    )
+    sent_message_id = str(send_result.get("message_id") or "").strip()
+
     new_context = dict(new_context or {})
     new_context.update(
         {
@@ -273,7 +359,8 @@ def _build_neona_draft(event: dict) -> None:
             "instagram_recipient_id": event["recipient_id"],
             "instagram_last_mid": message_id,
             "instagram_last_incoming_text": text,
-            "instagram_last_draft": str(reply or ""),
+            "instagram_last_draft": reply_text,
+            "instagram_last_sent_message_id": sent_message_id,
             "instagram_last_processed_at": datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -292,20 +379,18 @@ def _build_neona_draft(event: dict) -> None:
     )
 
     print(
-        "INSTAGRAM_NEONA_DRAFT:",
+        "INSTAGRAM_NEONA_SENT:",
         {
-            "sender_id": event["sender_id"],
-            "incoming": text,
-            "draft": str(reply or ""),
-            "stage": str(new_stage or "idle"),
-            "mid": message_id,
+            "recipient_id": event["sender_id"],
+            "message_id": sent_message_id,
+            "reply": reply_text,
         },
         flush=True,
     )
 
 
 def _process_instagram_payload(payload: dict) -> None:
-    """Background worker for one webhook delivery. Never sends a DM yet."""
+    """Process one webhook delivery, generate Neona replies and send them to Direct."""
     try:
         events = list(_iter_instagram_text_messages(payload))
         if not events:
