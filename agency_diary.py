@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from io import BytesIO
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
+from zipfile import ZIP_DEFLATED, ZipFile
 from zoneinfo import ZoneInfo
 
 import requests
@@ -123,6 +126,455 @@ def _load_entry(owner_telegram_id: int, entry_date: date, reflection_type: str) 
         raise DiaryStorageError("Не удалось загрузить запись дневника: " + response.text[:500])
     rows = response.json()
     return rows[0] if isinstance(rows, list) and rows else None
+
+def _load_all_entries(owner_telegram_id: int) -> list[dict[str, Any]]:
+    """Загрузить всю историю дневника владельца."""
+    url, _ = _config()
+    result: list[dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+
+    while True:
+        response = requests.get(
+            f"{url}/rest/v1/agency_diary_entries",
+            headers=_headers(),
+            params={
+                "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+                "select": "*",
+                "order": "entry_date.asc,created_at.asc",
+                "limit": page_size,
+                "offset": offset,
+            },
+            timeout=30,
+        )
+        if response.status_code >= 400:
+            raise DiaryStorageError(
+                "Не удалось загрузить историю дневника: "
+                + response.text[:500]
+            )
+
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise DiaryStorageError(
+                "Supabase вернул неожиданный формат истории дневника."
+            )
+
+        result.extend(row for row in rows if isinstance(row, dict))
+        if len(rows) < page_size:
+            break
+        offset += page_size
+
+    reflection_order = {"morning": 0, "evening": 1}
+    result.sort(
+        key=lambda item: (
+            str(item.get("entry_date") or ""),
+            reflection_order.get(
+                str(item.get("reflection_type") or ""),
+                9,
+            ),
+        )
+    )
+    return result
+
+
+_RU_MONTHS_GENITIVE = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+_RU_MONTHS_TITLE = (
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+)
+
+
+def _parse_entry_date(value: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(value or "")[:10])
+    except Exception:
+        return None
+
+
+def _format_date_ru(day: date) -> str:
+    return f"{day.day} {_RU_MONTHS_GENITIVE[day.month - 1]} {day.year}"
+
+
+def _month_key(day: date) -> str:
+    return f"{day.year:04d}-{day.month:02d}"
+
+
+def _month_label(key: str) -> str:
+    try:
+        year, month = (int(part) for part in key.split("-", 1))
+        return f"{_RU_MONTHS_TITLE[month - 1]} {year}"
+    except Exception:
+        return key
+
+
+def _entry_quote(entry: dict[str, Any]) -> tuple[str, str]:
+    latin = str(entry.get("quote_latin") or "").strip()
+    translation = str(entry.get("quote_translation") or "").strip()
+    if latin or translation:
+        return latin, translation
+
+    day = _parse_entry_date(entry.get("entry_date"))
+    reflection_type = str(entry.get("reflection_type") or "morning")
+    if day is None:
+        return "", ""
+
+    _, latin, translation = _weekly_quote(day, reflection_type)
+    return latin, translation
+
+
+def _docx_run(
+    text: str,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    size: int = 22,
+) -> str:
+    props: list[str] = []
+    if bold:
+        props.append("<w:b/>")
+    if italic:
+        props.append("<w:i/>")
+    props.append(f'<w:sz w:val="{int(size)}"/>')
+    props.append(f'<w:szCs w:val="{int(size)}"/>')
+
+    return (
+        "<w:r><w:rPr>"
+        + "".join(props)
+        + "</w:rPr>"
+        + f'<w:t xml:space="preserve">{xml_escape(str(text))}</w:t>'
+        + "</w:r>"
+    )
+
+
+def _docx_paragraph(
+    text: str,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    size: int = 22,
+    align: str | None = None,
+    before: int = 0,
+    after: int = 120,
+) -> str:
+    ppr = [
+        f'<w:spacing w:before="{int(before)}" '
+        f'w:after="{int(after)}"/>'
+    ]
+    if align:
+        ppr.append(f'<w:jc w:val="{align}"/>')
+
+    return (
+        "<w:p><w:pPr>"
+        + "".join(ppr)
+        + "</w:pPr>"
+        + _docx_run(
+            text,
+            bold=bold,
+            italic=italic,
+            size=size,
+        )
+        + "</w:p>"
+    )
+
+
+def _docx_page_break() -> str:
+    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+
+
+def _build_diary_docx(entries: list[dict[str, Any]]) -> bytes:
+    """Собрать настоящий .docx без дополнительной библиотеки."""
+    clean_entries = [
+        item
+        for item in entries
+        if str(item.get("entry_text") or "").strip()
+        and _parse_entry_date(item.get("entry_date")) is not None
+    ]
+    clean_entries.sort(
+        key=lambda item: (
+            str(item.get("entry_date") or ""),
+            0
+            if str(item.get("reflection_type") or "") == "morning"
+            else 1,
+        )
+    )
+
+    body: list[str] = [
+        _docx_paragraph(
+            "Мой дневник",
+            bold=True,
+            size=38,
+            align="center",
+            after=180,
+        ),
+        _docx_paragraph(
+            "Агентство W",
+            italic=True,
+            size=22,
+            align="center",
+            after=360,
+        ),
+    ]
+
+    current_month = ""
+    current_day = ""
+
+    for entry in clean_entries:
+        day = _parse_entry_date(entry.get("entry_date"))
+        if day is None:
+            continue
+
+        month = _month_key(day)
+        if month != current_month:
+            if current_month:
+                body.append(_docx_page_break())
+            body.append(
+                _docx_paragraph(
+                    _month_label(month),
+                    bold=True,
+                    size=30,
+                    before=80,
+                    after=260,
+                )
+            )
+            current_month = month
+            current_day = ""
+
+        day_key = day.isoformat()
+        if day_key != current_day:
+            body.append(
+                _docx_paragraph(
+                    _format_date_ru(day),
+                    bold=True,
+                    size=26,
+                    before=120,
+                    after=180,
+                )
+            )
+            current_day = day_key
+
+        reflection_type = str(entry.get("reflection_type") or "")
+        section_title = (
+            "Утренние размышления"
+            if reflection_type == "morning"
+            else "Вечерние размышления"
+        )
+        body.append(
+            _docx_paragraph(
+                section_title,
+                bold=True,
+                size=23,
+                before=100,
+                after=100,
+            )
+        )
+
+        latin, translation = _entry_quote(entry)
+        if latin:
+            body.append(
+                _docx_paragraph(
+                    latin,
+                    italic=True,
+                    size=21,
+                    after=40,
+                )
+            )
+        if translation:
+            body.append(
+                _docx_paragraph(
+                    translation,
+                    italic=True,
+                    size=19,
+                    after=140,
+                )
+            )
+
+        entry_text = str(entry.get("entry_text") or "").strip()
+        paragraphs = [
+            part.strip()
+            for part in entry_text.split("\n\n")
+            if part.strip()
+        ]
+        if not paragraphs:
+            paragraphs = [entry_text]
+
+        for paragraph in paragraphs:
+            body.append(
+                _docx_paragraph(
+                    paragraph,
+                    size=22,
+                    after=160,
+                )
+            )
+
+    body.append(
+        '<w:sectPr>'
+        '<w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1440" w:right="1440" '
+        'w:bottom="1440" w:left="1440" '
+        'w:header="720" w:footer="720" w:gutter="0"/>'
+        '</w:sectPr>'
+    )
+
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document '
+        'xmlns:w="http://schemas.openxmlformats.org/'
+        'wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/'
+        'officeDocument/2006/relationships">'
+        '<w:body>'
+        + "".join(body)
+        + '</w:body></w:document>'
+    )
+
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/'
+        '2006/content-types">'
+        '<Default Extension="rels" '
+        'ContentType="application/vnd.openxmlformats-package.'
+        'relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.'
+        'wordprocessingml.document.main+xml"/>'
+        '</Types>'
+    )
+
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/'
+        '2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/'
+        '2006/relationships/officeDocument" '
+        'Target="word/document.xml"/>'
+        '</Relationships>'
+    )
+
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("word/document.xml", document_xml)
+
+    return buffer.getvalue()
+
+
+def _render_book(owner_telegram_id: int) -> None:
+    st.markdown("### 📖 Моя книга")
+    st.caption(
+        "Все сохранённые записи собраны здесь по датам. "
+        "Утренние и вечерние размышления остаются отдельными разделами."
+    )
+
+    try:
+        entries = _load_all_entries(int(owner_telegram_id))
+    except DiaryStorageError as exc:
+        st.error(str(exc))
+        return
+
+    entries = [
+        item
+        for item in entries
+        if str(item.get("entry_text") or "").strip()
+    ]
+    if not entries:
+        st.info("В книге пока нет сохранённых записей.")
+        return
+
+    month_keys = sorted(
+        {
+            _month_key(day)
+            for item in entries
+            if (
+                day := _parse_entry_date(item.get("entry_date"))
+            ) is not None
+        },
+        reverse=True,
+    )
+
+    selected_period = st.selectbox(
+        "Период",
+        ["all", *month_keys],
+        format_func=lambda value: (
+            "Все записи"
+            if value == "all"
+            else _month_label(value)
+        ),
+        key=f"diary_book_period_{owner_telegram_id}",
+    )
+
+    try:
+        docx_bytes = _build_diary_docx(entries)
+        st.download_button(
+            "⬇️ Скачать всю книгу в Word (.docx)",
+            data=docx_bytes,
+            file_name="Мой_дневник_Agency_W.docx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            width="stretch",
+            key=f"diary_download_docx_{owner_telegram_id}",
+        )
+    except Exception as exc:
+        st.error(f"Не удалось подготовить Word-файл: {exc}")
+
+    visible_entries: list[dict[str, Any]] = []
+    for item in entries:
+        day = _parse_entry_date(item.get("entry_date"))
+        if day is None:
+            continue
+        if (
+            selected_period != "all"
+            and _month_key(day) != selected_period
+        ):
+            continue
+        visible_entries.append(item)
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in visible_entries:
+        key = str(item.get("entry_date") or "")[:10]
+        grouped.setdefault(key, []).append(item)
+
+    for day_key in sorted(grouped.keys(), reverse=True):
+        day = _parse_entry_date(day_key)
+        if day is None:
+            continue
+
+        st.markdown(f"### {_format_date_ru(day)}")
+        day_entries = sorted(
+            grouped[day_key],
+            key=lambda item: (
+                0
+                if str(item.get("reflection_type") or "") == "morning"
+                else 1
+            ),
+        )
+
+        for item in day_entries:
+            is_morning = (
+                str(item.get("reflection_type") or "") == "morning"
+            )
+            st.markdown(
+                "#### ☀️ Утренние размышления"
+                if is_morning
+                else "#### 🌙 Вечерние размышления"
+            )
+
+            latin, translation = _entry_quote(item)
+            if latin or translation:
+                _quote_block(latin, translation)
+
+            st.write(str(item.get("entry_text") or "").strip())
+
+        st.divider()
+
+
 
 
 def _save_entry(
@@ -280,36 +732,65 @@ def _render_reflection_page(owner_telegram_id: int, reflection_type: str) -> Non
 def render_agency_diary(owner_telegram_id: int) -> None:
     st.markdown("## 📖 Дневник")
     st.caption(
-        "Одна короткая латинская фраза утром и одна вечером. "
+        "Записывайте мысли утром и вечером, а в «Моей книге» "
+        "читайте всю историю подряд. "
         "После распознавания в дневнике остаётся только текст."
     )
 
     if "agency_diary_mode" not in st.session_state:
         st.session_state["agency_diary_mode"] = "morning"
 
-    left, right = st.columns(2)
-    with left:
+    morning_col, evening_col, book_col = st.columns(3)
+
+    with morning_col:
         if st.button(
             "☀️ Утренние размышления",
-            type="primary" if st.session_state["agency_diary_mode"] == "morning" else "secondary",
+            type=(
+                "primary"
+                if st.session_state["agency_diary_mode"] == "morning"
+                else "secondary"
+            ),
             width="stretch",
             key="open_diary_morning",
         ):
             st.session_state["agency_diary_mode"] = "morning"
             st.rerun()
 
-    with right:
+    with evening_col:
         if st.button(
             "🌙 Вечерние размышления",
-            type="primary" if st.session_state["agency_diary_mode"] == "evening" else "secondary",
+            type=(
+                "primary"
+                if st.session_state["agency_diary_mode"] == "evening"
+                else "secondary"
+            ),
             width="stretch",
             key="open_diary_evening",
         ):
             st.session_state["agency_diary_mode"] = "evening"
             st.rerun()
 
+    with book_col:
+        if st.button(
+            "📖 Моя книга",
+            type=(
+                "primary"
+                if st.session_state["agency_diary_mode"] == "book"
+                else "secondary"
+            ),
+            width="stretch",
+            key="open_diary_book",
+        ):
+            st.session_state["agency_diary_mode"] = "book"
+            st.rerun()
+
     st.divider()
-    _render_reflection_page(
-        int(owner_telegram_id),
-        str(st.session_state["agency_diary_mode"]),
-    )
+
+    mode = str(st.session_state["agency_diary_mode"])
+    if mode == "book":
+        _render_book(int(owner_telegram_id))
+    else:
+        _render_reflection_page(
+            int(owner_telegram_id),
+            mode,
+        )
