@@ -132,6 +132,61 @@ def _owner_forms(owner_name: str) -> dict[str, str]:
     }
 
 
+
+_TRANSCRIPTION_ARTIFACT_PATTERNS = (
+    r"\bредактор\s+субтитров\b",
+    r"\bавтор\s+субтитров\b",
+    r"\bпродолжение\s+следует\b",
+    r"\bспасибо\s+за\s+просмотр\b",
+    r"\bподписывайтесь\s+на\s+канал\b",
+)
+
+
+def _looks_like_transcription_artifact(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(value or "").casefold()).strip()
+    return bool(normalized) and any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in _TRANSCRIPTION_ARTIFACT_PATTERNS
+    )
+
+
+def _sanitize_relationship_memory(context):
+    """Remove known speech-to-text hallucination artefacts from stored dialog memory."""
+    if not isinstance(context, dict):
+        return {}
+    result = dict(context)
+    key = getattr(memory, "MEMORY_KEY", "relationship_memory")
+    mem = result.get(key)
+    if not isinstance(mem, dict):
+        return result
+    mem = dict(mem)
+
+    for list_key in ("confirmed_facts", "goals_or_needs", "questions", "preferences"):
+        values = mem.get(list_key)
+        if isinstance(values, list):
+            mem[list_key] = [item for item in values if not _looks_like_transcription_artifact(str(item))]
+
+    turns = mem.get("turns")
+    if isinstance(turns, list):
+        clean_turns = []
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            incoming = str(turn.get("incoming") or "")
+            summary = str(turn.get("summary") or "")
+            if _looks_like_transcription_artifact(incoming) or _looks_like_transcription_artifact(summary):
+                continue
+            clean_turns.append(turn)
+        mem["turns"] = clean_turns
+
+    for scalar_key in ("last_incoming", "last_summary"):
+        if _looks_like_transcription_artifact(str(mem.get(scalar_key) or "")):
+            mem[scalar_key] = ""
+
+    result[key] = mem
+    return result
+
+
 def _relationship_memory(context):
     if not isinstance(context, dict):
         return {}
@@ -272,6 +327,14 @@ def _general_reply(config, owner_name, first_name, text, greet, context=None):
     personal_reason_known = _has_personal_reason(context)
     personal_reason_now = _current_text_has_personal_reason(text)
     meeting_permission = personal_reason_known or personal_reason_now
+    voice_unverified = bool((context or {}).get("incoming_voice_unverified"))
+    voice_rule = (
+        "Последняя реплика получена через автоматическую расшифровку голосового. "
+        "Используй её для ответа, но НЕ объявляй имена, фамилии, цифры, названия или биографические сведения подтверждёнными фактами. "
+        "Если такой фрагмент выглядит неожиданно или важен для дальнейшего разговора — мягко переспроси."
+        if voice_unverified
+        else "Последняя реплика не требует специальной оговорки о голосовой расшифровке."
+    )
 
     meeting_rule = (
         "Личная причина уже проявилась. Ты МОЖЕШЬ очень мягко связать её с пользой Агентства W и, "
@@ -292,6 +355,7 @@ def _general_reply(config, owner_name, first_name, text, greet, context=None):
 {history}
 
 КРИТИЧЕСКОЕ ПРАВИЛО КОНТЕКСТА:
+{voice_rule}
 - прежде чем отвечать, восстанови, о чём идёт разговор;
 - местоимения и короткие ответы («ответ», «развёрнутый», «да», «это») трактуй через предыдущие реплики;
 - если ты сама только что задала загадку/вопрос, а человек просит ответ, ОТВЕТЬ, а не проси повторить загадку;
@@ -713,8 +777,21 @@ def _process_message(
     message_dt,
     state,
 ):
-    """Сохраняет сильную рабочую политику Неоны и добавляет только слой памяти."""
-    previous_stage = str((state or {}).get("stage") or "idle")
+    """Сохраняет рабочую политику Неоны и добавляет безопасную живую память."""
+    state = dict(state or {})
+    context_before = (
+        dict(state.get("context"))
+        if isinstance(state.get("context"), dict)
+        else {}
+    )
+    context_before = _sanitize_relationship_memory(context_before)
+    state["context"] = context_before
+
+    previous_stage = str(state.get("stage") or "idle")
+    voice_unverified = bool(context_before.get("incoming_voice_unverified"))
+    memory_before = _relationship_memory(context_before)
+    confirmed_before = list(memory_before.get("confirmed_facts") or []) if isinstance(memory_before.get("confirmed_facts"), list) else []
+
     reply, new_stage, greeted, context = _process_message_without_memory(
         config,
         owner_id,
@@ -727,8 +804,8 @@ def _process_message(
         state,
     )
 
-    # Память не участвует в принятии решения и не меняет сформированный ответ.
-    # Даже если извлечение памяти даст сбой, живой диалог продолжится как раньше.
+    # Память не имеет права сорвать живой диалог. Для непроверенной расшифровки
+    # разрешаем помнить ход разговора, но запрещаем превращать услышанное в подтверждённые факты.
     try:
         classification = objections.classify_neona_reply(text)
         context = memory.remember_dialog_turn(
@@ -741,6 +818,14 @@ def _process_message(
             new_stage=new_stage,
             message_dt=message_dt,
         )
+        context = _sanitize_relationship_memory(context)
+        if voice_unverified:
+            key = getattr(memory, "MEMORY_KEY", "relationship_memory")
+            mem = context.get(key)
+            if isinstance(mem, dict):
+                mem = dict(mem)
+                mem["confirmed_facts"] = confirmed_before
+                context[key] = mem
     except Exception:
         pass
 

@@ -29,6 +29,47 @@ INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
 INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0").strip() or "v23.0"
 
 
+# Known phrases that often appear when speech-to-text invents credits/subtitle text
+# instead of transcribing the speaker. Suspicious transcripts are confirmed by the
+# person before they are allowed into Neona's relationship memory.
+_VOICE_ARTIFACT_PATTERNS = (
+    r"\bредактор\s+субтитров\b",
+    r"\bавтор\s+субтитров\b",
+    r"\bкорректор\s*[—:-]",
+    r"\bсубтитры\s+(?:сделал|сделала|подготовил|подготовила|редактор)\b",
+    r"\bпродолжение\s+следует\b",
+    r"\bспасибо\s+за\s+просмотр\b",
+    r"\bподписывайтесь\s+на\s+канал\b",
+)
+
+
+def _voice_transcript_needs_confirmation(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    if not normalized:
+        return True
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _VOICE_ARTIFACT_PATTERNS)
+
+
+def _confirmation_yes(text: str) -> bool:
+    normalized = re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").casefold()).strip()
+    return normalized in {"да", "верно", "правильно", "точно", "угу", "ага", "yes"}
+
+
+def _confirmation_no(text: str) -> bool:
+    normalized = re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").casefold()).strip()
+    return normalized in {"нет", "неверно", "не правильно", "неправильно", "no"}
+
+
+def _voice_confirmation_reply(transcript: str) -> str:
+    compact = re.sub(r"\s+", " ", str(transcript or "")).strip()
+    if len(compact) > 240:
+        compact = compact[:237].rstrip() + "…"
+    return (
+        "Кажется, я могла неверно расслышать голосовое. "
+        f"У меня получилось: «{compact}». Я правильно вас услышала?"
+    )
+
+
 def _page(title: str, body: str) -> HTMLResponse:
     html = f"""<!doctype html>
 <html lang=\"en\">
@@ -459,40 +500,8 @@ def _build_neona_draft(event: dict) -> None:
     config, owner_id, owner_name = _neona_config(core)
     contact_id = _instagram_contact_id(event["sender_id"])
     message_id = str(event.get("message_id") or "").strip()
-    text = str(event.get("text") or "").strip()
+    raw_text = str(event.get("text") or "").strip()
     audio_url = str(event.get("audio_url") or "").strip()
-    if audio_url:
-        try:
-            transcript = _transcribe_instagram_audio(audio_url)
-            print(
-                "INSTAGRAM_AUDIO_TRANSCRIPT:",
-                {
-                    "sender_id": event["sender_id"],
-                    "mid": message_id,
-                    "text": transcript,
-                },
-                flush=True,
-            )
-            text = (
-                f"{text}\n\n{transcript}".strip()
-                if text
-                else transcript
-            )
-        except Exception as exc:
-            print(
-                "INSTAGRAM_AUDIO_ERROR:",
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            if not text:
-                _send_instagram_text(
-                    event["recipient_id"],
-                    event["sender_id"],
-                    "Я получила ваше голосовое сообщение, но сейчас не смогла его разобрать. "
-                    "Напишите, пожалуйста, эту мысль текстом — и я сразу отвечу.",
-                )
-                return
-
     message_dt = _message_datetime(event.get("timestamp"))
 
     state = core._dialog_state(config, owner_id, contact_id)
@@ -522,6 +531,130 @@ def _build_neona_draft(event: dict) -> None:
             flush=True,
         )
         return
+
+    # If the previous voice transcript looked suspicious, the next short yes/no
+    # confirms or rejects it before it becomes normal dialog input.
+    pending_voice = str(context.get("pending_voice_transcript") or "").strip()
+    text = raw_text
+    voice_confirmed = False
+    if pending_voice and not audio_url:
+        if _confirmation_yes(raw_text):
+            text = pending_voice
+            voice_confirmed = True
+            context.pop("pending_voice_transcript", None)
+            context.pop("pending_voice_mid", None)
+            context.pop("pending_voice_created_at", None)
+        elif _confirmation_no(raw_text):
+            context.pop("pending_voice_transcript", None)
+            context.pop("pending_voice_mid", None)
+            context.pop("pending_voice_created_at", None)
+            context.update(
+                {
+                    "instagram_last_mid": message_id,
+                    "instagram_last_processed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            dedupe_source = message_id or f'{event["sender_id"]}|{event.get("timestamp")}|{raw_text}'
+            core._save_dialog_state(
+                config,
+                owner_id,
+                contact_id,
+                last_incoming_id=_stable_message_id(dedupe_source),
+                stage=str(state.get("stage") or "idle"),
+                greeted=bool(state.get("greeted", False)),
+                context=context,
+            )
+            _send_instagram_text(
+                event["recipient_id"],
+                event["sender_id"],
+                "Поняла. Тогда не буду опираться на эту расшифровку. "
+                "Повторите, пожалуйста, голосовое или напишите мысль текстом.",
+            )
+            print(
+                "INSTAGRAM_AUDIO_CONFIRMATION_REJECTED:",
+                {"sender_id": event["sender_id"], "mid": message_id},
+                flush=True,
+            )
+            return
+        elif raw_text:
+            # A substantive correction replaces the pending transcript.
+            context.pop("pending_voice_transcript", None)
+            context.pop("pending_voice_mid", None)
+            context.pop("pending_voice_created_at", None)
+
+    if audio_url:
+        try:
+            transcript = _transcribe_instagram_audio(audio_url)
+            print(
+                "INSTAGRAM_AUDIO_TRANSCRIPT:",
+                {
+                    "sender_id": event["sender_id"],
+                    "mid": message_id,
+                    "text": transcript,
+                },
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "INSTAGRAM_AUDIO_ERROR:",
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            if not raw_text:
+                _send_instagram_text(
+                    event["recipient_id"],
+                    event["sender_id"],
+                    "Я получила ваше голосовое сообщение, но сейчас не смогла его разобрать. "
+                    "Напишите, пожалуйста, эту мысль текстом — и я сразу отвечу.",
+                )
+                return
+            transcript = ""
+
+        if transcript and _voice_transcript_needs_confirmation(transcript):
+            context.update(
+                {
+                    "pending_voice_transcript": transcript,
+                    "pending_voice_mid": message_id,
+                    "pending_voice_created_at": datetime.now(timezone.utc).isoformat(),
+                    "instagram_last_mid": message_id,
+                    "instagram_last_processed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            dedupe_source = message_id or f'{event["sender_id"]}|{event.get("timestamp")}|{transcript}'
+            core._save_dialog_state(
+                config,
+                owner_id,
+                contact_id,
+                last_incoming_id=_stable_message_id(dedupe_source),
+                stage=str(state.get("stage") or "idle"),
+                greeted=bool(state.get("greeted", False)),
+                context=context,
+            )
+            _send_instagram_text(
+                event["recipient_id"],
+                event["sender_id"],
+                _voice_confirmation_reply(transcript),
+            )
+            print(
+                "INSTAGRAM_AUDIO_CONFIRMATION_REQUIRED:",
+                {"sender_id": event["sender_id"], "mid": message_id, "text": transcript},
+                flush=True,
+            )
+            return
+
+        if transcript:
+            text = f"{raw_text}\n\n{transcript}".strip() if raw_text else transcript
+            # The transcript is useful for the live conversation, but it is not
+            # allowed to become a confirmed fact until the person explicitly confirms it.
+            context["incoming_voice_unverified"] = True
+            context["incoming_voice_transcript"] = transcript
+
+    if voice_confirmed:
+        context["incoming_voice_confirmed"] = True
+
+    # Pass the transport metadata to the dialog policy through state context.
+    state = dict(state)
+    state["context"] = context
 
     reply, new_stage, greeted, new_context = core._process_message(
         config,
@@ -560,6 +693,10 @@ def _build_neona_draft(event: dict) -> None:
     sent_message_id = str(send_result.get("message_id") or "").strip()
 
     new_context = dict(new_context or {})
+    # Transport flags are one-turn only; keep only durable audit fields.
+    new_context.pop("incoming_voice_unverified", None)
+    new_context.pop("incoming_voice_transcript", None)
+    new_context.pop("incoming_voice_confirmed", None)
     new_context.update(
         {
             "channel": "instagram",
@@ -567,6 +704,7 @@ def _build_neona_draft(event: dict) -> None:
             "instagram_recipient_id": event["recipient_id"],
             "instagram_last_mid": message_id,
             "instagram_last_incoming_text": text,
+            "instagram_last_input_source": "voice" if audio_url or voice_confirmed else "text",
             "instagram_last_draft": reply_text,
             "instagram_last_sent_message_id": sent_message_id,
             "instagram_last_processed_at": datetime.now(timezone.utc).isoformat(),
