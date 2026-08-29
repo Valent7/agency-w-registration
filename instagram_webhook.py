@@ -1,9 +1,14 @@
 import hashlib
 import json
 import os
+import mimetypes
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
+
+import requests
 
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
@@ -142,8 +147,8 @@ def _message_datetime(timestamp_value) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def _iter_instagram_text_messages(payload: dict):
-    """Yield only real incoming text messages from Instagram."""
+def _iter_instagram_messages(payload: dict):
+    """Yield real incoming text or audio messages from Instagram."""
     for entry in payload.get("entry") or []:
         if not isinstance(entry, dict):
             continue
@@ -170,11 +175,34 @@ def _iter_instagram_text_messages(payload: dict):
             message_id = str(message.get("mid") or "").strip()
             text = str(message.get("text") or "").strip()
 
-            if not sender_id or not recipient_id or not text:
+            if not sender_id or not recipient_id:
                 continue
             if sender_id == recipient_id:
                 continue
-            if bool(message.get("is_echo")):
+            if bool(message.get("is_echo")) or bool(message.get("is_self")):
+                continue
+            if bool(message.get("is_deleted")):
+                continue
+
+            audio_url = ""
+            attachments = message.get("attachments")
+            if isinstance(attachments, list):
+                for attachment in attachments:
+                    if not isinstance(attachment, dict):
+                        continue
+                    attachment_type = str(attachment.get("type") or "").strip().lower()
+                    payload_data = (
+                        attachment.get("payload")
+                        if isinstance(attachment.get("payload"), dict)
+                        else {}
+                    )
+                    if attachment_type == "audio":
+                        candidate_url = str(payload_data.get("url") or "").strip()
+                        if candidate_url:
+                            audio_url = candidate_url
+                            break
+
+            if not text and not audio_url:
                 continue
 
             yield {
@@ -182,8 +210,154 @@ def _iter_instagram_text_messages(payload: dict):
                 "recipient_id": recipient_id,
                 "message_id": message_id,
                 "text": text,
+                "audio_url": audio_url,
                 "timestamp": event.get("timestamp") or entry_timestamp,
             }
+
+
+def _owner_name_for_russian(name: str) -> str:
+    """Normalize the current Instagram owner's name for Russian dialog."""
+    value = str(name or "").strip()
+    if value.casefold() == "valentina":
+        return "Валентина"
+    return value
+
+
+def _polish_instagram_reply(text: str, owner_name: str) -> str:
+    """Remove awkward owner-name constructions from Instagram replies."""
+    reply = str(text or "").strip()
+    owner = _owner_name_for_russian(owner_name)
+
+    # Current cabinet owner. Keep this explicit until a generic declension
+    # helper is added for all Agency W owners.
+    if owner.casefold() == "валентина":
+        reply = re.sub(r"\bValentina\b", "Валентина", reply, flags=re.IGNORECASE)
+        reply = re.sub(
+            r"(?i)\bсекретар(?:ь|я)(?:[\s‑-]*референт)?\s+Валентина\b",
+            "секретарь-референт Валентины",
+            reply,
+        )
+        reply = re.sub(r"(?i)\bс\s+Валентина\b", "с Валентиной", reply)
+        reply = re.sub(r"(?i)\bу\s+Валентина\b", "у Валентины", reply)
+        reply = re.sub(r"(?i)\bдля\s+Валентина\b", "для Валентины", reply)
+
+    reply = re.sub(r"\s{2,}", " ", reply).strip()
+    return reply
+
+
+def _audio_suffix(content_type: str, url: str) -> str:
+    content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    mapping = {
+        "audio/ogg": ".ogg",
+        "audio/opus": ".ogg",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/mp4": ".m4a",
+        "audio/x-m4a": ".m4a",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/aac": ".aac",
+        "audio/webm": ".webm",
+    }
+    if content_type in mapping:
+        return mapping[content_type]
+
+    guessed = mimetypes.guess_extension(content_type) if content_type else None
+    if guessed:
+        return guessed
+
+    lower_url = str(url or "").lower()
+    for suffix in (".ogg", ".opus", ".mp3", ".m4a", ".mp4", ".wav", ".aac", ".webm"):
+        if suffix in lower_url:
+            return ".ogg" if suffix == ".opus" else suffix
+
+    return ".m4a"
+
+
+def _download_instagram_audio(audio_url: str) -> tuple[Path, str]:
+    """Download the temporary Instagram CDN audio URL immediately."""
+    response = requests.get(
+        str(audio_url),
+        timeout=60,
+        allow_redirects=True,
+        headers={"User-Agent": "Agency-W-Instagram-Webhook/1.0"},
+    )
+    response.raise_for_status()
+    audio_bytes = response.content
+    if not audio_bytes:
+        raise RuntimeError("Instagram audio download returned an empty file.")
+
+    content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+    suffix = _audio_suffix(content_type, audio_url)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temporary:
+        temporary.write(audio_bytes)
+        path = Path(temporary.name)
+
+    return path, (content_type or mimetypes.guess_type(path.name)[0] or "audio/m4a")
+
+
+def _transcribe_audio_with_model(path: Path, mime_type: str, model: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY")
+
+    with path.open("rb") as audio_file:
+        response = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            data={
+                "model": model,
+                "language": "ru",
+                "response_format": "json",
+            },
+            files={
+                "file": (
+                    path.name,
+                    audio_file,
+                    str(mime_type or "audio/m4a"),
+                )
+            },
+            timeout=120,
+        )
+    if not response.ok:
+        raise RuntimeError(
+            f"OpenAI transcription HTTP {response.status_code}: "
+            f"{response.text[:800]}"
+        )
+    transcript = str(response.json().get("text") or "").strip()
+    if not transcript:
+        raise RuntimeError("OpenAI transcription returned empty text.")
+    return transcript
+
+
+def _transcribe_instagram_audio(audio_url: str) -> str:
+    path = None
+    try:
+        path, mime_type = _download_instagram_audio(audio_url)
+        try:
+            return _transcribe_audio_with_model(
+                path,
+                mime_type,
+                "gpt-4o-mini-transcribe",
+            )
+        except Exception as primary_exc:
+            print(
+                "INSTAGRAM_AUDIO_TRANSCRIBE_FALLBACK:",
+                f"{type(primary_exc).__name__}: {primary_exc}",
+                flush=True,
+            )
+            return _transcribe_audio_with_model(
+                path,
+                mime_type,
+                "whisper-1",
+            )
+    finally:
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 
@@ -271,7 +445,7 @@ def _neona_config(core):
         telegram_api_hash="",
         openai_api_key=required["OPENAI_API_KEY"],
     )
-    return config, owner_id, required["INSTAGRAM_OWNER_NAME"]
+    return config, owner_id, _owner_name_for_russian(required["INSTAGRAM_OWNER_NAME"])
 
 
 def _build_neona_draft(event: dict) -> None:
@@ -285,6 +459,39 @@ def _build_neona_draft(event: dict) -> None:
     contact_id = _instagram_contact_id(event["sender_id"])
     message_id = str(event.get("message_id") or "").strip()
     text = str(event.get("text") or "").strip()
+    audio_url = str(event.get("audio_url") or "").strip()
+    if audio_url:
+        try:
+            transcript = _transcribe_instagram_audio(audio_url)
+            print(
+                "INSTAGRAM_AUDIO_TRANSCRIPT:",
+                {
+                    "sender_id": event["sender_id"],
+                    "mid": message_id,
+                    "text": transcript,
+                },
+                flush=True,
+            )
+            text = (
+                f"{text}\n\n{transcript}".strip()
+                if text
+                else transcript
+            )
+        except Exception as exc:
+            print(
+                "INSTAGRAM_AUDIO_ERROR:",
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            if not text:
+                _send_instagram_text(
+                    event["recipient_id"],
+                    event["sender_id"],
+                    "Я получила ваше голосовое сообщение, но сейчас не смогла его разобрать. "
+                    "Напишите, пожалуйста, эту мысль текстом — и я сразу отвечу.",
+                )
+                return
+
     message_dt = _message_datetime(event.get("timestamp"))
 
     state = core._dialog_state(config, owner_id, contact_id)
@@ -327,7 +534,7 @@ def _build_neona_draft(event: dict) -> None:
         state,
     )
 
-    reply_text = str(reply or "").strip()
+    reply_text = _polish_instagram_reply(str(reply or ""), owner_name)
 
     print(
         "INSTAGRAM_NEONA_DRAFT:",
@@ -392,9 +599,9 @@ def _build_neona_draft(event: dict) -> None:
 def _process_instagram_payload(payload: dict) -> None:
     """Process one webhook delivery, generate Neona replies and send them to Direct."""
     try:
-        events = list(_iter_instagram_text_messages(payload))
+        events = list(_iter_instagram_messages(payload))
         if not events:
-            print("INSTAGRAM_NEONA_NO_TEXT_MESSAGES", flush=True)
+            print("INSTAGRAM_NEONA_NO_SUPPORTED_MESSAGES", flush=True)
             return
 
         for event in events:
