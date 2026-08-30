@@ -5834,6 +5834,16 @@ telegram_keys = (
 )
 
 cached_web_auth = st.session_state.get("agency_web_auth")
+# После OIDC Telegram возвращает нас без исходного ?ref=... .
+# Поэтому для НОВОГО партнёра сохраняем код пригласившего,
+# который был защищённо пронесён через state. Для старого
+# Login Widget всё по-прежнему берётся из query params.
+effective_referral_code = str(
+    st.session_state.get("agency_web_referral_code")
+    or referral_code
+    or ""
+).strip()
+
 if isinstance(cached_web_auth, dict) and cached_web_auth.get("id"):
     telegram_data = {
         key: str(cached_web_auth.get(key) or "")
@@ -5901,7 +5911,10 @@ if received_hash:
             or "Партнёр"
         )
         telegram_id = telegram_data.get("id", "")
-        member_code, created = save_member_to_supabase(telegram_data, referral_code)
+        member_code, created = save_member_to_supabase(
+            telegram_data,
+            effective_referral_code,
+        )
 
 
         partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
@@ -11374,7 +11387,11 @@ if received_hash:
             render_agency_development()
 
         elif main_section == "👤 Профиль":
-            inviter_text = referral_code if referral_code else "не указан"
+            inviter_text = (
+                effective_referral_code
+                if effective_referral_code
+                else "не указан"
+            )
 
             st.markdown("### 👤 Профиль")
 
