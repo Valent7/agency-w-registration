@@ -107,6 +107,7 @@ import base64
 import subprocess
 import tempfile
 import shutil
+import secrets
 from pathlib import Path
 from io import BytesIO
 
@@ -135,6 +136,8 @@ from telethon.errors import (
     FloodWaitError,
 )
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 APP_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = APP_DIR / "assets"
@@ -235,6 +238,10 @@ def decrypt_telegram_session(encrypted_session):
 # Получаем код пригласившего из ссылки вида:
 # https://agency-w.streamlit.app/?ref=W12345
 referral_code = st.query_params.get("ref", "").strip()
+if not referral_code:
+    referral_code = str(
+        st.session_state.get("agency_web_referral_code") or ""
+    ).strip()
 def ask_openai(
     system_prompt,
     user_message,
@@ -5571,7 +5578,7 @@ div[data-testid="stAlert"] p {
     unsafe_allow_html=True,
 )
 
-if not st.query_params.get("hash"):
+if not (st.query_params.get("hash") or st.session_state.get("agency_web_auth")):
     render_agency_w_logo()
 
     st.markdown(
@@ -5598,11 +5605,224 @@ if not st.query_params.get("hash"):
     else:
         st.info("Вы открыли сайт без персональной партнёрской ссылки.")
 # Защищённый вход через Telegram
+# Поддерживаем два способа:
+# 1) современный Telegram OIDC (основной, если настроены Client ID/Secret);
+# 2) прежний Telegram Login Widget как безопасный резерв.
 import hashlib
 import hmac
 import html
 import time
 from urllib.parse import urlencode
+
+TELEGRAM_OIDC_REDIRECT_URI = "https://agency-w.streamlit.app/"
+TELEGRAM_OIDC_STATE_TTL_SECONDS = 15 * 60
+
+
+def _telegram_oidc_config():
+    client_id = str(
+        st.secrets.get("TELEGRAM_OIDC_CLIENT_ID") or ""
+    ).strip()
+    client_secret = str(
+        st.secrets.get("TELEGRAM_OIDC_CLIENT_SECRET") or ""
+    ).strip()
+    return client_id, client_secret
+
+
+def _b64url_decode(value):
+    value = str(value or "").strip()
+    value += "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value.encode("ascii"))
+
+
+def _telegram_oidc_verify_id_token(id_token, client_id):
+    parts = str(id_token or "").split(".")
+    if len(parts) != 3:
+        raise RuntimeError("Telegram вернул некорректный ID token.")
+
+    try:
+        header = json.loads(_b64url_decode(parts[0]).decode("utf-8"))
+        claims = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+        signature = _b64url_decode(parts[2])
+    except Exception as exc:
+        raise RuntimeError("Не удалось прочитать ID token Telegram.") from exc
+
+    algorithm = str(header.get("alg") or "").upper()
+    if algorithm != "RS256":
+        raise RuntimeError(
+            "Для входа Агентства W в BotFather должен быть выбран "
+            "стандартный алгоритм RS256."
+        )
+
+    jwks_response = requests.get(
+        "https://oauth.telegram.org/.well-known/jwks.json",
+        timeout=15,
+    )
+    jwks_response.raise_for_status()
+    keys = jwks_response.json().get("keys", [])
+    kid = str(header.get("kid") or "")
+
+    jwk = None
+    for candidate in keys:
+        if kid and str(candidate.get("kid") or "") == kid:
+            jwk = candidate
+            break
+    if jwk is None and len(keys) == 1:
+        jwk = keys[0]
+    if jwk is None:
+        raise RuntimeError("Не найден открытый ключ Telegram для проверки входа.")
+
+    try:
+        modulus = int.from_bytes(_b64url_decode(jwk["n"]), "big")
+        exponent = int.from_bytes(_b64url_decode(jwk["e"]), "big")
+        public_key = rsa.RSAPublicNumbers(exponent, modulus).public_key()
+        public_key.verify(
+            signature,
+            f"{parts[0]}.{parts[1]}".encode("ascii"),
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+    except Exception as exc:
+        raise RuntimeError("Не удалось подтвердить подпись Telegram.") from exc
+
+    now = int(time.time())
+    issuer = str(claims.get("iss") or "")
+    if issuer != "https://oauth.telegram.org":
+        raise RuntimeError("Неверный источник Telegram ID token.")
+
+    audience = claims.get("aud")
+    if isinstance(audience, list):
+        audience_ok = str(client_id) in {str(item) for item in audience}
+    else:
+        audience_ok = str(audience) == str(client_id)
+    if not audience_ok:
+        raise RuntimeError("Telegram ID token предназначен другому приложению.")
+
+    try:
+        expires_at = int(claims.get("exp") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+    if expires_at <= now:
+        raise RuntimeError("Срок действия Telegram-входа истёк.")
+
+    return claims
+
+
+def _telegram_oidc_build_url(current_referral_code):
+    client_id, client_secret = _telegram_oidc_config()
+    if not client_id or not client_secret:
+        return ""
+
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("utf-8")).digest()
+    ).decode("ascii").rstrip("=")
+
+    state_payload = json.dumps(
+        {
+            "v": 1,
+            "verifier": verifier,
+            "ref": str(current_referral_code or "").strip(),
+            "ts": int(time.time()),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    state = get_session_cipher().encrypt(
+        state_payload.encode("utf-8")
+    ).decode("ascii")
+
+    return "https://oauth.telegram.org/auth?" + urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": TELEGRAM_OIDC_REDIRECT_URI,
+            "response_type": "code",
+            "scope": "openid profile",
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+    )
+
+
+def _telegram_oidc_finish(code, state):
+    client_id, client_secret = _telegram_oidc_config()
+    if not client_id or not client_secret:
+        raise RuntimeError("Telegram OIDC ещё не настроен в Streamlit Secrets.")
+
+    try:
+        state_raw = get_session_cipher().decrypt(
+            str(state).encode("ascii"),
+            ttl=TELEGRAM_OIDC_STATE_TTL_SECONDS,
+        )
+        state_data = json.loads(state_raw.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(
+            "Ссылка входа Telegram устарела. Откройте Агентство W ещё раз."
+        ) from exc
+
+    verifier = str(state_data.get("verifier") or "").strip()
+    if not verifier:
+        raise RuntimeError("Не найден код защиты Telegram-входа.")
+
+    token_response = requests.post(
+        "https://oauth.telegram.org/token",
+        auth=(client_id, client_secret),
+        data={
+            "grant_type": "authorization_code",
+            "code": str(code),
+            "redirect_uri": TELEGRAM_OIDC_REDIRECT_URI,
+            "client_id": client_id,
+            "code_verifier": verifier,
+        },
+        timeout=20,
+    )
+    token_response.raise_for_status()
+    token_data = token_response.json()
+    id_token = str(token_data.get("id_token") or "").strip()
+    if not id_token:
+        raise RuntimeError("Telegram не вернул подтверждение личности.")
+
+    claims = _telegram_oidc_verify_id_token(id_token, client_id)
+    telegram_id = claims.get("id") or claims.get("sub")
+    if not telegram_id:
+        raise RuntimeError("Telegram не вернул идентификатор пользователя.")
+
+    telegram_data = {
+        "id": str(telegram_id),
+        "first_name": str(
+            claims.get("given_name")
+            or claims.get("name")
+            or "Пользователь"
+        ),
+        "last_name": str(claims.get("family_name") or ""),
+        "username": str(claims.get("preferred_username") or ""),
+        "photo_url": str(claims.get("picture") or ""),
+        "auth_date": str(claims.get("iat") or int(time.time())),
+    }
+
+    return telegram_data, str(state_data.get("ref") or "").strip()
+
+
+# Обрабатываем возврат от современного Telegram OIDC до показа кабинета.
+oidc_code = str(st.query_params.get("code", "")).strip()
+oidc_state = str(st.query_params.get("state", "")).strip()
+if oidc_code and oidc_state and not st.session_state.get("agency_web_auth"):
+    try:
+        oidc_telegram_data, oidc_referral_code = _telegram_oidc_finish(
+            oidc_code,
+            oidc_state,
+        )
+        st.session_state["agency_web_auth"] = oidc_telegram_data
+        st.session_state["agency_web_referral_code"] = oidc_referral_code
+
+        # Код авторизации одноразовый. Убираем его из адреса после обмена,
+        # но сохраняем подтверждённый вход в текущей сессии Streamlit.
+        st.query_params.clear()
+        st.rerun()
+    except Exception as exc:
+        st.session_state.pop("agency_web_auth", None)
+        st.error("Не удалось войти через Telegram.")
+        st.caption(f"Техническая причина: {exc}")
 
 telegram_keys = (
     "id",
@@ -5613,16 +5833,30 @@ telegram_keys = (
     "auth_date",
 )
 
-telegram_data = {
-    key: str(st.query_params.get(key))
-    for key in telegram_keys
-    if st.query_params.get(key) is not None
-}
-
-received_hash = str(st.query_params.get("hash", ""))
+cached_web_auth = st.session_state.get("agency_web_auth")
+if isinstance(cached_web_auth, dict) and cached_web_auth.get("id"):
+    telegram_data = {
+        key: str(cached_web_auth.get(key) or "")
+        for key in telegram_keys
+        if cached_web_auth.get(key) is not None
+    }
+    received_hash = "__agency_oidc_verified__"
+else:
+    telegram_data = {
+        key: str(st.query_params.get(key))
+        for key in telegram_keys
+        if st.query_params.get(key) is not None
+    }
+    received_hash = str(st.query_params.get("hash", ""))
 
 
 def telegram_auth_is_valid(data, received_hash):
+    if received_hash == "__agency_oidc_verified__":
+        return bool(
+            isinstance(st.session_state.get("agency_web_auth"), dict)
+            and st.session_state["agency_web_auth"].get("id")
+        )
+
     if not data or not received_hash:
         return False
 
@@ -11163,30 +11397,43 @@ if received_hash:
         )
 else:
     bot_username = st.secrets["TELEGRAM_BOT_USERNAME"]
+    oidc_login_url = _telegram_oidc_build_url(referral_code)
 
-    auth_url = "https://agency-w.streamlit.app/"
-    if referral_code:
-        auth_url += "?" + urlencode({"ref": referral_code})
+    if oidc_login_url:
+        st.link_button(
+            "🔐 Войти через Telegram",
+            oidc_login_url,
+            use_container_width=True,
+        )
+        st.caption(
+            "Для уже зарегистрированного партнёра откроется его существующий кабинет. "
+            "Повторная регистрация и повторное подтверждение Neonexa не требуются."
+        )
+    else:
+        # Резервный прежний способ. Он остаётся, чтобы текущий вход не сломался
+        # до добавления TELEGRAM_OIDC_CLIENT_ID и TELEGRAM_OIDC_CLIENT_SECRET.
+        auth_url = "https://agency-w.streamlit.app/"
+        if referral_code:
+            auth_url += "?" + urlencode({"ref": referral_code})
 
-    st.html(
-        f"""
-        <div style="display:flex; justify-content:center; margin:0.5rem 0 1rem;">
-            <script async
-                src="https://telegram.org/js/telegram-widget.js?22"
-                data-telegram-login="{html.escape(bot_username, quote=True)}"
-                data-size="large"
-                data-radius="10"
-                data-lang="ru"
-                data-auth-url="{html.escape(auth_url, quote=True)}">
-            </script>
-        </div>
-        """,
-        unsafe_allow_javascript=True,
-    )
+        st.html(
+            f"""
+            <div style="display:flex; justify-content:center; margin:0.5rem 0 1rem;">
+                <script async
+                    src="https://telegram.org/js/telegram-widget.js?22"
+                    data-telegram-login="{html.escape(bot_username, quote=True)}"
+                    data-size="large"
+                    data-radius="10"
+                    data-lang="ru"
+                    data-auth-url="{html.escape(auth_url, quote=True)}">
+                </script>
+            </div>
+            """,
+            unsafe_allow_javascript=True,
+        )
+        st.caption("Подтвердите вход в безопасном окне Telegram.")
 
-    st.caption("Подтвердите вход в безопасном окне Telegram.")
-
-if not st.query_params.get("hash"):
+if not (st.query_params.get("hash") or st.session_state.get("agency_web_auth")):
     st.divider()
 
     st.markdown(
