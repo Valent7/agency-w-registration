@@ -344,14 +344,37 @@ def _has_conflict(
     start_utc: datetime,
     end_utc: datetime,
     meetings: list[dict[str, Any]],
+    *,
+    exclude_meeting_id: str | None = None,
 ) -> bool:
+    """Проверяет пересечение встреч, при редактировании исключая текущую."""
     for meeting in meetings:
+        meeting_id = str(meeting.get("id") or "")
+        if exclude_meeting_id and meeting_id == str(exclude_meeting_id):
+            continue
         if not _meeting_is_active(meeting):
             continue
         existing_start, existing_end = _meeting_datetimes(meeting)
         if start_utc < existing_end and end_utc > existing_start:
             return True
     return False
+
+
+def _timezone_choice_for_value(timezone_name: str) -> str:
+    for label, value in COMMON_TIMEZONES.items():
+        if value and value == timezone_name:
+            return label
+    return "Другая часовая зона"
+
+
+def _local_to_utc(day: date, clock: dt_time, timezone_name: str) -> datetime:
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            "Часовая зона не распознана. Укажите, например, Europe/Berlin."
+        ) from exc
+    return datetime.combine(day, clock, tzinfo=timezone).astimezone(UTC)
 
 
 def _slot_label(
@@ -551,6 +574,155 @@ def _render_meeting_card(meeting: dict[str, Any], key_prefix: str) -> None:
             ):
                 update_meeting(meeting_id, {"status": "Отменена"})
                 st.rerun()
+
+        source = str(meeting.get("source") or "").strip()
+        if source:
+            st.caption(f"Источник: {source}")
+
+        with st.expander("✏️ Редактировать встречу"):
+            edit_timezone_default = _timezone_choice_for_value(timezone_name)
+            edit_timezone_index = list(COMMON_TIMEZONES).index(edit_timezone_default)
+            current_duration = max(15, int((end_utc - start_utc).total_seconds() // 60))
+            duration_options = [15, 30, 45, 60, 90, 120]
+            if current_duration not in duration_options:
+                duration_options.append(current_duration)
+                duration_options = sorted(set(duration_options))
+
+            with st.form(f"{key_prefix}_edit_form_{meeting_id}"):
+                edit_name = st.text_input(
+                    "Имя человека",
+                    value=person_name if person_name != "Без имени" else "",
+                )
+                edit_username = st.text_input(
+                    "Telegram username — необязательно",
+                    value=username.lstrip("@"),
+                )
+                edit_city = st.text_input(
+                    "Город или страна человека",
+                    value=str(meeting.get("contact_city") or ""),
+                )
+                edit_timezone_choice = st.selectbox(
+                    "Часовой пояс человека",
+                    list(COMMON_TIMEZONES),
+                    index=edit_timezone_index,
+                )
+                edit_timezone = COMMON_TIMEZONES[edit_timezone_choice]
+                if not edit_timezone:
+                    edit_timezone = st.text_input(
+                        "Введите часовую зону",
+                        value=timezone_name,
+                        placeholder="Например: Europe/Berlin",
+                    ).strip()
+
+                date_time_columns = st.columns(3)
+                edit_date = date_time_columns[0].date_input(
+                    "Дата встречи",
+                    value=local_start.date(),
+                )
+                edit_time = date_time_columns[1].time_input(
+                    "Время человека",
+                    value=local_start.timetz().replace(tzinfo=None),
+                    step=900,
+                )
+                edit_duration = date_time_columns[2].selectbox(
+                    "Длительность",
+                    duration_options,
+                    index=duration_options.index(current_duration),
+                    format_func=lambda value: f"{value} минут",
+                )
+
+                edit_format = st.selectbox(
+                    "Формат встречи",
+                    MEETING_FORMATS,
+                    index=(
+                        MEETING_FORMATS.index(meeting_format)
+                        if meeting_format in MEETING_FORMATS
+                        else 0
+                    ),
+                )
+                edit_link = st.text_input(
+                    "Ссылка на встречу — необязательно",
+                    value=meeting_link,
+                )
+                edit_status = st.selectbox(
+                    "Статус",
+                    MEETING_STATUSES,
+                    index=(
+                        MEETING_STATUSES.index(status)
+                        if status in MEETING_STATUSES
+                        else 1
+                    ),
+                )
+                edit_notes = st.text_area(
+                    "Заметка — необязательно",
+                    value=notes,
+                )
+
+                save_edit = st.form_submit_button(
+                    "💾 Сохранить изменения",
+                    type="primary",
+                    width="stretch",
+                )
+
+            if save_edit:
+                if not edit_name.strip():
+                    st.error("Укажите имя человека.")
+                elif not edit_timezone:
+                    st.error("Укажите часовой пояс человека.")
+                else:
+                    try:
+                        new_start_utc = _local_to_utc(
+                            edit_date, edit_time, edit_timezone
+                        )
+                        new_end_utc = new_start_utc + timedelta(
+                            minutes=int(edit_duration)
+                        )
+                        owner_id = int(meeting.get("owner_telegram_id") or 0)
+                        if owner_id <= 0:
+                            raise CalendarStorageError(
+                                "Не удалось определить владельца встречи."
+                            )
+                        other_meetings = list_meetings(
+                            owner_id,
+                            new_start_utc - timedelta(minutes=1),
+                            new_end_utc + timedelta(minutes=1),
+                        )
+                        blocks = list_recurring_blocks(owner_id)
+                        if (
+                            _has_conflict(
+                                new_start_utc,
+                                new_end_utc,
+                                other_meetings,
+                                exclude_meeting_id=meeting_id,
+                            )
+                            or _has_recurring_conflict(
+                                new_start_utc, new_end_utc, blocks
+                            )
+                        ):
+                            st.error(
+                                "Это время пересекается с другой встречей или "
+                                "постоянной занятостью."
+                            )
+                        else:
+                            update_meeting(
+                                meeting_id,
+                                {
+                                    "contact_name": edit_name.strip(),
+                                    "contact_username": edit_username.strip().lstrip("@") or None,
+                                    "contact_city": edit_city.strip() or None,
+                                    "contact_timezone": edit_timezone,
+                                    "start_at": _utc_iso(new_start_utc),
+                                    "end_at": _utc_iso(new_end_utc),
+                                    "meeting_format": edit_format,
+                                    "meeting_link": edit_link.strip() or None,
+                                    "status": edit_status,
+                                    "notes": edit_notes.strip() or None,
+                                },
+                            )
+                            st.success("Изменения сохранены. Неона увидит обновлённое время.")
+                            st.rerun()
+                    except (CalendarStorageError, ValueError) as exc:
+                        st.error(str(exc))
 
 
 def _render_recurring_block_card(block: dict[str, Any], key_prefix: str) -> None:
@@ -838,6 +1010,160 @@ def _render_recurring_blocks(owner_telegram_id: int) -> None:
                     st.error(str(exc))
 
 
+def _render_manual_meeting(owner_telegram_id: int, owner_name: str) -> None:
+    """Ручное создание встречи директором в общем календаре Агентства W."""
+
+    st.markdown("### ➕ Внести встречу вручную")
+    st.caption(
+        "Если вы уже договорились о встрече, укажите точную дату и время. "
+        "Запись попадёт в тот же календарь, который видит Неона, поэтому это "
+        "время сразу будет считаться занятым."
+    )
+
+    with st.form("calendar_manual_meeting_form"):
+        contact_name = st.text_input(
+            "Имя человека",
+            key="calendar_manual_contact_name",
+        )
+        contact_username = st.text_input(
+            "Telegram username — необязательно",
+            placeholder="username без @",
+            key="calendar_manual_contact_username",
+        )
+        contact_city = st.text_input(
+            "Город или страна человека",
+            placeholder="Например: Германия",
+            key="calendar_manual_contact_city",
+        )
+
+        timezone_choice = st.selectbox(
+            "Часовой пояс человека",
+            list(COMMON_TIMEZONES),
+            index=list(COMMON_TIMEZONES).index(
+                "Германия / Центральная Европа"
+            ),
+            key="calendar_manual_timezone_choice",
+        )
+        contact_timezone = COMMON_TIMEZONES[timezone_choice]
+        if not contact_timezone:
+            contact_timezone = st.text_input(
+                "Введите часовую зону",
+                placeholder="Например: Europe/Berlin",
+                key="calendar_manual_custom_timezone",
+            ).strip()
+
+        date_time_columns = st.columns(3)
+        meeting_date = date_time_columns[0].date_input(
+            "Дата встречи",
+            value=datetime.now(ZoneInfo("Europe/Berlin")).date(),
+            key="calendar_manual_date",
+        )
+        meeting_time = date_time_columns[1].time_input(
+            "Время человека",
+            value=dt_time(17, 0),
+            step=900,
+            key="calendar_manual_time",
+        )
+        duration_minutes = date_time_columns[2].selectbox(
+            "Длительность",
+            [15, 30, 45, 60, 90, 120],
+            index=3,
+            format_func=lambda value: f"{value} минут",
+            key="calendar_manual_duration",
+        )
+
+        meeting_format = st.selectbox(
+            "Формат встречи",
+            MEETING_FORMATS,
+            index=0,
+            key="calendar_manual_format",
+        )
+        meeting_link = st.text_input(
+            "Ссылка на встречу — необязательно",
+            placeholder="Ссылка Zoom, Telegram или WhatsApp",
+            key="calendar_manual_link",
+        )
+        status = st.selectbox(
+            "Статус",
+            ("Подтверждена", "Ожидает подтверждения"),
+            index=0,
+            key="calendar_manual_status",
+        )
+        notes = st.text_area(
+            "Заметка — необязательно",
+            placeholder="Например: вернулась из Парижа, обсудить сотрудничество",
+            key="calendar_manual_notes",
+        )
+
+        submitted = st.form_submit_button(
+            "💾 Сохранить встречу",
+            type="primary",
+            width="stretch",
+        )
+
+    if not submitted:
+        return
+
+    if not contact_name.strip():
+        st.error("Укажите имя человека.")
+        return
+    if not contact_timezone:
+        st.error("Укажите часовой пояс человека.")
+        return
+
+    try:
+        start_utc = _local_to_utc(
+            meeting_date, meeting_time, contact_timezone
+        )
+        end_utc = start_utc + timedelta(minutes=int(duration_minutes))
+
+        meetings = list_meetings(
+            owner_telegram_id,
+            start_utc - timedelta(minutes=1),
+            end_utc + timedelta(minutes=1),
+        )
+        blocks = list_recurring_blocks(owner_telegram_id)
+        if (
+            _has_conflict(start_utc, end_utc, meetings)
+            or _has_recurring_conflict(start_utc, end_utc, blocks)
+        ):
+            st.error(
+                "Это время уже занято другой встречей или постоянной занятостью. "
+                "Измените время либо сначала отредактируйте существующую запись."
+            )
+            return
+
+        created = create_meeting(
+            {
+                "owner_telegram_id": int(owner_telegram_id),
+                "owner_name": owner_name,
+                "contact_name": contact_name.strip(),
+                "contact_username": contact_username.strip().lstrip("@") or None,
+                "contact_city": contact_city.strip() or None,
+                "contact_timezone": contact_timezone,
+                "start_at": _utc_iso(start_utc),
+                "end_at": _utc_iso(end_utc),
+                "meeting_format": meeting_format,
+                "meeting_link": meeting_link.strip() or None,
+                "status": status,
+                "notes": notes.strip() or None,
+                "source": "Директор кабинета",
+            }
+        )
+
+        created_start = _parse_datetime(created["start_at"])
+        local_tz = ZoneInfo(contact_timezone)
+        local_start = created_start.astimezone(local_tz)
+        msk_start = created_start.astimezone(MSK)
+        st.success(
+            "Встреча сохранена. Неона уже будет учитывать это время: "
+            f"{local_start.strftime('%d.%m.%Y %H:%M')} по местному времени "
+            f"({msk_start.strftime('%H:%M')} МСК)."
+        )
+    except (CalendarStorageError, ValueError, ZoneInfoNotFoundError) as exc:
+        st.error(str(exc))
+
+
 def _render_new_meeting(owner_telegram_id: int, owner_name: str) -> None:
     st.markdown("### Подбор свободного времени")
     st.caption(
@@ -1114,13 +1440,20 @@ def render_agency_calendar(owner_telegram_id: int, owner_name: str) -> None:
         )
         return
 
-    calendar_tab, create_tab, recurring_tab = st.tabs(
-        ["Календарь", "Назначить встречу", "Постоянная занятость"]
+    calendar_tab, create_tab, manual_tab, recurring_tab = st.tabs(
+        [
+            "Календарь",
+            "Подобрать время",
+            "➕ Внести вручную",
+            "Постоянная занятость",
+        ]
     )
     with calendar_tab:
         _render_calendar_view(owner_telegram_id)
     with create_tab:
         _render_new_meeting(owner_telegram_id, owner_name)
+    with manual_tab:
+        _render_manual_meeting(owner_telegram_id, owner_name)
     with recurring_tab:
         _render_recurring_blocks(owner_telegram_id)
 
