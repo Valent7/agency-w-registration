@@ -216,19 +216,69 @@ def _load_workspace(config: Config, owner_id: int) -> dict[str, Any]:
 
 
 def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]]:
+    """Контакты, от которых Неона имеет право принимать новые входящие.
+
+    Важно: это не разрешение на самостоятельные исходящие сообщения.
+    Контакт попадает сюда только если из Агентства W ему уже реально было
+    отправлено первое сообщение/видеокружок или продолжение диалога.
+    """
     workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
-    for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
-        if not isinstance(event, dict) or event.get("kind") != "first_message":
+
+    # Все реальные способы, которыми Агентство уже могло начать/возобновить
+    # диалог. Раньше учитывался только first_message, поэтому ответы на
+    # first_video и director_continue_dialog_video могли остаться без Неоны.
+    allowed_kinds = {
+        "first_message",
+        "first_video",
+        "director_continue_dialog_video",
+    }
+
+    sent_log = (
+        workspace.get("sent_log", [])
+        if isinstance(workspace.get("sent_log"), list)
+        else []
+    )
+    for event in sent_log:
+        if not isinstance(event, dict) or event.get("kind") not in allowed_kinds:
             continue
         try:
             contact_id = int(event.get("telegram_id"))
         except (TypeError, ValueError):
             continue
+        # Если с человеком был более поздний разрешённый исходящий контакт,
+        # сохраняем именно его как безопасную точку отсчёта.
         allowed[contact_id] = {
             "sent_at": str(event.get("sent_at") or ""),
             "recipient_name": str(event.get("recipient_name") or ""),
         }
+
+    # Дополнительная страховка для старых записей: если сообщение было
+    # действительно отправлено, но sent_log сохранился неполно, черновик
+    # с sent=True всё равно разрешает Неоне ответить на НОВОЕ входящее.
+    drafts = workspace.get("neona_drafts", [])
+    if isinstance(drafts, dict):
+        drafts = [
+            {"telegram_id": contact_id, **draft}
+            for contact_id, draft in drafts.items()
+            if isinstance(draft, dict)
+        ]
+    if not isinstance(drafts, list):
+        drafts = []
+
+    for draft in drafts:
+        if not isinstance(draft, dict) or not bool(draft.get("sent")):
+            continue
+        try:
+            contact_id = int(draft.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in allowed:
+            allowed[contact_id] = {
+                "sent_at": str(draft.get("sent_at") or ""),
+                "recipient_name": str(draft.get("recipient_name") or ""),
+            }
+
     return allowed
 
 
