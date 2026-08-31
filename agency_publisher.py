@@ -41,6 +41,29 @@ def _bot_token() -> str:
     return token
 
 
+def _telegram_api_base() -> str:
+    """
+    Базовый адрес Telegram Bot API.
+
+    По умолчанию используется облачный API Telegram (лимит загрузки 50 МБ).
+    Для больших роликов Publisher можно перевести на собственный Local Bot API
+    и указать его адрес в Streamlit Secret AGENCY_W_TELEGRAM_API_BASE.
+    """
+    return str(
+        st.secrets.get("AGENCY_W_TELEGRAM_API_BASE")
+        or "https://api.telegram.org"
+    ).strip().rstrip("/")
+
+
+def _telegram_endpoint(method: str) -> str:
+    token = _bot_token()
+    return f"{_telegram_api_base()}/bot{token}/{str(method).strip()}"
+
+
+def _telegram_uses_local_api() -> bool:
+    return _telegram_api_base() != "https://api.telegram.org"
+
+
 def _telegram_call(
     method: str,
     *,
@@ -48,9 +71,8 @@ def _telegram_call(
     payload: dict[str, Any] | None = None,
     timeout: int = 20,
 ) -> Any:
-    token = _bot_token()
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/{method}",
+        _telegram_endpoint(method),
         params=params,
         json=payload,
         timeout=timeout,
@@ -535,9 +557,8 @@ def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, 
     if not raw:
         raise ValueError("Изображение пустое.")
 
-    token = _bot_token()
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendPhoto",
+        _telegram_endpoint("sendPhoto"),
         data={
             "chat_id": str(int(chat_id)),
             "caption": str(caption or "")[:1000],
@@ -572,9 +593,15 @@ def _send_video(
     if not raw:
         raise ValueError("Видео пустое.")
 
-    token = _bot_token()
+    if len(raw) > 50 * 1024 * 1024 and not _telegram_uses_local_api():
+        raise RuntimeError(
+            "Ролик больше 50 МБ. В Агентстве W он уже разрешён, "
+            "но Publisher ещё подключён к облачному Telegram Bot API. "
+            "Подключите Local Bot API через AGENCY_W_TELEGRAM_API_BASE."
+        )
+
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendVideo",
+        _telegram_endpoint("sendVideo"),
         data={
             "chat_id": str(int(chat_id)),
             "caption": str(caption or "")[:1000],
@@ -587,7 +614,7 @@ def _send_video(
                 str(mime_type or "video/mp4"),
             )
         },
-        timeout=180,
+        timeout=600 if len(raw) > 50 * 1024 * 1024 else 180,
     )
     response.raise_for_status()
     data = response.json()

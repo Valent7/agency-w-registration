@@ -3920,7 +3920,7 @@ def _telegram_publication_hash(
     return digest.hexdigest()
 
 
-MAX_PUBLISHER_VIDEO_BYTES = 49 * 1024 * 1024
+MAX_PUBLISHER_VIDEO_BYTES = 300 * 1024 * 1024
 
 
 def _prepare_uploaded_video(
@@ -3932,7 +3932,7 @@ def _prepare_uploaded_video(
     Проверяет готовый ролик для публикации через Telegram Publisher.
 
     На этом этапе видео НЕ отправляется во внешний ИИ и НЕ перекодируется.
-    Для предсказуемой публикации принимаем только MP4 до 49 МБ.
+    Для публикации принимаем MP4 до 300 МБ (ориентир: ролики до ~5 минут).
     """
     if uploaded_file is None:
         return {"ok": False, "error": "Файл не выбран."}
@@ -3962,7 +3962,7 @@ def _prepare_uploaded_video(
             "ok": False,
             "error": (
                 "Ролик слишком большой для текущего Publisher. "
-                "Максимум 49 МБ. Используйте короткую/сжатую MP4-версию."
+                "Максимум 300 МБ. Если ролик длиннее, используйте сжатую MP4-версию."
             ),
         }
 
@@ -6399,9 +6399,10 @@ def _render_result(
                 type=["mp4"],
                 accept_multiple_files=False,
                 key=video_upload_key,
+                max_upload_size=300,
                 help=(
                     "Готовый MP4-ролик для публикации в ваших Telegram-площадках. "
-                    "Текущий лимит — 49 МБ."
+                    "Допустимый размер — до 300 МБ (ориентир: ролики до ~5 минут)."
                 ),
             )
 
