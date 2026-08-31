@@ -5927,22 +5927,17 @@ def _render_telegram_oidc_login(referral_code_value=""):
         }
     )
 
-    # ВАЖНО: st.html работает внутри iframe. Telegram OAuth нельзя открывать
-    # внутри iframe, поэтому кнопку рисуем обычной ссылкой Streamlit DOM.
-    safe_url = html.escape(auth_url, quote=True)
-    st.markdown(
-        f"""
-        <div style="display:flex;justify-content:center;margin:0.7rem 0 1rem;">
-          <a href="{safe_url}" target="_top" style="
-            display:inline-block;text-decoration:none;border:0;border-radius:12px;
-            padding:12px 22px;font-size:18px;font-weight:700;cursor:pointer;
-            background:#2AABEE;color:white;box-shadow:0 6px 16px rgba(0,0,0,.2);">
-            ✈️ Войти через Telegram
-          </a>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # Используем родную кнопку-ссылку Streamlit. В отличие от HTML-ссылки
+    # внутри разметки приложения st.link_button открывает URL браузером
+    # в новой вкладке, что и требуется Telegram OIDC.
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        st.link_button(
+            "✈️ Войти через Telegram",
+            auth_url,
+            type="primary",
+            use_container_width=True,
+        )
 
 
 def create_remember_token(data):
