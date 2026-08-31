@@ -5720,26 +5720,41 @@ def _oidc_client_secret():
     ).strip()
 
 
-def _create_oidc_state(referral_code_value="", verifier=""):
-    """Создаёт зашифрованный state с PKCE verifier.
+def _pkce_verifier_for_state(state_value):
+    """Детерминированно восстанавливает PKCE verifier из короткого state.
 
-    Verifier не хранится в Streamlit session_state и не зависит от iframe-cookie:
-    он шифруется FERNET_KEY и возвращается нам только через state после Telegram.
+    Это позволяет не хранить verifier в cookie/session_state и не раздувать
+    параметр state в URL Telegram.
     """
+    state_text = str(state_value or "").strip()
+    digest = hmac.new(
+        _remember_secret(),
+        ("agency-w-oidc-pkce-v3|" + state_text).encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    # 32 байта -> 43 base64url-символа: допустимая минимальная длина PKCE verifier.
+    return _b64url_encode(digest)
+
+
+def _create_oidc_state(referral_code_value=""):
+    """Создаёт короткий подписанный state для Telegram OIDC.
+
+    Telegram ждёт в state короткую случайную строку. PKCE verifier в state
+    не кладём — он воспроизводится сервером через _pkce_verifier_for_state().
+    """
+    import os
+
     now = int(time.time())
-    clean_verifier = str(verifier or "").strip()
-    if not clean_verifier:
-        raise ValueError("Не удалось подготовить безопасный вход Telegram.")
-    payload = {
-        "v": 2,
-        "iat": now,
-        "exp": now + PKCE_MAX_AGE,
-        "nonce": _auth_base64.urlsafe_b64encode(__import__("os").urandom(18)).decode("ascii").rstrip("="),
-        "ref": str(referral_code_value or "")[:120],
-        "pkce": clean_verifier,
-    }
-    raw = _auth_json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return get_session_cipher().encrypt(raw).decode("ascii")
+    nonce = _b64url_encode(os.urandom(12))  # 16 символов
+    ref_raw = str(referral_code_value or "").strip()[:32]
+    ref_part = _b64url_encode(ref_raw.encode("utf-8")) if ref_raw else "-"
+    body = f"3.{now:x}.{nonce}.{ref_part}"
+    signature = hmac.new(
+        _remember_secret(),
+        ("agency-w-oidc-state-v3|" + body).encode("utf-8"),
+        hashlib.sha256,
+    ).digest()[:12]
+    return body + "." + _b64url_encode(signature)
 
 
 def _validate_oidc_state(state_value):
@@ -5747,22 +5762,41 @@ def _validate_oidc_state(state_value):
     if not state_value:
         return None
     try:
-        raw = get_session_cipher().decrypt(state_value.encode("ascii"))
-        payload = _auth_json.loads(raw.decode("utf-8"))
+        parts = state_value.split(".")
+        if len(parts) != 5 or parts[0] != "3":
+            return None
+        _, ts_hex, nonce, ref_part, signature_text = parts
+        body = ".".join(parts[:4])
+        expected = hmac.new(
+            _remember_secret(),
+            ("agency-w-oidc-state-v3|" + body).encode("utf-8"),
+            hashlib.sha256,
+        ).digest()[:12]
+        received = _b64url_decode(signature_text)
+        if not hmac.compare_digest(expected, received):
+            return None
+
+        issued_at = int(ts_hex, 16)
         now = int(time.time())
-        if int(payload.get("v", 0)) != 2:
+        if issued_at > now + 60 or now - issued_at > PKCE_MAX_AGE:
             return None
-        if int(payload.get("exp", 0)) < now:
+        if len(nonce) < 12:
             return None
-        if int(payload.get("iat", 0)) > now + 60:
-            return None
-        verifier = str(payload.get("pkce") or "")
-        if not (43 <= len(verifier) <= 128):
-            return None
-        return payload
+
+        if ref_part == "-":
+            ref_value = ""
+        else:
+            ref_value = _b64url_decode(ref_part).decode("utf-8")[:32]
+
+        return {
+            "v": 3,
+            "iat": issued_at,
+            "exp": issued_at + PKCE_MAX_AGE,
+            "nonce": nonce,
+            "ref": ref_value,
+        }
     except Exception:
         return None
-
 
 def _jwt_json_part(value):
     return _auth_json.loads(_b64url_decode(value).decode("utf-8"))
@@ -5824,9 +5858,7 @@ def _exchange_telegram_oidc_code(code, state_value):
             "В Streamlit Secrets нужны TELEGRAM_OIDC_CLIENT_ID и TELEGRAM_OIDC_CLIENT_SECRET из BotFather → Login Widget."
         )
 
-    verifier = str(state_payload.get("pkce") or "").strip()
-    if not verifier:
-        raise ValueError("Не найдено подтверждение безопасного входа. Нажмите «Войти через Telegram» ещё раз.")
+    verifier = _pkce_verifier_for_state(state_value)
 
     basic = _auth_base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
     response = requests.post(
@@ -5878,11 +5910,11 @@ def _render_telegram_oidc_login(referral_code_value=""):
         st.error("В Streamlit Secrets пока нет TELEGRAM_OIDC_CLIENT_ID.")
         return
 
-    # Генерируем PKCE на сервере и шифруем verifier внутри state.
-    # Поэтому внешний переход в Telegram может быть обычной браузерной ссылкой.
-    verifier = _b64url_encode(__import__("os").urandom(48))
+    # state оставляем коротким, а PKCE verifier детерминированно
+    # восстанавливаем на сервере из подписанного state.
+    state_token = _create_oidc_state(referral_code_value)
+    verifier = _pkce_verifier_for_state(state_token)
     challenge = _b64url_encode(hashlib.sha256(verifier.encode("ascii")).digest())
-    state_token = _create_oidc_state(referral_code_value, verifier)
     auth_url = TELEGRAM_OIDC_AUTH_URL + "?" + urlencode(
         {
             "client_id": client_id,
