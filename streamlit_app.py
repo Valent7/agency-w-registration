@@ -5933,7 +5933,7 @@ def _render_telegram_oidc_login(referral_code_value=""):
     st.markdown(
         f"""
         <div style="display:flex;justify-content:center;margin:0.7rem 0 1rem;">
-          <a href="{safe_url}" target="_self" style="
+          <a href="{safe_url}" target="_top" style="
             display:inline-block;text-decoration:none;border:0;border-radius:12px;
             padding:12px 22px;font-size:18px;font-weight:700;cursor:pointer;
             background:#2AABEE;color:white;box-shadow:0 6px 16px rgba(0,0,0,.2);">
