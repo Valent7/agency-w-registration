@@ -5632,11 +5632,11 @@ div[data-testid="stAlert"] p {
 )
 
 try:
-    _remember_cookie_present = bool(st.context.cookies.get("agency_w_device", ""))
+    _agency_user_logged_in = bool(st.user.is_logged_in)
 except Exception:
-    _remember_cookie_present = False
+    _agency_user_logged_in = False
 
-if not st.query_params.get("code") and not _remember_cookie_present:
+if not _agency_user_logged_in:
     render_agency_w_logo()
 
     st.markdown(
@@ -5660,424 +5660,101 @@ if not st.query_params.get("code") and not _remember_cookie_present:
 
     if referral_code:
         st.success(f"Приглашение партнёра принято: {referral_code}")
+        # Сохраняем код приглашения только локально в браузере на короткое время,
+        # чтобы штатный OIDC-редирект Streamlit не потерял его.
+        _pending_ref_json = json.dumps(str(referral_code))
+        st.html(
+            f"""
+            <script>
+            localStorage.setItem(
+              'agency_w_pending_ref',
+              JSON.stringify({{ref: {_pending_ref_json}, ts: Date.now()}})
+            );
+            </script>
+            """,
+            unsafe_allow_javascript=True,
+        )
     else:
         st.info("Вы открыли сайт без персональной партнёрской ссылки.")
-# Защищённый вход через Telegram + доверенное устройство на 30 дней
-import base64 as _auth_base64
-import hashlib
-import hmac
-import html
-import json as _auth_json
+# Защищённый вход через Telegram — встроенный OIDC Streamlit.
 import time
-from urllib.parse import urlencode
-
-REMEMBER_COOKIE_NAME = "agency_w_device"
-REMEMBER_DAYS = 30
-REMEMBER_MAX_AGE = REMEMBER_DAYS * 24 * 60 * 60
-
-TELEGRAM_REDIRECT_URI = "https://agency-w.streamlit.app/"
-TELEGRAM_OIDC_AUTH_URL = "https://oauth.telegram.org/auth"
-TELEGRAM_OIDC_TOKEN_URL = "https://oauth.telegram.org/token"
-TELEGRAM_OIDC_JWKS_URL = "https://oauth.telegram.org/.well-known/jwks.json"
-PKCE_COOKIE_NAME = "agency_w_pkce"
-PKCE_MAX_AGE = 10 * 60
-
+# Streamlit сам обрабатывает state, nonce, PKCE, проверку ID token
+# и хранит защищённую identity-cookie в браузере до 30 дней.
 telegram_data = {}
 oidc_error = ""
-oidc_login_valid = False
+remembered_data = {}
 
 
-def _remember_secret():
-    # Отдельно доменно разделяем ключ входа на устройство от подписи Telegram.
-    bot_token = str(st.secrets["TELEGRAM_BOT_TOKEN"])
-    return hashlib.sha256(
-        ("agency-w-remember-device-v1|" + bot_token).encode("utf-8")
-    ).digest()
-
-
-def _b64url_encode(raw: bytes) -> str:
-    return _auth_base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return _auth_base64.urlsafe_b64decode((value + padding).encode("ascii"))
-
-
-def _oidc_client_id():
-    return str(
-        st.secrets.get("TELEGRAM_OIDC_CLIENT_ID")
-        or st.secrets.get("TELEGRAM_CLIENT_ID")
-        or ""
-    ).strip()
-
-
-def _oidc_client_secret():
-    return str(
-        st.secrets.get("TELEGRAM_OIDC_CLIENT_SECRET")
-        or st.secrets.get("TELEGRAM_CLIENT_SECRET")
-        or ""
-    ).strip()
-
-
-def _pkce_verifier_for_state(state_value):
-    """Детерминированно восстанавливает PKCE verifier из короткого state.
-
-    Это позволяет не хранить verifier в cookie/session_state и не раздувать
-    параметр state в URL Telegram.
-    """
-    state_text = str(state_value or "").strip()
-    digest = hmac.new(
-        _remember_secret(),
-        ("agency-w-oidc-pkce-v3|" + state_text).encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-    # 32 байта -> 43 base64url-символа: допустимая минимальная длина PKCE verifier.
-    return _b64url_encode(digest)
-
-
-def _create_oidc_state(referral_code_value=""):
-    """Создаёт короткий подписанный state для Telegram OIDC.
-
-    Telegram ждёт в state короткую случайную строку. PKCE verifier в state
-    не кладём — он воспроизводится сервером через _pkce_verifier_for_state().
-    """
-    import os
-
-    now = int(time.time())
-    nonce = _b64url_encode(os.urandom(12))  # 16 символов
-    ref_raw = str(referral_code_value or "").strip()[:32]
-    ref_part = _b64url_encode(ref_raw.encode("utf-8")) if ref_raw else "-"
-    body = f"3.{now:x}.{nonce}.{ref_part}"
-    signature = hmac.new(
-        _remember_secret(),
-        ("agency-w-oidc-state-v3|" + body).encode("utf-8"),
-        hashlib.sha256,
-    ).digest()[:12]
-    return body + "." + _b64url_encode(signature)
-
-
-def _validate_oidc_state(state_value):
-    state_value = str(state_value or "").strip()
-    if not state_value:
-        return None
+def _streamlit_login_is_ready():
     try:
-        parts = state_value.split(".")
-        if len(parts) != 5 or parts[0] != "3":
-            return None
-        _, ts_hex, nonce, ref_part, signature_text = parts
-        body = ".".join(parts[:4])
-        expected = hmac.new(
-            _remember_secret(),
-            ("agency-w-oidc-state-v3|" + body).encode("utf-8"),
-            hashlib.sha256,
-        ).digest()[:12]
-        received = _b64url_decode(signature_text)
-        if not hmac.compare_digest(expected, received):
-            return None
-
-        issued_at = int(ts_hex, 16)
-        now = int(time.time())
-        if issued_at > now + 60 or now - issued_at > PKCE_MAX_AGE:
-            return None
-        if len(nonce) < 12:
-            return None
-
-        if ref_part == "-":
-            ref_value = ""
-        else:
-            ref_value = _b64url_decode(ref_part).decode("utf-8")[:32]
-
-        return {
-            "v": 3,
-            "iat": issued_at,
-            "exp": issued_at + PKCE_MAX_AGE,
-            "nonce": nonce,
-            "ref": ref_value,
-        }
+        return bool(st.user.is_logged_in)
     except Exception:
-        return None
-
-def _jwt_json_part(value):
-    return _auth_json.loads(_b64url_decode(value).decode("utf-8"))
+        return False
 
 
-def _verify_telegram_id_token(id_token):
-    token = str(id_token or "").strip()
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise ValueError("Telegram вернул некорректный ID token.")
+def _telegram_data_from_streamlit_user():
+    """Преобразует проверенные OIDC claims Telegram в старый формат Агентства W."""
+    try:
+        claims = dict(st.user)
+    except Exception:
+        claims = {}
 
-    header = _jwt_json_part(parts[0])
-    claims = _jwt_json_part(parts[1])
-    if str(header.get("alg") or "") != "RS256":
-        raise ValueError("Для входа Агентства W в BotFather должен быть выбран алгоритм RS256.")
-
-    kid = str(header.get("kid") or "")
-    jwks_response = requests.get(TELEGRAM_OIDC_JWKS_URL, timeout=15)
-    jwks_response.raise_for_status()
-    keys = jwks_response.json().get("keys", [])
-    jwk = next((item for item in keys if str(item.get("kid") or "") == kid), None)
-    if not jwk:
-        raise ValueError("Не найден публичный ключ Telegram для проверки входа.")
-
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding as _rsa_padding, rsa
-
-    n = int.from_bytes(_b64url_decode(str(jwk["n"])), "big")
-    e = int.from_bytes(_b64url_decode(str(jwk["e"])), "big")
-    public_key = rsa.RSAPublicNumbers(e, n).public_key()
-    signing_input = (parts[0] + "." + parts[1]).encode("ascii")
-    signature = _b64url_decode(parts[2])
-    public_key.verify(signature, signing_input, _rsa_padding.PKCS1v15(), hashes.SHA256())
-
-    client_id = _oidc_client_id()
-    now = int(time.time())
-    if str(claims.get("iss") or "") != "https://oauth.telegram.org":
-        raise ValueError("Telegram вернул неверный issuer.")
-    aud = claims.get("aud")
-    aud_values = [str(item) for item in aud] if isinstance(aud, list) else [str(aud)]
-    if client_id not in aud_values:
-        raise ValueError("Telegram вернул токен для другого Client ID.")
-    if int(claims.get("exp", 0)) < now - 30:
-        raise ValueError("Telegram ID token уже истёк.")
-    if int(claims.get("iat", 0)) > now + 120:
-        raise ValueError("Некорректное время Telegram ID token.")
-    return claims
-
-
-def _exchange_telegram_oidc_code(code, state_value):
-    state_payload = _validate_oidc_state(state_value)
-    if not state_payload:
-        raise ValueError("Сеанс входа устарел. Нажмите «Войти через Telegram» ещё раз.")
-
-    client_id = _oidc_client_id()
-    client_secret = _oidc_client_secret()
-    if not client_id or not client_secret:
-        raise ValueError(
-            "В Streamlit Secrets нужны TELEGRAM_OIDC_CLIENT_ID и TELEGRAM_OIDC_CLIENT_SECRET из BotFather → Login Widget."
-        )
-
-    verifier = _pkce_verifier_for_state(state_value)
-
-    basic = _auth_base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
-    response = requests.post(
-        TELEGRAM_OIDC_TOKEN_URL,
-        headers={
-            "Authorization": f"Basic {basic}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        data={
-            "grant_type": "authorization_code",
-            "code": str(code),
-            "redirect_uri": TELEGRAM_REDIRECT_URI,
-            "client_id": client_id,
-            "code_verifier": verifier,
-        },
-        timeout=20,
-    )
-    if not response.ok:
-        try:
-            details = response.json()
-        except Exception:
-            details = response.text[:300]
-        raise ValueError("Telegram не завершил вход: " + str(details))
-
-    token_data = response.json()
-    claims = _verify_telegram_id_token(token_data.get("id_token"))
     telegram_id_value = str(claims.get("id") or "").strip()
-    if not telegram_id_value.isdigit():
-        raise ValueError("Telegram не вернул числовой ID пользователя.")
 
-    name = str(claims.get("given_name") or claims.get("name") or "Пользователь").strip()
-    family = str(claims.get("family_name") or "").strip()
+    # Для Агентства нужен именно Telegram user id из profile scope.
+    # OIDC sub не подставляем: это другой идентификатор и он не должен
+    # смешиваться с Telegram ID, который уже используется в Supabase/Telethon.
+    if not telegram_id_value.isdigit():
+        return {}
+
+    full_name = str(claims.get("name") or "").strip()
+    display_name = str(claims.get("given_name") or "").strip()
+    if not display_name:
+        display_name = full_name.split()[0] if full_name else "Пользователь"
+    family_name = str(claims.get("family_name") or "").strip()
     username = str(claims.get("preferred_username") or "").strip()
     photo = str(claims.get("picture") or "").strip()
+    issued_at = claims.get("iat")
+    try:
+        auth_date = str(int(issued_at))
+    except (TypeError, ValueError):
+        auth_date = str(int(time.time()))
+
     return {
         "id": telegram_id_value,
-        "first_name": name or "Пользователь",
-        "last_name": family,
+        "first_name": display_name or "Пользователь",
+        "last_name": family_name,
         "username": username,
         "photo_url": photo,
-        "auth_date": str(int(claims.get("iat", int(time.time())))),
-        "_ref": str(state_payload.get("ref") or ""),
+        "auth_date": auth_date,
     }
 
 
 def _render_telegram_oidc_login(referral_code_value=""):
-    client_id = _oidc_client_id()
-    if not client_id:
-        st.error("В Streamlit Secrets пока нет TELEGRAM_OIDC_CLIENT_ID.")
-        return
-
-    # state оставляем коротким, а PKCE verifier детерминированно
-    # восстанавливаем на сервере из подписанного state.
-    state_token = _create_oidc_state(referral_code_value)
-    verifier = _pkce_verifier_for_state(state_token)
-    challenge = _b64url_encode(hashlib.sha256(verifier.encode("ascii")).digest())
-    auth_url = TELEGRAM_OIDC_AUTH_URL + "?" + urlencode(
-        {
-            "client_id": client_id,
-            "redirect_uri": TELEGRAM_REDIRECT_URI,
-            "response_type": "code",
-            "scope": "openid profile",
-            "state": state_token,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }
+    """Запускает штатный OIDC вход Streamlit."""
+    st.caption(
+        "Безопасный вход Telegram. После подтверждения это устройство "
+        "будет запомнено примерно на 30 дней."
     )
-
-    # Используем родную кнопку-ссылку Streamlit. В отличие от HTML-ссылки
-    # внутри разметки приложения st.link_button открывает URL браузером
-    # в новой вкладке, что и требуется Telegram OIDC.
     left, center, right = st.columns([1, 2, 1])
     with center:
-        st.link_button(
+        st.button(
             "✈️ Войти через Telegram",
-            auth_url,
             type="primary",
             use_container_width=True,
+            on_click=st.login,
         )
 
 
-def create_remember_token(data):
-    now = int(time.time())
-    payload = {
-        "v": 1,
-        "id": str(data.get("id") or ""),
-        "first_name": str(data.get("first_name") or "Пользователь")[:120],
-        "username": str(data.get("username") or "")[:120],
-        "iat": now,
-        "exp": now + REMEMBER_MAX_AGE,
-    }
-    raw = _auth_json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    body = _b64url_encode(raw)
-    signature = hmac.new(
-        _remember_secret(),
-        body.encode("ascii"),
-        hashlib.sha256,
-    ).digest()
-    return body + "." + _b64url_encode(signature)
-
-
-def validate_remember_token(token):
-    token = str(token or "").strip()
-    if not token or "." not in token:
-        return None
-    try:
-        body, signature_text = token.split(".", 1)
-        expected = hmac.new(
-            _remember_secret(),
-            body.encode("ascii"),
-            hashlib.sha256,
-        ).digest()
-        received = _b64url_decode(signature_text)
-        if not hmac.compare_digest(expected, received):
-            return None
-        payload = _auth_json.loads(_b64url_decode(body).decode("utf-8"))
-        if int(payload.get("v", 0)) != 1:
-            return None
-        if int(payload.get("exp", 0)) < int(time.time()):
-            return None
-        telegram_id_value = str(payload.get("id") or "").strip()
-        if not telegram_id_value.isdigit():
-            return None
-        return {
-            "id": telegram_id_value,
-            "first_name": str(payload.get("first_name") or "Пользователь"),
-            "username": str(payload.get("username") or ""),
-        }
-    except Exception:
-        return None
-
-
-def _remember_cookie_value():
-    try:
-        return str(st.context.cookies.get(REMEMBER_COOKIE_NAME, "") or "")
-    except Exception:
-        return ""
-
-
-def set_remember_cookie(token):
-    safe_token = _auth_json.dumps(str(token))
-    st.html(
-        f"""
-        <script>
-        (() => {{
-          const token = {safe_token};
-          document.cookie = "{REMEMBER_COOKIE_NAME}=" + token
-            + "; Max-Age={REMEMBER_MAX_AGE}; Path=/; SameSite=Lax; Secure";
-
-          // После первого входа убираем из адресной строки временные
-          // Telegram-параметры, оставляя партнёрский ref, если он есть.
-          const url = new URL(window.location.href);
-          ['id','first_name','last_name','username','photo_url','auth_date','hash','code','state','error','error_description']
-            .forEach((key) => url.searchParams.delete(key));
-          const clean = url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : '');
-          window.history.replaceState({{}}, document.title, clean);
-        }})();
-        </script>
-        """,
-        unsafe_allow_javascript=True,
-    )
-
-
-def clear_remember_cookie_and_open_login():
-    st.html(
-        f"""
-        <script>
-        document.cookie = "{REMEMBER_COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax; Secure";
-        window.location.replace('https://agency-w.streamlit.app/');
-        </script>
-        """,
-        unsafe_allow_javascript=True,
-    )
-
-
-def load_member_record(telegram_id):
-    try:
-        response = requests.get(
-            f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_members",
-            headers={
-                "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-                "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
-            },
-            params={
-                "telegram_id": f"eq.{int(telegram_id)}",
-                "select": "telegram_id,first_name,username,member_code,referrer_code",
-                "limit": 1,
-            },
-            timeout=10,
+telegram_login_valid = _streamlit_login_is_ready()
+if telegram_login_valid:
+    telegram_data = _telegram_data_from_streamlit_user()
+    if not telegram_data:
+        telegram_login_valid = False
+        oidc_error = (
+            "Telegram подтвердил вход, но не вернул числовой ID пользователя. "
+            "Проверьте, что в Streamlit Secrets для [auth] указан scope openid profile."
         )
-        response.raise_for_status()
-        rows = response.json()
-        return rows[0] if isinstance(rows, list) and rows else {}
-    except Exception:
-        return {}
-
-
-remembered_data = validate_remember_token(_remember_cookie_value())
-
-oidc_code = str(st.query_params.get("code", "") or "").strip()
-oidc_state = str(st.query_params.get("state", "") or "").strip()
-oidc_returned_error = str(st.query_params.get("error", "") or "").strip()
-if oidc_code:
-    try:
-        telegram_data = _exchange_telegram_oidc_code(oidc_code, oidc_state)
-        oidc_login_valid = True
-        if not referral_code and telegram_data.get("_ref"):
-            referral_code = str(telegram_data.get("_ref") or "")
-    except Exception as exc:
-        oidc_error = str(exc)
-elif oidc_returned_error:
-    oidc_error = str(st.query_params.get("error_description", "") or oidc_returned_error)
-
-telegram_login_valid = bool(oidc_login_valid)
-
 # Telegram нужен только для первого входа на устройстве. После него
 # безопасно подписанный токен устройства действует 30 дней.
 if telegram_login_valid or remembered_data:
@@ -6098,7 +5775,56 @@ if telegram_login_valid or remembered_data:
             or "Партнёр"
         )
         telegram_id = telegram_data.get("id", "")
+
+        # st.login возвращает пользователя на /oauth2callback -> главную страницу.
+        # Если вход начат по партнёрской ссылке, восстанавливаем ref из localStorage
+        # до первой записи нового участника в Supabase. Маркер не даёт зациклиться.
+        _ref_checked = str(st.query_params.get("_aw_ref_checked", "") or "") == "1"
+        if not referral_code and not _ref_checked:
+            st.html(
+                """
+                <script>
+                (() => {
+                  let ref = '';
+                  try {
+                    const raw = localStorage.getItem('agency_w_pending_ref');
+                    if (raw) {
+                      const item = JSON.parse(raw);
+                      const age = Date.now() - Number(item.ts || 0);
+                      if (age >= 0 && age < 2 * 60 * 60 * 1000) {
+                        ref = String(item.ref || '');
+                      } else {
+                        localStorage.removeItem('agency_w_pending_ref');
+                      }
+                    }
+                  } catch (_) {}
+                  const url = new URL(window.location.href);
+                  url.searchParams.set('_aw_ref_checked', '1');
+                  if (ref) url.searchParams.set('ref', ref);
+                  window.location.replace(url.toString());
+                })();
+                </script>
+                """,
+                unsafe_allow_javascript=True,
+            )
+            st.stop()
+
         member_code, created = save_member_to_supabase(telegram_data, referral_code)
+
+        # После успешной привязки приглашения очищаем временный браузерный след.
+        st.html(
+            """
+            <script>
+            localStorage.removeItem('agency_w_pending_ref');
+            const url = new URL(window.location.href);
+            if (url.searchParams.has('_aw_ref_checked')) {
+              url.searchParams.delete('_aw_ref_checked');
+              window.history.replaceState({}, document.title, url.pathname + (url.search ? url.search : ''));
+            }
+            </script>
+            """,
+            unsafe_allow_javascript=True,
+        )
 
         member_record = load_member_record(telegram_id)
         if member_record.get("member_code"):
@@ -6106,10 +5832,7 @@ if telegram_login_valid or remembered_data:
         if not referral_code and member_record.get("referrer_code"):
             referral_code = str(member_record.get("referrer_code") or "")
 
-        # Только после проверенного Telegram Login создаём доверие к устройству.
-        # Повторные открытия используют уже существующий cookie.
-        if telegram_login_valid:
-            set_remember_cookie(create_remember_token(telegram_data))
+        # Доверенную 30-дневную сессию теперь хранит сам Streamlit OIDC.
 
         partner_link = f"https://agency-w.streamlit.app/?ref={member_code}"
 
@@ -11602,15 +11325,15 @@ if telegram_login_valid or remembered_data:
             st.divider()
             st.markdown("#### 🔐 Вход на этом устройстве")
             st.success(
-                "Это устройство запомнено на 30 дней. "
-                "Открывайте Агентство W по иконке — повторный вход через Telegram не нужен."
+                "Вход подтверждён. Streamlit хранит защищённую сессию в браузере до 30 дней. "
+                "Открывайте Агентство W по иконке — повторный вход через Telegram обычно не нужен."
             )
             if st.button(
                 "🚪 Выйти из Агентства W на этом устройстве",
                 key=f"agency_logout_{telegram_id}",
                 use_container_width=True,
             ):
-                clear_remember_cookie_and_open_login()
+                st.logout()
     else:
         st.error(
             "Не удалось подтвердить вход через Telegram. Попробуйте ещё раз."
@@ -11618,7 +11341,7 @@ if telegram_login_valid or remembered_data:
 else:
     if oidc_error:
         st.error(oidc_error)
-        st.caption("Нажмите кнопку входа ещё раз. Если ошибка повторится — пришлите только текст ошибки, без Client Secret.")
+        st.caption("Проверьте настройки раздела [auth] в Streamlit Secrets. Client Secret сюда не присылайте.")
     _render_telegram_oidc_login(referral_code)
     st.caption("Telegram нужен только для первого входа на этом устройстве. Затем Агентство W запомнит его на 30 дней.")
 

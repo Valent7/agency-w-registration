@@ -1,4 +1,4 @@
-streamlit
+streamlit[auth]==1.62.0
 requests
 telethon==1.44.0
 cryptography
