@@ -5720,49 +5720,48 @@ def _oidc_client_secret():
     ).strip()
 
 
-def _create_oidc_state(referral_code_value=""):
+def _create_oidc_state(referral_code_value="", verifier=""):
+    """Создаёт зашифрованный state с PKCE verifier.
+
+    Verifier не хранится в Streamlit session_state и не зависит от iframe-cookie:
+    он шифруется FERNET_KEY и возвращается нам только через state после Telegram.
+    """
     now = int(time.time())
+    clean_verifier = str(verifier or "").strip()
+    if not clean_verifier:
+        raise ValueError("Не удалось подготовить безопасный вход Telegram.")
     payload = {
-        "v": 1,
+        "v": 2,
         "iat": now,
         "exp": now + PKCE_MAX_AGE,
         "nonce": _auth_base64.urlsafe_b64encode(__import__("os").urandom(18)).decode("ascii").rstrip("="),
         "ref": str(referral_code_value or "")[:120],
+        "pkce": clean_verifier,
     }
     raw = _auth_json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    body = _b64url_encode(raw)
-    sig = hmac.new(_remember_secret(), body.encode("ascii"), hashlib.sha256).digest()
-    return body + "." + _b64url_encode(sig)
+    return get_session_cipher().encrypt(raw).decode("ascii")
 
 
 def _validate_oidc_state(state_value):
     state_value = str(state_value or "").strip()
-    if not state_value or "." not in state_value:
+    if not state_value:
         return None
     try:
-        body, sig_text = state_value.split(".", 1)
-        expected = hmac.new(_remember_secret(), body.encode("ascii"), hashlib.sha256).digest()
-        received = _b64url_decode(sig_text)
-        if not hmac.compare_digest(expected, received):
-            return None
-        payload = _auth_json.loads(_b64url_decode(body).decode("utf-8"))
+        raw = get_session_cipher().decrypt(state_value.encode("ascii"))
+        payload = _auth_json.loads(raw.decode("utf-8"))
         now = int(time.time())
-        if int(payload.get("v", 0)) != 1:
+        if int(payload.get("v", 0)) != 2:
             return None
         if int(payload.get("exp", 0)) < now:
             return None
         if int(payload.get("iat", 0)) > now + 60:
             return None
+        verifier = str(payload.get("pkce") or "")
+        if not (43 <= len(verifier) <= 128):
+            return None
         return payload
     except Exception:
         return None
-
-
-def _pkce_cookie_value():
-    try:
-        return str(st.context.cookies.get(PKCE_COOKIE_NAME, "") or "")
-    except Exception:
-        return ""
 
 
 def _jwt_json_part(value):
@@ -5825,7 +5824,7 @@ def _exchange_telegram_oidc_code(code, state_value):
             "В Streamlit Secrets нужны TELEGRAM_OIDC_CLIENT_ID и TELEGRAM_OIDC_CLIENT_SECRET из BotFather → Login Widget."
         )
 
-    verifier = _pkce_cookie_value()
+    verifier = str(state_payload.get("pkce") or "").strip()
     if not verifier:
         raise ValueError("Не найдено подтверждение безопасного входа. Нажмите «Войти через Telegram» ещё раз.")
 
@@ -5879,57 +5878,38 @@ def _render_telegram_oidc_login(referral_code_value=""):
         st.error("В Streamlit Secrets пока нет TELEGRAM_OIDC_CLIENT_ID.")
         return
 
-    state_token = _create_oidc_state(referral_code_value)
-    auth_base = TELEGRAM_OIDC_AUTH_URL
-    # PKCE verifier генерируется в браузере, хранится 10 минут в cookie этого домена,
-    # а в Telegram уходит только SHA-256 challenge.
-    state_json = _auth_json.dumps(state_token)
-    client_json = _auth_json.dumps(client_id)
-    redirect_json = _auth_json.dumps(TELEGRAM_REDIRECT_URI)
-    st.html(
+    # Генерируем PKCE на сервере и шифруем verifier внутри state.
+    # Поэтому внешний переход в Telegram может быть обычной браузерной ссылкой.
+    verifier = _b64url_encode(__import__("os").urandom(48))
+    challenge = _b64url_encode(hashlib.sha256(verifier.encode("ascii")).digest())
+    state_token = _create_oidc_state(referral_code_value, verifier)
+    auth_url = TELEGRAM_OIDC_AUTH_URL + "?" + urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": TELEGRAM_REDIRECT_URI,
+            "response_type": "code",
+            "scope": "openid profile",
+            "state": state_token,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+    )
+
+    # ВАЖНО: st.html работает внутри iframe. Telegram OAuth нельзя открывать
+    # внутри iframe, поэтому кнопку рисуем обычной ссылкой Streamlit DOM.
+    safe_url = html.escape(auth_url, quote=True)
+    st.markdown(
         f"""
         <div style="display:flex;justify-content:center;margin:0.7rem 0 1rem;">
-          <button id="agency-w-telegram-login" style="
-            border:0;border-radius:12px;padding:12px 22px;font-size:18px;font-weight:700;
-            cursor:pointer;background:#2AABEE;color:white;box-shadow:0 6px 16px rgba(0,0,0,.2);">
+          <a href="{safe_url}" target="_self" style="
+            display:inline-block;text-decoration:none;border:0;border-radius:12px;
+            padding:12px 22px;font-size:18px;font-weight:700;cursor:pointer;
+            background:#2AABEE;color:white;box-shadow:0 6px 16px rgba(0,0,0,.2);">
             ✈️ Войти через Telegram
-          </button>
+          </a>
         </div>
-        <script>
-        (() => {{
-          const btn = document.getElementById('agency-w-telegram-login');
-          if (!btn) return;
-          const b64url = (bytes) => btoa(String.fromCharCode(...bytes))
-            .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-          btn.addEventListener('click', async () => {{
-            btn.disabled = true;
-            btn.textContent = 'Открываю Telegram…';
-            try {{
-              const random = new Uint8Array(48);
-              crypto.getRandomValues(random);
-              const verifier = b64url(random);
-              const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
-              const challenge = b64url(digest);
-              document.cookie = `{PKCE_COOKIE_NAME}=${{verifier}}; Max-Age={PKCE_MAX_AGE}; Path=/; SameSite=Lax; Secure`;
-              const url = new URL('{auth_base}');
-              url.searchParams.set('client_id', {client_json});
-              url.searchParams.set('redirect_uri', {redirect_json});
-              url.searchParams.set('response_type', 'code');
-              url.searchParams.set('scope', 'openid profile');
-              url.searchParams.set('state', {state_json});
-              url.searchParams.set('code_challenge', challenge);
-              url.searchParams.set('code_challenge_method', 'S256');
-              window.location.assign(url.toString());
-            }} catch (err) {{
-              btn.disabled = false;
-              btn.textContent = '✈️ Войти через Telegram';
-              alert('Не удалось открыть безопасный вход Telegram. Обновите страницу и попробуйте ещё раз.');
-            }}
-          }});
-        }})();
-        </script>
         """,
-        unsafe_allow_javascript=True,
+        unsafe_allow_html=True,
     )
 
 
@@ -6010,7 +5990,6 @@ def set_remember_cookie(token):
           const url = new URL(window.location.href);
           ['id','first_name','last_name','username','photo_url','auth_date','hash','code','state','error','error_description']
             .forEach((key) => url.searchParams.delete(key));
-          document.cookie = "{PKCE_COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax; Secure";
           const clean = url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : '');
           window.history.replaceState({{}}, document.title, clean);
         }})();
