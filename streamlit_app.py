@@ -5686,6 +5686,28 @@ oidc_error = ""
 remembered_data = {}
 
 
+
+def load_member_record(telegram_id):
+    try:
+        response = requests.get(
+            f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_members",
+            headers={
+                "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+                "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+            },
+            params={
+                "telegram_id": f"eq.{int(telegram_id)}",
+                "select": "telegram_id,first_name,username,member_code,referrer_code",
+                "limit": 1,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return rows[0] if isinstance(rows, list) and rows else {}
+    except Exception:
+        return {}
+
 def _streamlit_login_is_ready():
     try:
         return bool(st.user.is_logged_in)
