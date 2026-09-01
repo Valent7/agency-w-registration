@@ -216,69 +216,24 @@ def _load_workspace(config: Config, owner_id: int) -> dict[str, Any]:
 
 
 def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]]:
-    """Контакты, от которых Неона имеет право принимать новые входящие.
-
-    Важно: это не разрешение на самостоятельные исходящие сообщения.
-    Контакт попадает сюда только если из Агентства W ему уже реально было
-    отправлено первое сообщение/видеокружок или продолжение диалога.
-    """
     workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
-
-    # Все реальные способы, которыми Агентство уже могло начать/возобновить
-    # диалог. Раньше учитывался только first_message, поэтому ответы на
-    # first_video и director_continue_dialog_video могли остаться без Неоны.
-    allowed_kinds = {
-        "first_message",
-        "first_video",
-        "director_continue_dialog_video",
-    }
-
-    sent_log = (
-        workspace.get("sent_log", [])
-        if isinstance(workspace.get("sent_log"), list)
-        else []
-    )
-    for event in sent_log:
-        if not isinstance(event, dict) or event.get("kind") not in allowed_kinds:
+    for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
+        if not isinstance(event, dict) or event.get("kind") != "first_message":
             continue
         try:
             contact_id = int(event.get("telegram_id"))
         except (TypeError, ValueError):
             continue
-        # Если с человеком был более поздний разрешённый исходящий контакт,
-        # сохраняем именно его как безопасную точку отсчёта.
+        try:
+            first_message_id = int(event.get("message_id") or 0)
+        except (TypeError, ValueError):
+            first_message_id = 0
         allowed[contact_id] = {
             "sent_at": str(event.get("sent_at") or ""),
             "recipient_name": str(event.get("recipient_name") or ""),
+            "message_id": first_message_id,
         }
-
-    # Дополнительная страховка для старых записей: если сообщение было
-    # действительно отправлено, но sent_log сохранился неполно, черновик
-    # с sent=True всё равно разрешает Неоне ответить на НОВОЕ входящее.
-    drafts = workspace.get("neona_drafts", [])
-    if isinstance(drafts, dict):
-        drafts = [
-            {"telegram_id": contact_id, **draft}
-            for contact_id, draft in drafts.items()
-            if isinstance(draft, dict)
-        ]
-    if not isinstance(drafts, list):
-        drafts = []
-
-    for draft in drafts:
-        if not isinstance(draft, dict) or not bool(draft.get("sent")):
-            continue
-        try:
-            contact_id = int(draft.get("telegram_id"))
-        except (TypeError, ValueError):
-            continue
-        if contact_id not in allowed:
-            allowed[contact_id] = {
-                "sent_at": str(draft.get("sent_at") or ""),
-                "recipient_name": str(draft.get("recipient_name") or ""),
-            }
-
     return allowed
 
 
@@ -427,10 +382,53 @@ def _create_meeting(config: Config, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _first_name(entity: Any, fallback: str = "") -> str:
-    name = str(getattr(entity, "first_name", "") or "").strip()
-    if not name and fallback:
-        name = str(fallback).strip().split()[0]
-    return name[:80]
+    """Возвращает только безопасное личное имя для обращения Неоны.
+
+    Telegram иногда кладёт в first_name имя и фамилию целиком или ник/декор.
+    Неона использует только первое понятное имя. Если имя неясно — не угадывает.
+    """
+
+    blocked_tokens = {
+        "business", "biznes", "бизнес", "crypto", "крипто", "money", "деньги",
+        "coach", "коуч", "manager", "менеджер", "admin", "админ",
+        "official", "shop", "магазин", "team", "команда", "project", "проект",
+        "partner", "партнер", "партнёр", "online",
+    }
+
+    def clean_name_token(value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+
+        # Только первый словесный фрагмент: «Зинаида Жук» -> «Зинаида».
+        raw = re.split(r"[\s|,/]+", raw, maxsplit=1)[0].strip()
+
+        chars = []
+        for character in raw:
+            if character.isalpha() or (character in "-'’" and chars):
+                chars.append(character)
+                continue
+            break
+
+        token = "".join(chars).strip("-'’")
+        if len(token) < 2 or len(token) > 40:
+            return ""
+        if token.casefold() in blocked_tokens:
+            return ""
+
+        # Человеческий вид без попыток угадать неизвестное имя.
+        if token.isupper() and len(token) > 1:
+            token = token.title()
+        elif token.islower() and len(token) > 1:
+            token = token[:1].upper() + token[1:]
+
+        return token
+
+    name = clean_name_token(getattr(entity, "first_name", ""))
+    if name:
+        return name
+
+    return clean_name_token(fallback)
 
 
 def _greeting(name: str) -> str:
@@ -963,8 +961,10 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 continue
 
             state = _dialog_state(config, int(owner_id), contact_id)
+            all_recent = []
             recent = []
             async for message in client.iter_messages(entity, limit=30):
+                all_recent.append(message)
                 if message.out:
                     continue
 
@@ -977,6 +977,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                     continue
 
                 recent.append(message)
+            all_recent.sort(key=lambda item: int(item.id))
             recent.sort(key=lambda item: int(item.id))
             latest_incoming_id = int(recent[-1].id) if recent else 0
 
@@ -1032,20 +1033,68 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 }
 
             last_id = int(state.get("last_incoming_message_id") or 0)
-            new_messages = [
-                message for message in recent if int(message.id) > last_id
-            ]
-
-            # Защита от ложного "отправлено": старая версия считала ответ
-            # успешным сразу после send_message(), не проверяя, что сообщение
-            # действительно осталось в нужном чате Telegram. Если в состоянии
-            # есть last_reply_id, но такого исходящего сообщения в чате нет,
-            # повторяем уже сформированный ответ из живой памяти.
             state_context = (
                 state.get("context")
                 if isinstance(state.get("context"), dict)
                 else {}
             )
+
+            # Если владелец сам написал человеку в Telegram, считаем, что он
+            # перехватил разговор. Неона не должна отвечать на старые входящие,
+            # которые были до этого ручного сообщения. Она ждёт только нового
+            # сообщения человека после вмешательства владельца.
+            previous_reply_id = int(state_context.get("last_reply_id") or 0)
+            first_message_id = int(allowed[contact_id].get("message_id") or 0)
+            owner_fence_id = int(state_context.get("owner_outgoing_fence_id") or 0)
+            known_automatic_ids = {
+                value for value in (previous_reply_id, first_message_id) if value
+            }
+            manual_outgoing = [
+                message
+                for message in all_recent
+                if bool(getattr(message, "out", False))
+                and int(message.id) > max(last_id, owner_fence_id)
+                and int(message.id) not in known_automatic_ids
+            ]
+            if manual_outgoing:
+                owner_fence_id = max(int(message.id) for message in manual_outgoing)
+                handled_incoming_ids = [
+                    int(message.id)
+                    for message in recent
+                    if int(message.id) <= owner_fence_id
+                ]
+                if handled_incoming_ids:
+                    last_id = max(last_id, max(handled_incoming_ids))
+                state_context = {
+                    **state_context,
+                    "owner_outgoing_fence_id": owner_fence_id,
+                    "owner_outgoing_fence_at": datetime.now(UTC).isoformat(),
+                }
+                _save_dialog_state(
+                    config,
+                    int(owner_id),
+                    contact_id,
+                    last_incoming_id=last_id,
+                    stage=str(state.get("stage") or "idle"),
+                    greeted=bool(state.get("greeted", False)),
+                    context=state_context,
+                )
+                state = {
+                    **state,
+                    "last_incoming_message_id": last_id,
+                    "context": state_context,
+                }
+
+            new_messages = [
+                message
+                for message in recent
+                if int(message.id) > max(last_id, owner_fence_id)
+            ]
+
+            # Проверяем сохранённый ответ. Если владелец удалил сообщение
+            # Неоны, не восстанавливаем его автоматически: удаление считаем
+            # осознанным вмешательством владельца.
+
             last_incoming_message = next(
                 (message for message in recent if int(message.id) == last_id),
                 None,
@@ -1054,8 +1103,6 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 last_incoming_message is not None
                 and _telegram_message_kind(last_incoming_message) in {"voice", "audio"}
             )
-            previous_reply_id = int(state_context.get("last_reply_id") or 0)
-
             if not new_messages and previous_reply_id and last_incoming_message is not None:
                 previous_reply = await _verified_sent_message(
                     client,
@@ -1071,85 +1118,37 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                             missing_reply_id=previous_reply_id,
                         )
 
-                    stored_reply = str(state_context.get("last_reply_text") or "").strip()
-                    if not stored_reply:
-                        relationship_memory = (
-                            state_context.get("relationship_memory")
-                            if isinstance(state_context.get("relationship_memory"), dict)
-                            else {}
-                        )
-                        stored_reply = str(relationship_memory.get("last_reply") or "").strip()
-
-                    if stored_reply:
-                        try:
-                            resent = await client.send_message(
-                                entity,
-                                stored_reply,
-                                parse_mode=None,
-                                link_preview=False,
-                            )
-                            verified_resent = await _verified_sent_message(
-                                client,
-                                entity,
-                                contact_id,
-                                int(resent.id),
-                            )
-                            if verified_resent is None:
-                                raise DialogError(
-                                    "Telegram вернул ID повторного ответа, но сообщение "
-                                    "не найдено в нужном чате после отправки."
-                                )
-
-                            repaired_context = {
-                                **state_context,
-                                "last_reply_id": int(resent.id),
-                                "last_reply_text": stored_reply,
-                                "last_reply_verified": True,
-                                "last_reply_retried_at": datetime.now(UTC).isoformat(),
-                            }
-                            _save_dialog_state(
-                                config,
-                                int(owner_id),
-                                contact_id,
-                                last_incoming_id=last_id,
-                                stage=str(state.get("stage") or "idle"),
-                                greeted=bool(state.get("greeted", False)),
-                                context=repaired_context,
-                            )
-                            stats["replied"] += 1
-                            if last_incoming_is_audio:
-                                _voice_diag_add(
-                                    "reply_sent_after_voice",
-                                    latest_message_id=last_id,
-                                    reply_id=int(resent.id),
-                                    verified=True,
-                                    recovered_missing_reply=True,
-                                )
-                            continue
-                        except Exception as exc:
-                            if last_incoming_is_audio:
-                                _voice_diag_add(
-                                    "dialog_or_send_error",
-                                    latest_message_id=last_id,
-                                    error=f"{type(exc).__name__}: {exc}",
-                                )
-                            stats["errors"] += 1
-                            continue
-
-                    # Если старая память по какой-то причине не содержит текста
-                    # ответа, безопасно переобрабатываем то же входящее сообщение.
-                    new_messages = [last_incoming_message]
-                    if last_incoming_is_audio:
-                        _voice_diag_add(
-                            "saved_reply_missing_reprocess",
-                            latest_message_id=last_id,
-                            missing_reply_id=previous_reply_id,
-                        )
+                    repaired_context = {
+                        **state_context,
+                        "last_reply_id": 0,
+                        "last_reply_verified": False,
+                        "last_reply_missing_at": datetime.now(UTC).isoformat(),
+                        "auto_resend_suppressed": True,
+                    }
+                    _save_dialog_state(
+                        config,
+                        int(owner_id),
+                        contact_id,
+                        last_incoming_id=last_id,
+                        stage=str(state.get("stage") or "idle"),
+                        greeted=bool(state.get("greeted", False)),
+                        context=repaired_context,
+                    )
+                    state_context = repaired_context
+                    state = {**state, "context": repaired_context}
+                    # Никогда не отправляем удалённый ответ повторно без нового
+                    # входящего сообщения от человека.
+                    continue
 
             # Старая тестовая версия могла ошибочно поставить baseline прямо
             # на первом ответе. Один раз подхватываем такой ответ, если Неона
             # ещё ни разу не отвечала в этом диалоге.
-            if not new_messages and not bool(state.get("greeted", False)):
+            if (
+                not new_messages
+                and not bool(state.get("greeted", False))
+                and not bool(state_context.get("auto_resend_suppressed"))
+                and not int(state_context.get("owner_outgoing_fence_id") or 0)
+            ):
                 state_context = (
                     state.get("context")
                     if isinstance(state.get("context"), dict)
