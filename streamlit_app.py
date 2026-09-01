@@ -1,6 +1,7 @@
 import streamlit as st
 from agency_values import render_agency_development
 import requests
+import hashlib
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
@@ -1497,28 +1498,6 @@ def save_member_to_supabase(telegram_data, referral_code):
 
     response.raise_for_status()
     return member_code, True
-
-
-def load_member_record(telegram_id):
-    try:
-        response = requests.get(
-            f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_members",
-            headers={
-                "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-                "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
-            },
-            params={
-                "telegram_id": f"eq.{int(telegram_id)}",
-                "select": "telegram_id,first_name,username,member_code,referrer_code",
-                "limit": 1,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        rows = response.json()
-        return rows[0] if isinstance(rows, list) and rows else {}
-    except Exception:
-        return {}
 
 
 def save_telegram_session_to_supabase(telegram_id, session_string):
