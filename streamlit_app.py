@@ -140,12 +140,17 @@ from cryptography.fernet import Fernet, InvalidToken
 APP_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = APP_DIR / "assets"
 ICON_PATH = ASSETS_DIR / "agency_w_icon.png"
+FAVICON_PATH = ASSETS_DIR / "agency_w_favicon.png"
 WAVE_PATH = ASSETS_DIR / "agency_w_wave.png"
 
 page_icon = (
-    Image.open(ICON_PATH)
-    if ICON_PATH.exists()
-    else "W"
+    Image.open(FAVICON_PATH)
+    if FAVICON_PATH.exists()
+    else (
+        Image.open(ICON_PATH)
+        if ICON_PATH.exists()
+        else "W"
+    )
 )
 
 st.set_page_config(
@@ -160,9 +165,10 @@ def install_agency_w_app_metadata():
     if st.session_state.get("_agency_w_app_metadata_ready"):
         return
 
+    metadata_icon_path = FAVICON_PATH if FAVICON_PATH.exists() else ICON_PATH
     icon_uri = (
-        "data:image/png;base64," + base64.b64encode(ICON_PATH.read_bytes()).decode("ascii")
-        if ICON_PATH.exists()
+        "data:image/png;base64," + base64.b64encode(metadata_icon_path.read_bytes()).decode("ascii")
+        if metadata_icon_path.exists()
         else ""
     )
     icon_js = json.dumps(icon_uri)
