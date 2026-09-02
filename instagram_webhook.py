@@ -28,46 +28,14 @@ INSTAGRAM_OWNER_NAME = os.getenv("INSTAGRAM_OWNER_NAME", "").strip()
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
 INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0").strip() or "v23.0"
 
-
-# Known phrases that often appear when speech-to-text invents credits/subtitle text
-# instead of transcribing the speaker. Suspicious transcripts are confirmed by the
-# person before they are allowed into Neona's relationship memory.
-_VOICE_ARTIFACT_PATTERNS = (
-    r"\bредактор\s+субтитров\b",
-    r"\bавтор\s+субтитров\b",
-    r"\bкорректор\s*[—:-]",
-    r"\bсубтитры\s+(?:сделал|сделала|подготовил|подготовила|редактор)\b",
-    r"\bпродолжение\s+следует\b",
-    r"\bспасибо\s+за\s+просмотр\b",
-    r"\bподписывайтесь\s+на\s+канал\b",
-)
-
-
-def _voice_transcript_needs_confirmation(text: str) -> bool:
-    normalized = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
-    if not normalized:
-        return True
-    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in _VOICE_ARTIFACT_PATTERNS)
-
-
-def _confirmation_yes(text: str) -> bool:
-    normalized = re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").casefold()).strip()
-    return normalized in {"да", "верно", "правильно", "точно", "угу", "ага", "yes"}
-
-
-def _confirmation_no(text: str) -> bool:
-    normalized = re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").casefold()).strip()
-    return normalized in {"нет", "неверно", "не правильно", "неправильно", "no"}
-
-
-def _voice_confirmation_reply(transcript: str) -> str:
-    compact = re.sub(r"\s+", " ", str(transcript or "")).strip()
-    if len(compact) > 240:
-        compact = compact[:237].rstrip() + "…"
-    return (
-        "Кажется, я могла неверно расслышать голосовое. "
-        f"У меня получилось: «{compact}». Я правильно вас услышала?"
-    )
+# VK community integration. Keep every secret/token in Render Environment.
+VK_ACCESS_TOKEN = os.getenv("VK_ACCESS_TOKEN", "").strip()
+VK_GROUP_ID = os.getenv("VK_GROUP_ID", "").strip()
+VK_CALLBACK_CONFIRMATION = os.getenv("VK_CALLBACK_CONFIRMATION", "").strip()
+VK_CALLBACK_SECRET = os.getenv("VK_CALLBACK_SECRET", "").strip()
+VK_API_VERSION = os.getenv("VK_API_VERSION", "5.199").strip() or "5.199"
+VK_OWNER_ID = os.getenv("VK_OWNER_ID", INSTAGRAM_OWNER_ID).strip()
+VK_OWNER_NAME = os.getenv("VK_OWNER_NAME", INSTAGRAM_OWNER_NAME).strip()
 
 
 def _page(title: str, body: str) -> HTMLResponse:
@@ -500,8 +468,40 @@ def _build_neona_draft(event: dict) -> None:
     config, owner_id, owner_name = _neona_config(core)
     contact_id = _instagram_contact_id(event["sender_id"])
     message_id = str(event.get("message_id") or "").strip()
-    raw_text = str(event.get("text") or "").strip()
+    text = str(event.get("text") or "").strip()
     audio_url = str(event.get("audio_url") or "").strip()
+    if audio_url:
+        try:
+            transcript = _transcribe_instagram_audio(audio_url)
+            print(
+                "INSTAGRAM_AUDIO_TRANSCRIPT:",
+                {
+                    "sender_id": event["sender_id"],
+                    "mid": message_id,
+                    "text": transcript,
+                },
+                flush=True,
+            )
+            text = (
+                f"{text}\n\n{transcript}".strip()
+                if text
+                else transcript
+            )
+        except Exception as exc:
+            print(
+                "INSTAGRAM_AUDIO_ERROR:",
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            if not text:
+                _send_instagram_text(
+                    event["recipient_id"],
+                    event["sender_id"],
+                    "Я получила ваше голосовое сообщение, но сейчас не смогла его разобрать. "
+                    "Напишите, пожалуйста, эту мысль текстом — и я сразу отвечу.",
+                )
+                return
+
     message_dt = _message_datetime(event.get("timestamp"))
 
     state = core._dialog_state(config, owner_id, contact_id)
@@ -531,130 +531,6 @@ def _build_neona_draft(event: dict) -> None:
             flush=True,
         )
         return
-
-    # If the previous voice transcript looked suspicious, the next short yes/no
-    # confirms or rejects it before it becomes normal dialog input.
-    pending_voice = str(context.get("pending_voice_transcript") or "").strip()
-    text = raw_text
-    voice_confirmed = False
-    if pending_voice and not audio_url:
-        if _confirmation_yes(raw_text):
-            text = pending_voice
-            voice_confirmed = True
-            context.pop("pending_voice_transcript", None)
-            context.pop("pending_voice_mid", None)
-            context.pop("pending_voice_created_at", None)
-        elif _confirmation_no(raw_text):
-            context.pop("pending_voice_transcript", None)
-            context.pop("pending_voice_mid", None)
-            context.pop("pending_voice_created_at", None)
-            context.update(
-                {
-                    "instagram_last_mid": message_id,
-                    "instagram_last_processed_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            dedupe_source = message_id or f'{event["sender_id"]}|{event.get("timestamp")}|{raw_text}'
-            core._save_dialog_state(
-                config,
-                owner_id,
-                contact_id,
-                last_incoming_id=_stable_message_id(dedupe_source),
-                stage=str(state.get("stage") or "idle"),
-                greeted=bool(state.get("greeted", False)),
-                context=context,
-            )
-            _send_instagram_text(
-                event["recipient_id"],
-                event["sender_id"],
-                "Поняла. Тогда не буду опираться на эту расшифровку. "
-                "Повторите, пожалуйста, голосовое или напишите мысль текстом.",
-            )
-            print(
-                "INSTAGRAM_AUDIO_CONFIRMATION_REJECTED:",
-                {"sender_id": event["sender_id"], "mid": message_id},
-                flush=True,
-            )
-            return
-        elif raw_text:
-            # A substantive correction replaces the pending transcript.
-            context.pop("pending_voice_transcript", None)
-            context.pop("pending_voice_mid", None)
-            context.pop("pending_voice_created_at", None)
-
-    if audio_url:
-        try:
-            transcript = _transcribe_instagram_audio(audio_url)
-            print(
-                "INSTAGRAM_AUDIO_TRANSCRIPT:",
-                {
-                    "sender_id": event["sender_id"],
-                    "mid": message_id,
-                    "text": transcript,
-                },
-                flush=True,
-            )
-        except Exception as exc:
-            print(
-                "INSTAGRAM_AUDIO_ERROR:",
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            if not raw_text:
-                _send_instagram_text(
-                    event["recipient_id"],
-                    event["sender_id"],
-                    "Я получила ваше голосовое сообщение, но сейчас не смогла его разобрать. "
-                    "Напишите, пожалуйста, эту мысль текстом — и я сразу отвечу.",
-                )
-                return
-            transcript = ""
-
-        if transcript and _voice_transcript_needs_confirmation(transcript):
-            context.update(
-                {
-                    "pending_voice_transcript": transcript,
-                    "pending_voice_mid": message_id,
-                    "pending_voice_created_at": datetime.now(timezone.utc).isoformat(),
-                    "instagram_last_mid": message_id,
-                    "instagram_last_processed_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            dedupe_source = message_id or f'{event["sender_id"]}|{event.get("timestamp")}|{transcript}'
-            core._save_dialog_state(
-                config,
-                owner_id,
-                contact_id,
-                last_incoming_id=_stable_message_id(dedupe_source),
-                stage=str(state.get("stage") or "idle"),
-                greeted=bool(state.get("greeted", False)),
-                context=context,
-            )
-            _send_instagram_text(
-                event["recipient_id"],
-                event["sender_id"],
-                _voice_confirmation_reply(transcript),
-            )
-            print(
-                "INSTAGRAM_AUDIO_CONFIRMATION_REQUIRED:",
-                {"sender_id": event["sender_id"], "mid": message_id, "text": transcript},
-                flush=True,
-            )
-            return
-
-        if transcript:
-            text = f"{raw_text}\n\n{transcript}".strip() if raw_text else transcript
-            # The transcript is useful for the live conversation, but it is not
-            # allowed to become a confirmed fact until the person explicitly confirms it.
-            context["incoming_voice_unverified"] = True
-            context["incoming_voice_transcript"] = transcript
-
-    if voice_confirmed:
-        context["incoming_voice_confirmed"] = True
-
-    # Pass the transport metadata to the dialog policy through state context.
-    state = dict(state)
-    state["context"] = context
 
     reply, new_stage, greeted, new_context = core._process_message(
         config,
@@ -693,10 +569,6 @@ def _build_neona_draft(event: dict) -> None:
     sent_message_id = str(send_result.get("message_id") or "").strip()
 
     new_context = dict(new_context or {})
-    # Transport flags are one-turn only; keep only durable audit fields.
-    new_context.pop("incoming_voice_unverified", None)
-    new_context.pop("incoming_voice_transcript", None)
-    new_context.pop("incoming_voice_confirmed", None)
     new_context.update(
         {
             "channel": "instagram",
@@ -704,7 +576,6 @@ def _build_neona_draft(event: dict) -> None:
             "instagram_recipient_id": event["recipient_id"],
             "instagram_last_mid": message_id,
             "instagram_last_incoming_text": text,
-            "instagram_last_input_source": "voice" if audio_url or voice_confirmed else "text",
             "instagram_last_draft": reply_text,
             "instagram_last_sent_message_id": sent_message_id,
             "instagram_last_processed_at": datetime.now(timezone.utc).isoformat(),
@@ -760,6 +631,264 @@ def _process_instagram_payload(payload: dict) -> None:
         )
 
 
+def _vk_contact_id(user_id: int) -> int:
+    """Create a stable negative ID in a VK-specific namespace."""
+    return -abs(_stable_message_id(f"vk-user:{int(user_id)}"))
+
+
+def _vk_api(method: str, **params) -> dict:
+    if not VK_ACCESS_TOKEN:
+        raise RuntimeError("Missing VK_ACCESS_TOKEN")
+    payload = {
+        **params,
+        "access_token": VK_ACCESS_TOKEN,
+        "v": VK_API_VERSION,
+    }
+    response = requests.post(
+        f"https://api.vk.com/method/{method}",
+        data=payload,
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"VK API HTTP {response.status_code}: {str(response.text or '')[:800]}"
+        )
+    data = response.json() if response.text.strip() else {}
+    if not isinstance(data, dict):
+        raise RuntimeError("VK API returned an unexpected response.")
+    if data.get("error"):
+        error = data.get("error") or {}
+        raise RuntimeError(
+            "VK API error "
+            f"{error.get('error_code')}: {error.get('error_msg')}"
+        )
+    return data
+
+
+def _vk_user_name(user_id: int) -> str:
+    try:
+        data = _vk_api("users.get", user_ids=int(user_id))
+        rows = data.get("response") or []
+        if isinstance(rows, list) and rows:
+            first_name = str(rows[0].get("first_name") or "").strip()
+            last_name = str(rows[0].get("last_name") or "").strip()
+            return " ".join(x for x in (first_name, last_name) if x).strip()
+    except Exception as exc:
+        print(
+            "VK_USER_NAME_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+    return ""
+
+
+def _send_vk_text(peer_id: int, text: str) -> dict:
+    text = str(text or "").strip()
+    if not text:
+        raise RuntimeError("VK send requires non-empty text.")
+    return _vk_api(
+        "messages.send",
+        peer_id=int(peer_id),
+        random_id=0,
+        message=text,
+    )
+
+
+def _vk_neona_config(core):
+    required = {
+        "SUPABASE_URL": os.getenv("SUPABASE_URL", "").strip(),
+        "SUPABASE_SECRET_KEY": os.getenv("SUPABASE_SECRET_KEY", "").strip(),
+        "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", "").strip(),
+        "VK_OWNER_ID": VK_OWNER_ID,
+        "VK_OWNER_NAME": VK_OWNER_NAME,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "Missing VK/Neona environment variables: " + ", ".join(missing)
+        )
+
+    try:
+        owner_id = int(required["VK_OWNER_ID"])
+    except ValueError as exc:
+        raise RuntimeError("VK_OWNER_ID must be a numeric Agency W owner id.") from exc
+
+    config = core.Config(
+        supabase_url=required["SUPABASE_URL"].rstrip("/"),
+        supabase_secret_key=required["SUPABASE_SECRET_KEY"],
+        fernet_key="",
+        telegram_api_id=0,
+        telegram_api_hash="",
+        openai_api_key=required["OPENAI_API_KEY"],
+    )
+    return config, owner_id, _owner_name_for_russian(required["VK_OWNER_NAME"])
+
+
+def _process_vk_message(payload: dict) -> None:
+    """Pass one VK message_new event through the existing Neona policy."""
+    try:
+        obj = payload.get("object")
+        if not isinstance(obj, dict):
+            return
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            return
+
+        if int(message.get("out") or 0) != 0:
+            return
+
+        from_id = int(message.get("from_id") or 0)
+        peer_id = int(message.get("peer_id") or 0)
+        if from_id <= 0 or peer_id <= 0:
+            return
+
+        text_in = str(message.get("text") or "").strip()
+        if not text_in:
+            return
+
+        import neona_dialog_policy as policy
+
+        policy.apply_policy()
+        core = policy.core
+        config, owner_id, owner_name = _vk_neona_config(core)
+
+        contact_id = _vk_contact_id(from_id)
+        message_key = str(
+            message.get("id")
+            or message.get("conversation_message_id")
+            or ""
+        ).strip()
+        message_dt = _message_datetime(message.get("date"))
+
+        state = core._dialog_state(config, owner_id, contact_id)
+        if state is None:
+            state = {
+                "last_incoming_message_id": 0,
+                "stage": "idle",
+                "greeted": False,
+                "context": {
+                    "channel": "vk",
+                    "vk_user_id": from_id,
+                    "vk_peer_id": peer_id,
+                },
+            }
+
+        context = (
+            dict(state.get("context"))
+            if isinstance(state.get("context"), dict)
+            else {}
+        )
+
+        if message_key and str(context.get("vk_last_message_id") or "") == message_key:
+            print(
+                "VK_NEONA_DUPLICATE:",
+                {"user_id": from_id, "message_id": message_key},
+                flush=True,
+            )
+            return
+
+        display_name = _vk_user_name(from_id)
+
+        reply, new_stage, greeted, new_context = core._process_message(
+            config,
+            owner_id,
+            owner_name,
+            contact_id,
+            display_name,
+            "",
+            text_in,
+            message_dt,
+            state,
+        )
+
+        reply_text = _polish_instagram_reply(str(reply or ""), owner_name)
+        if not reply_text:
+            raise RuntimeError("Neona returned an empty VK reply.")
+
+        _send_vk_text(peer_id, reply_text)
+
+        new_context = dict(new_context or {})
+        new_context.update(
+            {
+                "channel": "vk",
+                "vk_user_id": from_id,
+                "vk_peer_id": peer_id,
+                "vk_display_name": display_name,
+                "vk_last_message_id": message_key,
+                "vk_last_incoming_text": text_in,
+                "vk_last_reply": reply_text,
+                "vk_last_processed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        dedupe_source = message_key or f"{from_id}|{message.get('date')}|{text_in}"
+        core._save_dialog_state(
+            config,
+            owner_id,
+            contact_id,
+            last_incoming_id=_stable_message_id(f"vk:{dedupe_source}"),
+            stage=str(new_stage or "idle"),
+            greeted=bool(greeted),
+            context=new_context,
+        )
+
+        print(
+            "VK_NEONA_SENT:",
+            {
+                "peer_id": peer_id,
+                "incoming": text_in,
+                "reply": reply_text,
+                "stage": str(new_stage or "idle"),
+            },
+            flush=True,
+        )
+    except Exception as exc:
+        print(
+            "VK_NEONA_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+
+async def vk_webhook_receive(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return PlainTextResponse("Bad Request", status_code=400)
+
+    if not isinstance(payload, dict):
+        return PlainTextResponse("Bad Request", status_code=400)
+
+    incoming_group_id = str(payload.get("group_id") or "").strip()
+    if VK_GROUP_ID and incoming_group_id != VK_GROUP_ID:
+        return PlainTextResponse("Forbidden", status_code=403)
+
+    incoming_secret = str(payload.get("secret") or "")
+    if VK_CALLBACK_SECRET and incoming_secret != VK_CALLBACK_SECRET:
+        return PlainTextResponse("Forbidden", status_code=403)
+
+    event_type = str(payload.get("type") or "").strip()
+
+    if event_type == "confirmation":
+        if not VK_CALLBACK_CONFIRMATION:
+            return PlainTextResponse(
+                "Missing VK_CALLBACK_CONFIRMATION",
+                status_code=500,
+            )
+        return PlainTextResponse(VK_CALLBACK_CONFIRMATION, status_code=200)
+
+    if event_type == "message_new":
+        print("VK_WEBHOOK_EVENT:", payload, flush=True)
+        return PlainTextResponse(
+            "ok",
+            status_code=200,
+            background=BackgroundTask(_process_vk_message, payload),
+        )
+
+    return PlainTextResponse("ok", status_code=200)
+
+
+
 async def instagram_webhook_receive(request: Request):
     try:
         payload = await request.json()
@@ -792,6 +921,11 @@ routes = [
     Route(
         "/instagram/webhook",
         instagram_webhook_receive,
+        methods=["POST"],
+    ),
+    Route(
+        "/vk/webhook",
+        vk_webhook_receive,
         methods=["POST"],
     ),
 ]
