@@ -46,16 +46,18 @@ def _telegram_api_base() -> str:
     """
     Базовый адрес Telegram Bot API.
 
-    Для больших роликов Агентство W использует собственный Local Telegram
-    Bot API. Если секрет не задан, остаётся совместимый fallback на обычный
-    облачный Bot API Telegram.
+    Агентство W использует собственный Local Telegram Bot API для всех
+    публикаций Publisher. Секрет/переменная окружения могут переопределить
+    адрес, но при их отсутствии НЕ откатываемся на облачный api.telegram.org,
+    потому что он снова ограничит загрузку больших видео.
     """
+    default_local_base = "https://agency-w-telegram-api.onrender.com"
     base = str(
         st.secrets.get("AGENCY_W_TELEGRAM_API_BASE")
         or os.environ.get("AGENCY_W_TELEGRAM_API_BASE")
-        or "https://api.telegram.org"
+        or default_local_base
     ).strip().rstrip("/")
-    return base or "https://api.telegram.org"
+    return base or default_local_base
 
 
 def _telegram_call(
@@ -72,7 +74,20 @@ def _telegram_call(
         json=payload,
         timeout=timeout,
     )
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            error_data = response.json()
+            description = (
+                str(error_data.get("description") or "")
+                if isinstance(error_data, dict)
+                else ""
+            )
+        except Exception:
+            description = str(response.text or "").strip()[:500]
+        raise RuntimeError(
+            f"Telegram API HTTP {response.status_code}: "
+            f"{description or 'запрос отклонён.'}"
+        )
     data = response.json()
     if not isinstance(data, dict) or data.get("ok") is not True:
         description = (
@@ -354,7 +369,20 @@ def list_publisher_destinations(
         },
         timeout=20,
     )
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            error_data = response.json()
+            description = (
+                str(error_data.get("description") or "")
+                if isinstance(error_data, dict)
+                else ""
+            )
+        except Exception:
+            description = str(response.text or "").strip()[:500]
+        raise RuntimeError(
+            f"Telegram API HTTP {response.status_code}: "
+            f"{description or 'запрос отклонён.'}"
+        )
     data = response.json()
     return data if isinstance(data, list) else []
 
@@ -568,7 +596,20 @@ def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, 
         },
         timeout=90,
     )
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            error_data = response.json()
+            description = (
+                str(error_data.get("description") or "")
+                if isinstance(error_data, dict)
+                else ""
+            )
+        except Exception:
+            description = str(response.text or "").strip()[:500]
+        raise RuntimeError(
+            f"Telegram API HTTP {response.status_code}: "
+            f"{description or 'запрос отклонён.'}"
+        )
     data = response.json()
     if not isinstance(data, dict) or data.get("ok") is not True:
         description = str(data.get("description") or "") if isinstance(data, dict) else ""
@@ -606,7 +647,20 @@ def _send_video(
         },
         timeout=900,
     )
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            error_data = response.json()
+            description = (
+                str(error_data.get("description") or "")
+                if isinstance(error_data, dict)
+                else ""
+            )
+        except Exception:
+            description = str(response.text or "").strip()[:500]
+        raise RuntimeError(
+            f"Telegram API HTTP {response.status_code}: "
+            f"{description or 'запрос отклонён.'}"
+        )
     data = response.json()
     if not isinstance(data, dict) or data.get("ok") is not True:
         description = str(data.get("description") or "") if isinstance(data, dict) else ""
