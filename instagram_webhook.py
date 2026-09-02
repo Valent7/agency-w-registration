@@ -28,7 +28,7 @@ INSTAGRAM_OWNER_NAME = os.getenv("INSTAGRAM_OWNER_NAME", "").strip()
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
 INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0").strip() or "v23.0"
 
-# VK community integration. Keep every secret/token in Render Environment.
+# VK community integration. Keep secrets/tokens in Render Environment.
 VK_ACCESS_TOKEN = os.getenv("VK_ACCESS_TOKEN", "").strip()
 VK_GROUP_ID = os.getenv("VK_GROUP_ID", "").strip()
 VK_CALLBACK_CONFIRMATION = os.getenv("VK_CALLBACK_CONFIRMATION", "").strip()
@@ -631,22 +631,21 @@ def _process_instagram_payload(payload: dict) -> None:
         )
 
 
+
 def _vk_contact_id(user_id: int) -> int:
-    """Create a stable negative ID in a VK-specific namespace."""
     return -abs(_stable_message_id(f"vk-user:{int(user_id)}"))
 
 
 def _vk_api(method: str, **params) -> dict:
     if not VK_ACCESS_TOKEN:
         raise RuntimeError("Missing VK_ACCESS_TOKEN")
-    payload = {
-        **params,
-        "access_token": VK_ACCESS_TOKEN,
-        "v": VK_API_VERSION,
-    }
     response = requests.post(
         f"https://api.vk.com/method/{method}",
-        data=payload,
+        data={
+            **params,
+            "access_token": VK_ACCESS_TOKEN,
+            "v": VK_API_VERSION,
+        },
         timeout=30,
     )
     if not response.ok:
@@ -659,8 +658,7 @@ def _vk_api(method: str, **params) -> dict:
     if data.get("error"):
         error = data.get("error") or {}
         raise RuntimeError(
-            "VK API error "
-            f"{error.get('error_code')}: {error.get('error_msg')}"
+            f"VK API error {error.get('error_code')}: {error.get('error_msg')}"
         )
     return data
 
@@ -674,11 +672,7 @@ def _vk_user_name(user_id: int) -> str:
             last_name = str(rows[0].get("last_name") or "").strip()
             return " ".join(x for x in (first_name, last_name) if x).strip()
     except Exception as exc:
-        print(
-            "VK_USER_NAME_ERROR:",
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
+        print("VK_USER_NAME_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
     return ""
 
 
@@ -725,7 +719,6 @@ def _vk_neona_config(core):
 
 
 def _process_vk_message(payload: dict) -> None:
-    """Pass one VK message_new event through the existing Neona policy."""
     try:
         obj = payload.get("object")
         if not isinstance(obj, dict):
@@ -733,7 +726,6 @@ def _process_vk_message(payload: dict) -> None:
         message = obj.get("message")
         if not isinstance(message, dict):
             return
-
         if int(message.get("out") or 0) != 0:
             return
 
@@ -742,8 +734,8 @@ def _process_vk_message(payload: dict) -> None:
         if from_id <= 0 or peer_id <= 0:
             return
 
-        text_in = str(message.get("text") or "").strip()
-        if not text_in:
+        incoming_text = str(message.get("text") or "").strip()
+        if not incoming_text:
             return
 
         import neona_dialog_policy as policy
@@ -773,22 +765,11 @@ def _process_vk_message(payload: dict) -> None:
                 },
             }
 
-        context = (
-            dict(state.get("context"))
-            if isinstance(state.get("context"), dict)
-            else {}
-        )
-
+        context = dict(state.get("context")) if isinstance(state.get("context"), dict) else {}
         if message_key and str(context.get("vk_last_message_id") or "") == message_key:
-            print(
-                "VK_NEONA_DUPLICATE:",
-                {"user_id": from_id, "message_id": message_key},
-                flush=True,
-            )
             return
 
         display_name = _vk_user_name(from_id)
-
         reply, new_stage, greeted, new_context = core._process_message(
             config,
             owner_id,
@@ -796,7 +777,7 @@ def _process_vk_message(payload: dict) -> None:
             contact_id,
             display_name,
             "",
-            text_in,
+            incoming_text,
             message_dt,
             state,
         )
@@ -815,13 +796,13 @@ def _process_vk_message(payload: dict) -> None:
                 "vk_peer_id": peer_id,
                 "vk_display_name": display_name,
                 "vk_last_message_id": message_key,
-                "vk_last_incoming_text": text_in,
+                "vk_last_incoming_text": incoming_text,
                 "vk_last_reply": reply_text,
                 "vk_last_processed_at": datetime.now(timezone.utc).isoformat(),
             }
         )
 
-        dedupe_source = message_key or f"{from_id}|{message.get('date')}|{text_in}"
+        dedupe_source = message_key or f"{from_id}|{message.get('date')}|{incoming_text}"
         core._save_dialog_state(
             config,
             owner_id,
@@ -834,20 +815,11 @@ def _process_vk_message(payload: dict) -> None:
 
         print(
             "VK_NEONA_SENT:",
-            {
-                "peer_id": peer_id,
-                "incoming": text_in,
-                "reply": reply_text,
-                "stage": str(new_stage or "idle"),
-            },
+            {"peer_id": peer_id, "incoming": incoming_text, "reply": reply_text},
             flush=True,
         )
     except Exception as exc:
-        print(
-            "VK_NEONA_ERROR:",
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
+        print("VK_NEONA_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
 
 
 async def vk_webhook_receive(request: Request):
@@ -863,12 +835,10 @@ async def vk_webhook_receive(request: Request):
     if VK_GROUP_ID and incoming_group_id != VK_GROUP_ID:
         return PlainTextResponse("Forbidden", status_code=403)
 
-    incoming_secret = str(payload.get("secret") or "")
-    if VK_CALLBACK_SECRET and incoming_secret != VK_CALLBACK_SECRET:
-        return PlainTextResponse("Forbidden", status_code=403)
-
     event_type = str(payload.get("type") or "").strip()
 
+    # VK's confirmation POST contains type + group_id. It does NOT have to
+    # contain the callback secret, so confirm first.
     if event_type == "confirmation":
         if not VK_CALLBACK_CONFIRMATION:
             return PlainTextResponse(
@@ -876,6 +846,11 @@ async def vk_webhook_receive(request: Request):
                 status_code=500,
             )
         return PlainTextResponse(VK_CALLBACK_CONFIRMATION, status_code=200)
+
+    # For real event deliveries, require the secret configured in VK + Render.
+    incoming_secret = str(payload.get("secret") or "")
+    if VK_CALLBACK_SECRET and incoming_secret != VK_CALLBACK_SECRET:
+        return PlainTextResponse("Forbidden", status_code=403)
 
     if event_type == "message_new":
         print("VK_WEBHOOK_EVENT:", payload, flush=True)
@@ -886,7 +861,6 @@ async def vk_webhook_receive(request: Request):
         )
 
     return PlainTextResponse("ok", status_code=200)
-
 
 
 async def instagram_webhook_receive(request: Request):
