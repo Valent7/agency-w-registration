@@ -3932,7 +3932,7 @@ def _prepare_uploaded_video(
     Проверяет готовый ролик для публикации через Telegram Publisher.
 
     На этом этапе видео НЕ отправляется во внешний ИИ и НЕ перекодируется.
-    Для публикации принимаем MP4 до 300 МБ (ориентир: ролики до ~5 минут).
+    Для публикации принимаем MP4 до 300 МБ через Local Telegram Bot API.
     """
     if uploaded_file is None:
         return {"ok": False, "error": "Файл не выбран."}
@@ -3962,7 +3962,7 @@ def _prepare_uploaded_video(
             "ok": False,
             "error": (
                 "Ролик слишком большой для текущего Publisher. "
-                "Максимум 300 МБ. Если ролик длиннее, используйте сжатую MP4-версию."
+                "Максимум 300 МБ."
             ),
         }
 
@@ -6399,10 +6399,9 @@ def _render_result(
                 type=["mp4"],
                 accept_multiple_files=False,
                 key=video_upload_key,
-                max_upload_size=300,
                 help=(
                     "Готовый MP4-ролик для публикации в ваших Telegram-площадках. "
-                    "Допустимый размер — до 300 МБ (ориентир: ролики до ~5 минут)."
+                    "Текущий лимит — 300 МБ."
                 ),
             )
 
@@ -7271,9 +7270,15 @@ def _render_result(
                     selected_video_destination_ids,
                     video=current_video,
                 )
+                published_count = int(
+                    result.get("video_telegram_published_count") or 0
+                )
                 video_already_published = bool(
-                    str(result.get("video_telegram_published_hash") or "")
+                    video_tg_hash
+                    and str(result.get("video_telegram_published_hash") or "")
                     == video_tg_hash
+                    and published_count > 0
+                    and published_count == len(selected_video_destination_ids)
                 )
 
                 if video_already_published:
@@ -7310,15 +7315,42 @@ def _render_result(
                                 ),
                                 destination_ids=selected_video_destination_ids,
                             )
+                        accepted = int(tg_result.get("accepted") or 0)
+                        requested = int(
+                            tg_result.get("requested")
+                            or len(selected_video_destination_ids)
+                        )
+                        failed = int(tg_result.get("failed") or 0)
+                        publish_results = tg_result.get("results") or []
+
+                        # Ноль отправок НИКОГДА не считается публикацией.
+                        # То же самое для частичной доставки: сначала показываем
+                        # реальную ошибку, а не зелёный статус «Telegram принял».
+                        if accepted <= 0 or failed > 0 or accepted < requested:
+                            details = []
+                            for item in publish_results:
+                                if not isinstance(item, dict) or item.get("ok") is True:
+                                    continue
+                                title = str(
+                                    item.get("title") or "Telegram-площадка"
+                                ).strip()
+                                error = str(
+                                    item.get("error") or "неизвестная ошибка"
+                                ).strip()
+                                details.append(f"{title}: {error}")
+                            detail_text = "; ".join(details[:3])
+                            summary = (
+                                f"Telegram доставил ролик в {accepted} из {requested} площадок."
+                            )
+                            if detail_text:
+                                summary += f" Причина: {detail_text}"
+                            raise RuntimeError(summary)
+
                         updated = dict(result)
                         updated["video_telegram_published_at"] = datetime.now(UTC).isoformat()
                         updated["video_telegram_published_hash"] = video_tg_hash
-                        updated["video_telegram_published_count"] = int(
-                            tg_result.get("accepted") or 0
-                        )
-                        updated["video_telegram_publish_results"] = (
-                            tg_result.get("results") or []
-                        )
+                        updated["video_telegram_published_count"] = accepted
+                        updated["video_telegram_publish_results"] = publish_results
                         _update_task(owner_id, task_id, {"result": updated})
                         st.rerun()
                     except Exception as exc:

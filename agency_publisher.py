@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import os
 import requests
 import streamlit as st
 
@@ -45,23 +46,16 @@ def _telegram_api_base() -> str:
     """
     Базовый адрес Telegram Bot API.
 
-    По умолчанию используется облачный API Telegram (лимит загрузки 50 МБ).
-    Для больших роликов Publisher можно перевести на собственный Local Bot API
-    и указать его адрес в Streamlit Secret AGENCY_W_TELEGRAM_API_BASE.
+    Для больших роликов Агентство W использует собственный Local Telegram
+    Bot API. Если секрет не задан, остаётся совместимый fallback на обычный
+    облачный Bot API Telegram.
     """
-    return str(
+    base = str(
         st.secrets.get("AGENCY_W_TELEGRAM_API_BASE")
+        or os.environ.get("AGENCY_W_TELEGRAM_API_BASE")
         or "https://api.telegram.org"
     ).strip().rstrip("/")
-
-
-def _telegram_endpoint(method: str) -> str:
-    token = _bot_token()
-    return f"{_telegram_api_base()}/bot{token}/{str(method).strip()}"
-
-
-def _telegram_uses_local_api() -> bool:
-    return _telegram_api_base() != "https://api.telegram.org"
+    return base or "https://api.telegram.org"
 
 
 def _telegram_call(
@@ -69,10 +63,11 @@ def _telegram_call(
     *,
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
-    timeout: int = 20,
+    timeout: int = 60,
 ) -> Any:
+    token = _bot_token()
     response = requests.post(
-        _telegram_endpoint(method),
+        f"{_telegram_api_base()}/bot{token}/{method}",
         params=params,
         json=payload,
         timeout=timeout,
@@ -557,8 +552,9 @@ def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, 
     if not raw:
         raise ValueError("Изображение пустое.")
 
+    token = _bot_token()
     response = requests.post(
-        _telegram_endpoint("sendPhoto"),
+        f"{_telegram_api_base()}/bot{token}/sendPhoto",
         data={
             "chat_id": str(int(chat_id)),
             "caption": str(caption or "")[:1000],
@@ -570,7 +566,7 @@ def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, 
                 "image/png",
             )
         },
-        timeout=45,
+        timeout=90,
     )
     response.raise_for_status()
     data = response.json()
@@ -593,15 +589,9 @@ def _send_video(
     if not raw:
         raise ValueError("Видео пустое.")
 
-    if len(raw) > 50 * 1024 * 1024 and not _telegram_uses_local_api():
-        raise RuntimeError(
-            "Ролик больше 50 МБ. В Агентстве W он уже разрешён, "
-            "но Publisher ещё подключён к облачному Telegram Bot API. "
-            "Подключите Local Bot API через AGENCY_W_TELEGRAM_API_BASE."
-        )
-
+    token = _bot_token()
     response = requests.post(
-        _telegram_endpoint("sendVideo"),
+        f"{_telegram_api_base()}/bot{token}/sendVideo",
         data={
             "chat_id": str(int(chat_id)),
             "caption": str(caption or "")[:1000],
@@ -614,7 +604,7 @@ def _send_video(
                 str(mime_type or "video/mp4"),
             )
         },
-        timeout=600 if len(raw) > 50 * 1024 * 1024 else 180,
+        timeout=900,
     )
     response.raise_for_status()
     data = response.json()
