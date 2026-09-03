@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
+from urllib.parse import quote
 
 import requests
 
@@ -663,17 +664,30 @@ def _vk_api(method: str, **params) -> dict:
     return data
 
 
-def _vk_user_name(user_id: int) -> str:
+def _vk_user_profile(user_id: int) -> dict:
+    """Returns VK profile data. Neona is intentionally given only first_name."""
     try:
         data = _vk_api("users.get", user_ids=int(user_id))
         rows = data.get("response") or []
         if isinstance(rows, list) and rows:
-            first_name = str(rows[0].get("first_name") or "").strip()
-            last_name = str(rows[0].get("last_name") or "").strip()
-            return " ".join(x for x in (first_name, last_name) if x).strip()
+            row = rows[0] if isinstance(rows[0], dict) else {}
+            first_name = str(row.get("first_name") or "").strip()
+            last_name = str(row.get("last_name") or "").strip()
+            display_name = " ".join(
+                x for x in (first_name, last_name) if x
+            ).strip()
+            return {
+                "first_name": first_name,
+                "last_name": last_name,
+                "display_name": display_name,
+            }
     except Exception as exc:
         print("VK_USER_NAME_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
-    return ""
+    return {"first_name": "", "last_name": "", "display_name": ""}
+
+
+def _vk_user_name(user_id: int) -> str:
+    return str(_vk_user_profile(user_id).get("first_name") or "").strip()
 
 
 def _send_vk_text(peer_id: int, text: str) -> dict:
@@ -688,13 +702,247 @@ def _send_vk_text(peer_id: int, text: str) -> dict:
     )
 
 
-def _vk_neona_config(core):
+
+def _supabase_rest_config() -> tuple[str, str]:
+    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    if not url or not key:
+        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SECRET_KEY")
+    return url, key
+
+
+def _supabase_headers(prefer: str = "") -> dict[str, str]:
+    _, key = _supabase_rest_config()
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def _sb_get(table: str, params: dict) -> list[dict]:
+    url, _ = _supabase_rest_config()
+    response = requests.get(
+        f"{url}/rest/v1/{table}",
+        headers=_supabase_headers(),
+        params=params,
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json() if response.text.strip() else []
+    return data if isinstance(data, list) else []
+
+
+def _sb_post(table: str, payload: dict, *, merge: bool = False) -> list[dict]:
+    url, _ = _supabase_rest_config()
+    prefer = "return=representation"
+    if merge:
+        prefer = "resolution=merge-duplicates,return=representation"
+    response = requests.post(
+        f"{url}/rest/v1/{table}",
+        headers=_supabase_headers(prefer),
+        json=payload,
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json() if response.text.strip() else []
+    return data if isinstance(data, list) else []
+
+
+def _sb_patch(table: str, filters: dict, payload: dict) -> None:
+    url, _ = _supabase_rest_config()
+    response = requests.patch(
+        f"{url}/rest/v1/{table}",
+        headers=_supabase_headers("return=minimal"),
+        params=filters,
+        json=payload,
+        timeout=20,
+    )
+    response.raise_for_status()
+
+
+def _vk_member_by_code(member_code: str) -> dict | None:
+    code = str(member_code or "").strip()
+    if not code:
+        return None
+    rows = _sb_get(
+        "agency_members",
+        {
+            "member_code": f"eq.{code}",
+            "select": "telegram_id,first_name,member_code,referrer_code",
+            "limit": 1,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def _vk_member_by_telegram(telegram_id: int) -> dict | None:
+    rows = _sb_get(
+        "agency_members",
+        {
+            "telegram_id": f"eq.{int(telegram_id)}",
+            "select": "telegram_id,first_name,member_code,referrer_code",
+            "limit": 1,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def _vk_lead(vk_user_id: int) -> dict | None:
+    rows = _sb_get(
+        "agency_vk_leads",
+        {
+            "vk_user_id": f"eq.{int(vk_user_id)}",
+            "select": "*",
+            "limit": 1,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def _fallback_vk_owner() -> dict:
+    if not VK_OWNER_ID:
+        raise RuntimeError("Missing VK_OWNER_ID fallback")
+    try:
+        owner_id = int(VK_OWNER_ID)
+    except ValueError as exc:
+        raise RuntimeError("VK_OWNER_ID must be numeric") from exc
+
+    member = _vk_member_by_telegram(owner_id) or {}
+    owner_name = str(
+        member.get("first_name")
+        or VK_OWNER_NAME
+        or ""
+    ).strip()
+    return {
+        "telegram_id": owner_id,
+        "first_name": owner_name,
+        "member_code": str(member.get("member_code") or "").strip(),
+        "attribution_status": "director_default",
+    }
+
+
+def _resolve_vk_owner(ref_code: str) -> dict:
+    """Resolve a personal VK ref to an Agency W member; otherwise Director."""
+    code = str(ref_code or "").strip()
+    if code:
+        member = _vk_member_by_code(code)
+        if member:
+            return {
+                "telegram_id": int(member["telegram_id"]),
+                "first_name": str(member.get("first_name") or "").strip(),
+                "member_code": str(member.get("member_code") or code).strip(),
+                "attribution_status": "partner_ref",
+            }
+    fallback = _fallback_vk_owner()
+    if code:
+        fallback["attribution_status"] = "invalid_ref_director_default"
+    return fallback
+
+
+def _ensure_vk_lead(
+    *,
+    vk_user_id: int,
+    peer_id: int,
+    ref_code: str,
+    ref_source: str,
+    display_name: str,
+) -> tuple[dict, dict]:
+    """
+    First-touch attribution: once a VK person is attached to an Agency W owner,
+    later links from other partners never overwrite that owner.
+    """
+    existing = _vk_lead(vk_user_id)
+    if existing:
+        owner = {
+            "telegram_id": int(existing["owner_telegram_id"]),
+            "first_name": str(existing.get("owner_name") or "").strip(),
+            "member_code": str(existing.get("owner_member_code") or "").strip(),
+            "attribution_status": str(existing.get("attribution_status") or "locked"),
+        }
+        _sb_patch(
+            "agency_vk_leads",
+            {"vk_user_id": f"eq.{int(vk_user_id)}"},
+            {
+                "vk_peer_id": int(peer_id),
+                "display_name": str(display_name or "").strip() or None,
+                "last_seen_at": datetime.now(timezone.utc).isoformat(),
+                "last_ref": str(ref_code or "").strip() or None,
+                "last_ref_source": str(ref_source or "").strip() or None,
+            },
+        )
+        return existing, owner
+
+    owner = _resolve_vk_owner(ref_code)
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "vk_user_id": int(vk_user_id),
+        "vk_peer_id": int(peer_id),
+        "display_name": str(display_name or "").strip() or None,
+        "owner_telegram_id": int(owner["telegram_id"]),
+        "owner_member_code": str(owner.get("member_code") or "").strip() or None,
+        "owner_name": str(owner.get("first_name") or "").strip() or None,
+        "first_ref": str(ref_code or "").strip() or None,
+        "first_ref_source": str(ref_source or "").strip() or None,
+        "last_ref": str(ref_code or "").strip() or None,
+        "last_ref_source": str(ref_source or "").strip() or None,
+        "attribution_status": str(owner.get("attribution_status") or "partner_ref"),
+        "dialog_stage": "idle",
+        "first_seen_at": now,
+        "last_seen_at": now,
+        "last_message_at": now,
+    }
+    created = _sb_post("agency_vk_leads", payload)
+    lead = created[0] if created else payload
+    return lead, owner
+
+
+def _update_vk_lead_after_dialog(
+    vk_user_id: int,
+    *,
+    stage: str,
+    incoming_text: str,
+) -> None:
+    _sb_patch(
+        "agency_vk_leads",
+        {"vk_user_id": f"eq.{int(vk_user_id)}"},
+        {
+            "dialog_stage": str(stage or "idle"),
+            "last_message_text": str(incoming_text or "")[:1000] or None,
+            "last_message_at": datetime.now(timezone.utc).isoformat(),
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def _vk_time_entry_reply(policy, owner_name: str, first_name: str) -> str:
+    person = str(first_name or "").strip()
+    hello = f"Здравствуйте, {person}!" if person else "Здравствуйте!"
+    forms = {}
+    try:
+        forms = policy._owner_forms(owner_name)
+    except Exception:
+        forms = {}
+    owner_genitive = str(forms.get("genitive") or "владельца аккаунта").strip()
+    return (
+        f"{hello} Я Неона, секретарь-референт {owner_genitive}. "
+        "Вы написали «ВРЕМЯ». А что сейчас отнимает у вас его больше всего — "
+        "поиск людей, переписка, организация работы или что-то совсем другое?"
+    )
+
+
+def _is_vk_time_keyword(text: str) -> bool:
+    normalized = re.sub(r"[^а-яёa-z0-9]+", "", str(text or "").casefold())
+    return normalized == "время"
+
+def _vk_neona_config(core, owner: dict | None = None):
     required = {
         "SUPABASE_URL": os.getenv("SUPABASE_URL", "").strip(),
         "SUPABASE_SECRET_KEY": os.getenv("SUPABASE_SECRET_KEY", "").strip(),
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", "").strip(),
-        "VK_OWNER_ID": VK_OWNER_ID,
-        "VK_OWNER_NAME": VK_OWNER_NAME,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -702,10 +950,9 @@ def _vk_neona_config(core):
             "Missing VK/Neona environment variables: " + ", ".join(missing)
         )
 
-    try:
-        owner_id = int(required["VK_OWNER_ID"])
-    except ValueError as exc:
-        raise RuntimeError("VK_OWNER_ID must be a numeric Agency W owner id.") from exc
+    owner = dict(owner or _fallback_vk_owner())
+    owner_id = int(owner["telegram_id"])
+    owner_name = str(owner.get("first_name") or VK_OWNER_NAME or "").strip()
 
     config = core.Config(
         supabase_url=required["SUPABASE_URL"].rstrip("/"),
@@ -715,7 +962,7 @@ def _vk_neona_config(core):
         telegram_api_hash="",
         openai_api_key=required["OPENAI_API_KEY"],
     )
-    return config, owner_id, _owner_name_for_russian(required["VK_OWNER_NAME"])
+    return config, owner_id, _owner_name_for_russian(owner_name)
 
 
 def _process_vk_message(payload: dict) -> None:
@@ -738,11 +985,25 @@ def _process_vk_message(payload: dict) -> None:
         if not incoming_text:
             return
 
+        ref_code = str(message.get("ref") or "").strip()
+        ref_source = str(message.get("ref_source") or "").strip()
+        profile = _vk_user_profile(from_id)
+        first_name = str(profile.get("first_name") or "").strip()
+        display_name = str(profile.get("display_name") or first_name).strip()
+
+        lead, owner = _ensure_vk_lead(
+            vk_user_id=from_id,
+            peer_id=peer_id,
+            ref_code=ref_code,
+            ref_source=ref_source,
+            display_name=display_name,
+        )
+
         import neona_dialog_policy as policy
 
         policy.apply_policy()
         core = policy.core
-        config, owner_id, owner_name = _vk_neona_config(core)
+        config, owner_id, owner_name = _vk_neona_config(core, owner)
 
         contact_id = _vk_contact_id(from_id)
         message_key = str(
@@ -769,22 +1030,34 @@ def _process_vk_message(payload: dict) -> None:
         if message_key and str(context.get("vk_last_message_id") or "") == message_key:
             return
 
-        display_name = _vk_user_name(from_id)
-        reply, new_stage, greeted, new_context = core._process_message(
-            config,
-            owner_id,
-            owner_name,
-            contact_id,
-            display_name,
-            "",
-            incoming_text,
-            message_dt,
-            state,
+        # "ВРЕМЯ" is the Agency W entry keyword, not a request for the clock.
+        first_time_keyword = (
+            _is_vk_time_keyword(incoming_text)
+            and str(state.get("stage") or "idle") == "idle"
+            and not bool(context.get("vk_time_entry_started"))
         )
 
-        reply_text = _polish_instagram_reply(str(reply or ""), owner_name)
-        if not reply_text:
-            raise RuntimeError("Neona returned an empty VK reply.")
+        if first_time_keyword:
+            reply_text = _vk_time_entry_reply(policy, owner_name, first_name)
+            new_stage = "idle"
+            greeted = True
+            new_context = dict(context)
+            new_context["vk_time_entry_started"] = True
+        else:
+            reply, new_stage, greeted, new_context = core._process_message(
+                config,
+                owner_id,
+                owner_name,
+                contact_id,
+                first_name,
+                "",
+                incoming_text,
+                message_dt,
+                state,
+            )
+            reply_text = _polish_instagram_reply(str(reply or ""), owner_name)
+            if not reply_text:
+                raise RuntimeError("Neona returned an empty VK reply.")
 
         _send_vk_text(peer_id, reply_text)
 
@@ -795,6 +1068,11 @@ def _process_vk_message(payload: dict) -> None:
                 "vk_user_id": from_id,
                 "vk_peer_id": peer_id,
                 "vk_display_name": display_name,
+                "vk_first_name": first_name,
+                "vk_ref": ref_code,
+                "vk_ref_source": ref_source,
+                "vk_owner_member_code": str(owner.get("member_code") or ""),
+                "vk_attribution_status": str(owner.get("attribution_status") or ""),
                 "vk_last_message_id": message_key,
                 "vk_last_incoming_text": incoming_text,
                 "vk_last_reply": reply_text,
@@ -813,9 +1091,22 @@ def _process_vk_message(payload: dict) -> None:
             context=new_context,
         )
 
+        _update_vk_lead_after_dialog(
+            from_id,
+            stage=str(new_stage or "idle"),
+            incoming_text=incoming_text,
+        )
+
         print(
             "VK_NEONA_SENT:",
-            {"peer_id": peer_id, "incoming": incoming_text, "reply": reply_text},
+            {
+                "peer_id": peer_id,
+                "owner_id": owner_id,
+                "owner_code": owner.get("member_code"),
+                "ref": ref_code,
+                "incoming": incoming_text,
+                "reply": reply_text,
+            },
             flush=True,
         )
     except Exception as exc:

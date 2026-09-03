@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any
+from urllib.parse import urlencode
 
 import base64
 import re
@@ -1074,12 +1075,99 @@ def _mark_read(message_id: int) -> None:
     )
 
 
+
+VK_COMMUNITY_ID = "241237638"
+VK_REF_SOURCE = "agency_w"
+
+
+def _vk_personal_link(member_code: str) -> str:
+    code = str(member_code or "").strip()
+    query = urlencode({"ref": code, "ref_source": VK_REF_SOURCE})
+    return f"https://vk.me/club{VK_COMMUNITY_ID}?{query}"
+
+
+def _vk_leads_for_owner(owner_telegram_id: int) -> list[dict[str, Any]]:
+    try:
+        return _get(
+            "agency_vk_leads",
+            {
+                "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+                "select": (
+                    "vk_user_id,display_name,dialog_stage,first_seen_at,"
+                    "last_message_at,attribution_status,first_ref"
+                ),
+                "order": "first_seen_at.desc",
+                "limit": 500,
+            },
+        )
+    except requests.HTTPError as exc:
+        details = str(exc.response.text if exc.response is not None else "")
+        if "agency_vk_leads" in details or "does not exist" in details or "42P01" in details:
+            return []
+        raise
+
+
+def _render_vk_partner_channel(
+    owner_telegram_id: int,
+    member_code: str,
+) -> None:
+    st.markdown("#### 💙 VK Агентства W")
+    st.caption(
+        "Сообщество общее для всей структуры, а эта ссылка персональная. "
+        "Человек, который впервые напишет после перехода по ней, "
+        "закрепляется именно за вами."
+    )
+
+    vk_link = _vk_personal_link(member_code)
+    st.code(vk_link, language=None)
+
+    # Native link button gives partners a one-click test/open path; the code block
+    # remains convenient for copying into posts, clips and ads.
+    st.link_button(
+        "💬 Открыть мою VK-ссылку",
+        vk_link,
+        use_container_width=True,
+    )
+
+    leads = _vk_leads_for_owner(owner_telegram_id)
+    in_dialog = sum(
+        str(item.get("dialog_stage") or "idle")
+        not in {"scheduled", "closed", "declined"}
+        for item in leads
+    )
+    scheduled = sum(
+        str(item.get("dialog_stage") or "") == "scheduled"
+        for item in leads
+    )
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Пришли по VK", len(leads))
+    m2.metric("В диалоге", in_dialog)
+    m3.metric("Записаны", scheduled)
+
+    if leads:
+        with st.expander("Последние обращения из VK"):
+            for item in leads[:10]:
+                name = str(item.get("display_name") or "Пользователь VK").strip()
+                stage = str(item.get("dialog_stage") or "idle").strip()
+                when = _format_dt(item.get("last_message_at") or item.get("first_seen_at"))
+                st.write(f"**{name}** · {stage} · {when}")
+    else:
+        st.caption(
+            "Обращений по вашей VK-ссылке пока нет. "
+            "После первого сообщения человека статистика появится здесь."
+        )
+
+
 def _render_partners(
     owner_telegram_id: int,
     member_code: str,
     partner_link: str,
 ) -> None:
     partners = _direct_partners(member_code)
+
+    _render_vk_partner_channel(owner_telegram_id, member_code)
+    st.divider()
 
     c1, c2 = st.columns(2)
     c1.metric("Лично приглашено", len(partners))
