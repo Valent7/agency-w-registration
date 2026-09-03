@@ -462,17 +462,40 @@ def _detect_timezone(text: str) -> str | None:
 
 
 def _detect_time(text: str) -> str | None:
-    # Двоеточие — однозначный формат времени. Точку считаем временем только
-    # после предлога «в», чтобы дата 07.08 не превращалась в 07:08.
-    match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text)
+    """Распознаёт обычные варианты времени: 17:00, 17-00, 17.00, 17–00, «в 17»."""
+    raw = str(text or "")
+    lowered = raw.casefold()
+
+    # 17:00
+    match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw)
     if match:
         return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
-    match = re.search(r"(?:^|\s)в\s+([01]?\d|2[0-3])\.([0-5]\d)\b", text.lower())
+
+    # «в 17-00», «в 17.00», «в 17–00»
+    match = re.search(
+        r"(?:^|\s)в\s+([01]?\d|2[0-3])\s*[-–—.]\s*([0-5]\d)\b(?![./-]\d)",
+        lowered,
+    )
     if match:
         return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
-    match = re.search(r"(?:^|\s)(?:в\s+)?([01]?\d|2[0-3])\s*(?:час(?:а|ов)?|ч)?(?:\s|$)", text.lower())
+
+    # «17-00 МСК», «17.00 по Москве»
+    match = re.search(
+        r"\b([01]?\d|2[0-3])\s*[-–—.]\s*([0-5]\d)\s*"
+        r"(?:мск|по\s+москве|москов\w*(?:\s+врем\w*)?)\b",
+        lowered,
+    )
+    if match:
+        return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+
+    # «в 17», «17 часов»
+    match = re.search(
+        r"(?:^|\s)(?:в\s+)?([01]?\d|2[0-3])\s*(?:час(?:а|ов)?|ч)?(?:\s|$)",
+        lowered,
+    )
     if match:
         return f"{int(match.group(1)):02d}:00"
+
     return None
 
 
@@ -808,27 +831,41 @@ def _schedule_reply(
                 context,
             )
 
-    missing = []
-    if not context.get("requested_date") or not context.get("requested_time"):
-        missing.append("date_time")
-    if not context.get("contact_timezone"):
-        missing.append("timezone")
-    if not context.get("meeting_format"):
-        missing.append("format")
+       # Спрашиваем только то, чего действительно не хватает.
+    # Уже названные человеком данные повторно не запрашиваем.
 
-    if missing:
-        questions: list[str] = []
-        if "date_time" in missing:
-            questions.append("на какой день и время вам удобна встреча")
-        if "timezone" in missing:
-            questions.append("по какому часовому поясу указано время")
-        if "format" in missing:
-            questions.append("как вам удобнее встретиться — Zoom, Telegram или WhatsApp")
-        if len(questions) == 1:
-            ask = questions[0]
-        else:
-            ask = "; и ".join(questions)
-        return prefix + "Подскажите, пожалуйста, " + ask + ".", "collecting_meeting_details", context
+    if not context.get("requested_date"):
+        lead = (
+            "Отлично. Тогда давайте подберём удобное время. "
+            if stage == "invited_to_meeting"
+            else ""
+        )
+        return (
+            prefix + lead + "На какой день вам удобна встреча?",
+            "collecting_meeting_details",
+            context,
+        )
+
+    if not context.get("requested_time"):
+        return (
+            prefix + "На какое время вам удобно?",
+            "collecting_meeting_details",
+            context,
+        )
+
+    if not context.get("contact_timezone"):
+        return (
+            prefix + "По какому часовому поясу указано время?",
+            "collecting_meeting_details",
+            context,
+        )
+
+    if not context.get("meeting_format"):
+        return (
+            prefix + "Как вам удобнее встретиться — Zoom, Telegram или WhatsApp?",
+            "collecting_meeting_details",
+            context,
+        )
 
     start_utc = _parse_start(context)
     if start_utc is None:
