@@ -16,7 +16,7 @@ MIN_LEAD_MINUTES = 60
 
 
 def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
-    """Свободный слот с рабочим окном 10:00–20:00 МСК и часовым буфером."""
+    """Свободный слот с окном 10:00–20:00 МСК, буфером и постоянной занятостью."""
 
     start_utc = start_utc.astimezone(core.UTC)
     end_utc = end_utc.astimezone(core.UTC)
@@ -34,16 +34,82 @@ def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
     if start_msk < day_start or end_msk > day_end:
         return False
 
-    # Между встречами должен оставаться минимум 1 час.
+    # Между встречами / постоянной занятостью оставляем минимум 1 час.
     expanded_start = start_utc - timedelta(minutes=BUFFER_MINUTES)
     expanded_end = end_utc + timedelta(minutes=BUFFER_MINUTES)
 
-    return not core._list_meetings(
+    # 1) Обычные встречи.
+    if core._list_meetings(
         config,
         owner_id,
         expanded_start,
         expanded_end,
-    )
+    ):
+        return False
+
+    # 2) Постоянная занятость владельца (agency_calendar_blocks).
+    # Именно этого раньше не было в проверке Неоны.
+    try:
+        response = requests.get(
+            f"{config.supabase_url}/rest/v1/agency_calendar_blocks",
+            headers=core._headers(config),
+            params={
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "active": "eq.true",
+                "weekday": f"eq.{int(start_msk.weekday())}",
+                "select": "weekday,start_time,end_time,active,title",
+                "order": "start_time.asc",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        blocks = response.json()
+    except Exception as exc:
+        # Безопаснее считать время занятым, чем создать двойную встречу.
+        print(
+            "NEONA_CALENDAR_BLOCKS_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return False
+
+    if not isinstance(blocks, list):
+        return False
+
+    for block in blocks:
+        if not bool(block.get("active", True)):
+            continue
+
+        try:
+            raw_start = str(block.get("start_time") or "").strip().split(":")
+            raw_end = str(block.get("end_time") or "").strip().split(":")
+            if len(raw_start) < 2 or len(raw_end) < 2:
+                continue
+
+            block_start_clock = dt_time(int(raw_start[0]), int(raw_start[1]))
+            block_end_clock = dt_time(int(raw_end[0]), int(raw_end[1]))
+        except (TypeError, ValueError):
+            continue
+
+        block_start_msk = datetime.combine(
+            start_msk.date(),
+            block_start_clock,
+            core.MSK,
+        )
+        block_end_msk = datetime.combine(
+            start_msk.date(),
+            block_end_clock,
+            core.MSK,
+        )
+
+        block_start_utc = block_start_msk.astimezone(core.UTC)
+        block_end_utc = block_end_msk.astimezone(core.UTC)
+
+        if expanded_start < block_end_utc and expanded_end > block_start_utc:
+            return False
+
+    return True
+
 
 
 def _call_openai(config, instructions: str, text: str) -> str:
