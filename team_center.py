@@ -1078,6 +1078,7 @@ def _mark_read(message_id: int) -> None:
 
 VK_COMMUNITY_ID = "241237638"
 VK_REF_SOURCE = "agency_w"
+VK_COMMUNITY_URL = f"https://vk.ru/club{VK_COMMUNITY_ID}"
 
 
 def _vk_personal_link(member_code: str) -> str:
@@ -1119,14 +1120,23 @@ def _render_vk_partner_channel(
     )
 
     vk_link = _vk_personal_link(member_code)
-    st.code(vk_link, language=None)
 
-    # Native link button gives partners a one-click test/open path; the code block
-    # remains convenient for copying into posts, clips and ads.
+    st.markdown("**📋 Моя персональная ссылка для приглашения людей**")
+    st.code(vk_link, language=None)
+    st.caption(
+        "Скопируйте ссылку значком справа в строке выше и отправляйте её людям, "
+        "размещайте в постах, роликах и рекламе. По этой ссылке человек "
+        "закрепляется за вами."
+    )
+
     st.link_button(
-        "💬 Открыть мою VK-ссылку",
-        vk_link,
+        "💙 Открыть VK-сообщество",
+        VK_COMMUNITY_URL,
         use_container_width=True,
+    )
+    st.caption(
+        "Эта кнопка — только для вашего входа в общее сообщество Агентства W. "
+        "Она открывает VK без персональной ref-метки и не создаёт лид от вашего имени."
     )
 
     leads = _vk_leads_for_owner(owner_telegram_id)
