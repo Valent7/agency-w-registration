@@ -495,6 +495,20 @@ def _refresh_tokens(owner_id: int, row: dict[str, Any]) -> str:
         raise
 
 
+
+def force_refresh_vk_scout_access_token(owner_id: int) -> str:
+    """Force refreshes the rotating VK ID token pair for this owner.
+
+    Used when VK rejects an otherwise valid access token because it was issued
+    from another IP address (error 5). The refresh request is made by the
+    background worker itself, so the replacement access token is issued from
+    the worker side and the new rotating refresh token is saved immediately.
+    """
+    row = _read_token_row(int(owner_id))
+    if not row:
+        raise VKScoutOAuthError("VK Scout ещё не авторизован через VK ID")
+    return _refresh_tokens(int(owner_id), row)
+
 def get_valid_vk_scout_access_token(owner_id: int, *, refresh_before_minutes: int = 5) -> str:
     row = _read_token_row(int(owner_id))
     if not row:

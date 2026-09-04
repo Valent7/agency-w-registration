@@ -23,7 +23,11 @@ from typing import Any
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 
-from vk_scout_oauth import VKScoutOAuthError, get_valid_vk_scout_access_token
+from vk_scout_oauth import (
+    VKScoutOAuthError,
+    force_refresh_vk_scout_access_token,
+    get_valid_vk_scout_access_token,
+)
 
 from vk_scout import (
     VKScoutError,
@@ -340,6 +344,31 @@ def run_once() -> dict[str, int]:
                 per_source=per_source,
                 max_sources=max_sources,
             )
+
+            # VK ID can bind the freshly issued user access token to the IP
+            # that completed OAuth (Streamlit). If the scanner runs on Render,
+            # VK may answer with error 5: "access_token was given to another
+            # ip address". In that case refresh the rotating pair FROM Render
+            # and retry the source scan once.
+            scan_errors = [str(item or "") for item in (scan.get("errors") or [])]
+            ip_bound_error = any(
+                "another ip address" in item.lower()
+                or "другому ip" in item.lower()
+                for item in scan_errors
+            )
+            if ip_bound_error:
+                _log(
+                    f"{owner_id}: VK привязал access token к другому IP; "
+                    "обновляю токен из Render и повторяю сканирование один раз"
+                )
+                scout_access_token = force_refresh_vk_scout_access_token(root_owner_id)
+                os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
+                scan = scan_vk_sources(
+                    owner_id,
+                    per_source=per_source,
+                    max_sources=max_sources,
+                )
+
             stats["sources_scanned"] += int(scan.get("sources_checked") or 0)
             stats["candidates_saved"] += int(scan.get("candidates_saved") or 0)
             for error in scan.get("errors") or []:
