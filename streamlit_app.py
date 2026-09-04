@@ -8136,89 +8136,9 @@ if telegram_login_valid or remembered_data:
                         "отправляется без утверждения владельца."
                     )
 
-                    render_neona_heygen_test(telegram_id)
-
-                    with st.expander("📜 Задача и регламент Неоны"):
-                        st.markdown(
-                            neona_reglament_markdown(first_name)
-                        )
-                        st.caption(
-                            "Согласованные встречи сохраняются во внутреннем "
-                            "календаре Агентства W. Основное время — МСК; "
-                            "местное время человека рассчитывается на дату встречи."
-                        )
-
-                    with st.expander("💬 Входящие сообщения Telegram — тест"):
-                        st.caption(
-                            "На этом этапе Неона отвечает только людям, которым "
-                            "из Агентства W уже было отправлено утверждённое первое "
-                            "сообщение. Старые сообщения не обрабатываются. Первый "
-                            "запуск создаёт безопасную точку отсчёта."
-                        )
-                        st.info(
-                            "Тестовый режим: проверка выполняется по кнопке. "
-                            "После проверки логики подключим отдельный круглосуточный "
-                            "worker, чтобы ответы не зависели от открытого сайта."
-                        )
-                        if st.button(
-                            "🔄 Проверить входящие сейчас",
-                            type="primary",
-                            key=f"neona_sync_incoming_{telegram_id}",
-                        ):
-                            try:
-                                with st.spinner("Неона проверяет новые ответы..."):
-                                    dialog_stats = run_sync_owner_once(
-                                        int(telegram_id),
-                                        first_name,
-                                        initialize_new_dialogs=True,
-                                    )
-                                if dialog_stats.get("initialized", 0) and not dialog_stats.get("processed", 0):
-                                    st.success(
-                                        "Точка отсчёта создана. Старую переписку "
-                                        "Неона не тронула. Теперь можно отправить "
-                                        "новое тестовое сообщение и нажать кнопку ещё раз."
-                                    )
-                                elif dialog_stats.get("replied", 0):
-                                    st.success(
-                                        "Новые ответы обработаны: "
-                                        f"{dialog_stats.get('replied', 0)}."
-                                    )
-                                elif dialog_stats.get("errors", 0):
-                                    st.warning(
-                                        "Обработка завершилась с ошибкой. "
-                                        "Ни одно неподтверждённое действие не было "
-                                        "объявлено выполненным."
-                                    )
-                                else:
-                                    st.info("Новых ответов пока нет.")
-                                st.caption(
-                                    "Контактов после первого сообщения: "
-                                    f"{dialog_stats.get('allowed', 0)} · "
-                                    "новых входящих: "
-                                    f"{dialog_stats.get('processed', 0)}"
-                                )
-                                voice_diag = get_last_voice_diagnostics()
-                                if voice_diag:
-                                    with st.expander(
-                                        "🧪 Диагностика голосового сообщения",
-                                        expanded=True,
-                                    ):
-                                        st.caption(
-                                            "Показывает технические этапы обработки. "
-                                            "Содержимое голосового здесь не сохраняется."
-                                        )
-                                        st.json(voice_diag)
-                                else:
-                                    st.caption(
-                                        "🧪 Голосовое сообщение в этом запуске не обнаружено."
-                                    )
-                            except NeonaDialogError as exc:
-                                st.error(str(exc))
-                            except Exception as exc:
-                                st.error(
-                                    "Не удалось проверить входящие сообщения: "
-                                    + str(exc)
-                                )
+                    # Служебные инструменты Неоны (HeyGen-тест, внутренний регламент,
+                    # ручной тест входящих и диагностика) намеренно не показываем
+                    # партнёрам в рабочем интерфейсе. Рабочие функции остаются в коде.
 
                     candidates_key = (
                         f"neonia_candidates_{telegram_id}"
@@ -8394,11 +8314,28 @@ if telegram_login_valid or remembered_data:
                         ]
 
                         st.markdown("### 🎯 Сегодня от Стагирита")
+                        daily_target_value = int(
+                            weekly_neona_day.get("daily_target", 5) or 5
+                        )
+                        current_daily_count = len(daily_candidate_ids)
+
+                        if current_daily_count >= daily_target_value:
+                            st.success(
+                                f"✅ Рабочая пятёрка собрана: "
+                                f"{current_daily_count}/{daily_target_value}."
+                            )
+                        else:
+                            st.warning(
+                                f"Сейчас найдено {current_daily_count} из "
+                                f"{daily_target_value}. Стагирит не считает "
+                                "эту подборку полной и продолжает добор "
+                                "новых подходящих людей."
+                            )
+
                         st.caption(
-                            "Стагирит подготовил сегодняшнюю рабочую пятёрку "
-                            "из уже найденного пула людей. Повторно заходить к "
-                            "Неонии не нужно. Выберите людей — Неона сразу "
-                            "подготовит первые сообщения."
+                            "Выберите людей — Неона сразу подготовит "
+                            "первые сообщения. Повторно заходить к Неонии "
+                            "для уже найденного пула не нужно."
                         )
 
                         if daily_available_ids:
