@@ -403,9 +403,14 @@ def score_vk_candidates(
     if ask_openai_fn is None:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
 
+    # В ежедневный анализ допускаем только профили, которым VK прямо разрешает
+    # отправить личное сообщение. Профили с закрытыми сообщениями сохраняются
+    # в базе как найденные, но Неония не тратит на них анализ и не выдаёт их
+    # партнёру в рабочую пятёрку.
     rows = _sb_get(
         "agency_vk_candidates",
         {
+            "can_write_private_message": "eq.true",
             "select": "*",
             "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
             "limit": max(1, min(100, int(limit))),
@@ -468,6 +473,39 @@ def release_expired_vk_assignments() -> int:
     return len(rows)
 
 
+def _messageable_vk_ids(user_ids: Iterable[int]) -> set[int]:
+    """Возвращает только VK ID, которым можно написать личное сообщение."""
+    ids: list[int] = []
+    for value in user_ids:
+        try:
+            uid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in ids:
+            ids.append(uid)
+
+    result: set[int] = set()
+    for start in range(0, len(ids), 200):
+        chunk = ids[start:start + 200]
+        if not chunk:
+            continue
+        rows = _sb_get(
+            "agency_vk_candidates",
+            {
+                "vk_user_id": "in.(" + ",".join(str(x) for x in chunk) + ")",
+                "can_write_private_message": "eq.true",
+                "select": "vk_user_id",
+                "limit": len(chunk),
+            },
+        )
+        for row in rows:
+            try:
+                result.add(int(row.get("vk_user_id")))
+            except (TypeError, ValueError):
+                pass
+    return result
+
+
 def _used_vk_ids() -> set[int]:
     result: set[int] = set()
     for table, params in (
@@ -505,6 +543,45 @@ def ensure_daily_vk_assignments(
             "order": "daily_position.asc",
         },
     )
+
+    # Старые назначения могли быть сформированы до введения правила
+    # «только тем, кому можно написать». Автоматически убираем такие карточки
+    # из сегодняшней пятёрки и освобождаем место для замены.
+    existing_vk_ids = [x.get("vk_user_id") for x in existing if x.get("vk_user_id") is not None]
+    messageable_existing = _messageable_vk_ids(existing_vk_ids)
+    if existing_vk_ids:
+        now_iso = datetime.now(UTC).isoformat()
+        for row in existing:
+            try:
+                uid = int(row.get("vk_user_id"))
+            except (TypeError, ValueError):
+                continue
+            if uid in messageable_existing:
+                continue
+            assignment_id = row.get("id")
+            if assignment_id is None:
+                continue
+            _sb_patch(
+                "agency_vk_assignments",
+                {"id": f"eq.{int(assignment_id)}"},
+                {
+                    "status": "blocked",
+                    "released_at": now_iso,
+                    "updated_at": now_iso,
+                },
+            )
+
+        existing = _sb_get(
+            "agency_vk_assignments",
+            {
+                "owner_telegram_id": f"eq.{owner_id}",
+                "assignment_date": f"eq.{today}",
+                "status": "not.in.(released,skipped,blocked,not_fit)",
+                "select": "*",
+                "order": "daily_position.asc",
+            },
+        )
+
     if len(existing) >= limit:
         return {"ok": True, "assignments": existing[:limit], "complete": True, "message": f"VK-пятёрка готова: {limit}/{limit}."}
 
@@ -519,6 +596,9 @@ def ensure_daily_vk_assignments(
             "limit": 300,
         },
     )
+    score_vk_ids = [x.get("vk_user_id") for x in scores if x.get("vk_user_id") is not None]
+    messageable_score_ids = _messageable_vk_ids(score_vk_ids)
+
     existing_ids = {int(x["vk_user_id"]) for x in existing if x.get("vk_user_id") is not None}
     positions = {int(x["daily_position"]) for x in existing if x.get("daily_position") is not None}
     free_positions = [x for x in range(1, limit + 1) if x not in positions]
@@ -533,6 +613,8 @@ def ensure_daily_vk_assignments(
         except (TypeError, ValueError):
             continue
         if uid in used or uid in existing_ids:
+            continue
+        if uid not in messageable_score_ids:
             continue
         payload = {
             "vk_user_id": uid,
