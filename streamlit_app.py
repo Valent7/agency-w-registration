@@ -101,6 +101,7 @@ from workspace_persistence import (
 )
 from person_card import render_person_card_2_0, render_neona_magnets_reference
 from scout_center import render_scout_center
+from vk_scout_ui import render_vk_sources
 import asyncio
 import json
 import re
@@ -6417,6 +6418,7 @@ if telegram_login_valid or remembered_data:
                 "Выберите задачу Неонии:",
                 [
                     "🎯 Определить мою целевую аудиторию",
+                    "💙 Источники поиска VK",
                     "🔎 Поиск чатов",
                     "🎯 Поиск контактов в чатах по ЦА",
                     "👥 Поиск контактов",
@@ -6427,6 +6429,11 @@ if telegram_login_valid or remembered_data:
             )
                     if neonia_mode != "🎯 Определить мою целевую аудиторию":
                         mode_messages = {
+                        "💙 Источники поиска VK": (
+                            "Здесь вы задаёте тематические VK-сообщества. "
+                            "Фоновый VK Scout будет брать оттуда публичные профили "
+                            "и передавать их Неонии на анализ по вашей ЦА."
+                        ),
                         "🔎 Поиск чатов": (
                             "Здесь Неония загружает доступные Telegram-группы "
                             "и каналы. Затем выберите «Поиск контактов в чатах "
@@ -6445,7 +6452,10 @@ if telegram_login_valid or remembered_data:
                         ),
                         }
                         st.info(mode_messages[neonia_mode])
-                        if neonia_mode == "🔎 Поиск чатов":
+                        if neonia_mode == "💙 Источники поиска VK":
+                            render_vk_sources(int(telegram_id))
+
+                        elif neonia_mode == "🔎 Поиск чатов":
                             chats_result = render_neonia_chats()
 
                             chats_state_key = (
