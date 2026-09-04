@@ -101,9 +101,71 @@ def _render_today_vk_candidates(
                     use_container_width=False,
                 )
 
+            editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
             if invitation_text:
                 st.markdown("**Сообщение Неоны:**")
+
+                if st.session_state.get(editing_key, False):
+                    edited_text = st.text_area(
+                        "Отредактируйте сообщение перед отправкой",
+                        value=invitation_text,
+                        key=f"vk_edit_text_{owner_id}_{assignment_id}",
+                        height=190,
+                        label_visibility="collapsed",
+                    )
+                    edit_cols = st.columns(2)
+                    with edit_cols[0]:
+                        if st.button(
+                            "💾 Сохранить",
+                            key=f"vk_save_edit_{owner_id}_{assignment_id}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            cleaned = str(edited_text or "").strip()
+                            if not cleaned:
+                                st.warning("Сообщение не может быть пустым.")
+                            else:
+                                try:
+                                    _sb_patch(
+                                        "agency_vk_assignments",
+                                        {
+                                            "id": f"eq.{assignment_id}",
+                                            "owner_telegram_id": f"eq.{owner_id}",
+                                        },
+                                        {
+                                            "invitation_text": cleaned,
+                                            "status": "prepared",
+                                            "updated_at": datetime.now(UTC).isoformat(),
+                                        },
+                                    )
+                                    st.session_state[editing_key] = False
+                                    st.success("Сообщение сохранено.")
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Не удалось сохранить сообщение: {exc}")
+                    with edit_cols[1]:
+                        if st.button(
+                            "Отмена",
+                            key=f"vk_cancel_edit_{owner_id}_{assignment_id}",
+                            use_container_width=True,
+                        ):
+                            st.session_state[editing_key] = False
+                            st.rerun()
+
+                    # Пока текст редактируется, не показываем кнопки
+                    # «Отправлено» и «Пропустить», чтобы не отметить
+                    # сообщение до сохранения правок.
+                    continue
+
                 st.code(invitation_text, language=None)
+                if status != "invited" and assignment_id:
+                    if st.button(
+                        "✏️ Редактировать",
+                        key=f"vk_edit_{owner_id}_{assignment_id}",
+                        use_container_width=False,
+                    ):
+                        st.session_state[editing_key] = True
+                        st.rerun()
             elif status in {"reserved", "prepared"} and assignment_id:
                 if st.button(
                     "✍️ Подготовить сообщение Неоны",
