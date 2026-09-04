@@ -6455,7 +6455,11 @@ if telegram_login_valid or remembered_data:
                         }
                         st.info(mode_messages[neonia_mode])
                         if neonia_mode == "💙 Источники поиска VK":
-                            render_vk_sources(int(telegram_id))
+                            render_vk_sources(
+                                int(telegram_id),
+                                member_code=str(member_code or ""),
+                                ask_openai_fn=ask_openai,
+                            )
 
                         elif neonia_mode == "🔎 Поиск чатов":
                             chats_result = render_neonia_chats()

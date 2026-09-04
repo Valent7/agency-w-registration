@@ -12,7 +12,11 @@ from vk_scout_oauth import (
 from vk_scout import (
     VKScoutError,
     _sb_patch,
+    load_today_vk_assignments,
     load_vk_sources,
+    mark_vk_invited,
+    prepare_vk_invitation,
+    skip_vk_assignment,
     upsert_vk_source,
 )
 
@@ -35,7 +39,134 @@ def _disable_vk_source(owner_id: int, source_id: int) -> None:
     )
 
 
-def render_vk_sources(owner_id: int) -> None:
+
+def _render_today_vk_candidates(
+    owner_id: int,
+    member_code: str,
+    ask_openai_fn=None,
+) -> None:
+    """Показывает владельцу его сегодняшнюю VK-пятёрку и действия Неоны."""
+    st.markdown("### 💙 VK 5 на сегодня")
+
+    try:
+        assignments = load_today_vk_assignments(owner_id)
+    except Exception as exc:
+        st.error(f"Не удалось загрузить сегодняшних VK-кандидатов: {exc}")
+        return
+
+    st.caption(f"Готово кандидатов: {len(assignments)}/5")
+
+    if not assignments:
+        st.info(
+            "Пока сегодняшняя VK-пятёрка не сформирована. После авторизации VK Scout "
+            "фоновый worker должен выполнить новый цикл: прочитать участников источников, "
+            "передать их Неонии на анализ и зарезервировать до 5 лучших кандидатов."
+        )
+        st.caption(
+            "Для первого теста можно перезапустить neona-worker в Render вручную; "
+            "дальше поиск будет идти автоматически по расписанию."
+        )
+        return
+
+    for item in assignments:
+        assignment_id = int(item.get("id") or 0)
+        position = int(item.get("daily_position") or 0)
+        first_name = str(item.get("first_name") or "").strip()
+        last_name = str(item.get("last_name") or "").strip()
+        full_name = " ".join(x for x in (first_name, last_name) if x) or "VK-кандидат"
+        score = int(item.get("score") or 0)
+        city = str(item.get("city_name") or "").strip()
+        country = str(item.get("country_name") or "").strip()
+        place = ", ".join(x for x in (city, country) if x)
+        fit = str(item.get("fit_summary") or "").strip()
+        profile_url = str(item.get("profile_url") or "").strip()
+        status = str(item.get("status") or "reserved").strip()
+        invitation_text = str(item.get("invitation_text") or "").strip()
+
+        title = f"{position}. {full_name}" if position else full_name
+        with st.container(border=True):
+            st.markdown(f"#### {title}")
+            meta = [f"совпадение с ЦА: {score}/100"]
+            if place:
+                meta.append(place)
+            st.caption(" · ".join(meta))
+
+            if fit:
+                st.write(f"**Почему Неония выбрала:** {fit}")
+
+            if profile_url:
+                st.link_button(
+                    "Открыть профиль VK",
+                    profile_url,
+                    use_container_width=False,
+                )
+
+            if invitation_text:
+                st.markdown("**Сообщение Неоны:**")
+                st.code(invitation_text, language=None)
+            elif status in {"reserved", "prepared"} and assignment_id:
+                if st.button(
+                    "✍️ Подготовить сообщение Неоны",
+                    key=f"vk_prepare_{owner_id}_{assignment_id}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    try:
+                        prepared = prepare_vk_invitation(
+                            assignment_id,
+                            member_code,
+                            ask_openai_fn=ask_openai_fn,
+                        )
+                        st.success("Сообщение Неоны готово.")
+                        st.session_state[
+                            f"vk_prepared_message_{assignment_id}"
+                        ] = prepared.get("invitation_text") or ""
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось подготовить сообщение: {exc}")
+
+            cols = st.columns(2)
+            with cols[0]:
+                if status != "invited" and assignment_id:
+                    if st.button(
+                        "✅ Отправлено",
+                        key=f"vk_invited_{owner_id}_{assignment_id}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            mark_vk_invited(assignment_id)
+                            st.success("Отмечено как отправленное.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Не удалось сохранить статус: {exc}")
+                elif status == "invited":
+                    st.success("✅ Отправлено")
+
+            with cols[1]:
+                if status != "invited" and assignment_id:
+                    if st.button(
+                        "⏭ Пропустить",
+                        key=f"vk_skip_{owner_id}_{assignment_id}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            skip_vk_assignment(assignment_id)
+                            st.success("Кандидат пропущен.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Не удалось пропустить кандидата: {exc}")
+
+    st.caption(
+        "Сообщения автоматически не отправляются: вы открываете профиль, копируете "
+        "подготовленный текст Неоны и отправляете его сами."
+    )
+
+
+def render_vk_sources(
+    owner_id: int,
+    member_code: str = "",
+    ask_openai_fn=None,
+) -> None:
     """Интерфейс Неонии для управления тематическими VK-сообществами."""
     owner_id = int(owner_id)
 
@@ -83,6 +214,14 @@ def render_vk_sources(owner_id: int) -> None:
                 use_container_width=True,
             )
             st.caption("После разрешения VK вернёт вас обратно в Агентство W.")
+
+    if connection.get("connected"):
+        _render_today_vk_candidates(
+            owner_id,
+            str(member_code or "").strip(),
+            ask_openai_fn=ask_openai_fn,
+        )
+        st.divider()
 
     with st.form(
         f"neonia_vk_source_add_{owner_id}",
