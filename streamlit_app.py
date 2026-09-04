@@ -6114,9 +6114,12 @@ if telegram_login_valid or remembered_data:
             # Ежедневная рабочая пятёрка Стагирита готовится уже на «Моём дне».
             # После того как Неония однажды получила/обновила общий пул людей,
             # владельцу не нужно ежедневно заходить к Неонии.
+            # «Мой день» должен открываться мгновенно.
+            # Здесь только читаем уже подготовленную подборку и никогда
+            # не запускаем тяжёлый Telegram/ИИ-поиск.
             daily_stagirite_candidates = ensure_weekly_candidates_for_neona(
                 telegram_id,
-                prepare_candidates_fn=prepare_candidates_for_stagirite,
+                prepare_candidates_fn=None,
             )
             if (
                 isinstance(daily_stagirite_candidates, dict)
@@ -8174,9 +8177,11 @@ if telegram_login_valid or remembered_data:
                     # общего пула людей из контактов или чатов. После этого
                     # Стагирит ежедневно готовит рабочую пятёрку сам.
                     # --------------------------------------------------
+                    # Рабочий экран Неоны должен оставаться отзывчивым.
+                    # На обычном rerun только читаем уже найденных людей.
                     weekly_neona_day = ensure_weekly_candidates_for_neona(
                         telegram_id,
-                        prepare_candidates_fn=prepare_candidates_for_stagirite,
+                        prepare_candidates_fn=None,
                     )
 
                     candidate_results = st.session_state.get(
@@ -8327,15 +8332,38 @@ if telegram_login_valid or remembered_data:
                         else:
                             st.warning(
                                 f"Сейчас найдено {current_daily_count} из "
-                                f"{daily_target_value}. Стагирит не считает "
-                                "эту подборку полной и продолжает добор "
-                                "новых подходящих людей."
+                                f"{daily_target_value}. Уже найденные люди "
+                                "доступны для работы сразу — добор больше "
+                                "не блокирует страницу."
                             )
 
+                            if st.button(
+                                f"🔄 Добрать ещё "
+                                f"{max(0, daily_target_value - current_daily_count)}",
+                                key=(
+                                    "stagirite_force_topup_"
+                                    f"{telegram_id}_"
+                                    + datetime.now(
+                                        ZoneInfo("Europe/Berlin")
+                                    ).date().isoformat()
+                                ),
+                                use_container_width=True,
+                            ):
+                                with st.spinner(
+                                    "Стагирит просит Неонию найти недостающих людей. "
+                                    "Это может занять несколько минут, но только по "
+                                    "вашему явному запуску."
+                                ):
+                                    ensure_weekly_candidates_for_neona(
+                                        telegram_id,
+                                        prepare_candidates_fn=prepare_candidates_for_stagirite,
+                                        force_prepare=True,
+                                    )
+                                st.rerun()
+
                         st.caption(
-                            "Выберите людей — Неона сразу подготовит "
-                            "первые сообщения. Повторно заходить к Неонии "
-                            "для уже найденного пула не нужно."
+                            "Выберите любого из уже найденных людей — Неона "
+                            "сразу подготовит первое сообщение. Ждать 5/5 не нужно."
                         )
 
                         if daily_available_ids:

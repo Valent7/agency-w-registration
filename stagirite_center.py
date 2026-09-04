@@ -4991,6 +4991,7 @@ def _shown_candidate_ids_for_stagirite(
 def ensure_weekly_candidates_for_neona(
     owner_id: int,
     prepare_candidates_fn=None,
+    force_prepare: bool = False,
 ) -> dict[str, Any]:
     """
     Ежедневная рабочая пятёрка Стагирита → Неона.
@@ -5055,8 +5056,16 @@ def ensure_weekly_candidates_for_neona(
         candidate_ids = []
         today_info = {}
 
-    # Полная пятёрка уже есть — повторно Неонию не запускаем.
-    if len(candidate_ids) >= daily_target:
+    # В интерактивном интерфейсе НИКОГДА не запускаем тяжёлый Telegram/ИИ-поиск
+    # на обычном rerun. Streamlit перезапускает весь скрипт после выбора,
+    # нажатия кнопки и других действий; автоматический добор здесь блокировал
+    # партнёра на несколько минут.
+    #
+    # Уже найденные 1–5 человек сразу доступны для работы. Тяжёлый добор
+    # запускается только по явному force_prepare=True (позже его вынесем
+    # в фоновый worker и уберём ручную кнопку).
+    if candidate_ids and not force_prepare:
+        complete = len(candidate_ids) >= daily_target
         return {
             "ok": True,
             "active": True,
@@ -5069,19 +5078,36 @@ def ensure_weekly_candidates_for_neona(
             "desired": desired,
             "daily_target": daily_target,
             "prepared_at": str(today_info.get("prepared_at") or ""),
-            "message": "",
+            "complete": complete,
+            "message": (
+                ""
+                if complete
+                else (
+                    f"Сейчас найдено {len(candidate_ids)} из {daily_target}. "
+                    "С найденными людьми уже можно работать; добор не блокирует интерфейс."
+                )
+            ),
         }
 
     if not callable(prepare_candidates_fn):
         return {
-            "ok": False,
+            "ok": True,
             "active": True,
             "task_id": str(task.get("id") or ""),
             "candidate_ids": candidate_ids,
             "approved_ids": approved_ids,
+            "period_start": str(goal.get("period_start") or ""),
+            "period_end": str(goal.get("period_end") or ""),
+            "minimum": minimum,
+            "desired": desired,
+            "daily_target": daily_target,
+            "prepared_at": str(today_info.get("prepared_at") or ""),
+            "complete": len(candidate_ids) >= daily_target,
             "message": (
-                f"Подготовлено {len(candidate_ids)} из {daily_target}. "
-                "Неония пока недоступна для автоматического добора."
+                f"Сейчас найдено {len(candidate_ids)} из {daily_target}. "
+                "Можно работать с найденными кандидатами."
+                if candidate_ids
+                else "Сегодняшний список ещё не подготовлен."
             ),
         }
 
