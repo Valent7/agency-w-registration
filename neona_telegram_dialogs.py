@@ -772,6 +772,25 @@ def _schedule_reply(
                         owner_id,
                     )
 
+                channel = str(
+                    context.get("channel") or "telegram"
+                ).strip().casefold()
+
+                source_label = {
+                    "vk": "Неона — VK диалог",
+                    "instagram": "Неона — Instagram Direct",
+                    "telegram": "Неона — Telegram диалог",
+                }.get(channel, "Неона — Telegram диалог")
+
+                notes_label = {
+                    "vk": "Назначено Неоной после подтверждения человека во VK.",
+                    "instagram": "Назначено Неоной после подтверждения человека в Instagram Direct.",
+                    "telegram": "Назначено Неоной после подтверждения человека в Telegram.",
+                }.get(
+                    channel,
+                    "Назначено Неоной после подтверждения человека в Telegram.",
+                )
+
                 created = _create_meeting(
                     config,
                     {
@@ -787,8 +806,8 @@ def _schedule_reply(
                         "meeting_format": meeting_format,
                         "meeting_link": zoom_link or None,
                         "status": "Подтверждена",
-                        "notes": "Назначено Неоной после подтверждения человека в Telegram.",
-                        "source": "Неона — Telegram диалог",
+                        "notes": notes_label,
+                        "source": source_label,
                     },
                 )
                 confirmed_start = datetime.fromisoformat(str(created["start_at"]).replace("Z", "+00:00")).astimezone(UTC)
