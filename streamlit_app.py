@@ -4251,7 +4251,53 @@ def prepare_candidates_for_stagirite(
         st.session_state[activity_key] = activity_by_id
         st.session_state[activity_date_key] = berlin_today
 
-    # Недельный резерв: только контакты владельца + активность сегодня/вчера.
+    def _stagirite_activity_tier(activity):
+        """
+        Приоритет активности только для ежедневной пятёрки Стагирита.
+
+        0 — онлайн / сегодня / вчера;
+        1 — Telegram показывает «был недавно»;
+        2 — точная активность за последние 7 дней;
+        3 — Telegram показывает «был на прошлой неделе».
+
+        Более старые и неизвестные статусы в холодную пятёрку не берём.
+        """
+        activity = activity if isinstance(activity, dict) else {}
+        if activity.get("activity_eligible") is True:
+            return 0
+
+        precision = str(
+            activity.get("activity_precision") or ""
+        ).strip().lower()
+
+        if precision == "approx_recently":
+            return 1
+
+        if precision == "exact":
+            raw_seen = str(activity.get("last_seen_at") or "").strip()
+            if raw_seen:
+                try:
+                    seen_at = datetime.fromisoformat(
+                        raw_seen.replace("Z", "+00:00")
+                    )
+                    if seen_at.tzinfo is None:
+                        seen_at = seen_at.replace(tzinfo=timezone.utc)
+                    if (
+                        datetime.now(timezone.utc)
+                        - seen_at.astimezone(timezone.utc)
+                        <= timedelta(days=7)
+                    ):
+                        return 2
+                except Exception:
+                    pass
+
+        if precision == "approx_week":
+            return 3
+
+        return None
+
+    # Недельный резерв: сначала сегодня/вчера, а если людей мало —
+    # аккуратно добираем реальными контактами с недавней активностью.
     reserve_contacts = []
     for contact in contacts:
         if not isinstance(contact, dict):
@@ -4261,13 +4307,15 @@ def prepare_candidates_for_stagirite(
         except (TypeError, ValueError):
             continue
         activity = activity_by_id.get(cid) or {}
-        if activity.get("activity_eligible") is not True:
+        activity_tier = _stagirite_activity_tier(activity)
+        if activity_tier is None:
             continue
         reserve_contacts.append(
             {
                 **contact,
                 **activity,
                 "is_owner_contact": True,
+                "_stagirite_activity_tier": activity_tier,
             }
         )
 
@@ -4313,7 +4361,8 @@ def prepare_candidates_for_stagirite(
         if cid not in owner_contact_ids:
             continue
         fresh_activity = activity_by_id.get(cid) or {}
-        if fresh_activity.get("activity_eligible") is not True:
+        activity_tier = _stagirite_activity_tier(fresh_activity)
+        if activity_tier is None:
             continue
         if bool(item.get("selection_blocked")):
             continue
@@ -4326,6 +4375,7 @@ def prepare_candidates_for_stagirite(
                 **item,
                 **fresh_activity,
                 "is_owner_contact": True,
+                "_stagirite_activity_tier": activity_tier,
             }
         )
 
@@ -4370,6 +4420,7 @@ def prepare_candidates_for_stagirite(
             interest_rank,
             score_rank,
             warmth_rank,
+            int(item.get("_stagirite_activity_tier") or 0),
             activity_rank,
             str(item.get("name") or "").lower(),
         )
@@ -4397,15 +4448,21 @@ def prepare_candidates_for_stagirite(
         if int(item["telegram_id"]) not in already_sent_ids
     ]
 
-    # Стабильный порядок: сейчас онлайн/сегодня — раньше вчера.
+    # Стабильный порядок:
+    # сначала онлайн/сегодня/вчера, затем «недавно» и только потом
+    # более широкий недельный резерв.
     def activity_sort(item):
-        raw = str(item.get("last_seen_at") or "")
-        return raw
+        tier = int(item.get("_stagirite_activity_tier") or 0)
+        raw = str(item.get("last_seen_at") or "").strip()
+        try:
+            timestamp = datetime.fromisoformat(
+                raw.replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            timestamp = 0.0
+        return (tier, -timestamp)
 
-    reserve_contacts.sort(
-        key=activity_sort,
-        reverse=True,
-    )
+    reserve_contacts.sort(key=activity_sort)
     reserve_contacts = reserve_contacts[:reserve_target]
     reserve_ids = [int(item["telegram_id"]) for item in reserve_contacts]
 
@@ -4517,7 +4574,7 @@ def prepare_candidates_for_stagirite(
         batch_results = [
             item for item in batch_results
             if int(item.get("telegram_id")) in owner_contact_ids
-            and item.get("activity_eligible") is True
+            and _stagirite_activity_tier(item) is not None
             and item.get("work_state") == "available"
             and not bool(item.get("selection_blocked"))
         ]
@@ -4565,7 +4622,10 @@ def prepare_candidates_for_stagirite(
             "В сохранённом пуле сейчас недостаточно новых людей для полной пятёрки."
         )
     else:
-        message = "Рабочая пятёрка: лучшие новые пригодные контакты из сохранённого пула Неонии."
+        message = (
+            "Рабочая пятёрка собрана. Приоритет — активные сегодня/вчера; "
+            "если их не хватило, Стагирит добрал недавние реальные Telegram-контакты."
+        )
 
     return {
         "ok": True,

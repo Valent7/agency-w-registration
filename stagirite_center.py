@@ -4995,14 +4995,9 @@ def ensure_weekly_candidates_for_neona(
     """
     Ежедневная рабочая пятёрка Стагирита → Неона.
 
-    Неония нужна владельцу только для получения/обновления общего пула людей.
-    После появления пула Стагирит сам готовит ежедневную пятёрку.
-
-    ВАЖНО:
-    - не требует ежедневного захода в Неонию;
-    - при первом открытии «Моего дня» или Неоны в новый день сам готовит текущую пятёрку;
-    - повторный rerun в тот же день не создаёт новую пятёрку;
-    - людей ещё НЕ считает выбранными владельцем.
+    Если утром удалось найти только часть пятёрки, это НЕ считается
+    завершённой дневной партией: Стагирит сохраняет найденных и автоматически
+    добирает недостающих людей при следующем запуске.
     """
     owner_id = int(owner_id)
     task = _active_weekly_meeting_task(owner_id)
@@ -5047,9 +5042,6 @@ def ensure_weekly_candidates_for_neona(
         today_info.get("approved_ids", [])
     )
 
-    # До исправления ротации сегодняшняя пятёрка могла повторять вчерашнюю.
-    # Если Директор ещё никого из неё не утвердил, один раз считаем такую
-    # запись устаревшей и пересобираем её из НОВЫХ людей.
     previously_shown = _shown_candidate_ids_for_stagirite(
         owner_id,
         exclude_day=today_key,
@@ -5063,13 +5055,13 @@ def ensure_weekly_candidates_for_neona(
         candidate_ids = []
         today_info = {}
 
-    # Сегодняшняя новая пятёрка уже существует — повторный rerun её не меняет.
-    if candidate_ids:
+    # Полная пятёрка уже есть — повторно Неонию не запускаем.
+    if len(candidate_ids) >= daily_target:
         return {
             "ok": True,
             "active": True,
             "task_id": str(task.get("id") or ""),
-            "candidate_ids": candidate_ids,
+            "candidate_ids": candidate_ids[:daily_target],
             "approved_ids": approved_ids,
             "period_start": str(goal.get("period_start") or ""),
             "period_end": str(goal.get("period_end") or ""),
@@ -5085,67 +5077,93 @@ def ensure_weekly_candidates_for_neona(
             "ok": False,
             "active": True,
             "task_id": str(task.get("id") or ""),
-            "candidate_ids": [],
+            "candidate_ids": candidate_ids,
             "approved_ids": approved_ids,
-            "message": "Неония пока недоступна для автоматической подготовки.",
+            "message": (
+                f"Подготовлено {len(candidate_ids)} из {daily_target}. "
+                "Неония пока недоступна для автоматического добора."
+            ),
         }
 
     selected_all = _normalize_int_ids(
         result.get("selected_candidate_ids", [])
     )
 
-    # Главное правило ротации: вчера показан — сегодня место не занимает,
-    # даже если Директор его не выбирал. Решение «не выбрала» тоже учитываем.
+    # Вчерашние/уже выбранные не повторяем; сегодняшних 1–4 сохраняем,
+    # но также исключаем из повторного подбора, чтобы добрать только новых.
     excluded_for_today = set(selected_all)
     excluded_for_today.update(previously_shown)
+    excluded_for_today.update(candidate_ids)
+
+    missing_count = max(0, daily_target - len(candidate_ids))
 
     try:
         prepared = prepare_candidates_fn(
             owner_id,
-            desired_count=daily_target,
+            desired_count=missing_count or daily_target,
             reserve_target=reserve_target,
             exclude_ids=sorted(excluded_for_today),
         )
     except TypeError:
-        # Совместимость с коротким промежутком обновления файлов.
         prepared = prepare_candidates_fn(
             owner_id,
-            desired_count=daily_target,
+            desired_count=missing_count or daily_target,
         )
     except Exception as exc:
         return {
             "ok": False,
             "active": True,
             "task_id": str(task.get("id") or ""),
-            "candidate_ids": [],
+            "candidate_ids": candidate_ids,
             "approved_ids": approved_ids,
-            "message": f"Не удалось подготовить сегодняшних кандидатов: {exc}",
+            "message": (
+                f"Сохранено {len(candidate_ids)} из {daily_target}. "
+                f"Не удалось добрать остальных: {exc}"
+            ),
         }
 
     if not isinstance(prepared, dict):
         prepared = {}
 
-    candidate_ids = []
+    merged_candidate_ids = list(candidate_ids)
     for contact_id in _normalize_int_ids(
         prepared.get("candidate_ids", [])
     ):
         if contact_id in excluded_for_today:
             continue
-        candidate_ids.append(contact_id)
-        if len(candidate_ids) >= daily_target:
+        if contact_id in merged_candidate_ids:
+            continue
+        merged_candidate_ids.append(contact_id)
+        if len(merged_candidate_ids) >= daily_target:
             break
 
-    reserve_ids = _normalize_int_ids(
+    old_reserve_ids = _normalize_int_ids(
+        goal.get("weekly_pool_ids", [])
+    )
+    new_reserve_ids = _normalize_int_ids(
         prepared.get("reserve_ids", [])
-    )[:reserve_target]
+    )
+    reserve_ids = []
+    for contact_id in old_reserve_ids + new_reserve_ids:
+        if contact_id not in reserve_ids:
+            reserve_ids.append(contact_id)
+        if len(reserve_ids) >= reserve_target:
+            break
 
     goal["weekly_pool_ids"] = reserve_ids
+    now_iso = datetime.now(UTC).isoformat()
     today_info = {
-        "candidate_ids": candidate_ids,
+        **today_info,
+        "candidate_ids": merged_candidate_ids[:daily_target],
         "approved_ids": approved_ids,
-        "prepared_at": datetime.now(UTC).isoformat(),
+        "prepared_at": str(today_info.get("prepared_at") or now_iso),
+        "last_topup_attempt_at": now_iso,
         "source": "stagirite_daily_bridge",
+        "complete": len(merged_candidate_ids) >= daily_target,
     }
+    if len(merged_candidate_ids) >= daily_target:
+        today_info["completed_at"] = now_iso
+
     daily_batches[today_key] = today_info
     goal["daily_batches"] = daily_batches
     goal["last_daily_prepare_date"] = today_key
@@ -5162,11 +5180,26 @@ def ensure_weekly_candidates_for_neona(
             },
         )
 
+    if len(merged_candidate_ids) >= daily_target:
+        message = (
+            f"Рабочая пятёрка собрана полностью: "
+            f"{len(merged_candidate_ids)} из {daily_target}."
+        )
+    else:
+        base_message = str(prepared.get("message") or "").strip()
+        message = (
+            f"Пока подготовлено {len(merged_candidate_ids)} из {daily_target}. "
+            "Стагирит не считает эту партию полной и продолжит добор новых "
+            "реальных Telegram-контактов."
+        )
+        if base_message:
+            message += " " + base_message
+
     return {
         "ok": True,
         "active": True,
         "task_id": task_id,
-        "candidate_ids": candidate_ids,
+        "candidate_ids": merged_candidate_ids[:daily_target],
         "approved_ids": approved_ids,
         "period_start": str(goal.get("period_start") or ""),
         "period_end": str(goal.get("period_end") or ""),
@@ -5178,7 +5211,8 @@ def ensure_weekly_candidates_for_neona(
             prepared.get("available_reserve")
             or len(reserve_ids)
         ),
-        "message": str(prepared.get("message") or ""),
+        "complete": len(merged_candidate_ids) >= daily_target,
+        "message": message,
     }
 
 
@@ -5396,24 +5430,26 @@ def _render_weekly_meeting_goal(
 
     excluded_for_today = set(selected_all)
     excluded_for_today.update(previously_shown)
+    excluded_for_today.update(current_ids)
 
-    # Формируем сегодняшнюю пятёрку только один раз в день.
-    if not today_info.get("candidate_ids") and prepare_candidates_fn is not None:
+    # Если сегодня найдено только 1–4 человека, это не полная пятёрка:
+    # сохраняем их и просим Неонию добрать ровно недостающее количество.
+    missing_today = max(0, daily_target - len(current_ids))
+    if missing_today > 0 and prepare_candidates_fn is not None:
         with st.spinner(
-            "Стагирит просит Неонию обновить недельный резерв и подготовить сегодняшних кандидатов..."
+            "Стагирит просит Неонию добрать сегодняшнюю рабочую пятёрку..."
         ):
             try:
                 prepared = prepare_candidates_fn(
                     owner_id,
-                    desired_count=daily_target,
+                    desired_count=missing_today,
                     reserve_target=reserve_target,
                     exclude_ids=sorted(excluded_for_today),
                 )
             except TypeError:
-                # Совместимость на коротком промежутке обновления файлов.
                 prepared = prepare_candidates_fn(
                     owner_id,
-                    desired_count=daily_target,
+                    desired_count=missing_today,
                 )
             except Exception:
                 prepared = {
@@ -5423,16 +5459,20 @@ def _render_weekly_meeting_goal(
                 }
 
         if isinstance(prepared, dict):
+            old_reserve_ids = _normalize_int_ids(
+                goal.get("weekly_pool_ids", [])
+            )
+            new_reserve_ids = _normalize_int_ids(
+                prepared.get("reserve_ids", [])
+            )
             reserve_ids: list[int] = []
-            for raw in prepared.get("reserve_ids", []) or []:
-                try:
-                    cid = int(raw)
-                except (TypeError, ValueError):
-                    continue
+            for cid in old_reserve_ids + new_reserve_ids:
                 if cid not in reserve_ids:
                     reserve_ids.append(cid)
+                if len(reserve_ids) >= reserve_target:
+                    break
 
-            candidate_ids: list[int] = []
+            candidate_ids = list(current_ids)
             for raw in prepared.get("candidate_ids", []) or []:
                 try:
                     cid = int(raw)
@@ -5441,14 +5481,20 @@ def _render_weekly_meeting_goal(
                 if cid in excluded_for_today or cid in candidate_ids:
                     continue
                 candidate_ids.append(cid)
+                if len(candidate_ids) >= daily_target:
+                    break
 
-            # Недельный резерв динамический: каждый день Неония перепроверяет
-            # активность и оставляет только реальных Telegram-контактов.
             goal["weekly_pool_ids"] = reserve_ids[:reserve_target]
+            now_iso = datetime.now(UTC).isoformat()
             today_info = {
+                **today_info,
                 "candidate_ids": candidate_ids[:daily_target],
-                "approved_ids": [],
-                "prepared_at": datetime.now(UTC).isoformat(),
+                "approved_ids": current_approved,
+                "prepared_at": str(
+                    today_info.get("prepared_at") or now_iso
+                ),
+                "last_topup_attempt_at": now_iso,
+                "complete": len(candidate_ids) >= daily_target,
             }
             daily_batches[today_key] = today_info
             goal["daily_batches"] = daily_batches
@@ -5470,7 +5516,7 @@ def _render_weekly_meeting_goal(
     ]
     st.caption(
         f"🧰 Недельный резерв: {len(weekly_pool_ids)} из {reserve_target} "
-        "активных контактов Telegram."
+        "реальных Telegram-контактов для работы."
     )
     if len(weekly_pool_ids) < reserve_target:
         st.caption(
@@ -5518,8 +5564,10 @@ def _render_weekly_meeting_goal(
     if remaining_today:
         st.markdown(f"### 👥 Сегодняшние кандидаты — до {daily_target}")
         st.caption(
-            "Все люди ниже находятся в ваших Telegram-контактах и были "
-            "активны сегодня или вчера. Выберите до пяти и передайте Неоне."
+            "Все люди ниже находятся в ваших Telegram-контактах. "
+            "Сначала Стагирит берёт активных сегодня/вчера; если их не хватает, "
+            "добирает тех, кого Telegram показывает как недавно активных. "
+            "Выберите до пяти и передайте Неоне."
         )
 
         chosen_ids = st.multiselect(
