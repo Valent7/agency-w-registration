@@ -102,6 +102,7 @@ from workspace_persistence import (
 from person_card import render_person_card_2_0, render_neona_magnets_reference
 from scout_center import render_scout_center
 from vk_scout_ui import render_vk_sources
+from vk_scout_oauth import handle_vk_scout_oauth_callback
 import asyncio
 import json
 import re
@@ -220,6 +221,7 @@ def install_agency_w_app_metadata():
 
 
 install_agency_w_app_metadata()
+handle_vk_scout_oauth_callback()
 def _image_data_uri(path):
     """Возвращает PNG как data URI для точного HTML-размещения."""
 

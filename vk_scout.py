@@ -66,7 +66,7 @@ def _config() -> dict[str, str]:
     cfg = {
         "supabase_url": _secret("SUPABASE_URL").rstrip("/"),
         "supabase_key": _secret("SUPABASE_SECRET_KEY") or _secret("SUPABASE_SERVICE_ROLE_KEY"),
-        "vk_token": _secret("VK_ACCESS_TOKEN"),
+        "vk_token": _secret("VK_SCOUT_ACCESS_TOKEN") or _secret("VK_ACCESS_TOKEN"),
         "vk_group_id": _secret("VK_GROUP_ID").lstrip("-"),
         "vk_api_version": _secret("VK_API_VERSION", "5.199") or "5.199",
     }
@@ -75,7 +75,7 @@ def _config() -> dict[str, str]:
         for label, value in (
             ("SUPABASE_URL", cfg["supabase_url"]),
             ("SUPABASE_SECRET_KEY", cfg["supabase_key"]),
-            ("VK_ACCESS_TOKEN", cfg["vk_token"]),
+            ("VK_SCOUT_ACCESS_TOKEN / VK_ACCESS_TOKEN", cfg["vk_token"]),
         )
         if not value
     ]
@@ -171,7 +171,7 @@ def _vk_api(method: str, **params: Any) -> Any:
 
 def _screen_name(value: str) -> str:
     text = str(value or "").strip()
-    text = re.sub(r"^https?://(?:m\.)?vk\.com/", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^https?://(?:m\.)?vk\.(?:com|ru)/", "", text, flags=re.IGNORECASE)
     return text.split("?", 1)[0].split("#", 1)[0].strip("/")
 
 

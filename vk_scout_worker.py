@@ -23,6 +23,8 @@ from typing import Any
 import requests
 from cryptography.fernet import Fernet, InvalidToken
 
+from vk_scout_oauth import VKScoutOAuthError, get_valid_vk_scout_access_token
+
 from vk_scout import (
     VKScoutError,
     ensure_daily_vk_assignments,
@@ -281,6 +283,24 @@ def run_once() -> dict[str, int]:
     )
     target_profiles = _load_target_profiles(member_ids)
 
+    # One VK user authorization is enough for the shared background scanner.
+    # Use the root Agency W owner (member without referrer_code).
+    root_owner_id = next((
+        owner_id for owner_id, member in member_by_id.items()
+        if not str(member.get("referrer_code") or "").strip()
+    ), None)
+    if root_owner_id is None:
+        raise RuntimeError("Не найден корневой владелец Агентства W для VK Scout OAuth")
+
+    try:
+        scout_access_token = get_valid_vk_scout_access_token(root_owner_id)
+        # vk_scout._config() prefers VK_SCOUT_ACCESS_TOKEN. This process-local
+        # value is refreshed from encrypted Supabase storage when needed.
+        os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
+    except VKScoutOAuthError as exc:
+        _log(f"VK Scout OAuth: {exc}")
+        scout_access_token = ""
+
     stats = {
         "members": len(member_ids),
         "active": 0,
@@ -301,6 +321,8 @@ def run_once() -> dict[str, int]:
 
     for owner_id in member_ids:
         if owner_id not in confirmed_ids:
+            continue
+        if not scout_access_token:
             continue
         try:
             sources = load_vk_sources(owner_id)

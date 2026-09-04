@@ -4,6 +4,11 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
+from vk_scout_oauth import (
+    begin_vk_scout_authorization,
+    get_vk_scout_connection,
+)
+
 from vk_scout import (
     VKScoutError,
     _sb_patch,
@@ -40,6 +45,44 @@ def render_vk_sources(owner_id: int) -> None:
         "Неония будет анализировать только доступные публичные данные. "
         "Холодные сообщения автоматически не отправляются."
     )
+
+    # VK user authorization for the background scanner. Tokens are encrypted
+    # in Supabase and refresh automatically; they are never shown in the UI.
+    try:
+        connection = get_vk_scout_connection(owner_id)
+    except Exception as exc:
+        connection = {"connected": False}
+        st.warning(f"Не удалось проверить авторизацию VK Scout: {exc}")
+
+    if connection.get("connected"):
+        st.success("🟢 VK Scout авторизован через VK ID")
+        expires_at = str(connection.get("access_expires_at") or "").strip()
+        if expires_at:
+            st.caption("Access token обновляется worker автоматически. Ручная замена каждый час не нужна.")
+    else:
+        st.info(
+            "Чтобы читать участников публичных VK-сообществ, один раз авторизуйте "
+            "VK Scout через ваш VK ID."
+        )
+        auth_key = f"vk_scout_auth_url_{owner_id}"
+        if st.button(
+            "🔐 Подключить VK Scout",
+            key=f"vk_scout_auth_start_{owner_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                st.session_state[auth_key] = begin_vk_scout_authorization(owner_id)
+            except Exception as exc:
+                st.error(f"Не удалось начать авторизацию VK Scout: {exc}")
+        auth_url = str(st.session_state.get(auth_key) or "").strip()
+        if auth_url:
+            st.link_button(
+                "Продолжить авторизацию в VK",
+                auth_url,
+                use_container_width=True,
+            )
+            st.caption("После разрешения VK вернёт вас обратно в Агентство W.")
 
     with st.form(
         f"neonia_vk_source_add_{owner_id}",
