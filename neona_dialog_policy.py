@@ -111,6 +111,100 @@ def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
     return True
 
 
+_INACTIVE_MEETING_STATUSES = {
+    "отменена",
+    "перенесена",
+    "завершена",
+    "не состоялась",
+    "cancelled",
+    "canceled",
+    "rescheduled",
+    "completed",
+    "no_show",
+    "deleted",
+}
+
+
+def _scheduled_meeting_still_active(config, owner_id, context) -> bool:
+    """
+    Проверяет, существует ли ещё встреча, на которую ссылается stage='scheduled'.
+
+    Если запись удалена, отменена, перенесена или уже закончилась, старое состояние
+    диалога больше не должно блокировать новую проверку календаря.
+    При временной ошибке Supabase сохраняем старое состояние, чтобы случайно не
+    потерять реально существующую встречу.
+    """
+    if not isinstance(context, dict):
+        return False
+
+    meeting_id = str(context.get("meeting_id") or "").strip()
+    if not meeting_id:
+        return False
+
+    try:
+        response = requests.get(
+            f"{config.supabase_url}/rest/v1/agency_meetings",
+            headers=core._headers(config),
+            params={
+                "id": f"eq.{meeting_id}",
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "select": "id,status,start_at,end_at",
+                "limit": 1,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        rows = response.json()
+    except Exception as exc:
+        print(
+            "NEONA_MEETING_STATE_CHECK_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        # Ошибка связи не должна сама по себе отменять реальную встречу.
+        return True
+
+    if not isinstance(rows, list) or not rows:
+        return False
+
+    meeting = rows[0] if isinstance(rows[0], dict) else {}
+    status = str(meeting.get("status") or "").strip().casefold()
+    if status in _INACTIVE_MEETING_STATUSES:
+        return False
+
+    end_raw = str(meeting.get("end_at") or "").strip()
+    if end_raw:
+        try:
+            end_utc = datetime.fromisoformat(
+                end_raw.replace("Z", "+00:00")
+            ).astimezone(core.UTC)
+            if end_utc <= datetime.now(core.UTC):
+                return False
+        except (TypeError, ValueError):
+            # Не удаляем состояние только из-за старого/нестандартного формата даты.
+            pass
+
+    return True
+
+
+def _clear_stale_meeting_context(context):
+    """Удаляет только технические поля старой встречи, сохраняя живую память диалога."""
+    cleaned = dict(context or {})
+    for key in (
+        "meeting_id",
+        "proposed_start_at",
+        "requested_date",
+        "requested_time",
+        "offered_slots",
+        "contact_timezone",
+        "contact_city",
+        "meeting_format",
+    ):
+        cleaned.pop(key, None)
+    cleaned["stale_meeting_cleared_at"] = datetime.now(core.UTC).isoformat()
+    return cleaned
+
+
 
 def _call_openai(config, instructions: str, text: str) -> str:
     response = requests.post(
@@ -683,6 +777,8 @@ def _after_scheduled_reply(config, owner_name, first_name, text):
 Ответь на его вопрос кратко и по существу.
 Если вопрос действительно требует личного решения владельца, скажи, что его можно обсудить с {forms['instrumental']} на встрече.
 Не приглашай на новую встречу и не начинай согласование времени заново.
+Если формат встречи — WhatsApp, Telegram или Zoom, это только формат встречи.
+Не обещай «отправить подтверждение» в WhatsApp/Telegram/Zoom, если система реально этого не делает.
 Не выдумывай факты.
 1–2 коротких предложения.
 """.strip()
@@ -707,6 +803,17 @@ def _process_message_without_memory(
         else {}
     )
     greet = not greeted
+
+    # stage="scheduled" нельзя считать истиной без проверки самой записи календаря.
+    # Если встречу удалили/отменили/перенесли или она уже закончилась,
+    # снимаем старый статус и обрабатываем текущее сообщение заново.
+    if stage == "scheduled" and not _scheduled_meeting_still_active(
+        config,
+        owner_id,
+        context,
+    ):
+        context = _clear_stale_meeting_context(context)
+        stage = "idle"
 
     classification = objections.classify_neona_reply(text)
 
