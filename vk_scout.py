@@ -403,19 +403,79 @@ def score_vk_candidates(
     if ask_openai_fn is None:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
 
+    owner_id = int(owner_id)
+    analysis_limit = max(1, min(100, int(limit)))
+
     # В ежедневный анализ допускаем только профили, которым VK прямо разрешает
     # отправить личное сообщение. Профили с закрытыми сообщениями сохраняются
     # в базе как найденные, но Неония не тратит на них анализ и не выдаёт их
     # партнёру в рабочую пятёрку.
-    rows = _sb_get(
-        "agency_vk_candidates",
+    #
+    # ВАЖНО: сначала берём профили, которые этот владелец ЕЩЁ НЕ анализировал.
+    # Раньше каждый цикл снова оценивал одни и те же последние 30 профилей,
+    # поэтому VK Scout мог навсегда застрять на 0/5, даже если в общем пуле
+    # были сотни других кандидатов.
+    scored_rows = _sb_get(
+        "agency_vk_candidate_scores",
         {
-            "can_write_private_message": "eq.true",
-            "select": "*",
-            "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
-            "limit": max(1, min(100, int(limit))),
+            "owner_telegram_id": f"eq.{owner_id}",
+            "select": "vk_user_id,analyzed_at",
+            "limit": 5000,
         },
     )
+    already_scored: set[int] = set()
+    for item in scored_rows:
+        try:
+            already_scored.add(int(item.get("vk_user_id")))
+        except (TypeError, ValueError):
+            pass
+
+    rows: list[dict[str, Any]] = []
+    page_size = 200
+    offset = 0
+    # Ограничиваем число страниц, чтобы worker не мог случайно читать бесконечный пул.
+    for _ in range(25):
+        page = _sb_get(
+            "agency_vk_candidates",
+            {
+                "can_write_private_message": "eq.true",
+                "select": "*",
+                "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
+                "limit": page_size,
+                "offset": offset,
+            },
+        )
+        if not page:
+            break
+        for candidate in page:
+            try:
+                uid = int(candidate.get("vk_user_id"))
+            except (TypeError, ValueError):
+                continue
+            if uid in already_scored:
+                continue
+            rows.append(candidate)
+            if len(rows) >= analysis_limit:
+                break
+        if len(rows) >= analysis_limit or len(page) < page_size:
+            break
+        offset += page_size
+
+    # Когда весь доступный пул уже пройден, разрешаем повторный анализ свежих
+    # профилей. Это полезно после обновления публичных данных или портрета ЦА.
+    reanalysis = False
+    if not rows:
+        reanalysis = True
+        rows = _sb_get(
+            "agency_vk_candidates",
+            {
+                "can_write_private_message": "eq.true",
+                "select": "*",
+                "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
+                "limit": analysis_limit,
+            },
+        )
+
     profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
     system_prompt = """
 Ты — Неония, аналитик целевой аудитории Агентства W.
@@ -427,6 +487,7 @@ def score_vk_candidates(
 """.strip()
 
     analyzed = 0
+    scores_this_cycle: list[int] = []
     for start in range(0, len(rows), 10):
         batch = rows[start:start + 10]
         request = "ПОРТРЕТ ЦА:\n" + profile_text + "\n\nПУБЛИЧНЫЕ VK-ПРОФИЛИ:\n" + json.dumps([_candidate_public_view(x) for x in batch], ensure_ascii=False, indent=2)
@@ -442,8 +503,9 @@ def score_vk_candidates(
                 score = max(0, min(100, int(item.get("score") or 0)))
             except (TypeError, ValueError):
                 score = 0
+            scores_this_cycle.append(score)
             payload.append({
-                "owner_telegram_id": int(owner_id),
+                "owner_telegram_id": owner_id,
                 "vk_user_id": uid,
                 "score": score,
                 "fit_summary": str(item.get("fit_summary") or "").strip() or None,
@@ -455,7 +517,17 @@ def score_vk_candidates(
         if payload:
             _sb_post("agency_vk_candidate_scores", payload, on_conflict="owner_telegram_id,vk_user_id")
             analyzed += len(payload)
-    return {"ok": True, "analyzed": analyzed, "message": f"Неония оценила VK-кандидатов: {analyzed}."}
+
+    best = max(scores_this_cycle) if scores_this_cycle else None
+    mode = "повторный анализ" if reanalysis else "новые профили"
+    best_text = str(best) if best is not None else "—"
+    return {
+        "ok": True,
+        "analyzed": analyzed,
+        "best_score": best,
+        "mode": mode,
+        "message": f"Неония оценила VK-кандидатов: {analyzed}; режим: {mode}; лучший балл цикла: {best_text}.",
+    }
 
 
 def release_expired_vk_assignments() -> int:
@@ -530,6 +602,7 @@ def ensure_daily_vk_assignments(
 ) -> dict[str, Any]:
     owner_id = int(owner_id)
     limit = max(1, min(5, int(limit)))
+    min_score = max(0, min(100, int(min_score)))
     today = date.today().isoformat()
     release_expired_vk_assignments()
 
@@ -582,24 +655,57 @@ def ensure_daily_vk_assignments(
             },
         )
 
-    if len(existing) >= limit:
-        return {"ok": True, "assignments": existing[:limit], "complete": True, "message": f"VK-пятёрка готова: {limit}/{limit}."}
-
-    used = _used_vk_ids() - {int(x["vk_user_id"]) for x in existing if x.get("vk_user_id") is not None}
-    scores = _sb_get(
+    # Диагностика нужна даже когда пятёрка уже готова: по ней видно,
+    # сколько профилей реально прошло порог Неонии.
+    all_owner_scores = _sb_get(
         "agency_vk_candidate_scores",
         {
             "owner_telegram_id": f"eq.{owner_id}",
-            "score": f"gte.{max(0, min(100, int(min_score)))}",
-            "select": "vk_user_id,score,fit_summary",
+            "select": "vk_user_id,score,fit_summary,analyzed_at",
             "order": "score.desc,analyzed_at.desc",
-            "limit": 300,
+            "limit": 5000,
         },
     )
+    best_score = None
+    for item in all_owner_scores:
+        try:
+            value = int(item.get("score"))
+        except (TypeError, ValueError):
+            continue
+        best_score = value if best_score is None else max(best_score, value)
+
+    if len(existing) >= limit:
+        return {
+            "ok": True,
+            "assignments": existing[:limit],
+            "complete": True,
+            "analyzed_total": len(all_owner_scores),
+            "best_score": best_score,
+            "message": f"VK-пятёрка готова: {limit}/{limit}; всего оценено: {len(all_owner_scores)}; лучший балл: {best_score if best_score is not None else '—'}.",
+        }
+
+    used = _used_vk_ids() - {int(x["vk_user_id"]) for x in existing if x.get("vk_user_id") is not None}
+    scores = [
+        item
+        for item in all_owner_scores
+        if str(item.get("score") if item.get("score") is not None else "").lstrip("-").isdigit()
+        and int(item.get("score")) >= min_score
+    ]
     score_vk_ids = [x.get("vk_user_id") for x in scores if x.get("vk_user_id") is not None]
     messageable_score_ids = _messageable_vk_ids(score_vk_ids)
 
     existing_ids = {int(x["vk_user_id"]) for x in existing if x.get("vk_user_id") is not None}
+    available_ids: list[int] = []
+    for item in scores:
+        try:
+            uid = int(item.get("vk_user_id"))
+        except (TypeError, ValueError):
+            continue
+        if uid in used or uid in existing_ids or uid not in messageable_score_ids:
+            continue
+        if uid not in available_ids:
+            available_ids.append(uid)
+
     positions = {int(x["daily_position"]) for x in existing if x.get("daily_position") is not None}
     free_positions = [x for x in range(1, limit + 1) if x not in positions]
     created = 0
@@ -648,12 +754,25 @@ def ensure_daily_vk_assignments(
             "order": "daily_position.asc",
         },
     )[:limit]
+
+    diagnostic = (
+        f"всего оценено: {len(all_owner_scores)}; "
+        f">={min_score}: {len(scores)}; "
+        f"можно написать: {len(messageable_score_ids)}; "
+        f"свободных: {len(available_ids)}; "
+        f"лучший балл: {best_score if best_score is not None else '—'}"
+    )
     return {
         "ok": True,
         "assignments": final_rows,
         "created": created,
         "complete": len(final_rows) >= limit,
-        "message": f"VK-кандидаты на сегодня: {len(final_rows)}/{limit}.",
+        "analyzed_total": len(all_owner_scores),
+        "qualified": len(scores),
+        "messageable_qualified": len(messageable_score_ids),
+        "available": len(available_ids),
+        "best_score": best_score,
+        "message": f"VK-кандидаты на сегодня: {len(final_rows)}/{limit}; {diagnostic}.",
     }
 
 
