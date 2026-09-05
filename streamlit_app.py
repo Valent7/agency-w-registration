@@ -102,7 +102,6 @@ from workspace_persistence import (
 from person_card import render_person_card_2_0, render_neona_magnets_reference
 from scout_center import render_scout_center
 from vk_scout_ui import render_vk_sources
-from vk_scout_oauth import handle_vk_scout_oauth_callback
 import asyncio
 import json
 import re
@@ -221,7 +220,6 @@ def install_agency_w_app_metadata():
 
 
 install_agency_w_app_metadata()
-handle_vk_scout_oauth_callback()
 def _image_data_uri(path):
     """Возвращает PNG как data URI для точного HTML-размещения."""
 
@@ -4043,19 +4041,6 @@ def analyze_contacts_for_target_audience(
                 "activity_precision": str(
                     source.get("activity_precision") or "unknown"
                 ),
-                # ВАЖНО: сохраняем состояние пригодности, вычисленное до ИИ-анализа.
-                # Без этих полей prepare_candidates_for_stagirite() отбрасывал
-                # информативные контакты после OpenAI как будто они недоступны.
-                "work_state": str(source.get("work_state") or "available"),
-                "work_state_label": str(
-                    source.get("work_state_label") or "Можно начинать новый разговор"
-                ),
-                "selection_blocked": bool(source.get("selection_blocked", False)),
-                "block_reason": str(source.get("block_reason") or ""),
-                "last_owner_outreach_at": str(
-                    source.get("last_owner_outreach_at") or ""
-                ),
-                "cooldown_until": str(source.get("cooldown_until") or ""),
                 "potential_interest": potential_interest,
                 "actuality": "активен сейчас",
                 "warmth": warmth,
@@ -4113,16 +4098,6 @@ def analyze_contacts_for_target_audience(
                 "activity_precision": str(
                     source.get("activity_precision") or "unknown"
                 ),
-                "work_state": str(source.get("work_state") or "available"),
-                "work_state_label": str(
-                    source.get("work_state_label") or "Можно начинать новый разговор"
-                ),
-                "selection_blocked": bool(source.get("selection_blocked", False)),
-                "block_reason": str(source.get("block_reason") or ""),
-                "last_owner_outreach_at": str(
-                    source.get("last_owner_outreach_at") or ""
-                ),
-                "cooldown_until": str(source.get("cooldown_until") or ""),
                 "potential_interest": "средний",
                 "actuality": "активен сейчас",
                 "warmth": "холодный",
@@ -6478,11 +6453,7 @@ if telegram_login_valid or remembered_data:
                         }
                         st.info(mode_messages[neonia_mode])
                         if neonia_mode == "💙 Источники поиска VK":
-                            render_vk_sources(
-                                int(telegram_id),
-                                member_code=str(member_code or ""),
-                                ask_openai_fn=ask_openai,
-                            )
+                            render_vk_sources(int(telegram_id))
 
                         elif neonia_mode == "🔎 Поиск чатов":
                             chats_result = render_neonia_chats()
