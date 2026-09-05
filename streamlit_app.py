@@ -3767,6 +3767,137 @@ def candidate_priority_key(candidate):
 
 
 
+def prepare_saved_candidates_for_stagirite(
+    owner_id,
+    desired_count=5,
+    reserve_target=50,
+    exclude_ids=None,
+):
+    """
+    Быстрая утренняя подготовка пятёрки только из уже сохранённого пула Неонии.
+
+    ВАЖНО: эта функция не обращается к Telegram и OpenAI, поэтому её безопасно
+    вызывать прямо на странице «Мой день» при каждом обычном rerun Streamlit.
+    Тяжёлое получение/обновление общего пула остаётся отдельной задачей Неонии.
+    """
+    owner_id = int(owner_id)
+    desired_count = max(1, min(10, int(desired_count or 5)))
+    reserve_target = max(desired_count, min(100, int(reserve_target or 50)))
+
+    excluded = set()
+    for value in exclude_ids or []:
+        try:
+            excluded.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    # Не возвращаем уже заблокированные для первого сообщения контакты.
+    blocked_queue = st.session_state.get(
+        f"neona_first_message_blocked_{owner_id}",
+        [],
+    )
+    if isinstance(blocked_queue, list):
+        for item in blocked_queue:
+            if not isinstance(item, dict):
+                continue
+            try:
+                excluded.add(int(item.get("telegram_id")))
+            except (TypeError, ValueError):
+                continue
+
+    # Уже отправленные первые сообщения не должны возвращаться в новую пятёрку.
+    sent_events = st.session_state.get(
+        f"neona_first_message_sent_log_{owner_id}",
+        [],
+    )
+    if not isinstance(sent_events, list):
+        sent_events = []
+    for event in sent_events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            excluded.add(int(event.get("telegram_id")))
+        except (TypeError, ValueError):
+            continue
+
+    candidates_key = f"neonia_candidates_{owner_id}"
+    saved_candidates = list(st.session_state.get(candidates_key, []) or [])
+
+    usable = []
+    for item in saved_candidates:
+        if not isinstance(item, dict):
+            continue
+        try:
+            cid = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+
+        if cid in excluded:
+            continue
+        if bool(item.get("selection_blocked")):
+            continue
+        if bool(item.get("telegram_warning")):
+            continue
+        if str(item.get("status") or "").strip() == "Отправлено":
+            continue
+
+        # Если поле уже известно, не выдаём чатового кандидата, которому
+        # нельзя сделать первое личное обращение как реальному контакту владельца.
+        if item.get("is_owner_contact") is False:
+            continue
+
+        work_state = str(item.get("work_state") or "").strip().lower()
+        if work_state and work_state != "available":
+            continue
+
+        usable.append(item)
+
+    usable.sort(key=candidate_priority_key)
+
+    ids = []
+    for item in usable:
+        cid = int(item["telegram_id"])
+        if cid not in ids:
+            ids.append(cid)
+        if len(ids) >= reserve_target:
+            break
+
+    if not ids:
+        return {
+            "ok": True,
+            "candidate_ids": [],
+            "reserve_ids": [],
+            "available_reserve": 0,
+            "checked_detail": 0,
+            "exhausted": True,
+            "message": (
+                "В сохранённом пуле Неонии сейчас нет новых пригодных кандидатов. "
+                "Общий пул можно обновить отдельно в Неонии; «Мой день» при этом "
+                "не запускает тяжёлый поиск."
+            ),
+        }
+
+    picked = ids[:desired_count]
+    complete = len(picked) >= desired_count
+    return {
+        "ok": True,
+        "candidate_ids": picked,
+        "reserve_ids": ids,
+        "available_reserve": len(ids),
+        "checked_detail": 0,
+        "exhausted": not complete,
+        "message": (
+            "Рабочая пятёрка подготовлена из уже сохранённого пула Неонии."
+            if complete
+            else (
+                f"Из сохранённого пула подготовлено {len(picked)} из {desired_count}. "
+                "С найденными людьми уже можно работать; общий пул можно обновить отдельно."
+            )
+        ),
+    }
+
+
+
 def split_contacts_by_analysis_value(contact_contexts):
     """Не отправляет в OpenAI контакты, где фактически нечего анализировать."""
 
@@ -6122,7 +6253,7 @@ if telegram_login_valid or remembered_data:
             # не запускаем тяжёлый Telegram/ИИ-поиск.
             daily_stagirite_candidates = ensure_weekly_candidates_for_neona(
                 telegram_id,
-                prepare_candidates_fn=None,
+                prepare_candidates_fn=prepare_saved_candidates_for_stagirite,
             )
             if (
                 isinstance(daily_stagirite_candidates, dict)
@@ -6301,7 +6432,8 @@ if telegram_login_valid or remembered_data:
             ]
 
             st.info(
-                f"🎯 В работе сейчас: {len(selected_candidates)}. "
+                f"🎯 Всего кандидатов в работе: {len(selected_candidates)}. "
+                "Сегодняшняя рабочая пятёрка показана выше отдельно. "
                 "К Неонии возвращайтесь только когда нужно получить или обновить "
                 "общий список людей из Telegram-контактов или чатов."
             )
