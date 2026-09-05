@@ -445,6 +445,8 @@ async def _fetch_contexts(
                 "telegram_warning": False,
                 "is_owner_contact": True,
                 "recent_messages": [],
+                "has_message_history": False,
+                "message_history_count": 0,
                 "activity_eligible": bool(contact.get("activity_eligible", False)),
                 "telegram_activity_label": str(
                     contact.get("telegram_activity_label") or "активность не подтверждена"
@@ -471,9 +473,9 @@ async def _fetch_contexts(
 
                 try:
                     async for message in client.iter_messages(entity, limit=6):
+                        context["has_message_history"] = True
+                        context["message_history_count"] = int(context.get("message_history_count") or 0) + 1
                         message_text = str(getattr(message, "message", "") or "").strip()
-                        if not message_text:
-                            continue
                         context["recent_messages"].append(
                             {
                                 "direction": "от владельца" if getattr(message, "out", False) else "от контакта",
@@ -581,6 +583,17 @@ def _classify_workability(
             "work_state_label": "Явный отказ — не предлагать",
             "selection_blocked": True,
             "block_reason": "явный отказ",
+        }
+
+    # Для ежедневной холодной пятёрки допускаются только контакты без любой
+    # прежней истории личной переписки. Знакомых/старые диалоги владелец может
+    # открыть отдельно через сценарий «Найти знакомого».
+    if bool(source.get("has_message_history")) or bool(recent):
+        return {
+            "work_state": "existing_history",
+            "work_state_label": "Есть история переписки — не выдавать как новый холодный контакт",
+            "selection_blocked": True,
+            "block_reason": "есть прежняя история личной переписки",
         }
 
     if cid in already_sent_ids:
@@ -1057,18 +1070,24 @@ def _current_batch_info(owner_id: int) -> dict[str, Any]:
     tasks = _load_tasks(owner_id)
     task = _active_weekly_task(tasks, today) or _daily_task(tasks)
     if not task:
-        return {"count": 0, "complete": False, "candidate_ids": []}
+        return {"count": 0, "complete": False, "candidate_ids": [], "approved_ids": []}
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     container = result.get("weekly_goal") if isinstance(result.get("weekly_goal"), dict) else result.get("daily_candidate_feed")
     if not isinstance(container, dict):
-        return {"count": 0, "complete": False, "candidate_ids": []}
+        return {"count": 0, "complete": False, "candidate_ids": [], "approved_ids": []}
     batches = container.get("daily_batches") if isinstance(container.get("daily_batches"), dict) else {}
     info = batches.get(today_key) if isinstance(batches.get(today_key), dict) else {}
     ids = list(_ids_from_list(info.get("candidate_ids", [])))
-    return {"count": len(ids), "complete": len(ids) >= int(container.get("daily_target") or DAILY_TARGET), "candidate_ids": ids}
+    approved_ids = list(_ids_from_list(info.get("approved_ids", [])))
+    return {
+        "count": len(ids),
+        "complete": len(ids) >= int(container.get("daily_target") or DAILY_TARGET),
+        "candidate_ids": ids,
+        "approved_ids": approved_ids,
+    }
 
 
-def _write_daily_batch(owner_id: int, ranked_ids: list[int], reserve_ids: list[int]) -> dict[str, Any]:
+def _write_daily_batch(owner_id: int, ranked_ids: list[int], reserve_ids: list[int], *, replace_existing: bool = False) -> dict[str, Any]:
     today = datetime.now(BERLIN).date()
     today_key = today.isoformat()
     tasks = _load_tasks(owner_id)
@@ -1103,7 +1122,12 @@ def _write_daily_batch(owner_id: int, ranked_ids: list[int], reserve_ids: list[i
 
     current_ids = list(_ids_from_list(today_info.get("candidate_ids", [])))
     approved_ids = list(_ids_from_list(today_info.get("approved_ids", [])))
-    merged = list(current_ids)
+    merged = [] if replace_existing else list(current_ids)
+    # Уже утверждённые владельцем кандидаты не исчезают при фоновой перепроверке.
+    if replace_existing:
+        for cid in approved_ids:
+            if cid not in merged:
+                merged.append(int(cid))
     for cid in ranked_ids:
         cid = int(cid)
         if cid not in merged:
@@ -1115,7 +1139,7 @@ def _write_daily_batch(owner_id: int, ranked_ids: list[int], reserve_ids: list[i
     today_info.update(
         {
             "candidate_ids": merged[:daily_target],
-            "approved_ids": approved_ids,
+            "approved_ids": [cid for cid in approved_ids if cid in merged],
             "prepared_at": str(today_info.get("prepared_at") or now_iso),
             "last_topup_attempt_at": now_iso,
             "source": "telegram_scout_background",
@@ -1163,12 +1187,6 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         return {"owner_id": owner_id, "status": "skip", "reason": "нет портрета ЦА"}
 
     current_batch = _current_batch_info(owner_id)
-    if current_batch.get("complete"):
-        return {
-            "owner_id": owner_id,
-            "status": "ready",
-            "count": int(current_batch.get("count") or 0),
-        }
 
     contacts, activity_by_id = asyncio.run(_fetch_contacts_and_statuses(session_string))
     if not contacts:
@@ -1207,18 +1225,66 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
 
     reserve_contacts.sort(key=activity_sort)
     reserve_contacts = reserve_contacts[:RESERVE_TARGET]
-    reserve_ids = [int(item["telegram_id"]) for item in reserve_contacts]
+    reserve_by_id = {int(item["telegram_id"]): item for item in reserve_contacts}
 
     tasks = _load_tasks(owner_id)
     today_key = datetime.now(BERLIN).date().isoformat()
     previously_shown = _shown_candidate_ids(tasks, exclude_day=today_key)
-    current_today = set(current_batch.get("candidate_ids") or [])
-    excluded = set(sent_ids) | set(blocked_ids) | set(known_ids) | set(previously_shown)
-    excluded -= current_today
+    current_today_order = [int(x) for x in (current_batch.get("candidate_ids") or [])]
+    approved_today = {int(x) for x in (current_batch.get("approved_ids") or [])}
+
+    # Перепроверяем уже выданную сегодняшнюю пятёрку. Это важно после изменения
+    # правил: старый контакт с прежней перепиской должен исчезнуть из холодной пятёрки
+    # в тот же день, а не только завтра.
+    safe_current_today: list[int] = []
+    current_probe = [
+        reserve_by_id[cid]
+        for cid in current_today_order
+        if cid in reserve_by_id and cid not in sent_ids and cid not in blocked_ids and cid not in known_ids
+    ]
+    current_state_by_id: dict[int, dict[str, Any]] = {}
+    for start in range(0, len(current_probe), 10):
+        contexts = asyncio.run(_fetch_contexts(session_string, current_probe[start : start + 10]))
+        for source in contexts:
+            state_info = _classify_workability(
+                source,
+                already_sent_ids=sent_ids,
+                known_contact_ids=known_ids,
+                blocked_ids=blocked_ids,
+            )
+            current_state_by_id[int(source["telegram_id"])] = state_info
+
+    for cid in current_today_order:
+        if cid in approved_today:
+            safe_current_today.append(cid)
+            continue
+        state_info = current_state_by_id.get(cid) or {}
+        if state_info.get("work_state") == "available" and not bool(state_info.get("selection_blocked")):
+            safe_current_today.append(cid)
+
+    if len(safe_current_today) >= DAILY_TARGET and len(current_today_order) >= DAILY_TARGET:
+        if safe_current_today[:DAILY_TARGET] != current_today_order[:DAILY_TARGET]:
+            reserve_ids = [int(item["telegram_id"]) for item in reserve_contacts]
+            _write_daily_batch(
+                owner_id,
+                safe_current_today[:DAILY_TARGET],
+                reserve_ids,
+                replace_existing=True,
+            )
+        return {
+            "owner_id": owner_id,
+            "status": "ready",
+            "count": DAILY_TARGET,
+        }
+
+    excluded = set(sent_ids) | set(blocked_ids) | set(known_ids) | set(previously_shown) | set(safe_current_today)
 
     existing_candidates = _normalize_candidate_list(state.get("candidates", []))
     existing_by_id = {int(item["telegram_id"]): item for item in existing_candidates}
-    usable_existing: list[dict[str, Any]] = []
+
+    # Сначала пытаемся добрать уже проанализированными кандидатами, но обязательно
+    # заново проверяем историю личной переписки перед выдачей.
+    existing_probe: list[dict[str, Any]] = []
     for contact in reserve_contacts:
         cid = int(contact["telegram_id"])
         if cid in excluded:
@@ -1230,11 +1296,48 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
             continue
         if str(old.get("status") or "") == "Отправлено":
             continue
-        usable_existing.append({**old, **contact, "work_state": str(old.get("work_state") or "available")})
+        existing_probe.append({**contact, "_old_candidate": old})
 
-    usable_existing.sort(key=_candidate_priority)
-    ranked_candidates = list(usable_existing)
-    needed = max(0, DAILY_TARGET - len(current_today) - len(ranked_candidates))
+    existing_probe.sort(
+        key=lambda item: _candidate_priority({**(item.get("_old_candidate") or {}), **item})
+    )
+
+    ranked_candidates: list[dict[str, Any]] = []
+    need_existing = max(0, DAILY_TARGET - len(safe_current_today))
+    for start in range(0, len(existing_probe), 10):
+        if len(ranked_candidates) >= need_existing:
+            break
+        batch_contacts = [
+            {k: v for k, v in item.items() if k != "_old_candidate"}
+            for item in existing_probe[start : start + 10]
+        ]
+        contexts = asyncio.run(_fetch_contexts(session_string, batch_contacts))
+        context_by_id = {int(item["telegram_id"]): item for item in contexts}
+        for probe_item in existing_probe[start : start + 10]:
+            cid = int(probe_item["telegram_id"])
+            source = context_by_id.get(cid)
+            if not source:
+                continue
+            state_info = _classify_workability(
+                source,
+                already_sent_ids=sent_ids,
+                known_contact_ids=known_ids,
+                blocked_ids=blocked_ids,
+            )
+            if state_info.get("work_state") != "available" or bool(state_info.get("selection_blocked")):
+                continue
+            old = probe_item.get("_old_candidate") or {}
+            ranked_candidates.append(
+                {
+                    **old,
+                    **{k: v for k, v in probe_item.items() if k != "_old_candidate"},
+                    **state_info,
+                }
+            )
+            if len(ranked_candidates) >= need_existing:
+                break
+
+    needed = max(0, DAILY_TARGET - len(safe_current_today) - len(ranked_candidates))
     new_results: list[dict[str, Any]] = []
 
     if needed > 0:
@@ -1245,7 +1348,7 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         ]
 
         for start in range(0, len(raw_new), 10):
-            if len(ranked_candidates) + len(new_results) >= DAILY_TARGET:
+            if len(ranked_candidates) + len(new_results) >= DAILY_TARGET - len(safe_current_today):
                 break
             contexts = asyncio.run(_fetch_contexts(session_string, raw_new[start : start + 10]))
             workable: list[dict[str, Any]] = []
@@ -1288,27 +1391,49 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
             new_results.extend(batch_results)
 
     all_ranked = ranked_candidates + new_results
-    # Убираем дубли и сортируем по качеству/активности.
     dedup: dict[int, dict[str, Any]] = {}
     for item in all_ranked:
-        dedup[int(item["telegram_id"])] = item
+        cid = int(item["telegram_id"])
+        if cid not in safe_current_today:
+            dedup[cid] = item
     all_ranked = list(dedup.values())
     all_ranked.sort(key=_candidate_priority)
 
-    # Сначала сохраняем общий пул Неонии, затем выдаём id Стагириту.
+    # Сохраняем новый анализ в общий пул Неонии.
     _save_workspace_candidates(owner_id, contacts, new_results)
 
     latest_state, _ = _workspace_state(owner_id)
     latest_sent = _sent_ids(latest_state)
     latest_blocked = _blocked_ids(latest_state)
-    safe_ranked_ids = [
+    ranked_ids = list(safe_current_today)
+    for item in all_ranked:
+        cid = int(item["telegram_id"])
+        if cid in latest_sent or cid in latest_blocked:
+            continue
+        if cid not in ranked_ids:
+            ranked_ids.append(cid)
+        if len(ranked_ids) >= DAILY_TARGET:
+            break
+
+    # В резерв для Стагирита не включаем контакты, которые уже показали историю
+    # переписки в текущей проверке. Остальные будут окончательно проверены перед выдачей.
+    invalid_history_ids = {
+        cid
+        for cid, info in current_state_by_id.items()
+        if info.get("work_state") == "existing_history"
+    }
+    reserve_ids = [
         int(item["telegram_id"])
-        for item in all_ranked
-        if int(item["telegram_id"]) not in latest_sent
-        and int(item["telegram_id"]) not in latest_blocked
+        for item in reserve_contacts
+        if int(item["telegram_id"]) not in invalid_history_ids
     ]
 
-    batch = _write_daily_batch(owner_id, safe_ranked_ids, reserve_ids)
+    batch = _write_daily_batch(
+        owner_id,
+        ranked_ids,
+        reserve_ids,
+        replace_existing=True,
+    )
     return {
         "owner_id": owner_id,
         "status": "prepared" if batch.get("candidate_ids") else "empty",
@@ -1316,6 +1441,7 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         "complete": bool(batch.get("complete")),
         "reserve": len(reserve_ids),
         "new_analyzed": len(new_results),
+        "removed_old_dialogues": max(0, len(current_today_order) - len(safe_current_today)),
     }
 
 
