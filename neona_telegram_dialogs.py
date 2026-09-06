@@ -223,7 +223,7 @@ def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]
     workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
     for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
-        if not isinstance(event, dict) or event.get("kind") != "first_message":
+        if not isinstance(event, dict) or event.get("kind") not in {"first_message", "first_video"}:
             continue
         try:
             contact_id = int(event.get("telegram_id"))
