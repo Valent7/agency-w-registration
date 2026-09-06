@@ -34,6 +34,10 @@ UTC = timezone.utc
 
 _LAST_VOICE_DIAGNOSTICS: list[dict] = []
 
+# Диагностика Неоны: печатаем подробный снимок только один раз на владельца
+# после каждого запуска worker. На логику диалога и отправку сообщений не влияет.
+_NEONA_DIAG_PRINTED_OWNERS: set[int] = set()
+
 def _voice_diag_reset() -> None:
     _LAST_VOICE_DIAGNOSTICS.clear()
 
@@ -992,8 +996,29 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
     config = load_config()
     allowed = _allowed_contacts(config, int(owner_id))
     stats = {"allowed": len(allowed), "initialized": 0, "processed": 0, "replied": 0, "errors": 0}
+
+    diag_this_run = int(owner_id) not in _NEONA_DIAG_PRINTED_OWNERS
+    if diag_this_run:
+        _NEONA_DIAG_PRINTED_OWNERS.add(int(owner_id))
+        allowed_preview = [
+            {
+                "telegram_id": int(contact_id),
+                "name": str(meta.get("recipient_name") or ""),
+                "message_id": int(meta.get("message_id") or 0),
+                "sent_at": str(meta.get("sent_at") or ""),
+            }
+            for contact_id, meta in allowed.items()
+        ]
+        print(
+            f"[NeonaDiag] owner={int(owner_id)} "
+            f"allowed_count={len(allowed)} allowed={allowed_preview}",
+            flush=True,
+        )
+
     if not allowed:
         return stats
+
+    matched_allowed_ids: set[int] = set()
 
     session = _get_telegram_session(config, int(owner_id))
     if not session:
@@ -1013,6 +1038,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
             contact_id = int(getattr(entity, "id", 0) or 0)
             if contact_id not in allowed or getattr(entity, "bot", False):
                 continue
+            matched_allowed_ids.add(contact_id)
             if not getattr(entity, "first_name", None) and not getattr(entity, "last_name", None):
                 continue
 
@@ -1036,6 +1062,20 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
             all_recent.sort(key=lambda item: int(item.id))
             recent.sort(key=lambda item: int(item.id))
             latest_incoming_id = int(recent[-1].id) if recent else 0
+
+            if diag_this_run:
+                state_last_before = int((state or {}).get("last_incoming_message_id") or 0)
+                print(
+                    f"[NeonaDiag] owner={int(owner_id)} contact={contact_id} "
+                    f"username=@{str(getattr(entity, 'username', '') or '')} "
+                    f"name={str(getattr(entity, 'first_name', '') or '')!r} "
+                    f"allowed_name={str(allowed[contact_id].get('recipient_name') or '')!r} "
+                    f"first_message_id={int(allowed[contact_id].get('message_id') or 0)} "
+                    f"state_exists={state is not None} "
+                    f"state_last_before={state_last_before} "
+                    f"latest_incoming_id={latest_incoming_id}",
+                    flush=True,
+                )
 
             if state is None:
                 # Если точка отсчёта не была создана в момент отправки,
@@ -1146,6 +1186,14 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 for message in recent
                 if int(message.id) > max(last_id, owner_fence_id)
             ]
+
+            if diag_this_run:
+                print(
+                    f"[NeonaDiag] owner={int(owner_id)} contact={contact_id} "
+                    f"last_id={last_id} owner_fence_id={owner_fence_id} "
+                    f"new_message_ids={[int(message.id) for message in new_messages]}",
+                    flush=True,
+                )
 
             # Проверяем сохранённый ответ. Если владелец удалил сообщение
             # Неоны, не восстанавливаем его автоматически: удаление считаем
@@ -1313,6 +1361,17 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                     stats["errors"] += 1
                     # При ошибке не помечаем сообщения обработанными, чтобы
                     # следующая попытка могла повторить безопасно.
+
+        if diag_this_run:
+            missing_allowed_ids = sorted(set(allowed) - matched_allowed_ids)
+            print(
+                f"[NeonaDiag] owner={int(owner_id)} "
+                f"matched_allowed={len(matched_allowed_ids)}/{len(allowed)} "
+                f"missing_allowed_ids={missing_allowed_ids} "
+                f"stats={stats}",
+                flush=True,
+            )
+
         return stats
     finally:
         await client.disconnect()
