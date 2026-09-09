@@ -1,8 +1,9 @@
+import html
 import streamlit as st
 from agency_values import render_agency_development
 import requests
 import hashlib
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
@@ -5230,11 +5231,31 @@ def _instagram_connect_state(owner_telegram_id: int, owner_name: str) -> str:
 
 
 def _instagram_connect_url(owner_telegram_id: int, owner_name: str) -> str:
+    """Build the official Instagram OAuth URL without sending the browser through Render first."""
     base_url = str(st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
     if not base_url:
         raise RuntimeError("INSTAGRAM_OAUTH_SERVICE_URL не найден в Streamlit Secrets.")
+
+    # The Streamlit server asks our backend only for public OAuth configuration.
+    # The partner's browser is then sent directly to instagram.com.
+    response = requests.get(f"{base_url}/instagram/oauth-config", timeout=10)
+    response.raise_for_status()
+    oauth_config = response.json() if response.text.strip() else {}
+    client_id = str(oauth_config.get("client_id") or "").strip()
+    redirect_uri = str(oauth_config.get("redirect_uri") or "").strip()
+    if not client_id or not redirect_uri:
+        raise RuntimeError("OAuth Instagram ещё не настроен на сервере Агентства W.")
+
     state = _instagram_connect_state(owner_telegram_id, owner_name)
-    return f"{base_url}/instagram/connect?state={quote(state, safe='')}"
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "instagram_business_basic,instagram_business_manage_messages",
+        "state": state,
+        "force_reauth": "true",
+    }
+    return "https://www.instagram.com/oauth/authorize?" + urlencode(params)
 
 
 def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool:
@@ -5264,11 +5285,19 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
             st.caption(f"Техническая причина: {exc}")
             return False
 
-        st.link_button(
-            "📸 Подключить Instagram",
-            connect_url,
-            type="primary",
-            use_container_width=True,
+        safe_url = html.escape(connect_url, quote=True)
+        st.markdown(
+            f"""
+            <a href="{safe_url}" target="_self" style="
+                display:flex; align-items:center; justify-content:center;
+                width:100%; box-sizing:border-box; padding:0.85rem 1rem;
+                border-radius:0.55rem; text-decoration:none; font-weight:700;
+                font-size:1.05rem; color:white;
+                background:linear-gradient(90deg,#6f2dbd,#8b2fc9);
+                border:1px solid rgba(255,255,255,.10);
+            "">📸&nbsp;&nbsp;Подключить Instagram</a>
+            """,
+            unsafe_allow_html=True,
         )
     return False
 
