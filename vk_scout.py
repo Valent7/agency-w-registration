@@ -16,6 +16,7 @@ import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
+from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 
 import requests
 
@@ -477,13 +478,18 @@ def score_vk_candidates(
         )
 
     profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
-    system_prompt = """
-Ты — Неония, аналитик целевой аудитории Агентства W.
+    system_prompt = f"""
+Ты — Неония, аналитик и селектор целевой аудитории Агентства W.
 Оценивай только по предоставленным публичным данным VK.
 Не додумывай профессию, доход, здоровье, политику, религию, личную жизнь,
 диагнозы или другие чувствительные признаки. Отсутствие данных = неопределённость.
+
+{BUSINESS_GATE_RULES}
+
 Верни ТОЛЬКО JSON-массив:
-[{"vk_user_id":123,"score":0,"fit_summary":"...","positive_signals":["..."],"weak_fit_signals":["..."]}]
+[{{"vk_user_id":123,"score":0,"fit_summary":"...","positive_signals":["..."],
+"weak_fit_signals":["..."],"business_relevant":false,"business_evidence":[],
+"business_gate_reason":"..."}}]
 """.strip()
 
     analyzed = 0
@@ -503,14 +509,36 @@ def score_vk_candidates(
                 score = max(0, min(100, int(item.get("score") or 0)))
             except (TypeError, ValueError):
                 score = 0
+
+            score, _, business_evidence, business_gate_reason = apply_business_gate(
+                item,
+                score,
+            )
+            # Сохраняем объяснение жёсткого бизнес-фильтра в уже существующие поля,
+            # поэтому миграция Supabase не нужна.
+            positive_signals = (
+                item.get("positive_signals")
+                if isinstance(item.get("positive_signals"), list)
+                else []
+            )
+            weak_fit_signals = (
+                item.get("weak_fit_signals")
+                if isinstance(item.get("weak_fit_signals"), list)
+                else []
+            )
+            if business_evidence:
+                positive_signals = business_evidence + positive_signals
+            elif business_gate_reason:
+                weak_fit_signals = [business_gate_reason] + weak_fit_signals
+
             scores_this_cycle.append(score)
             payload.append({
                 "owner_telegram_id": owner_id,
                 "vk_user_id": uid,
                 "score": score,
                 "fit_summary": str(item.get("fit_summary") or "").strip() or None,
-                "positive_signals": item.get("positive_signals") if isinstance(item.get("positive_signals"), list) else [],
-                "weak_fit_signals": item.get("weak_fit_signals") if isinstance(item.get("weak_fit_signals"), list) else [],
+                "positive_signals": positive_signals[:6],
+                "weak_fit_signals": weak_fit_signals[:6],
                 "target_profile_snapshot": {"profile": profile_text},
                 "analyzed_at": datetime.now(UTC).isoformat(),
             })
