@@ -5295,7 +5295,7 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
                 font-size:1.05rem; color:white;
                 background:linear-gradient(90deg,#6f2dbd,#8b2fc9);
                 border:1px solid rgba(255,255,255,.10);
-            "">📸&nbsp;&nbsp;Подключить Instagram</a>
+            ">📸&nbsp;&nbsp;Подключить Instagram</a>
             """,
             unsafe_allow_html=True,
         )
