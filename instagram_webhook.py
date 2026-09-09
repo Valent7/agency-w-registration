@@ -4,18 +4,19 @@ import os
 import re
 import mimetypes
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import requests
+from cryptography.fernet import Fernet, InvalidToken
 
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Route
 
 
@@ -28,6 +29,17 @@ INSTAGRAM_OWNER_ID = os.getenv("INSTAGRAM_OWNER_ID", "").strip()
 INSTAGRAM_OWNER_NAME = os.getenv("INSTAGRAM_OWNER_NAME", "").strip()
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
 INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0").strip() or "v23.0"
+
+# Multi-partner Instagram Business Login. These values are configured once
+# by the Agency W operator in Render; partners never see them.
+INSTAGRAM_APP_ID = os.getenv("INSTAGRAM_APP_ID", "").strip()
+INSTAGRAM_APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET", "").strip()
+INSTAGRAM_OAUTH_REDIRECT_URI = os.getenv("INSTAGRAM_OAUTH_REDIRECT_URI", "").strip()
+INSTAGRAM_AGENCY_RETURN_URL = os.getenv(
+    "INSTAGRAM_AGENCY_RETURN_URL",
+    "https://agency-w.streamlit.app/",
+).strip()
+FERNET_KEY = os.getenv("FERNET_KEY", "").strip()
 
 # VK community integration. Keep secrets/tokens in Render Environment.
 VK_ACCESS_TOKEN = os.getenv("VK_ACCESS_TOKEN", "").strip()
@@ -74,7 +86,7 @@ async def privacy(request: Request):
 <h2>Data we may process</h2>
 <ul>
   <li>Instagram account identifiers and profile information made available by Instagram;</li>
-  <li>messages and content voluntarily sent to the Instagram account <strong>ai_v_ton</strong>;</li>
+  <li>messages and content voluntarily sent to Instagram accounts connected by Agency W partners;</li>
   <li>technical metadata required to receive, process, secure and troubleshoot messages.</li>
 </ul>
 
@@ -372,10 +384,355 @@ def _transcribe_instagram_audio(audio_url: str) -> str:
 
 
 
-def _send_instagram_text(sender_account_id: str, recipient_id: str, text: str) -> dict:
-    """Send one text reply through Instagram API with Instagram Login."""
-    if not INSTAGRAM_ACCESS_TOKEN:
-        raise RuntimeError("Missing INSTAGRAM_ACCESS_TOKEN")
+
+def _instagram_cipher() -> Fernet:
+    if not FERNET_KEY:
+        raise RuntimeError("Missing FERNET_KEY for Instagram connections")
+    return Fernet(FERNET_KEY.encode("utf-8"))
+
+
+def _encrypt_instagram_secret(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    return _instagram_cipher().encrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def _decrypt_instagram_secret(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    try:
+        return _instagram_cipher().decrypt(value.encode("utf-8")).decode("utf-8")
+    except InvalidToken as exc:
+        raise RuntimeError("Instagram token could not be decrypted") from exc
+
+
+def _decode_instagram_state(state: str) -> dict:
+    state = str(state or "").strip()
+    if not state:
+        raise RuntimeError("Missing Instagram OAuth state")
+    try:
+        raw = _instagram_cipher().decrypt(state.encode("utf-8"), ttl=15 * 60)
+        payload = json.loads(raw.decode("utf-8"))
+    except InvalidToken as exc:
+        raise RuntimeError("Instagram authorization link expired or is invalid") from exc
+    except Exception as exc:
+        raise RuntimeError("Invalid Instagram authorization state") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Invalid Instagram authorization state")
+    owner_id = str(payload.get("owner_id") or "").strip()
+    if not owner_id.isdigit():
+        raise RuntimeError("Instagram authorization has no valid Agency W owner")
+    return payload
+
+
+def _instagram_connection_by_account_id(instagram_account_id: str) -> dict | None:
+    account_id = str(instagram_account_id or "").strip()
+    if not account_id:
+        return None
+    try:
+        rows = _sb_get(
+            "agency_instagram_connections",
+            {
+                "instagram_account_id": f"eq.{account_id}",
+                "status": "eq.connected",
+                "select": "*",
+                "limit": 1,
+            },
+        )
+    except Exception as exc:
+        print("INSTAGRAM_CONNECTION_LOOKUP_ERROR:", exc, flush=True)
+        return None
+    if not rows:
+        return None
+    row = dict(rows[0])
+    row["access_token"] = _decrypt_instagram_secret(row.get("access_token_encrypted") or "")
+    return row
+
+
+def _fallback_instagram_connection(recipient_id: str) -> dict | None:
+    """Keep the proven single-account setup working only until migration starts.
+
+    Once at least one DB-backed Instagram connection exists, unknown recipient IDs
+    are never routed to the Director. This prevents cross-partner dialog leakage.
+    """
+    if not (INSTAGRAM_OWNER_ID and INSTAGRAM_ACCESS_TOKEN):
+        return None
+    try:
+        existing = _sb_get(
+            "agency_instagram_connections",
+            {"status": "eq.connected", "select": "id", "limit": 1},
+        )
+        if existing:
+            return None
+    except Exception:
+        # Before the migration table is created, preserve today's working mode.
+        pass
+    return {
+        "owner_telegram_id": int(INSTAGRAM_OWNER_ID),
+        "owner_name": INSTAGRAM_OWNER_NAME,
+        "instagram_account_id": str(recipient_id or "").strip(),
+        "instagram_username": "",
+        "access_token": INSTAGRAM_ACCESS_TOKEN,
+        "status": "fallback_env",
+    }
+
+
+def _ensure_fresh_instagram_token(connection: dict) -> dict:
+    """Refresh a long-lived Instagram token before it expires."""
+    row = dict(connection or {})
+    token = str(row.get("access_token") or "").strip()
+    expires_text = str(row.get("token_expires_at") or "").strip()
+    if not token or not expires_text or row.get("status") == "fallback_env":
+        return row
+    try:
+        expires_at = datetime.fromisoformat(expires_text.replace("Z", "+00:00"))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return row
+    if expires_at - datetime.now(timezone.utc) > timedelta(days=7):
+        return row
+    try:
+        response = requests.get(
+            "https://graph.instagram.com/refresh_access_token",
+            params={
+                "grant_type": "ig_refresh_token",
+                "access_token": token,
+            },
+            timeout=30,
+        )
+        if not response.ok:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
+        data = response.json()
+        refreshed = str(data.get("access_token") or token).strip()
+        expires_in = int(data.get("expires_in") or 0)
+        next_expiry = (
+            datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            if expires_in
+            else expires_at
+        )
+        _sb_patch(
+            "agency_instagram_connections",
+            {"owner_telegram_id": f"eq.{int(row['owner_telegram_id'])}"},
+            {
+                "access_token_encrypted": _encrypt_instagram_secret(refreshed),
+                "token_expires_at": next_expiry.isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        row["access_token"] = refreshed
+        row["token_expires_at"] = next_expiry.isoformat()
+    except Exception as exc:
+        # Do not break a live dialog if the current token still works.
+        print("INSTAGRAM_TOKEN_REFRESH_ERROR:", exc, flush=True)
+    return row
+
+
+def _resolve_instagram_connection(recipient_id: str) -> dict:
+    connection = _instagram_connection_by_account_id(recipient_id)
+    if connection:
+        return _ensure_fresh_instagram_token(connection)
+    fallback = _fallback_instagram_connection(recipient_id)
+    if fallback:
+        return fallback
+    raise RuntimeError(
+        f"No Agency W Instagram connection found for recipient account {recipient_id}"
+    )
+
+
+def _save_instagram_connection(
+    *,
+    owner_id: int,
+    owner_name: str,
+    instagram_account_id: str,
+    instagram_username: str,
+    account_type: str,
+    access_token: str,
+    expires_in: int | None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    expires_at = None
+    if expires_in:
+        expires_at = (now + timedelta(seconds=int(expires_in))).isoformat()
+
+    payload = {
+        "owner_telegram_id": int(owner_id),
+        "owner_name": str(owner_name or "").strip() or None,
+        "instagram_account_id": str(instagram_account_id or "").strip(),
+        "instagram_username": str(instagram_username or "").strip() or None,
+        "account_type": str(account_type or "").strip() or None,
+        "access_token_encrypted": _encrypt_instagram_secret(access_token),
+        "token_expires_at": expires_at,
+        "status": "connected",
+        "connected_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+    _sb_post(
+        "agency_instagram_connections",
+        payload,
+        merge=True,
+        on_conflict="owner_telegram_id",
+    )
+
+
+def _instagram_oauth_settings() -> dict:
+    required = {
+        "INSTAGRAM_APP_ID": INSTAGRAM_APP_ID,
+        "INSTAGRAM_APP_SECRET": INSTAGRAM_APP_SECRET,
+        "INSTAGRAM_OAUTH_REDIRECT_URI": INSTAGRAM_OAUTH_REDIRECT_URI,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError("Missing Instagram OAuth settings: " + ", ".join(missing))
+    return required
+
+
+async def instagram_connect(request: Request):
+    try:
+        settings = _instagram_oauth_settings()
+        state = str(request.query_params.get("state") or "").strip()
+        _decode_instagram_state(state)
+        params = {
+            "client_id": settings["INSTAGRAM_APP_ID"],
+            "redirect_uri": settings["INSTAGRAM_OAUTH_REDIRECT_URI"],
+            "response_type": "code",
+            "scope": "instagram_business_basic,instagram_business_manage_messages",
+            "state": state,
+            "force_reauth": "true",
+        }
+        return RedirectResponse(
+            "https://www.instagram.com/oauth/authorize?" + urlencode(params),
+            status_code=302,
+        )
+    except Exception as exc:
+        return _page(
+            "Agency W — Instagram",
+            f"<h1>Не удалось начать подключение Instagram</h1><p>{str(exc)}</p>",
+        )
+
+
+async def instagram_oauth_callback(request: Request):
+    error = str(request.query_params.get("error") or "").strip()
+    error_description = str(request.query_params.get("error_description") or "").strip()
+    if error:
+        return _page(
+            "Agency W — Instagram",
+            "<h1>Подключение Instagram отменено</h1>"
+            f"<p>{error_description or error}</p>",
+        )
+
+    try:
+        settings = _instagram_oauth_settings()
+        code = str(request.query_params.get("code") or "").strip()
+        state = str(request.query_params.get("state") or "").strip()
+        state_payload = _decode_instagram_state(state)
+        if not code:
+            raise RuntimeError("Instagram did not return an authorization code")
+
+        token_response = requests.post(
+            "https://api.instagram.com/oauth/access_token",
+            data={
+                "client_id": settings["INSTAGRAM_APP_ID"],
+                "client_secret": settings["INSTAGRAM_APP_SECRET"],
+                "grant_type": "authorization_code",
+                "redirect_uri": settings["INSTAGRAM_OAUTH_REDIRECT_URI"],
+                "code": code,
+            },
+            timeout=30,
+        )
+        if not token_response.ok:
+            raise RuntimeError(
+                f"Instagram token exchange HTTP {token_response.status_code}: "
+                f"{token_response.text[:800]}"
+            )
+        short_data = token_response.json()
+        short_token = str(short_data.get("access_token") or "").strip()
+        if not short_token:
+            raise RuntimeError("Instagram did not return an access token")
+
+        long_response = requests.get(
+            "https://graph.instagram.com/access_token",
+            params={
+                "grant_type": "ig_exchange_token",
+                "client_secret": settings["INSTAGRAM_APP_SECRET"],
+                "access_token": short_token,
+            },
+            timeout=30,
+        )
+        if not long_response.ok:
+            raise RuntimeError(
+                f"Instagram long-lived token HTTP {long_response.status_code}: "
+                f"{long_response.text[:800]}"
+            )
+        long_data = long_response.json()
+        access_token = str(long_data.get("access_token") or short_token).strip()
+        expires_in = long_data.get("expires_in")
+
+        profile_response = requests.get(
+            "https://graph.instagram.com/me",
+            params={
+                "fields": "id,username,account_type",
+                "access_token": access_token,
+            },
+            timeout=30,
+        )
+        if not profile_response.ok:
+            raise RuntimeError(
+                f"Instagram profile HTTP {profile_response.status_code}: "
+                f"{profile_response.text[:800]}"
+            )
+        profile = profile_response.json()
+        instagram_account_id = str(profile.get("id") or short_data.get("user_id") or "").strip()
+        if not instagram_account_id:
+            raise RuntimeError("Instagram account id was not returned")
+
+        owner_id = int(state_payload["owner_id"])
+        owner_name = str(state_payload.get("owner_name") or "").strip()
+        if not owner_name:
+            try:
+                member = _vk_member_by_telegram(owner_id) or {}
+                owner_name = str(member.get("first_name") or "").strip()
+            except Exception:
+                owner_name = ""
+
+        _save_instagram_connection(
+            owner_id=owner_id,
+            owner_name=owner_name,
+            instagram_account_id=instagram_account_id,
+            instagram_username=str(profile.get("username") or "").strip(),
+            account_type=str(profile.get("account_type") or "").strip(),
+            access_token=access_token,
+            expires_in=int(expires_in) if str(expires_in or "").isdigit() else None,
+        )
+
+        return_to = INSTAGRAM_AGENCY_RETURN_URL or "https://agency-w.streamlit.app/"
+        sep = "&" if "?" in return_to else "?"
+        return RedirectResponse(
+            f"{return_to}{sep}instagram=connected",
+            status_code=302,
+        )
+    except Exception as exc:
+        print("INSTAGRAM_OAUTH_CALLBACK_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
+        return _page(
+            "Agency W — Instagram",
+            "<h1>Instagram не подключён</h1>"
+            f"<p>{str(exc)}</p>"
+            "<p>Вернитесь в Агентство W и попробуйте ещё раз.</p>",
+        )
+
+
+def _send_instagram_text(
+    sender_account_id: str,
+    recipient_id: str,
+    text: str,
+    access_token: str | None = None,
+) -> dict:
+    """Send one text reply using the token belonging to this Agency W owner."""
+    token = str(access_token or INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        raise RuntimeError("Missing Instagram access token")
 
     sender_account_id = str(sender_account_id or "").strip()
     recipient_id = str(recipient_id or "").strip()
@@ -399,7 +756,7 @@ def _send_instagram_text(sender_account_id: str, recipient_id: str, text: str) -
         endpoint,
         data=body,
         headers={
-            "Authorization": f"Bearer {INSTAGRAM_ACCESS_TOKEN}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "Agency-W-Instagram-Webhook/1.0",
@@ -428,13 +785,12 @@ def _send_instagram_text(sender_account_id: str, recipient_id: str, text: str) -
         raise RuntimeError(f"Instagram API error: {payload['error']}")
     return payload
 
-def _neona_config(core):
+def _neona_config(core, connection: dict | None = None):
+    connection = dict(connection or {})
     required = {
         "SUPABASE_URL": os.getenv("SUPABASE_URL", "").strip(),
         "SUPABASE_SECRET_KEY": os.getenv("SUPABASE_SECRET_KEY", "").strip(),
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", "").strip(),
-        "INSTAGRAM_OWNER_ID": INSTAGRAM_OWNER_ID,
-        "INSTAGRAM_OWNER_NAME": INSTAGRAM_OWNER_NAME,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -442,10 +798,14 @@ def _neona_config(core):
             "Missing Instagram/Neona environment variables: " + ", ".join(missing)
         )
 
+    raw_owner_id = connection.get("owner_telegram_id") or INSTAGRAM_OWNER_ID
+    raw_owner_name = connection.get("owner_name") or INSTAGRAM_OWNER_NAME
     try:
-        owner_id = int(required["INSTAGRAM_OWNER_ID"])
-    except ValueError as exc:
-        raise RuntimeError("INSTAGRAM_OWNER_ID must be a numeric Agency W owner id.") from exc
+        owner_id = int(raw_owner_id)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Instagram connection has no valid Agency W owner id.") from exc
+    if not str(raw_owner_name or "").strip():
+        raise RuntimeError("Instagram connection has no Agency W owner name.")
 
     config = core.Config(
         supabase_url=required["SUPABASE_URL"].rstrip("/"),
@@ -456,7 +816,7 @@ def _neona_config(core):
         telegram_api_hash="",
         openai_api_key=required["OPENAI_API_KEY"],
     )
-    return config, owner_id, _owner_name_for_russian(required["INSTAGRAM_OWNER_NAME"])
+    return config, owner_id, _owner_name_for_russian(str(raw_owner_name))
 
 
 def _build_neona_draft(event: dict) -> None:
@@ -466,7 +826,9 @@ def _build_neona_draft(event: dict) -> None:
     policy.apply_policy()
     core = policy.core
 
-    config, owner_id, owner_name = _neona_config(core)
+    connection = _resolve_instagram_connection(event["recipient_id"])
+    access_token = str(connection.get("access_token") or "").strip()
+    config, owner_id, owner_name = _neona_config(core, connection)
     contact_id = _instagram_contact_id(event["sender_id"])
     message_id = str(event.get("message_id") or "").strip()
     text = str(event.get("text") or "").strip()
@@ -500,6 +862,7 @@ def _build_neona_draft(event: dict) -> None:
                     event["sender_id"],
                     "Я получила ваше голосовое сообщение, но сейчас не смогла его разобрать. "
                     "Напишите, пожалуйста, эту мысль текстом — и я сразу отвечу.",
+                    access_token=access_token,
                 )
                 return
 
@@ -566,6 +929,7 @@ def _build_neona_draft(event: dict) -> None:
         event["recipient_id"],
         event["sender_id"],
         reply_text,
+        access_token=access_token,
     )
     sent_message_id = str(send_result.get("message_id") or "").strip()
 
@@ -736,13 +1100,22 @@ def _sb_get(table: str, params: dict) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def _sb_post(table: str, payload: dict, *, merge: bool = False) -> list[dict]:
+def _sb_post(
+    table: str,
+    payload: dict,
+    *,
+    merge: bool = False,
+    on_conflict: str = "",
+) -> list[dict]:
     url, _ = _supabase_rest_config()
     prefer = "return=representation"
+    endpoint = f"{url}/rest/v1/{table}"
     if merge:
         prefer = "resolution=merge-duplicates,return=representation"
+    if on_conflict:
+        endpoint += "?on_conflict=" + quote(str(on_conflict))
     response = requests.post(
-        f"{url}/rest/v1/{table}",
+        endpoint,
         headers=_supabase_headers(prefer),
         json=payload,
         timeout=20,
@@ -1178,6 +1551,8 @@ routes = [
     Route("/privacy", privacy, methods=["GET"]),
     Route("/terms", terms, methods=["GET"]),
     Route("/data-deletion", data_deletion, methods=["GET"]),
+    Route("/instagram/connect", instagram_connect, methods=["GET"]),
+    Route("/instagram/callback", instagram_oauth_callback, methods=["GET"]),
     Route(
         "/instagram/webhook",
         instagram_webhook_verify,
