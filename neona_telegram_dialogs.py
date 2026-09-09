@@ -101,6 +101,15 @@ YES_WORDS = {
     "да", "подтверждаю", "подтверждаем", "согласен", "согласна",
     "договорились", "ок", "okay", "yes", "подходит", "устраивает",
 }
+
+# Дополнительные естественные ответы, которые считаем явным согласием
+# ТОЛЬКО на финальном этапе подтверждения уже предложенной встречи.
+MEETING_CONFIRMATION_WORDS = {
+    "готов", "готова",
+    "все верно", "всё верно",
+    "отлично", "замечательно",
+}
+
 NO_WORDS = {"нет", "не подходит", "неудобно", "другое время", "перенести"}
 
 
@@ -555,6 +564,14 @@ def _is_yes(text: str) -> bool:
     return any((" " in word and word in lowered) or (" " not in word and word in tokens) for word in YES_WORDS)
 
 
+def _is_meeting_confirmation(text: str) -> bool:
+    """Явное согласие именно на уже предложенные дату/время/формат встречи."""
+    lowered = re.sub(r"[^a-zа-яё0-9 ]+", " ", text.lower()).strip()
+    tokens = set(lowered.split())
+    words = YES_WORDS | MEETING_CONFIRMATION_WORDS
+    return any((" " in word and word in lowered) or (" " not in word and word in tokens) for word in words)
+
+
 def _is_no(text: str) -> bool:
     lowered = re.sub(r"[^a-zа-яё0-9 ]+", " ", text.lower()).strip()
     tokens = set(lowered.split())
@@ -751,7 +768,7 @@ def _schedule_reply(
         )
 
     if stage == "awaiting_confirmation":
-        if _is_yes(text):
+        if _is_meeting_confirmation(text):
             proposed = context.get("proposed_start_at")
             tz_name = str(context.get("contact_timezone") or "")
             meeting_format = str(context.get("meeting_format") or "")
