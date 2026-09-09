@@ -589,6 +589,25 @@ def _instagram_oauth_settings() -> dict:
     return required
 
 
+async def instagram_oauth_config(request: Request):
+    """Return only public OAuth values so Agency W can link directly to Instagram."""
+    try:
+        settings = _instagram_oauth_settings()
+        return JSONResponse(
+            {
+                "client_id": settings["INSTAGRAM_APP_ID"],
+                "redirect_uri": settings["INSTAGRAM_OAUTH_REDIRECT_URI"],
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": str(exc)},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+
+
 async def instagram_connect(request: Request):
     try:
         settings = _instagram_oauth_settings()
@@ -1551,6 +1570,7 @@ routes = [
     Route("/privacy", privacy, methods=["GET"]),
     Route("/terms", terms, methods=["GET"]),
     Route("/data-deletion", data_deletion, methods=["GET"]),
+    Route("/instagram/oauth-config", instagram_oauth_config, methods=["GET"]),
     Route("/instagram/connect", instagram_connect, methods=["GET"]),
     Route("/instagram/callback", instagram_oauth_callback, methods=["GET"]),
     Route(
