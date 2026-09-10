@@ -5292,7 +5292,7 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
         safe_url = html.escape(connect_url, quote=True)
         st.markdown(
             f"""
-            <a href="{safe_url}" target="_self" style="
+            <a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="
                 display:flex; align-items:center; justify-content:center;
                 width:100%; box-sizing:border-box; padding:0.85rem 1rem;
                 border-radius:0.55rem; text-decoration:none; font-weight:700;
