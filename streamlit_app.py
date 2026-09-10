@@ -1,7 +1,9 @@
+import html
 import streamlit as st
 from agency_values import render_agency_development
 import requests
 import hashlib
+from urllib.parse import quote, urlencode
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from neonia_contacts import render_neonia_contacts
@@ -5202,6 +5204,108 @@ def generate_neona_first_messages(
         }
     return result
 
+def _load_instagram_connection(owner_telegram_id: int) -> dict | None:
+    try:
+        response = requests.get(
+            f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_instagram_connections",
+            headers={
+                "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+                "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+            },
+            params={
+                "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+                "status": "eq.connected",
+                "select": "instagram_account_id,instagram_username,account_type,status,connected_at,token_expires_at",
+                "limit": 1,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        rows = response.json() if response.text.strip() else []
+        return dict(rows[0]) if isinstance(rows, list) and rows else None
+    except Exception:
+        return None
+
+
+def _instagram_connect_state(owner_telegram_id: int, owner_name: str) -> str:
+    key = str(st.secrets.get("FERNET_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("FERNET_KEY не найден в Streamlit Secrets.")
+    payload = {
+        "owner_id": int(owner_telegram_id),
+        "owner_name": str(owner_name or "").strip(),
+        "purpose": "agency_w_instagram_connect",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return Fernet(key.encode("utf-8")).encrypt(
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ).decode("utf-8")
+
+
+def _instagram_connect_url(owner_telegram_id: int, owner_name: str) -> str:
+    base_url = str(st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
+    if not base_url:
+        raise RuntimeError("INSTAGRAM_OAUTH_SERVICE_URL не найден в Streamlit Secrets.")
+    response = requests.get(f"{base_url}/instagram/oauth-config", timeout=10)
+    response.raise_for_status()
+    oauth_config = response.json() if response.text.strip() else {}
+    client_id = str(oauth_config.get("client_id") or "").strip()
+    redirect_uri = str(oauth_config.get("redirect_uri") or "").strip()
+    if not client_id or not redirect_uri:
+        raise RuntimeError("OAuth Instagram ещё не настроен на сервере Агентства W.")
+    state = _instagram_connect_state(owner_telegram_id, owner_name)
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "instagram_business_basic,instagram_business_manage_messages",
+        "state": state,
+        "force_reauth": "true",
+    }
+    return "https://www.instagram.com/oauth/authorize?" + urlencode(params)
+
+
+def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool:
+    connection = _load_instagram_connection(int(owner_telegram_id))
+    if connection:
+        username = str(connection.get("instagram_username") or "").strip()
+        suffix = f" · @{username}" if username else ""
+        st.success(f"🟢 Instagram подключён{suffix}")
+        return True
+
+    if str(st.query_params.get("instagram") or "").strip() == "connected":
+        st.info("Instagram авторизован. Обновите страницу, если статус ещё не стал зелёным.")
+
+    with st.container(border=True):
+        st.markdown("**Instagram**")
+        st.caption(
+            "Подключите профессиональный аккаунт один раз. После этого Неона сможет "
+            "отвечать на входящие сообщения Direct от вашего имени."
+        )
+        try:
+            connect_url = _instagram_connect_url(owner_telegram_id, owner_name)
+        except Exception as exc:
+            st.warning("Подключение Instagram ещё настраивается администратором Агентства W.")
+            st.caption(f"Техническая причина: {exc}")
+            return False
+
+        safe_url = html.escape(connect_url, quote=True)
+        st.markdown(
+            f"""
+            <a href="{safe_url}" target="_self" style="
+                display:flex; align-items:center; justify-content:center;
+                width:100%; box-sizing:border-box; padding:0.85rem 1rem;
+                border-radius:0.55rem; text-decoration:none; font-weight:700;
+                font-size:1.05rem; color:white;
+                background:linear-gradient(90deg,#6f2dbd,#8b2fc9);
+                border:1px solid rgba(255,255,255,.10);
+            ">📸&nbsp;&nbsp;Подключить Instagram</a>
+            """,
+            unsafe_allow_html=True,
+        )
+    return False
+
+
 def render_telegram_connection(expected_telegram_id):
     expected_telegram_id = int(expected_telegram_id)
 
@@ -6026,6 +6130,12 @@ if telegram_login_valid or remembered_data:
                 ask_openai,
             )
             st.stop()
+
+        instagram_connected = render_instagram_connection(
+            int(telegram_id),
+            neola_first_name,
+        )
+        st.session_state["neona_instagram_connected"] = instagram_connected
 
         hydrate_workspace_state_once(telegram_id)
 
