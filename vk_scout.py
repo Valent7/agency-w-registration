@@ -675,7 +675,7 @@ def add_known_vk_contact(
             raise VKScoutError(
                 "Этот VK-контакт уже находится в активной работе у другого партнёра Агентства W."
             )
-        return {**row, **candidate, "known_contact": True}
+        return {**row, **candidate, "assignment_id": int(row.get("id") or 0), "known_contact": True}
 
     now = datetime.now(UTC)
     note = re.sub(r"\s+", " ", str(familiarity_note or "")).strip()
@@ -698,7 +698,7 @@ def add_known_vk_contact(
     }
     created = _sb_post("agency_vk_assignments", payload)
     row = created[0] if created else payload
-    return {**row, **candidate, "known_contact": True}
+    return {**row, **candidate, "assignment_id": int(row.get("id") or 0), "known_contact": True}
 
 
 def load_known_vk_contacts(owner_id: int) -> list[dict[str, Any]]:
@@ -729,6 +729,9 @@ def load_known_vk_contacts(owner_id: int) -> list[dict[str, Any]]:
         result.append({
             **assignment,
             **candidate,
+            # У candidate тоже есть поле id. Храним id назначения отдельно,
+            # чтобы UI не перепутал его с id профиля-кандидата.
+            "assignment_id": int(assignment.get("id") or 0),
             "profile_url": vk_profile_url(candidate) if candidate else f"https://vk.com/id{uid}",
             "known_contact": True,
         })
