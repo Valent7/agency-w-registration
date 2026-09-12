@@ -10,6 +10,9 @@ from neola_cabinet_map import NEOLA_MISSION, neola_cabinet_knowledge
 
 REALTIME_MODEL = "gpt-realtime-2"
 REALTIME_VOICE = "marin"
+# Даем партнёру достаточно времени прочитать экран и нажать кнопку.
+# После установления WebRTC-сессии истечение client secret разговор не прерывает.
+REALTIME_CLIENT_SECRET_TTL_SECONDS = 1800  # 30 минут
 
 
 VOICE_CABINET_MAP = r"""
@@ -118,6 +121,40 @@ def build_neola_realtime_instructions(
 """.strip()
 
 
+def _realtime_error_for_user(response):
+    """Возвращает понятное сообщение партнёру, а технику оставляет в логах."""
+    raw = str(getattr(response, "text", "") or "")[:2000]
+    status_code = getattr(response, "status_code", "?")
+    print(
+        f"[Neola Realtime] client secret error {status_code}: {raw}",
+        flush=True,
+    )
+
+    lowered = raw.lower()
+    if (
+        "credit_balance_exhausted" in lowered
+        or "insufficient_quota" in lowered
+        or "no credits remaining" in lowered
+    ):
+        return (
+            "Голос Неолы временно недоступен: закончился API-баланс. "
+            "Сообщите Директору Агентства W."
+        )
+    if status_code in {401, 403}:
+        return (
+            "Голос Неолы временно недоступен из-за настройки доступа. "
+            "Сообщите Директору Агентства W."
+        )
+    if status_code == 429:
+        return (
+            "Неола сейчас перегружена. Подождите немного и попробуйте ещё раз."
+        )
+    return (
+        "Не удалось подготовить голос Неолы. "
+        "Подождите немного и попробуйте ещё раз."
+    )
+
+
 def create_realtime_client_secret(
     telegram_id,
     owner_name,
@@ -135,6 +172,10 @@ def create_realtime_client_secret(
     )
 
     body = {
+        "expires_after": {
+            "anchor": "created_at",
+            "seconds": REALTIME_CLIENT_SECRET_TTL_SECONDS,
+        },
         "session": {
             "type": "realtime",
             "model": REALTIME_MODEL,
@@ -180,24 +221,35 @@ def create_realtime_client_secret(
     )
 
     if not response.ok:
-        details = response.text[:800]
-        raise RuntimeError(
-            f"OpenAI Realtime не создал голосовую сессию: "
-            f"{response.status_code} {details}"
-        )
+        raise RuntimeError(_realtime_error_for_user(response))
 
     data = response.json()
     token = str(data.get("value") or "").strip()
+    try:
+        expires_at = int(data.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+
     if not token:
-        raise RuntimeError("OpenAI Realtime не вернул временный ключ сессии.")
+        print(
+            "[Neola Realtime] OpenAI returned no client secret value",
+            flush=True,
+        )
+        raise RuntimeError(
+            "Не удалось подготовить голос Неолы. Попробуйте ещё раз через минуту."
+        )
 
-    return token, instructions
+    return token, instructions, expires_at
 
 
-def _render_realtime_html(ephemeral_key, instructions, ui_context):
+def _render_realtime_html(ephemeral_key, instructions, ui_context, expires_at=0):
     token_json = json.dumps(ephemeral_key)
     instructions_json = json.dumps(instructions)
     context_json = json.dumps(str(ui_context or "Агентство W"))
+    try:
+        expires_at_ms = int(expires_at or 0) * 1000
+    except (TypeError, ValueError):
+        expires_at_ms = 0
 
     # Важно: все динамические значения передаются через JSON, а не вставляются
     # как произвольный HTML.
@@ -252,6 +304,7 @@ def _render_realtime_html(ephemeral_key, instructions, ui_context):
   const TOKEN = {token_json};
   const INSTRUCTIONS = {instructions_json};
   const CONTEXT = {context_json};
+  const TOKEN_EXPIRES_AT_MS = {expires_at_ms};
 
   const shell = document.getElementById("neola-live-shell");
   const statusEl = document.getElementById("neola-live-status");
@@ -261,6 +314,34 @@ def _render_realtime_html(ephemeral_key, instructions, ui_context):
 
   function setStatus(text) {{
     if (statusEl) statusEl.textContent = text;
+  }}
+
+  function friendlyRealtimeError(error) {{
+    const name = (error && error.name) ? String(error.name) : "";
+    const message = (error && error.message) ? String(error.message) : String(error || "");
+    const lowered = message.toLowerCase();
+
+    if (name === "NotAllowedError") {{
+      return "Разрешите браузеру доступ к микрофону и нажмите «Начать разговор» ещё раз.";
+    }}
+    if (
+      lowered.includes("ephemeral token expired") ||
+      lowered.includes("client secret expired") ||
+      lowered.includes("token expired")
+    ) {{
+      return "Подключение Неолы устарело. Закройте Неолу, откройте снова и нажмите «Начать разговор».";
+    }}
+    if (
+      lowered.includes("credit_balance_exhausted") ||
+      lowered.includes("insufficient_quota") ||
+      lowered.includes("no credits remaining")
+    ) {{
+      return "Голос Неолы временно недоступен. Сообщите Директору Агентства W.";
+    }}
+    if (lowered.includes("failed to fetch")) {{
+      return "Не удалось соединиться с голосовым сервисом. Проверьте интернет и попробуйте ещё раз.";
+    }}
+    return "Не удалось подключить голос Неолы. Попробуйте ещё раз через минуту.";
   }}
 
   function appendLine(who, text) {{
@@ -333,12 +414,24 @@ def _render_realtime_html(ephemeral_key, instructions, ui_context):
       return;
     }}
 
+    // Не пытаемся использовать заведомо просроченный ключ.
+    if (TOKEN_EXPIRES_AT_MS && Date.now() >= TOKEN_EXPIRES_AT_MS - 5000) {{
+      setStatus(
+        "🔴 Подключение Неолы устарело. Закройте Неолу, откройте снова и нажмите «Начать разговор»."
+      );
+      return;
+    }}
+
     live.connecting = true;
     setStatus("🟡 Подключаю Неолу…");
 
+    let pc = null;
+    let audioEl = null;
+    let stream = null;
+
     try {{
-      const pc = new RTCPeerConnection();
-      const audioEl = document.createElement("audio");
+      pc = new RTCPeerConnection();
+      audioEl = document.createElement("audio");
       audioEl.autoplay = true;
       audioEl.setAttribute("playsinline", "");
       audioEl.style.display = "none";
@@ -349,7 +442,7 @@ def _render_realtime_html(ephemeral_key, instructions, ui_context):
         audioEl.play().catch(() => {{}});
       }};
 
-      const stream = await navigator.mediaDevices.getUserMedia({{
+      stream = await navigator.mediaDevices.getUserMedia({{
         audio: {{
           echoCancellation: true,
           noiseSuppression: true,
@@ -414,7 +507,8 @@ def _render_realtime_html(ephemeral_key, instructions, ui_context):
 
         if (msg.type === "error") {{
           const message = (msg.error && msg.error.message) || msg.message || "Неизвестная ошибка";
-          setStatus("🔴 " + message);
+          console.error("Neola Realtime event error:", msg);
+          setStatus("🔴 " + friendlyRealtimeError(new Error(message)));
         }}
       }});
 
@@ -443,7 +537,8 @@ def _render_realtime_html(ephemeral_key, instructions, ui_context):
 
       if (!sdpResponse.ok) {{
         const details = await sdpResponse.text();
-        throw new Error("Не удалось открыть голосовую сессию: " + details);
+        console.error("Neola Realtime call failed:", sdpResponse.status, details);
+        throw new Error(details || "realtime_call_failed");
       }}
 
       const answer = {{
@@ -461,7 +556,23 @@ def _render_realtime_html(ephemeral_key, instructions, ui_context):
     }} catch (error) {{
       live.connecting = false;
       live.connected = false;
-      setStatus("🔴 " + (error.message || String(error)));
+      console.error("Neola Realtime connection error:", error);
+
+      try {{
+        if (pc) pc.close();
+      }} catch (_) {{}}
+      try {{
+        if (stream) stream.getTracks().forEach(track => track.stop());
+      }} catch (_) {{}}
+      try {{
+        if (audioEl) {{
+          audioEl.pause();
+          audioEl.srcObject = null;
+          audioEl.remove();
+        }}
+      }} catch (_) {{}}
+
+      setStatus("🔴 " + friendlyRealtimeError(error));
       if (error && error.name === "NotAllowedError") {{
         appendLine(
           "Подсказка",
@@ -521,20 +632,22 @@ def render_neola_realtime_voice(
     - разговор идёт напрямую браузер <-> OpenAI Realtime через WebRTC.
     """
     try:
-        token, instructions = create_realtime_client_secret(
+        token, instructions, expires_at = create_realtime_client_secret(
             telegram_id=telegram_id,
             owner_name=owner_name,
             ui_context=ui_context,
             onboarding_step=onboarding_step,
         )
     except Exception as exc:
-        st.error(f"Не удалось подготовить живой голос Неолы: {exc}")
+        # Партнёру показываем только понятный русский текст без API-деталей.
+        st.error(str(exc))
         return False
 
     html_body = _render_realtime_html(
         ephemeral_key=token,
         instructions=instructions,
         ui_context=ui_context,
+        expires_at=expires_at,
     )
 
     # Новые версии Streamlit умеют безопасно выполнять явно разрешённый JS
