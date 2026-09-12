@@ -34,6 +34,13 @@ UTC = timezone.utc
 
 _LAST_VOICE_DIAGNOSTICS: list[dict] = []
 
+# Защита от повторных платных вызовов на одном и том же входящем сообщении.
+# Кэш в Supabase (context) переживает перезапуск worker; память защищает от
+# повторной оплаты даже если сохранение состояния временно не удалось.
+VOICE_TRANSCRIPT_CACHE_LIMIT = 20
+MAX_MESSAGE_PROCESSING_ATTEMPTS = 3
+_VOICE_TRANSCRIPTION_MEMORY_CACHE: dict[tuple[int, int, int], dict[str, str]] = {}
+
 # Диагностика Неоны: печатаем подробный снимок только один раз на владельца
 # после каждого запуска worker. На логику диалога и отправку сообщений не влияет.
 _NEONA_DIAG_PRINTED_OWNERS: set[int] = set()
@@ -48,6 +55,79 @@ def _voice_diag_add(stage: str, **data) -> None:
 
 def get_last_voice_diagnostics() -> list[dict]:
     return list(_LAST_VOICE_DIAGNOSTICS)
+
+
+def _trim_context_map(raw: Any, limit: int) -> dict[str, Any]:
+    """Оставляет только последние записи словаря с числовыми message_id."""
+    data = dict(raw) if isinstance(raw, dict) else {}
+
+    def sort_key(item: tuple[str, Any]) -> int:
+        try:
+            return int(item[0])
+        except (TypeError, ValueError):
+            return 0
+
+    if len(data) > max(1, int(limit)):
+        data = dict(sorted(data.items(), key=sort_key)[-int(limit):])
+    return data
+
+
+def _voice_cache_get(context: dict[str, Any], message_id: int) -> dict[str, str] | None:
+    cache = context.get("voice_transcription_cache")
+    if not isinstance(cache, dict):
+        return None
+    entry = cache.get(str(int(message_id)))
+    return dict(entry) if isinstance(entry, dict) else None
+
+
+def _voice_cache_put(
+    context: dict[str, Any],
+    message_id: int,
+    *,
+    status: str,
+    text: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    updated = dict(context or {})
+    cache = _trim_context_map(
+        updated.get("voice_transcription_cache"),
+        VOICE_TRANSCRIPT_CACHE_LIMIT,
+    )
+    cache[str(int(message_id))] = {
+        "status": str(status),
+        "text": str(text or ""),
+        "error": str(error or "")[:500],
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    updated["voice_transcription_cache"] = _trim_context_map(
+        cache,
+        VOICE_TRANSCRIPT_CACHE_LIMIT,
+    )
+    return updated
+
+
+def _processing_attempts_put(
+    context: dict[str, Any],
+    message_id: int,
+    attempts: int,
+) -> dict[str, Any]:
+    updated = dict(context or {})
+    data = _trim_context_map(updated.get("message_processing_attempts"), 20)
+    data[str(int(message_id))] = int(attempts)
+    updated["message_processing_attempts"] = _trim_context_map(data, 20)
+    return updated
+
+
+def _processing_attempts_remove(
+    context: dict[str, Any],
+    message_id: int,
+) -> dict[str, Any]:
+    updated = dict(context or {})
+    data = _trim_context_map(updated.get("message_processing_attempts"), 20)
+    data.pop(str(int(message_id)), None)
+    updated["message_processing_attempts"] = data
+    return updated
+
 
 MSK = ZoneInfo("Europe/Moscow")
 DURATION_MINUTES = 30
@@ -1298,25 +1378,255 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
             if new_messages:
                 stats["processed"] += len(new_messages)
                 latest = new_messages[-1]
-                incoming_parts = []
+                incoming_parts: list[str] = []
+                failed_voice_ids: list[int] = []
+                working_context = dict(state_context)
+
+                # Голосовое сообщение распознаём максимум ОДИН раз на message_id.
+                # Результат сразу сохраняем в context до генерации ответа Неоны.
                 for incoming_message in new_messages:
-                    incoming_text = await _incoming_message_text(
-                        config,
-                        incoming_message,
-                    )
-                    if incoming_text:
-                        incoming_parts.append(incoming_text)
+                    incoming_id = int(getattr(incoming_message, "id", 0) or 0)
+                    kind = _telegram_message_kind(incoming_message)
+
+                    if kind in {"voice", "audio"}:
+                        memory_key = (
+                            int(owner_id),
+                            int(contact_id),
+                            int(incoming_id),
+                        )
+                        cached = _voice_cache_get(
+                            working_context,
+                            incoming_id,
+                        )
+                        if cached is None:
+                            memory_cached = _VOICE_TRANSCRIPTION_MEMORY_CACHE.get(
+                                memory_key
+                            )
+                            cached = (
+                                dict(memory_cached)
+                                if isinstance(memory_cached, dict)
+                                else None
+                            )
+
+                        if cached is not None:
+                            if (
+                                str(cached.get("status") or "") == "ok"
+                                and str(cached.get("text") or "").strip()
+                            ):
+                                incoming_parts.append(
+                                    str(cached.get("text") or "").strip()
+                                )
+                            else:
+                                failed_voice_ids.append(incoming_id)
+                            continue
+
+                        try:
+                            incoming_text = await _incoming_message_text(
+                                config,
+                                incoming_message,
+                            )
+                            if incoming_text:
+                                cache_entry = {
+                                    "status": "ok",
+                                    "text": incoming_text,
+                                    "error": "",
+                                }
+                                _VOICE_TRANSCRIPTION_MEMORY_CACHE[
+                                    memory_key
+                                ] = cache_entry
+                                working_context = _voice_cache_put(
+                                    working_context,
+                                    incoming_id,
+                                    status="ok",
+                                    text=incoming_text,
+                                )
+                                incoming_parts.append(incoming_text)
+                            else:
+                                cache_entry = {
+                                    "status": "failed",
+                                    "text": "",
+                                    "error": "empty_transcript",
+                                }
+                                _VOICE_TRANSCRIPTION_MEMORY_CACHE[
+                                    memory_key
+                                ] = cache_entry
+                                working_context = _voice_cache_put(
+                                    working_context,
+                                    incoming_id,
+                                    status="failed",
+                                    error="empty_transcript",
+                                )
+                                failed_voice_ids.append(incoming_id)
+                        except Exception as exc:
+                            error_text = f"{type(exc).__name__}: {exc}"
+                            _voice_diag_add(
+                                "transcription_failed_once",
+                                message_id=incoming_id,
+                                error=error_text,
+                            )
+                            cache_entry = {
+                                "status": "failed",
+                                "text": "",
+                                "error": error_text[:500],
+                            }
+                            _VOICE_TRANSCRIPTION_MEMORY_CACHE[
+                                memory_key
+                            ] = cache_entry
+                            working_context = _voice_cache_put(
+                                working_context,
+                                incoming_id,
+                                status="failed",
+                                error=error_text,
+                            )
+                            failed_voice_ids.append(incoming_id)
+
+                        # Сохраняем кэш НЕМЕДЛЕННО. Если генерация ответа или
+                        # Telegram-отправка ниже упадут, повторной транскрибации
+                        # на следующем 15-секундном цикле уже не будет.
+                        _save_dialog_state(
+                            config,
+                            int(owner_id),
+                            contact_id,
+                            last_incoming_id=last_id,
+                            stage=str(state.get("stage") or "idle"),
+                            greeted=bool(state.get("greeted", False)),
+                            context=working_context,
+                        )
+                        state_context = working_context
+                        state = {**state, "context": state_context}
+                        continue
+
+                    plain_text = str(
+                        getattr(incoming_message, "message", "") or ""
+                    ).strip()
+                    if plain_text:
+                        incoming_parts.append(plain_text)
 
                 combined_text = "\n".join(incoming_parts).strip()
+
+                # Если единственное новое содержимое — нераспознанный voice,
+                # не гоняем его по кругу. Один раз просим прислать заново/текстом
+                # и помечаем входящее обработанным.
                 if not combined_text:
-                    _voice_diag_add("incoming_text_empty", latest_message_id=int(latest.id))
-                    # Если аудио не удалось распознать, не помечаем его обработанным:
-                    # следующий запуск сможет попробовать снова.
+                    if failed_voice_ids:
+                        notice = (
+                            "Не смогла разобрать голосовое сообщение. "
+                            "Пожалуйста, отправьте его ещё раз или напишите "
+                            "коротко текстом."
+                        )
+                        notice_id = 0
+                        try:
+                            sent_notice = await client.send_message(
+                                entity,
+                                notice,
+                                parse_mode=None,
+                                link_preview=False,
+                            )
+                            notice_id = int(getattr(sent_notice, "id", 0) or 0)
+                        except Exception as exc:
+                            _voice_diag_add(
+                                "voice_failure_notice_send_error",
+                                latest_message_id=int(latest.id),
+                                error=f"{type(exc).__name__}: {exc}",
+                            )
+
+                        final_context = {
+                            **working_context,
+                            "last_voice_failure_ids": failed_voice_ids[-10:],
+                            "last_voice_failure_at": datetime.now(UTC).isoformat(),
+                        }
+                        if notice_id:
+                            final_context["last_reply_id"] = notice_id
+                            final_context["last_reply_text"] = notice
+
+                        _save_dialog_state(
+                            config,
+                            int(owner_id),
+                            contact_id,
+                            last_incoming_id=int(latest.id),
+                            stage=str(state.get("stage") or "idle"),
+                            greeted=bool(state.get("greeted", False)),
+                            context=final_context,
+                        )
+                        stats["errors"] += 1
+                        continue
+
+                    _voice_diag_add(
+                        "incoming_text_empty",
+                        latest_message_id=int(latest.id),
+                    )
+                    _save_dialog_state(
+                        config,
+                        int(owner_id),
+                        contact_id,
+                        last_incoming_id=int(latest.id),
+                        stage=str(state.get("stage") or "idle"),
+                        greeted=bool(state.get("greeted", False)),
+                        context=working_context,
+                    )
                     stats["errors"] += 1
                     continue
 
+                # Любую дальнейшую обработку одного и того же batch ограничиваем.
+                # Это защищает не только аудио, но и gpt-5-mini от бесконечного
+                # повтора, если после ответа API ломается отправка в Telegram.
+                attempts_map = (
+                    working_context.get("message_processing_attempts")
+                    if isinstance(
+                        working_context.get("message_processing_attempts"),
+                        dict,
+                    )
+                    else {}
+                )
+                previous_attempts = int(
+                    attempts_map.get(str(int(latest.id)), 0) or 0
+                )
+                if previous_attempts >= MAX_MESSAGE_PROCESSING_ATTEMPTS:
+                    suppressed_context = {
+                        **working_context,
+                        "last_processing_suppressed_id": int(latest.id),
+                        "last_processing_suppressed_at": datetime.now(UTC).isoformat(),
+                    }
+                    _save_dialog_state(
+                        config,
+                        int(owner_id),
+                        contact_id,
+                        last_incoming_id=int(latest.id),
+                        stage=str(state.get("stage") or "idle"),
+                        greeted=bool(state.get("greeted", False)),
+                        context=suppressed_context,
+                    )
+                    _voice_diag_add(
+                        "processing_suppressed",
+                        latest_message_id=int(latest.id),
+                        attempts=previous_attempts,
+                    )
+                    stats["errors"] += 1
+                    continue
+
+                current_attempt = previous_attempts + 1
+                working_context = _processing_attempts_put(
+                    working_context,
+                    int(latest.id),
+                    current_attempt,
+                )
+                _save_dialog_state(
+                    config,
+                    int(owner_id),
+                    contact_id,
+                    last_incoming_id=last_id,
+                    stage=str(state.get("stage") or "idle"),
+                    greeted=bool(state.get("greeted", False)),
+                    context=working_context,
+                )
+                state_context = working_context
+                state = {**state, "context": state_context}
+
                 try:
-                    first_name = _first_name(entity, allowed[contact_id].get("recipient_name", ""))
+                    first_name = _first_name(
+                        entity,
+                        allowed[contact_id].get("recipient_name", ""),
+                    )
                     username = str(getattr(entity, "username", "") or "")
                     reply, stage, greeted, context = _process_message(
                         config,
@@ -1347,13 +1657,21 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                             "в нужном чате после отправки."
                         )
 
-                    if any(_telegram_message_kind(item) in {"voice", "audio"} for item in new_messages):
+                    if any(
+                        _telegram_message_kind(item) in {"voice", "audio"}
+                        for item in new_messages
+                    ):
                         _voice_diag_add(
                             "reply_sent_after_voice",
                             latest_message_id=int(latest.id),
                             reply_id=int(sent.id),
                             verified=True,
                         )
+
+                    context = _processing_attempts_remove(
+                        context,
+                        int(latest.id),
+                    )
                     _save_dialog_state(
                         config,
                         int(owner_id),
@@ -1373,11 +1691,33 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                     _voice_diag_add(
                         "dialog_or_send_error",
                         latest_message_id=int(latest.id),
+                        attempt=current_attempt,
                         error=f"{type(exc).__name__}: {exc}",
                     )
                     stats["errors"] += 1
-                    # При ошибке не помечаем сообщения обработанными, чтобы
-                    # следующая попытка могла повторить безопасно.
+
+                    if current_attempt >= MAX_MESSAGE_PROCESSING_ATTEMPTS:
+                        # После 3 неудач прекращаем платный цикл. Человека не
+                        # спамим автоматическими повторами; новый входящий текст
+                        # снова запустит обычную обработку.
+                        stopped_context = {
+                            **working_context,
+                            "last_processing_failed_id": int(latest.id),
+                            "last_processing_failed_attempts": current_attempt,
+                            "last_processing_failed_at": datetime.now(UTC).isoformat(),
+                            "last_processing_error": (
+                                f"{type(exc).__name__}: {exc}"
+                            )[:500],
+                        }
+                        _save_dialog_state(
+                            config,
+                            int(owner_id),
+                            contact_id,
+                            last_incoming_id=int(latest.id),
+                            stage=str(state.get("stage") or "idle"),
+                            greeted=bool(state.get("greeted", False)),
+                            context=stopped_context,
+                        )
 
         if diag_this_run:
             missing_allowed_ids = sorted(set(allowed) - matched_allowed_ids)
@@ -1507,28 +1847,15 @@ def _transcribe_audio_with_model(
     return transcript
 
 def _transcribe_audio(config: Config, path: Path) -> str:
-    """Современная транскрибация с запасным проверенным вариантом."""
+    """Одна платная транскрибация без дорогого автоматического fallback."""
 
-    try:
-        transcript = _transcribe_audio_with_model(
-            config,
-            path,
-            "gpt-4o-mini-transcribe",
-        )
-        if transcript:
-            return transcript
-    except Exception as exc:
-        _voice_diag_add(
-            "primary_transcription_exception",
-            model="gpt-4o-mini-transcribe",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-    _voice_diag_add("fallback_started", model="whisper-1")
-    # Старый рабочий контур Агентства использовал whisper-1.
+    # ВАЖНО: не переключаемся автоматически на whisper-1.
+    # Один Telegram message_id должен иметь максимум одну попытку
+    # распознавания, а результат/ошибка затем кэшируются в dialog context.
     return _transcribe_audio_with_model(
         config,
         path,
-        "whisper-1",
+        "gpt-4o-mini-transcribe",
     )
 
 
