@@ -12,6 +12,8 @@ from vk_scout_oauth import (
 from vk_scout import (
     VKScoutError,
     _sb_patch,
+    add_known_vk_contact,
+    load_known_vk_contacts,
     load_today_vk_assignments,
     load_vk_sources,
     mark_vk_invited,
@@ -219,9 +221,197 @@ def _render_today_vk_candidates(
                             st.error(f"Не удалось пропустить кандидата: {exc}")
 
     st.caption(
-        "Сообщения автоматически не отправляются: вы открываете профиль, копируете "
-        "подготовленный текст Неоны и отправляете его сами."
+        "Первое сообщение пока отправляется из личного VK вручную: откройте профиль, "
+        "скопируйте утверждённый текст Неоны и после отправки нажмите «Отправлено». "
+        "Обязательной ссылки на сообщество в первом сообщении больше нет."
     )
+
+
+def _render_known_vk_contacts(
+    owner_id: int,
+    member_code: str,
+    ask_openai_fn=None,
+) -> None:
+    """Ручное добавление знакомых владельца — отдельно от ежедневной пятёрки Неонии."""
+    st.markdown("### 👥 Свои знакомые VK")
+    st.caption(
+        "Можно добавить друга или знакомого по ссылке на личный VK-профиль. "
+        "Он не занимает место в пятёрке Неонии. Неона подготовит отдельное первое сообщение, "
+        "а вы сможете его отредактировать перед отправкой."
+    )
+
+    with st.form(f"vk_known_contact_add_{owner_id}", clear_on_submit=True):
+        profile = st.text_input(
+            "Ссылка или ID VK-профиля",
+            placeholder="Например: https://vk.com/id123456 или https://vk.com/username",
+        )
+        familiarity_note = st.text_input(
+            "Что Неоне важно знать о вашем знакомстве — необязательно",
+            placeholder="Например: знакомы по прежнему проекту; давно не общались",
+        )
+        submitted = st.form_submit_button(
+            "➕ Добавить знакомого",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if not str(profile or "").strip():
+            st.warning("Вставьте ссылку или ID личного VK-профиля.")
+        else:
+            try:
+                added = add_known_vk_contact(
+                    owner_id,
+                    member_code,
+                    str(profile).strip(),
+                    familiarity_note=str(familiarity_note or "").strip(),
+                )
+                name = " ".join(
+                    x for x in (
+                        str(added.get("first_name") or "").strip(),
+                        str(added.get("last_name") or "").strip(),
+                    ) if x
+                ) or "VK-контакт"
+                st.success(f"✅ {name} добавлен в список знакомых.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось добавить знакомого: {exc}")
+
+    try:
+        contacts = load_known_vk_contacts(owner_id)
+    except Exception as exc:
+        st.error(f"Не удалось загрузить знакомых VK: {exc}")
+        return
+
+    if not contacts:
+        st.info("Пока знакомые VK не добавлены.")
+        return
+
+    for item in contacts:
+        assignment_id = int(item.get("id") or 0)
+        first_name = str(item.get("first_name") or "").strip()
+        last_name = str(item.get("last_name") or "").strip()
+        full_name = " ".join(x for x in (first_name, last_name) if x) or "VK-контакт"
+        profile_url = str(item.get("profile_url") or "").strip()
+        status = str(item.get("status") or "reserved").strip()
+        invitation_text = str(item.get("invitation_text") or "").strip()
+        fit = str(item.get("fit_summary") or "").strip()
+        note = fit.split(":", 1)[1].strip() if fit.startswith("Знакомый владельца:") else ""
+
+        with st.container(border=True):
+            st.markdown(f"#### {full_name}")
+            st.caption("Знакомый владельца")
+            if note:
+                st.write(f"**Заметка:** {note}")
+            if profile_url:
+                st.link_button("Открыть профиль VK", profile_url, use_container_width=False)
+
+            editing_key = f"vk_known_editing_{owner_id}_{assignment_id}"
+            if invitation_text:
+                st.markdown("**Сообщение Неоны:**")
+                if st.session_state.get(editing_key, False):
+                    edited_text = st.text_area(
+                        "Отредактируйте сообщение перед отправкой",
+                        value=invitation_text,
+                        key=f"vk_known_edit_text_{owner_id}_{assignment_id}",
+                        height=190,
+                        label_visibility="collapsed",
+                    )
+                    edit_cols = st.columns(2)
+                    with edit_cols[0]:
+                        if st.button(
+                            "💾 Сохранить",
+                            key=f"vk_known_save_{owner_id}_{assignment_id}",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            cleaned = str(edited_text or "").strip()
+                            if not cleaned:
+                                st.warning("Сообщение не может быть пустым.")
+                            else:
+                                try:
+                                    _sb_patch(
+                                        "agency_vk_assignments",
+                                        {
+                                            "id": f"eq.{assignment_id}",
+                                            "owner_telegram_id": f"eq.{owner_id}",
+                                        },
+                                        {
+                                            "invitation_text": cleaned,
+                                            "status": "prepared",
+                                            "updated_at": datetime.now(UTC).isoformat(),
+                                        },
+                                    )
+                                    st.session_state[editing_key] = False
+                                    st.success("Сообщение сохранено.")
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Не удалось сохранить сообщение: {exc}")
+                    with edit_cols[1]:
+                        if st.button(
+                            "Отмена",
+                            key=f"vk_known_cancel_{owner_id}_{assignment_id}",
+                            use_container_width=True,
+                        ):
+                            st.session_state[editing_key] = False
+                            st.rerun()
+                    continue
+
+                st.code(invitation_text, language=None)
+                if status != "invited" and assignment_id:
+                    if st.button(
+                        "✏️ Редактировать",
+                        key=f"vk_known_edit_{owner_id}_{assignment_id}",
+                    ):
+                        st.session_state[editing_key] = True
+                        st.rerun()
+            elif status in {"reserved", "prepared"} and assignment_id:
+                if st.button(
+                    "✍️ Подготовить сообщение Неоны",
+                    key=f"vk_known_prepare_{owner_id}_{assignment_id}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    try:
+                        prepare_vk_invitation(
+                            assignment_id,
+                            member_code,
+                            ask_openai_fn=ask_openai_fn,
+                        )
+                        st.success("Сообщение Неоны готово.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось подготовить сообщение: {exc}")
+
+            cols = st.columns(2)
+            with cols[0]:
+                if status != "invited" and assignment_id:
+                    if st.button(
+                        "✅ Отправлено",
+                        key=f"vk_known_invited_{owner_id}_{assignment_id}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            mark_vk_invited(assignment_id)
+                            st.success("Отмечено как отправленное.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Не удалось сохранить статус: {exc}")
+                elif status == "invited":
+                    st.success("✅ Отправлено")
+            with cols[1]:
+                if status != "invited" and assignment_id:
+                    if st.button(
+                        "⏭ Убрать",
+                        key=f"vk_known_skip_{owner_id}_{assignment_id}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            skip_vk_assignment(assignment_id)
+                            st.success("Контакт убран из активной работы.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Не удалось убрать контакт: {exc}")
 
 
 def render_vk_sources(
@@ -279,6 +469,12 @@ def render_vk_sources(
 
     if connection.get("connected"):
         _render_today_vk_candidates(
+            owner_id,
+            str(member_code or "").strip(),
+            ask_openai_fn=ask_openai_fn,
+        )
+        st.divider()
+        _render_known_vk_contacts(
             owner_id,
             str(member_code or "").strip(),
             ask_openai_fn=ask_openai_fn,

@@ -47,6 +47,8 @@ ACTIVE_ASSIGNMENT_STATUSES = (
     "meeting",
 )
 
+KNOWN_CONTACT_LABEL = "Знакомый владельца"
+
 
 class VKScoutError(RuntimeError):
     pass
@@ -620,6 +622,119 @@ def _used_vk_ids() -> set[int]:
     return result
 
 
+
+def resolve_vk_person(value: str | int) -> int:
+    """Разрешает ссылку/короткое имя/ID VK именно в ID пользователя."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise VKScoutError("Не указан VK-профиль")
+
+    screen_name = _screen_name(raw)
+    if screen_name.lower().startswith("id") and screen_name[2:].isdigit():
+        return int(screen_name[2:])
+    if screen_name.isdigit():
+        return int(screen_name)
+
+    resolved = _vk_api("utils.resolveScreenName", screen_name=screen_name)
+    if not isinstance(resolved, dict):
+        raise VKScoutError(f"VK не распознал профиль: {value}")
+    if str(resolved.get("type") or "") != "user":
+        raise VKScoutError("Указана не ссылка на личный VK-профиль")
+    return int(resolved["object_id"])
+
+
+def add_known_vk_contact(
+    owner_id: int,
+    member_code: str,
+    profile: str | int,
+    *,
+    familiarity_note: str = "",
+) -> dict[str, Any]:
+    """Добавляет знакомого владельца в работу Неоны отдельно от ежедневной пятёрки."""
+    owner_id = int(owner_id)
+    vk_user_id = resolve_vk_person(profile)
+
+    profiles = enrich_vk_profiles([vk_user_id])
+    if not profiles:
+        raise VKScoutError("Не удалось получить VK-профиль этого человека")
+    candidate = profiles[0]
+    save_vk_candidates([candidate])
+
+    active = _sb_get(
+        "agency_vk_assignments",
+        {
+            "vk_user_id": f"eq.{vk_user_id}",
+            "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+            "select": "*",
+            "limit": 1,
+        },
+    )
+    if active:
+        row = active[0]
+        if int(row.get("owner_telegram_id") or 0) != owner_id:
+            raise VKScoutError(
+                "Этот VK-контакт уже находится в активной работе у другого партнёра Агентства W."
+            )
+        return {**row, **candidate, "known_contact": True}
+
+    now = datetime.now(UTC)
+    note = re.sub(r"\s+", " ", str(familiarity_note or "")).strip()
+    fit_summary = KNOWN_CONTACT_LABEL + (f": {note}" if note else "")
+    payload = {
+        "vk_user_id": vk_user_id,
+        "owner_telegram_id": owner_id,
+        "owner_member_code": str(member_code or "").strip() or None,
+        "assignment_date": date.today().isoformat(),
+        # NULL специально отделяет знакомых владельца от ежедневной VK-пятёрки 1..5.
+        "daily_position": None,
+        "status": "reserved",
+        "score": None,
+        "fit_summary": fit_summary,
+        "reserved_at": now.isoformat(),
+        # Знакомый владельца не должен автоматически выпадать через 7 дней.
+        "reservation_until": None,
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+    created = _sb_post("agency_vk_assignments", payload)
+    row = created[0] if created else payload
+    return {**row, **candidate, "known_contact": True}
+
+
+def load_known_vk_contacts(owner_id: int) -> list[dict[str, Any]]:
+    """Активные знакомые владельца — отдельный поток, не входящий в VK 5 на сегодня."""
+    rows = _sb_get(
+        "agency_vk_assignments",
+        {
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "daily_position": "is.null",
+            "status": "not.in.(released,skipped,blocked,not_fit)",
+            "select": "*",
+            "order": "created_at.desc",
+            "limit": 100,
+        },
+    )
+    if not rows:
+        return []
+    ids = [int(x["vk_user_id"]) for x in rows if x.get("vk_user_id") is not None]
+    candidates = _sb_get(
+        "agency_vk_candidates",
+        {"vk_user_id": "in.(" + ",".join(str(x) for x in ids) + ")", "select": "*"},
+    ) if ids else []
+    by_id = {int(x["vk_user_id"]): x for x in candidates if x.get("vk_user_id") is not None}
+    result = []
+    for assignment in rows:
+        uid = int(assignment["vk_user_id"])
+        candidate = by_id.get(uid, {})
+        result.append({
+            **assignment,
+            **candidate,
+            "profile_url": vk_profile_url(candidate) if candidate else f"https://vk.com/id{uid}",
+            "known_contact": True,
+        })
+    return result
+
+
 def ensure_daily_vk_assignments(
     owner_id: int,
     member_code: str,
@@ -639,6 +754,7 @@ def ensure_daily_vk_assignments(
         {
             "owner_telegram_id": f"eq.{owner_id}",
             "assignment_date": f"eq.{today}",
+            "daily_position": "not.is.null",
             "status": "not.in.(released,skipped,blocked,not_fit)",
             "select": "*",
             "order": "daily_position.asc",
@@ -777,6 +893,7 @@ def ensure_daily_vk_assignments(
         {
             "owner_telegram_id": f"eq.{owner_id}",
             "assignment_date": f"eq.{today}",
+            "daily_position": "not.is.null",
             "status": "not.in.(released,skipped,blocked,not_fit)",
             "select": "*",
             "order": "daily_position.asc",
@@ -835,32 +952,74 @@ def prepare_vk_invitation(
     candidate = candidates[0]
     first_name = str(candidate.get("first_name") or "").strip()
     fit = str(assignment.get("fit_summary") or "").strip()
-    link = personal_vk_invitation_link(member_code)
+    known_contact = assignment.get("daily_position") is None or fit.startswith(KNOWN_CONTACT_LABEL)
 
     if ask_openai_fn:
-        system = """
-Ты — Неона. Подготовь короткое первое сообщение для холодного контакта VK.
-Текст отправит сам партнёр после просмотра.
-Правила: обращаться только по имени; 2–4 коротких предложения; не говорить,
-что человека анализировали; не выдумывать факты; мягко пригласить посмотреть
-сообщество Agency W; польза — ИИ-команда освобождает время от рутины;
-без обещаний дохода/результата; персональную ссылку поставить последней строкой.
+        if known_contact:
+            system = """
+Ты — Неона, секретарь-референт владельца кабинета Агентства W.
+Подготовь короткое первое сообщение знакомому владельца в VK.
+Текст сначала увидит и при необходимости поправит сам владелец.
+Правила:
+- обращаться только по имени, если оно надёжно известно;
+- 1–3 коротких предложения;
+- в первых двух предложениях понятно представить Неону;
+- учитывать заметку владельца о знакомстве, но не выдумывать степень близости;
+- одна понятная польза Агентства W, без презентации списком;
+- ровно один простой вопрос, и он должен быть последним предложением;
+- не давать ссылку на сообщество в первом сообщении;
+- не обещать доход, результат или гарантированных партнёров.
+Верни только готовый текст.
 """.strip()
-        request = f"Имя: {first_name or 'неизвестно'}\nКонтекст Неонии: {fit or 'данных мало'}\nСсылка: {link}"
+        else:
+            system = """
+Ты — Неона, секретарь-референт владельца кабинета Агентства W.
+Подготовь короткое первое сообщение холодному контакту VK, которого Неония отобрала по публичным данным.
+Текст сначала увидит и при необходимости поправит сам владелец.
+Правила:
+- обращаться только по имени, если оно надёжно известно;
+- 1–3 коротких предложения;
+- не говорить и не намекать, что человека анализировали или оценивали;
+- не выдумывать факты о человеке;
+- раскрыть только одну понятную пользу Агентства W простым человеческим языком;
+- ровно один простой вопрос, и он должен быть последним предложением;
+- не давать ссылку на сообщество в первом сообщении;
+- без давления, срочности, обещаний дохода или результата.
+Верни только готовый текст.
+""".strip()
+        request = (
+            f"Имя: {first_name or 'неизвестно'}\n"
+            f"Режим: {'знакомый владельца' if known_contact else 'холодный контакт'}\n"
+            f"Контекст/заметка: {fit or 'данных мало'}"
+        )
         message = str(ask_openai_fn(system, request) or "").strip()
     else:
         greeting = f"{first_name}, здравствуйте!" if first_name else "Здравствуйте!"
-        message = (
-            f"{greeting} Сейчас мы показываем, как ИИ-команда может взять на себя "
-            "часть поиска, переписки и организационной рутины и освободить человеку время. "
-            "Если тема вам близка, можно просто посмотреть наше сообщество.\n\n" + link
-        )
+        if known_contact:
+            message = (
+                f"{greeting} Я Неона, секретарь-референт в Агентстве W. "
+                "Мы помогаем снять часть повседневной рутины с помощью ИИ-команды. "
+                "Вам было бы интересно посмотреть, что из этого могло бы пригодиться именно вам?"
+            )
+        else:
+            message = (
+                f"{greeting} Я Неона, секретарь-референт в Агентстве W. "
+                "Мы помогаем освобождать время от повторяющейся работы с помощью ИИ-команды. "
+                "Вам было бы интересно посмотреть, как это работает?"
+            )
 
     now = datetime.now(UTC).isoformat()
     _sb_patch(
         "agency_vk_assignments",
         {"id": f"eq.{int(assignment_id)}"},
-        {"status": "prepared", "invitation_text": message, "invitation_link": link, "prepared_at": now, "updated_at": now},
+        {
+            "status": "prepared",
+            "invitation_text": message,
+            # Первое сообщение больше не заставляет человека идти в сообщество.
+            "invitation_link": None,
+            "prepared_at": now,
+            "updated_at": now,
+        },
     )
     return {
         "assignment_id": int(assignment_id),
@@ -868,7 +1027,8 @@ def prepare_vk_invitation(
         "name": " ".join(x for x in [str(candidate.get("first_name") or "").strip(), str(candidate.get("last_name") or "").strip()] if x),
         "profile_url": vk_profile_url(candidate),
         "invitation_text": message,
-        "invitation_link": link,
+        "invitation_link": None,
+        "known_contact": known_contact,
     }
 
 
@@ -889,6 +1049,7 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
         {
             "owner_telegram_id": f"eq.{int(owner_id)}",
             "assignment_date": f"eq.{today}",
+            "daily_position": "not.is.null",
             "status": "not.in.(released,skipped,blocked,not_fit)",
             "select": "*",
             "order": "daily_position.asc",
