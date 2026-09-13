@@ -966,7 +966,7 @@ def _vk_post_material(post: dict[str, Any]) -> str:
     return " ".join(parts).strip()
 
 
-def _vk_user_api(owner_id: int, method: str, **params: Any) -> Any:
+def _vk_user_api(account_owner_id: int, method: str, **params: Any) -> Any:
     """Вызывает VK API именно пользовательским VK ID токеном владельца кабинета.
 
     Для wall.get групповой токен не подходит: VK API 5.199 допускает user/service.
@@ -1002,12 +1002,12 @@ def _vk_user_api(owner_id: int, method: str, **params: Any) -> Any:
             return err, code
         return data.get("response"), None
 
-    token = get_valid_vk_scout_access_token(int(owner_id))
+    token = get_valid_vk_scout_access_token(int(account_owner_id))
     result, error_code = request_with(token)
     if error_code == 5:
         # VK иногда привязывает свежий access token к IP выдачи. Наш OAuth-модуль
         # уже умеет безопасно обновлять rotating refresh token с IP текущего worker.
-        token = force_refresh_vk_scout_access_token(int(owner_id))
+        token = force_refresh_vk_scout_access_token(int(account_owner_id))
         result, error_code = request_with(token)
 
     if error_code is not None:
