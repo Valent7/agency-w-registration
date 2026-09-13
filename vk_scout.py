@@ -966,9 +966,62 @@ def _vk_post_material(post: dict[str, Any]) -> str:
     return " ".join(parts).strip()
 
 
-def fetch_public_vk_posts(vk_user_id: int, *, count: int = 5) -> list[dict[str, Any]]:
-    """Читает только доступные текущему VK-токену публичные записи профиля."""
-    response = _vk_api(
+def _vk_user_api(owner_id: int, method: str, **params: Any) -> Any:
+    """Вызывает VK API именно пользовательским VK ID токеном владельца кабинета.
+
+    Для wall.get групповой токен не подходит: VK API 5.199 допускает user/service.
+    Токен берём из уже существующего VK Scout OAuth и при необходимости обновляем.
+    """
+    from vk_scout_oauth import (
+        force_refresh_vk_scout_access_token,
+        get_valid_vk_scout_access_token,
+    )
+
+    cfg = _config()
+
+    def request_with(token: str) -> tuple[Any, int | None]:
+        response = requests.post(
+            f"{VK_API_URL}/{method}",
+            data={
+                **params,
+                "access_token": token,
+                "v": cfg["vk_api_version"],
+            },
+            timeout=45,
+        )
+        if not response.ok:
+            raise VKScoutError(
+                f"VK API {method}: HTTP {response.status_code}: {response.text[:800]}"
+            )
+        data = response.json() if response.text.strip() else {}
+        if not isinstance(data, dict):
+            raise VKScoutError(f"VK API {method}: неожиданный ответ")
+        if data.get("error"):
+            err = data.get("error") or {}
+            code = int(err.get("error_code") or 0) or None
+            return err, code
+        return data.get("response"), None
+
+    token = get_valid_vk_scout_access_token(int(owner_id))
+    result, error_code = request_with(token)
+    if error_code == 5:
+        # VK иногда привязывает свежий access token к IP выдачи. Наш OAuth-модуль
+        # уже умеет безопасно обновлять rotating refresh token с IP текущего worker.
+        token = force_refresh_vk_scout_access_token(int(owner_id))
+        result, error_code = request_with(token)
+
+    if error_code is not None:
+        err = result if isinstance(result, dict) else {}
+        raise VKScoutError(
+            f"VK API {method}: {error_code} — {err.get('error_msg') or 'ошибка VK'}"
+        )
+    return result
+
+
+def fetch_public_vk_posts(owner_id: int, vk_user_id: int, *, count: int = 5) -> list[dict[str, Any]]:
+    """Читает доступные публичные записи профиля пользовательским VK ID токеном владельца."""
+    response = _vk_user_api(
+        int(owner_id),
         "wall.get",
         owner_id=int(vk_user_id),
         count=max(1, min(10, int(count))),
@@ -1041,7 +1094,11 @@ def prepare_vk_warmup_comment(
     first_name = str(candidate.get("first_name") or "").strip()
 
     try:
-        posts = fetch_public_vk_posts(vk_user_id, count=posts_limit)
+        posts = fetch_public_vk_posts(
+            int(assignment.get("owner_telegram_id") or 0),
+            vk_user_id,
+            count=posts_limit,
+        )
     except VKScoutError as exc:
         raise VKScoutError(f"Не удалось прочитать публичную ленту VK: {exc}") from exc
     if not posts:
