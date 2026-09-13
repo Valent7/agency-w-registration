@@ -106,6 +106,7 @@ from person_card import render_person_card_2_0, render_neona_magnets_reference
 from scout_center import render_scout_center
 from vk_scout_ui import render_vk_sources
 from vk_scout_oauth import handle_vk_scout_oauth_callback
+from telegram_stories_ui import render_telegram_stories_radar
 import asyncio
 import json
 import re
@@ -6568,6 +6569,7 @@ if telegram_login_valid or remembered_data:
                 [
                     "🎯 Определить мою целевую аудиторию",
                     "💙 Источники поиска VK",
+                    "🌿 Stories Telegram",
                     "🔎 Поиск чатов",
                     "🎯 Поиск контактов в чатах по ЦА",
                     "👥 Поиск контактов",
@@ -6582,6 +6584,10 @@ if telegram_login_valid or remembered_data:
                             "Здесь вы задаёте тематические VK-сообщества. "
                             "Фоновый VK Scout будет брать оттуда публичные профили "
                             "и передавать их Неонии на анализ по вашей ЦА."
+                        ),
+                        "🌿 Stories Telegram": (
+                            "Неона смотрит верхние активные Stories людей из вашей Telegram-ленты "
+                            "и предлагает только естественные тёплые ответы — без рекламы и продаж."
                         ),
                         "🔎 Поиск чатов": (
                             "Здесь Неония загружает доступные Telegram-группы "
@@ -6607,6 +6613,9 @@ if telegram_login_valid or remembered_data:
                                 member_code=str(member_code or ""),
                                 ask_openai_fn=ask_openai,
                             )
+
+                        elif neonia_mode == "🌿 Stories Telegram":
+                            render_telegram_stories_radar(int(telegram_id))
 
                         elif neonia_mode == "🔎 Поиск чатов":
                             chats_result = render_neonia_chats()
