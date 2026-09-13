@@ -924,6 +924,194 @@ def ensure_daily_vk_assignments(
     }
 
 
+def _vk_post_material(post: dict[str, Any]) -> str:
+    """Текстовое содержание публичного VK-поста без домыслов о медиа."""
+    parts: list[str] = []
+    text = re.sub(r"\s+", " ", str(post.get("text") or "")).strip()
+    if text:
+        parts.append(text)
+
+    for attachment in post.get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        kind = str(attachment.get("type") or "").strip()
+        obj = attachment.get(kind) if kind and isinstance(attachment.get(kind), dict) else {}
+        if kind == "photo":
+            caption = re.sub(r"\s+", " ", str(obj.get("text") or "")).strip()
+            parts.append(f"Фото. Подпись: {caption}" if caption else "Фото без подписи.")
+        elif kind == "video":
+            title = re.sub(r"\s+", " ", str(obj.get("title") or "")).strip()
+            description = re.sub(r"\s+", " ", str(obj.get("description") or "")).strip()
+            details = ". ".join(x for x in (title, description) if x)
+            parts.append(f"Видео: {details}" if details else "Видео без описания.")
+        elif kind == "link":
+            title = re.sub(r"\s+", " ", str(obj.get("title") or "")).strip()
+            description = re.sub(r"\s+", " ", str(obj.get("description") or "")).strip()
+            details = ". ".join(x for x in (title, description) if x)
+            parts.append(f"Ссылка: {details}" if details else "Публикация со ссылкой.")
+        elif kind == "poll":
+            question = re.sub(r"\s+", " ", str(obj.get("question") or "")).strip()
+            parts.append(f"Опрос: {question}" if question else "Опрос.")
+        elif kind:
+            parts.append(f"Вложение: {kind}.")
+
+    for copied in post.get("copy_history") or []:
+        if not isinstance(copied, dict):
+            continue
+        copied_text = re.sub(r"\s+", " ", str(copied.get("text") or "")).strip()
+        if copied_text:
+            parts.append(f"Репост: {copied_text}")
+            break
+
+    return " ".join(parts).strip()
+
+
+def fetch_public_vk_posts(vk_user_id: int, *, count: int = 5) -> list[dict[str, Any]]:
+    """Читает только доступные текущему VK-токену публичные записи профиля."""
+    response = _vk_api(
+        "wall.get",
+        owner_id=int(vk_user_id),
+        count=max(1, min(10, int(count))),
+        filter="owner",
+        extended=0,
+    )
+    if not isinstance(response, dict):
+        return []
+
+    result: list[dict[str, Any]] = []
+    for post in response.get("items") or []:
+        if not isinstance(post, dict) or not post.get("id"):
+            continue
+        post_id = int(post["id"])
+        material = _vk_post_material(post)
+        result.append({
+            "post_id": post_id,
+            "owner_id": int(post.get("owner_id") or vk_user_id),
+            "date": int(post.get("date") or 0),
+            "material": material,
+            "url": f"https://vk.com/wall{int(post.get('owner_id') or vk_user_id)}_{post_id}",
+        })
+    return result
+
+
+def _extract_json_object(answer: Any) -> dict[str, Any]:
+    if isinstance(answer, dict):
+        return answer
+    text = str(answer or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.I | re.S)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(text[start:end + 1])
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                pass
+    return {}
+
+
+def prepare_vk_warmup_comment(
+    assignment_id: int,
+    *,
+    ask_openai_fn: Callable[..., Any] | None = None,
+    posts_limit: int = 5,
+) -> dict[str, Any]:
+    """Выбирает свежий публичный пост и готовит мягкий человеческий комментарий."""
+    rows = _sb_get(
+        "agency_vk_assignments",
+        {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1},
+    )
+    if not rows:
+        raise VKScoutError("VK-назначение не найдено")
+    assignment = rows[0]
+    vk_user_id = int(assignment["vk_user_id"])
+
+    candidates = _sb_get(
+        "agency_vk_candidates",
+        {"vk_user_id": f"eq.{vk_user_id}", "select": "*", "limit": 1},
+    )
+    if not candidates:
+        raise VKScoutError("VK-кандидат не найден")
+    candidate = candidates[0]
+    first_name = str(candidate.get("first_name") or "").strip()
+
+    try:
+        posts = fetch_public_vk_posts(vk_user_id, count=posts_limit)
+    except VKScoutError as exc:
+        raise VKScoutError(f"Не удалось прочитать публичную ленту VK: {exc}") from exc
+    if not posts:
+        raise VKScoutError("В публичной ленте этого профиля сейчас нет доступных Неоне публикаций.")
+
+    # Неона получает до пяти последних публикаций и сама выбирает лучшую точку касания.
+    public_posts = [
+        {
+            "post_id": item["post_id"],
+            "date": item["date"],
+            "content": item["material"] or "Публикация без текста; доступно только само наличие публикации.",
+        }
+        for item in posts
+    ]
+
+    parsed: dict[str, Any] = {}
+    if ask_openai_fn is not None:
+        system = """
+Ты — Неона. Сейчас ты не продаёшь и не предлагаешь Агентство W.
+Твоя задача — мягко познакомить владельца кабинета с человеком через его публичный контент VK.
+
+Из нескольких свежих публикаций выбери ОДНУ, к которой естественнее всего оставить доброжелательный комментарий.
+Комментарий должен дать человеку маленькую приятность: показать, что его публикацию действительно заметили и прочитали.
+
+Правила:
+- 1–2 естественных предложения;
+- комментарий пишется от лица обычного человека, НЕ от имени Неоны;
+- не упоминать Агентство W, ИИ, бизнес-предложение, партнёрство, доход или встречу;
+- не льстить чрезмерно и не писать шаблонное «Отличный пост!»;
+- опираться только на реально предоставленное содержание;
+- если пост простой или бытовой — всё равно можно тепло откликнуться на реальную мысль, подпись или сам факт, что человек делится моментом;
+- если указано «фото/видео без описания», НЕ придумывать, что именно изображено или сказано;
+- вопрос НЕ обязателен. Добавляй один короткий вопрос только если он звучит совершенно естественно и помогает разговору;
+- не использовать фамилию человека.
+
+Верни ТОЛЬКО JSON:
+{"post_id":123,"comment":"..."}
+""".strip()
+        request = (
+            f"Имя человека: {first_name or 'неизвестно'}\n"
+            "Свежие публичные публикации:\n"
+            + json.dumps(public_posts, ensure_ascii=False, indent=2)
+        )
+        parsed = _extract_json_object(ask_openai_fn(system, request))
+
+    available_by_id = {int(item["post_id"]): item for item in posts}
+    try:
+        chosen_id = int(parsed.get("post_id"))
+    except (TypeError, ValueError):
+        chosen_id = int(posts[0]["post_id"])
+    chosen = available_by_id.get(chosen_id) or posts[0]
+
+    comment = re.sub(r"\s+", " ", str(parsed.get("comment") or "")).strip()
+    if not comment:
+        if chosen.get("material"):
+            comment = "Спасибо, что поделились — приятно встретить в ленте живую мысль, а не просто очередную публикацию."
+        else:
+            comment = "Спасибо, что делитесь такими моментами — иногда даже небольшая публикация делает ленту чуточку теплее."
+
+    return {
+        "assignment_id": int(assignment_id),
+        "vk_user_id": vk_user_id,
+        "first_name": first_name,
+        "post_id": int(chosen["post_id"]),
+        "post_url": str(chosen["url"]),
+        "post_preview": str(chosen.get("material") or "").strip(),
+        "comment": comment,
+    }
+
+
 def personal_vk_invitation_link(member_code: str) -> str:
     group_id = _config().get("vk_group_id") or ""
     if not group_id:
@@ -937,6 +1125,7 @@ def personal_vk_invitation_link(member_code: str) -> str:
 def vk_profile_url(candidate: dict[str, Any]) -> str:
     domain = str(candidate.get("domain") or "").strip()
     return f"https://vk.com/{domain}" if domain else f"https://vk.com/id{int(candidate['vk_user_id'])}"
+
 
 
 def prepare_vk_invitation(

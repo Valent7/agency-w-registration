@@ -18,6 +18,7 @@ from vk_scout import (
     load_vk_sources,
     mark_vk_invited,
     prepare_vk_invitation,
+    prepare_vk_warmup_comment,
     skip_vk_assignment,
     upsert_vk_source,
 )
@@ -40,6 +41,92 @@ def _disable_vk_source(owner_id: int, source_id: int) -> None:
         },
     )
 
+
+
+def _render_vk_warmup(
+    owner_id: int,
+    assignment_id: int,
+    ask_openai_fn=None,
+) -> None:
+    """Мягкое знакомство через свежую публичную публикацию кандидата."""
+    if not assignment_id:
+        return
+
+    state_key = f"vk_warmup_{owner_id}_{assignment_id}"
+    edit_key = f"vk_warmup_comment_{owner_id}_{assignment_id}"
+    result = st.session_state.get(state_key)
+
+    st.markdown("**🌿 Утепление**")
+    if not isinstance(result, dict):
+        st.caption(
+            "Неона найдёт свежую публичную публикацию и подготовит тёплый комментарий — "
+            "без предложения бизнеса и без рекламы."
+        )
+        if st.button(
+            "🌿 Найти пост и подготовить комментарий",
+            key=f"vk_warmup_prepare_{owner_id}_{assignment_id}",
+            use_container_width=True,
+        ):
+            try:
+                result = prepare_vk_warmup_comment(
+                    assignment_id,
+                    ask_openai_fn=ask_openai_fn,
+                )
+                st.session_state[state_key] = result
+                st.session_state[edit_key] = str(result.get("comment") or "")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось подготовить утепление: {exc}")
+        return
+
+    post_url = str(result.get("post_url") or "").strip()
+    preview = str(result.get("post_preview") or "").strip()
+    if post_url:
+        st.link_button("Открыть выбранную публикацию VK", post_url, use_container_width=False)
+    if preview:
+        short_preview = preview if len(preview) <= 320 else preview[:317].rstrip() + "..."
+        st.caption(f"Неона выбрала: {short_preview}")
+
+    comment = st.text_area(
+        "Комментарий Неоны",
+        value=str(st.session_state.get(edit_key) or result.get("comment") or ""),
+        key=edit_key,
+        height=110,
+    )
+    if comment.strip() != str(result.get("comment") or "").strip():
+        result = {**result, "comment": comment.strip()}
+        st.session_state[state_key] = result
+
+    cols = st.columns(2)
+    with cols[0]:
+        if st.button(
+            "🔄 Другой вариант",
+            key=f"vk_warmup_refresh_{owner_id}_{assignment_id}",
+            use_container_width=True,
+        ):
+            try:
+                fresh = prepare_vk_warmup_comment(
+                    assignment_id,
+                    ask_openai_fn=ask_openai_fn,
+                )
+                st.session_state[state_key] = fresh
+                st.session_state[edit_key] = str(fresh.get("comment") or "")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось подготовить другой вариант: {exc}")
+    with cols[1]:
+        if st.button(
+            "🧹 Очистить",
+            key=f"vk_warmup_clear_{owner_id}_{assignment_id}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(state_key, None)
+            st.session_state.pop(edit_key, None)
+            st.rerun()
+
+    st.caption(
+        "Комментарий пока публикуется вручную из вашего VK. Неона ничего не отправляет автоматически."
+    )
 
 
 def _render_today_vk_candidates(
@@ -109,6 +196,9 @@ def _render_today_vk_candidates(
                     profile_url,
                     use_container_width=False,
                 )
+
+            _render_vk_warmup(owner_id, assignment_id, ask_openai_fn=ask_openai_fn)
+            st.divider()
 
             editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
             if invitation_text:
@@ -196,7 +286,6 @@ def _render_today_vk_candidates(
                                 st.rerun()
                             except Exception as exc:
                                 st.error(f"Не удалось обновить сообщение: {exc}")
-
                 if status != "invited" and assignment_id:
                     if st.button(
                         "✏️ Редактировать",
@@ -350,6 +439,9 @@ def _render_known_vk_contacts(
             if profile_url:
                 st.link_button("Открыть профиль VK", profile_url, use_container_width=False)
 
+            _render_vk_warmup(owner_id, assignment_id, ask_openai_fn=ask_openai_fn)
+            st.divider()
+
             editing_key = f"vk_known_editing_{owner_id}_{assignment_id}"
             if invitation_text:
                 st.markdown("**Сообщение Неоны:**")
@@ -431,7 +523,6 @@ def _render_known_vk_contacts(
                                 st.rerun()
                             except Exception as exc:
                                 st.error(f"Не удалось обновить сообщение: {exc}")
-
                 if status != "invited" and assignment_id:
                     if st.button(
                         "✏️ Редактировать",
