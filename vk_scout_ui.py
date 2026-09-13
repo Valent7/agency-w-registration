@@ -17,6 +17,7 @@ from vk_scout import (
     load_today_vk_assignments,
     load_vk_sources,
     mark_vk_invited,
+    prepare_vk_feed_radar,
     prepare_vk_invitation,
     prepare_vk_warmup_comment,
     skip_vk_assignment,
@@ -128,6 +129,115 @@ def _render_vk_warmup(
         "Комментарий пока публикуется вручную из вашего VK. Неона ничего не отправляет автоматически."
     )
 
+
+
+def _render_vk_feed_radar(
+    owner_id: int,
+    ask_openai_fn=None,
+) -> None:
+    """Ручной тест радара верхних 10 постов общей ленты VK."""
+    state_key = f"vk_feed_radar_{int(owner_id)}"
+    result = st.session_state.get(state_key)
+
+    st.markdown("### 🌿 Радар общей ленты VK")
+    st.caption(
+        "Неона читает 10 верхних свежих постов вашей общей ленты. "
+        "10 просмотренных постов не означают 10 комментариев: она выбирает только естественные касания."
+    )
+
+    cols = st.columns([2.2, 1])
+    with cols[0]:
+        if st.button(
+            "🔎 Проверить 10 постов общей ленты",
+            key=f"vk_feed_radar_run_{int(owner_id)}",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                result = prepare_vk_feed_radar(
+                    int(owner_id),
+                    ask_openai_fn=ask_openai_fn,
+                    count=10,
+                )
+                st.session_state[state_key] = result
+                for idx, item in enumerate(result.get("recommendations") or []):
+                    st.session_state[f"vk_feed_radar_comment_{int(owner_id)}_{idx}"] = str(
+                        item.get("comment") or ""
+                    )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось прочитать общую ленту VK: {exc}")
+    with cols[1]:
+        if isinstance(result, dict) and st.button(
+            "🧹 Очистить",
+            key=f"vk_feed_radar_clear_{int(owner_id)}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(state_key, None)
+            for key in list(st.session_state.keys()):
+                if str(key).startswith(f"vk_feed_radar_comment_{int(owner_id)}_"):
+                    st.session_state.pop(key, None)
+            st.rerun()
+
+    if not isinstance(result, dict):
+        st.caption(
+            "Сейчас это безопасный тест: Неона только читает и предлагает комментарии, "
+            "сама в VK ничего не публикует."
+        )
+        return
+
+    checked = int(result.get("checked") or 0)
+    people = int(result.get("people") or 0)
+    commentable = int(result.get("commentable") or 0)
+    recommendations = list(result.get("recommendations") or [])
+
+    st.caption(
+        f"Проверено: {checked} · личных постов: {people} · "
+        f"можно комментировать: {commentable} · Неона выбрала: {len(recommendations)}"
+    )
+
+    message = str(result.get("message") or "").strip()
+    if message and not recommendations:
+        st.info(message)
+
+    for idx, item in enumerate(recommendations):
+        author = str(item.get("author_name") or "VK-контакт").strip()
+        post_url = str(item.get("post_url") or "").strip()
+        profile_url = str(item.get("profile_url") or "").strip()
+        preview = str(item.get("material") or "").strip()
+        signal = str(item.get("business_signal") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        edit_key = f"vk_feed_radar_comment_{int(owner_id)}_{idx}"
+
+        with st.container(border=True):
+            st.markdown(f"#### {author}")
+            links = st.columns(2)
+            with links[0]:
+                if profile_url:
+                    st.link_button("Открыть профиль", profile_url, use_container_width=True)
+            with links[1]:
+                if post_url:
+                    st.link_button("Открыть пост", post_url, use_container_width=True)
+
+            if signal:
+                st.write(f"**Почему человек интересен:** {signal}")
+            if reason:
+                st.caption(f"Почему Неона выбрала этот пост: {reason}")
+            if preview:
+                short = preview if len(preview) <= 420 else preview[:417].rstrip() + "..."
+                st.caption(f"Публикация: {short}")
+
+            st.text_area(
+                "Комментарий Неоны",
+                value=str(st.session_state.get(edit_key) or item.get("comment") or ""),
+                key=edit_key,
+                height=110,
+            )
+
+    st.caption(
+        "На этапе теста комментарии публикуются вручную. После проверки качества подключим "
+        "часовой автоматический радар и историю реакций."
+    )
 
 def _render_today_vk_candidates(
     owner_id: int,
@@ -633,6 +743,11 @@ def render_vk_sources(
             st.caption("После разрешения VK вернёт вас обратно в Агентство W.")
 
     if connection.get("connected"):
+        _render_vk_feed_radar(
+            owner_id,
+            ask_openai_fn=ask_openai_fn,
+        )
+        st.divider()
         # Знакомые владельца показываем СРАЗУ сверху, чтобы блок не терялся
         # после пяти карточек ежедневной подборки Неонии.
         _render_known_vk_contacts(
