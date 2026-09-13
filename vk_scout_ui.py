@@ -135,20 +135,20 @@ def _render_vk_feed_radar(
     owner_id: int,
     ask_openai_fn=None,
 ) -> None:
-    """Ручной тест радара верхних 10 постов общей ленты VK."""
+    """Ручной тест нашей ленты из свежих постов отобранных Неонией людей."""
     state_key = f"vk_feed_radar_{int(owner_id)}"
     result = st.session_state.get(state_key)
 
-    st.markdown("### 🌿 Радар общей ленты VK")
+    st.markdown("### 🌿 Радар свежих постов VK")
     st.caption(
-        "Неона читает 10 верхних свежих постов вашей общей ленты. "
+        "Неона собирает до 10 самых свежих публичных постов людей, которых уже отобрала по ЦА. "
         "10 просмотренных постов не означают 10 комментариев: она выбирает только естественные касания."
     )
 
     cols = st.columns([2.2, 1])
     with cols[0]:
         if st.button(
-            "🔎 Проверить 10 постов общей ленты",
+            "🔎 Собрать 10 свежих постов",
             key=f"vk_feed_radar_run_{int(owner_id)}",
             type="primary",
             use_container_width=True,
@@ -166,7 +166,7 @@ def _render_vk_feed_radar(
                     )
                 st.rerun()
             except Exception as exc:
-                st.error(f"Не удалось прочитать общую ленту VK: {exc}")
+                st.error(f"Не удалось собрать радар свежих постов VK: {exc}")
     with cols[1]:
         if isinstance(result, dict) and st.button(
             "🧹 Очистить",
@@ -181,8 +181,8 @@ def _render_vk_feed_radar(
 
     if not isinstance(result, dict):
         st.caption(
-            "Сейчас это безопасный тест: Неона только читает и предлагает комментарии, "
-            "сама в VK ничего не публикует."
+            "Сейчас это безопасный тест нашей собственной ленты: Неона читает публичные стены "
+            "отобранных людей и предлагает комментарии, сама в VK ничего не публикует."
         )
         return
 
@@ -192,8 +192,8 @@ def _render_vk_feed_radar(
     recommendations = list(result.get("recommendations") or [])
 
     st.caption(
-        f"Проверено: {checked} · личных постов: {people} · "
-        f"можно комментировать: {commentable} · Неона выбрала: {len(recommendations)}"
+        f"Свежих постов собрано: {checked} · авторов: {people} · "
+        f"доступны для комментария: {commentable} · Неона выбрала: {len(recommendations)}"
     )
 
     message = str(result.get("message") or "").strip()
@@ -235,8 +235,8 @@ def _render_vk_feed_radar(
             )
 
     st.caption(
-        "На этапе теста комментарии публикуются вручную. После проверки качества подключим "
-        "часовой автоматический радар и историю реакций."
+        "На этапе теста комментарии публикуются вручную. Если качество нас устраивает, следующий шаг — "
+        "автоматический проход каждый час и единая история реакций."
     )
 
 def _render_today_vk_candidates(

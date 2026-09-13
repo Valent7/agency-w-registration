@@ -1018,7 +1018,13 @@ def _vk_user_api(account_owner_id: int, method: str, **params: Any) -> Any:
     return result
 
 
-def fetch_public_vk_posts(owner_id: int, vk_user_id: int, *, count: int = 5) -> list[dict[str, Any]]:
+def fetch_public_vk_posts(
+    owner_id: int,
+    vk_user_id: int,
+    *,
+    count: int = 5,
+    max_age_days: int = 180,
+) -> list[dict[str, Any]]:
     """Читает свежие публичные записи, под которыми владелец кабинета реально может комментировать.
 
     Для утепления мало просто увидеть пост: у него должны быть открыты комментарии.
@@ -1041,7 +1047,7 @@ def fetch_public_vk_posts(owner_id: int, vk_user_id: int, *, count: int = 5) -> 
         return []
 
     now_ts = int(datetime.now(UTC).timestamp())
-    max_age_seconds = 180 * 24 * 60 * 60
+    max_age_seconds = max(1, int(max_age_days)) * 24 * 60 * 60
 
     result: list[dict[str, Any]] = []
     for post in response.get("items") or []:
@@ -1198,96 +1204,131 @@ def prepare_vk_warmup_comment(
 
 
 
-def fetch_vk_newsfeed(owner_id: int, *, count: int = 10) -> dict[str, Any]:
-    """Возвращает верхние свежие записи общей ленты VK владельца кабинета.
+def fetch_vk_candidate_feed(
+    owner_id: int,
+    *,
+    count: int = 10,
+    pool_limit: int = 30,
+    min_score: int = 60,
+    max_age_days: int = 30,
+) -> dict[str, Any]:
+    """Собирает нашу собственную «ленту» из свежих постов подходящих кандидатов.
 
-    Метод newsfeed.get работает в контексте конкретного пользовательского VK ID токена.
-    Ничего не публикует и не меняет в VK — только читает текущую ленту.
+    Домашний newsfeed.get для текущего типа VK-профиля недоступен, поэтому Радар
+    не зависит от него. Берём людей, которых Неония уже оценила по ЦА, читаем их
+    доступные публичные стены и собираем самые свежие посты с открытыми комментариями.
+    Для разнообразия в один проход берём не более одного свежего поста от человека.
     """
-    wanted = max(1, min(100, int(count)))
-    response = _vk_user_api(
-        int(owner_id),
-        "newsfeed.get",
-        filters="post",
-        count=wanted,
-        fields="domain,status,photo_100,city,country",
-    )
-    if not isinstance(response, dict):
-        return {"items": [], "checked": 0, "people": 0, "commentable": 0}
+    owner_id = int(owner_id)
+    wanted = max(1, min(20, int(count)))
+    pool_limit = max(wanted, min(60, int(pool_limit)))
+    min_score = max(0, min(100, int(min_score)))
 
-    profiles = {
-        int(item.get("id")): item
-        for item in (response.get("profiles") or [])
-        if isinstance(item, dict) and str(item.get("id") or "").lstrip("-").isdigit()
+    scores = _sb_get(
+        "agency_vk_candidate_scores",
+        {
+            "owner_telegram_id": f"eq.{owner_id}",
+            "score": f"gte.{min_score}",
+            "select": "vk_user_id,score,fit_summary,analyzed_at",
+            "order": "score.desc,analyzed_at.desc",
+            "limit": pool_limit,
+        },
+    )
+    if not scores:
+        return {
+            "items": [],
+            "checked": 0,
+            "checked_candidates": 0,
+            "pool_size": 0,
+            "people": 0,
+            "commentable": 0,
+            "errors": [],
+        }
+
+    ids: list[int] = []
+    score_by_id: dict[int, dict[str, Any]] = {}
+    for row in scores:
+        try:
+            uid = int(row.get("vk_user_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if uid <= 0 or uid in score_by_id:
+            continue
+        ids.append(uid)
+        score_by_id[uid] = row
+
+    candidates = _sb_get(
+        "agency_vk_candidates",
+        {
+            "vk_user_id": "in.(" + ",".join(str(x) for x in ids) + ")",
+            "select": "*",
+            "limit": max(1, len(ids)),
+        },
+    ) if ids else []
+    candidate_by_id = {
+        int(row["vk_user_id"]): row
+        for row in candidates
+        if row.get("vk_user_id") is not None
     }
 
     items: list[dict[str, Any]] = []
-    people_count = 0
-    commentable_count = 0
+    errors: list[str] = []
+    checked_candidates = 0
 
-    # newsfeed.get уже возвращает верхние записи в порядке ленты. Нам важны именно
-    # первые wanted элементов, а не "добор" до wanted человек после фильтрации.
-    for raw in list(response.get("items") or [])[:wanted]:
-        if not isinstance(raw, dict):
+    for uid in ids:
+        candidate = candidate_by_id.get(uid)
+        if not candidate:
+            continue
+        checked_candidates += 1
+        try:
+            posts = fetch_public_vk_posts(
+                owner_id,
+                uid,
+                count=1,
+                max_age_days=max_age_days,
+            )
+        except Exception as exc:
+            # Закрытая стена или отдельная ошибка одного профиля не должна ломать весь радар.
+            errors.append(f"{uid}: {exc}")
+            continue
+        if not posts:
             continue
 
-        source_id_raw = raw.get("source_id")
-        if source_id_raw is None:
-            source_id_raw = raw.get("owner_id")
-        try:
-            source_id = int(source_id_raw or 0)
-        except (TypeError, ValueError):
-            source_id = 0
-
-        post_id_raw = raw.get("post_id")
-        if post_id_raw is None:
-            post_id_raw = raw.get("id")
-        try:
-            post_id = int(post_id_raw or 0)
-        except (TypeError, ValueError):
-            post_id = 0
-
-        is_person = source_id > 0
-        if is_person:
-            people_count += 1
-
-        comments = raw.get("comments") if isinstance(raw.get("comments"), dict) else {}
-        try:
-            can_comment = int(comments.get("can_post") or 0) == 1
-        except (TypeError, ValueError):
-            can_comment = False
-        if is_person and can_comment:
-            commentable_count += 1
-
-        profile = profiles.get(source_id, {}) if is_person else {}
-        first_name = str(profile.get("first_name") or "").strip()
-        last_name = str(profile.get("last_name") or "").strip()
-        author_name = " ".join(x for x in (first_name, last_name) if x)
-        domain = str(profile.get("domain") or "").strip()
-        status = str(profile.get("status") or "").strip()
+        post = posts[0]
+        first_name = str(candidate.get("first_name") or "").strip()
+        last_name = str(candidate.get("last_name") or "").strip()
+        author_name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {uid}"
+        domain = str(candidate.get("domain") or "").strip()
+        score_row = score_by_id.get(uid, {})
 
         items.append({
-            "post_id": post_id,
-            "owner_id": source_id,
-            "date": int(raw.get("date") or 0),
-            "is_person": is_person,
-            "can_comment": bool(can_comment),
-            "author_name": author_name or (f"VK user {source_id}" if is_person else "VK-сообщество"),
+            "post_id": int(post["post_id"]),
+            "owner_id": uid,
+            "date": int(post.get("date") or 0),
+            "is_person": True,
+            "can_comment": True,
+            "author_name": author_name,
             "first_name": first_name,
-            "profile_status": status,
-            "profile_url": (
-                f"https://vk.com/{domain}" if is_person and domain
-                else (f"https://vk.com/id{source_id}" if is_person and source_id else "")
-            ),
-            "post_url": f"https://vk.com/wall{source_id}_{post_id}" if source_id and post_id else "",
-            "material": _vk_post_material(raw),
+            "profile_status": str(candidate.get("status_text") or "").strip(),
+            "profile_url": f"https://vk.com/{domain}" if domain else f"https://vk.com/id{uid}",
+            "post_url": str(post.get("url") or ""),
+            "material": str(post.get("material") or "").strip(),
+            "score": int(score_row.get("score") or 0),
+            "fit_summary": str(score_row.get("fit_summary") or "").strip(),
         })
+
+    # Это и есть наша «верхняя десятка»: не по баллу, а по свежести публикации.
+    items.sort(key=lambda item: int(item.get("date") or 0), reverse=True)
+    items = items[:wanted]
 
     return {
         "items": items,
         "checked": len(items),
-        "people": people_count,
-        "commentable": commentable_count,
+        "checked_candidates": checked_candidates,
+        "pool_size": len(ids),
+        "people": len(items),
+        "commentable": len(items),
+        "errors": errors,
     }
 
 
@@ -1297,12 +1338,12 @@ def prepare_vk_feed_radar(
     ask_openai_fn: Callable[..., Any] | None = None,
     count: int = 10,
 ) -> dict[str, Any]:
-    """Проверяет верх общей ленты и предлагает только естественные тёплые касания.
+    """Собирает свежую десятку из пула Неонии и выбирает естественные касания.
 
     Это тестовый ручной режим: Неона читает, оценивает и готовит комментарии,
     но сама ничего в VK не публикует.
     """
-    feed = fetch_vk_newsfeed(int(owner_id), count=count)
+    feed = fetch_vk_candidate_feed(int(owner_id), count=count)
     items = list(feed.get("items") or [])
     eligible = [
         item for item in items
@@ -1313,18 +1354,12 @@ def prepare_vk_feed_radar(
         return {
             **feed,
             "recommendations": [],
-            "message": "VK не вернул свежих постов в общей ленте.",
+            "message": (
+                "Среди подходящих кандидатов сейчас не найдено свежих публичных постов "
+                "с открытыми комментариями."
+            ),
         }
 
-    if not eligible:
-        return {
-            **feed,
-            "recommendations": [],
-            "message": "В верхних постах сейчас нет личных публикаций с открытыми комментариями.",
-        }
-
-    # Для радара важно не превращать чтение десяти постов в десять комментариев.
-    # Модель может выбрать от нуля до трёх самых естественных точек касания.
     public_view = [
         {
             "post_id": int(item["post_id"]),
@@ -1332,6 +1367,8 @@ def prepare_vk_feed_radar(
             "author_name": item.get("author_name") or "",
             "first_name": item.get("first_name") or "",
             "profile_status": item.get("profile_status") or "",
+            "score": int(item.get("score") or 0),
+            "fit_summary": item.get("fit_summary") or "",
             "date": int(item.get("date") or 0),
             "content": item.get("material") or "Публикация без доступного текста.",
         }
@@ -1340,37 +1377,33 @@ def prepare_vk_feed_radar(
 
     parsed: list[dict[str, Any]] = []
     if ask_openai_fn is not None:
-        system = f"""
+        system = """
 Ты — Неона, социальный радар Агентства W. Сейчас ты НЕ продаёшь и НЕ предлагаешь бизнес.
-Ты просматриваешь верх общей ленты VK владельца кабинета и решаешь, где есть естественный повод
-для мягкого человеческого знакомства через публичный комментарий.
+Перед тобой до 10 самых свежих публичных постов людей, которых Неония УЖЕ отобрала
+как подходящих по целевой аудитории. Не нужно заново требовать от каждого поста бизнес-тему:
+человек может сегодня писать о семье, прогулке, мысли дня, путешествии или обычной жизни.
 
-Главная цель — находить людей, которые по предоставленным публичным признакам действительно могут
-быть связаны с предпринимательством, сетевым/партнёрским бизнесом, продажами, развитием команды,
-наставничеством, поиском клиентов или партнёров. Не додумывай профессию или бизнес, если прямых
-признаков нет.
+Твоя задача — выбрать только те публикации, где можно естественно и доброжелательно откликнуться,
+чтобы человеку было приятно, что его действительно заметили и прочитали.
 
-{BUSINESS_GATE_RULES}
-
-Правила комментария:
-- просмотр 10 постов НЕ означает 10 комментариев;
+Правила:
+- 10 просмотренных постов НЕ означают 10 комментариев;
 - выбери от 0 до 3 публикаций за один проход;
-- комментируй только публикации реальных людей, которые уже переданы тебе системой;
 - комментарий 1–2 естественных предложения;
 - он пишется от лица владельца кабинета, не от имени Неоны;
-- не упоминай Агентство W, ИИ, партнёрство, доход, встречу или бизнес-предложение;
-- не льсти чрезмерно и не пиши шаблонное «Отличный пост!»;
-- найди конкретную приятную деталь или мысль в публикации;
-- вопрос не обязателен; задавай его только если он звучит естественно;
-- если публикация бытовая, но автор по другим предоставленным признакам явно бизнес-релевантен,
-  можно оставить просто тёплый человеческий комментарий;
-- если реального бизнес-сигнала недостаточно или комментарий будет натянутым — пропусти пост.
+- не упоминать Агентство W, ИИ, партнёрство, доход, встречу или бизнес-предложение;
+- не льстить чрезмерно и не писать шаблонное «Отличный пост!»;
+- опираться на конкретную мысль или деталь, реально присутствующую в тексте/описании;
+- бытовой или простой пост — нормальный повод для тёплого касания;
+- вопрос НЕ обязателен; задавай его только если человеку естественно захочется ответить;
+- если у публикации нет достаточного доступного содержания и пришлось бы фантазировать — пропусти её;
+- не использовать фамилию человека в комментарии.
 
 Верни ТОЛЬКО JSON-массив, максимум 3 объекта:
-[{{"post_id":123,"owner_id":456,"business_signal":"...","reason":"...","comment":"..."}}]
-Если подходящих касаний нет, верни [].
+[{"post_id":123,"owner_id":456,"reason":"...","comment":"..."}]
+Если естественных касаний нет, верни [].
 """.strip()
-        request = "ВЕРХ ОБЩЕЙ ЛЕНТЫ VK (только личные посты с открытыми комментариями):\n" + json.dumps(
+        request = "10 САМЫХ СВЕЖИХ ПОСТОВ ИЗ ПУЛА НЕОНИИ:\n" + json.dumps(
             public_view,
             ensure_ascii=False,
             indent=2,
@@ -1397,7 +1430,7 @@ def prepare_vk_feed_radar(
             continue
         recommendations.append({
             **source,
-            "business_signal": re.sub(r"\s+", " ", str(choice.get("business_signal") or "")).strip(),
+            "business_signal": str(source.get("fit_summary") or "").strip(),
             "reason": re.sub(r"\s+", " ", str(choice.get("reason") or "")).strip(),
             "comment": comment,
         })
@@ -1410,10 +1443,9 @@ def prepare_vk_feed_radar(
         "eligible": len(eligible),
         "recommendations": recommendations,
         "message": (
-            f"Проверено {int(feed.get('checked') or 0)} постов; "
-            f"личных {int(feed.get('people') or 0)}; "
-            f"с открытыми комментариями {len(eligible)}; "
-            f"Неона выбрала {len(recommendations)}."
+            f"Проверено кандидатов: {int(feed.get('checked_candidates') or 0)}; "
+            f"свежих постов в верхней десятке: {len(items)}; "
+            f"Неона выбрала: {len(recommendations)}."
         ),
     }
 
