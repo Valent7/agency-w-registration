@@ -77,14 +77,128 @@ def _radar_connect_state(owner_telegram_id: int, owner_name: str) -> str:
     ).decode("utf-8")
 
 
+def _radar_redirect_uri() -> str:
+    return str(
+        st.secrets.get("FACEBOOK_RADAR_REDIRECT_URI")
+        or "https://agency-w.streamlit.app/"
+    ).strip()
+
+
 def _radar_connect_url(owner_telegram_id: int, owner_name: str) -> str:
+    # Keep the browser on Agency W -> Facebook -> Agency W. Render is used only
+    # server-to-server for the token exchange, so browser reputation warnings on
+    # the Render hostname never interrupt the user's login.
+    app_id = str(
+        st.secrets.get("FACEBOOK_APP_ID") or "1101869308929738"
+    ).strip()
+    config_id = str(
+        st.secrets.get("FACEBOOK_CONFIG_ID") or "1017467271327083"
+    ).strip()
+    api_version = str(
+        st.secrets.get("FACEBOOK_API_VERSION") or "v23.0"
+    ).strip()
+    redirect_uri = _radar_redirect_uri()
+    if not app_id or not config_id or not redirect_uri:
+        raise RuntimeError("Не заданы параметры Facebook Login для Instagram Radar.")
+    state = _radar_connect_state(owner_telegram_id, owner_name)
+    params = {
+        "client_id": app_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "config_id": config_id,
+        "response_type": "code",
+        "override_default_response_type": "true",
+        "auth_type": "rerequest",
+    }
+    return (
+        f"https://www.facebook.com/{api_version}/dialog/oauth?"
+        + urlencode(params)
+    )
+
+
+def _decode_radar_state(state: str) -> dict:
+    value = str(state or "").strip()
+    if not value:
+        raise RuntimeError("Пустое состояние Facebook авторизации.")
+    try:
+        raw = _cipher().decrypt(value.encode("utf-8"), ttl=15 * 60)
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("Ссылка Facebook авторизации устарела или повреждена.") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Некорректное состояние Facebook авторизации.")
+    return payload
+
+
+def _clear_facebook_callback_query() -> None:
+    for key in (
+        "code",
+        "state",
+        "error",
+        "error_reason",
+        "error_description",
+        "error_code",
+    ):
+        try:
+            if key in st.query_params:
+                del st.query_params[key]
+        except Exception:
+            pass
+
+
+def _handle_facebook_radar_callback(owner_telegram_id: int) -> bool:
+    state = str(st.query_params.get("state") or "").strip()
+    code = str(st.query_params.get("code") or "").strip()
+    error = str(st.query_params.get("error") or "").strip()
+    if not state or (not code and not error):
+        return False
+
+    try:
+        payload = _decode_radar_state(state)
+    except Exception:
+        return False
+    if str(payload.get("purpose") or "").strip() != "agency_w_instagram_radar_connect":
+        return False
+    if int(payload.get("owner_id") or 0) != int(owner_telegram_id):
+        st.error("Facebook вернул авторизацию для другого кабинета Agency W.")
+        return True
+
+    if error:
+        detail = str(st.query_params.get("error_description") or error).strip()
+        _clear_facebook_callback_query()
+        st.error(f"Подключение Instagram Radar отменено: {detail}")
+        return True
+
     base_url = str(
         st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or ""
     ).strip().rstrip("/")
     if not base_url:
-        raise RuntimeError("INSTAGRAM_OAUTH_SERVICE_URL не найден в Streamlit Secrets.")
-    state = _radar_connect_state(owner_telegram_id, owner_name)
-    return f"{base_url}/facebook/connect?" + urlencode({"state": state})
+        st.error("INSTAGRAM_OAUTH_SERVICE_URL не найден в Streamlit Secrets.")
+        return True
+
+    try:
+        with st.spinner("Завершаю безопасное подключение Instagram Radar..."):
+            response = requests.post(
+                f"{base_url}/facebook/exchange",
+                json={
+                    "code": code,
+                    "state": state,
+                    "redirect_uri": _radar_redirect_uri(),
+                },
+                timeout=45,
+            )
+        data = response.json() if response.text.strip() else {}
+        if not response.ok or not isinstance(data, dict) or not data.get("ok"):
+            raise RuntimeError(
+                str(data.get("error") if isinstance(data, dict) else "")
+                or f"HTTP {response.status_code}"
+            )
+        _clear_facebook_callback_query()
+        st.success("Instagram Radar подключён через Facebook.")
+        st.rerun()
+    except Exception as exc:
+        st.error(f"Не удалось завершить подключение Instagram Radar: {exc}")
+    return True
 
 
 def _target_audience_text(owner_telegram_id: int) -> str:
@@ -485,6 +599,12 @@ def render_instagram_radar(
     owner_name: str,
     ask_openai_fn,
 ) -> None:
+    if _handle_facebook_radar_callback(int(owner_telegram_id)):
+        # On success st.rerun() already fired; on an error we stop this run so
+        # the user sees the message instead of another connect button below it.
+        if str(st.query_params.get("code") or "").strip():
+            return
+
     st.markdown("### 🌿 Instagram Radar")
     st.caption(
         "Неония находит подходящие профессиональные аккаунты, Radar проверяет их "

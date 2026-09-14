@@ -55,6 +55,10 @@ FACEBOOK_OAUTH_REDIRECT_URI = (
     or os.getenv("FACEBOOK_OAUTH_REDIRECT_URI")
     or "https://instagram-webhook-zeuv.onrender.com/facebook/callback"
 ).strip()
+FACEBOOK_AGENCY_REDIRECT_URI = os.getenv(
+    "FACEBOOK_AGENCY_REDIRECT_URI",
+    "https://agency-w.streamlit.app/",
+).strip() or "https://agency-w.streamlit.app/"
 FACEBOOK_API_VERSION = os.getenv(
     "FACEBOOK_API_VERSION",
     "v23.0",
@@ -883,8 +887,211 @@ async def facebook_connect(request: Request):
         )
 
 
+def _complete_facebook_radar_oauth(*, code: str, state: str, redirect_uri: str) -> dict:
+    """Exchange one Facebook Login for Business code and persist the Radar connection."""
+    settings = _facebook_oauth_settings()
+    code = str(code or "").strip()
+    state = str(state or "").strip()
+    redirect_uri = str(redirect_uri or "").strip()
+    state_payload = _decode_instagram_state(state)
+    if str(state_payload.get("purpose") or "").strip() != (
+        "agency_w_instagram_radar_connect"
+    ):
+        raise RuntimeError("Invalid Instagram Radar authorization state")
+    if not code:
+        raise RuntimeError("Facebook did not return an authorization code")
+    if not redirect_uri:
+        raise RuntimeError("Missing Facebook redirect URI")
+
+    token_response = requests.get(
+        f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/oauth/access_token",
+        params={
+            "client_id": settings["FACEBOOK_APP_ID"],
+            "client_secret": settings["FACEBOOK_APP_SECRET"],
+            "redirect_uri": redirect_uri,
+            "code": code,
+        },
+        timeout=30,
+    )
+    if not token_response.ok:
+        raise RuntimeError(
+            f"Facebook token exchange HTTP {token_response.status_code}: "
+            f"{token_response.text[:1000]}"
+        )
+    token_data = token_response.json()
+    short_token = str(token_data.get("access_token") or "").strip()
+    if not short_token:
+        raise RuntimeError("Facebook did not return an access token")
+
+    access_token = short_token
+    expires_in = token_data.get("expires_in")
+    try:
+        long_response = requests.get(
+            f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": settings["FACEBOOK_APP_ID"],
+                "client_secret": settings["FACEBOOK_APP_SECRET"],
+                "fb_exchange_token": short_token,
+            },
+            timeout=30,
+        )
+        if long_response.ok:
+            long_data = long_response.json()
+            access_token = str(
+                long_data.get("access_token") or short_token
+            ).strip()
+            expires_in = long_data.get("expires_in") or expires_in
+    except Exception as exchange_exc:
+        print(
+            "FACEBOOK_LONG_TOKEN_EXCHANGE_WARNING:",
+            f"{type(exchange_exc).__name__}: {exchange_exc}",
+            flush=True,
+        )
+
+    me = _facebook_graph_get(
+        "me",
+        access_token=access_token,
+        params={"fields": "id,name"},
+    )
+
+    pages = _facebook_graph_get(
+        "me/accounts",
+        access_token=access_token,
+        params={
+            "fields": (
+                "id,name,access_token,"
+                "instagram_business_account{id,username,name}"
+            ),
+            "limit": 100,
+        },
+    ).get("data") or []
+
+    owner_id = int(state_payload["owner_id"])
+    owner_name = str(state_payload.get("owner_name") or "").strip()
+
+    preferred_username = ""
+    try:
+        rows = _sb_get(
+            "agency_instagram_connections",
+            {
+                "owner_telegram_id": f"eq.{owner_id}",
+                "status": "eq.connected",
+                "select": "instagram_username",
+                "limit": 1,
+            },
+        )
+        if rows:
+            preferred_username = str(
+                rows[0].get("instagram_username") or ""
+            ).strip().casefold()
+    except Exception:
+        preferred_username = ""
+
+    candidates = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        ig = page.get("instagram_business_account")
+        if not isinstance(ig, dict):
+            continue
+        ig_id = str(ig.get("id") or "").strip()
+        page_token = str(page.get("access_token") or "").strip()
+        if not ig_id or not page_token:
+            continue
+        candidates.append((page, ig))
+
+    if not candidates:
+        raise RuntimeError(
+            "Facebook не вернул Страницу с привязанным профессиональным "
+            "Instagram. Проверьте, что Instagram Business/Creator связан "
+            "со Страницей Facebook и у вашего Facebook-профиля есть доступ к ней."
+        )
+
+    selected_page, selected_ig = candidates[0]
+    if preferred_username:
+        for page, ig in candidates:
+            if str(ig.get("username") or "").strip().casefold() == preferred_username:
+                selected_page, selected_ig = page, ig
+                break
+
+    ig_id = str(selected_ig.get("id") or "").strip()
+    ig_username = str(selected_ig.get("username") or "").strip()
+
+    if not ig_username:
+        try:
+            ig_profile = _facebook_graph_get(
+                ig_id,
+                access_token=str(selected_page.get("access_token") or ""),
+                params={"fields": "id,username,name"},
+            )
+            ig_username = str(ig_profile.get("username") or "").strip()
+        except Exception:
+            ig_username = ""
+
+    _save_instagram_radar_connection(
+        owner_id=owner_id,
+        owner_name=owner_name,
+        facebook_user_id=str(me.get("id") or "").strip(),
+        facebook_user_name=str(me.get("name") or "").strip(),
+        page_id=str(selected_page.get("id") or "").strip(),
+        page_name=str(selected_page.get("name") or "").strip(),
+        instagram_account_id=ig_id,
+        instagram_username=ig_username,
+        user_access_token=access_token,
+        page_access_token=str(selected_page.get("access_token") or "").strip(),
+        expires_in=(
+            int(expires_in)
+            if str(expires_in or "").isdigit()
+            else None
+        ),
+    )
+
+    return {
+        "ok": True,
+        "owner_id": owner_id,
+        "instagram_username": ig_username,
+        "facebook_page_name": str(selected_page.get("name") or "").strip(),
+    }
+
+
+async def facebook_exchange(request: Request):
+    """Server-to-server callback exchange used by Agency W Streamlit.
+
+    The user's browser never has to visit the Render hostname.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Bad Request"}, status_code=400)
+
+    try:
+        code = str((payload or {}).get("code") or "").strip()
+        state = str((payload or {}).get("state") or "").strip()
+        redirect_uri = str((payload or {}).get("redirect_uri") or "").strip()
+        if redirect_uri.rstrip("/") != FACEBOOK_AGENCY_REDIRECT_URI.rstrip("/"):
+            raise RuntimeError("Invalid Agency W redirect URI")
+        result = _complete_facebook_radar_oauth(
+            code=code,
+            state=state,
+            redirect_uri=redirect_uri,
+        )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        print(
+            "FACEBOOK_RADAR_EXCHANGE_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+
+
 async def facebook_oauth_callback(request: Request):
-    """Finish Facebook Login for Business and bind the Page + Instagram account."""
+    """Legacy browser callback kept for compatibility; new UI uses Agency W callback."""
     error = str(request.query_params.get("error") or "").strip()
     error_description = str(
         request.query_params.get("error_description") or ""
@@ -897,165 +1104,11 @@ async def facebook_oauth_callback(request: Request):
         )
 
     try:
-        settings = _facebook_oauth_settings()
-        code = str(request.query_params.get("code") or "").strip()
-        state = str(request.query_params.get("state") or "").strip()
-        state_payload = _decode_instagram_state(state)
-        if str(state_payload.get("purpose") or "").strip() != (
-            "agency_w_instagram_radar_connect"
-        ):
-            raise RuntimeError("Invalid Instagram Radar authorization state")
-        if not code:
-            raise RuntimeError("Facebook did not return an authorization code")
-
-        token_response = requests.get(
-            f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/oauth/access_token",
-            params={
-                "client_id": settings["FACEBOOK_APP_ID"],
-                "client_secret": settings["FACEBOOK_APP_SECRET"],
-                "redirect_uri": settings["FACEBOOK_OAUTH_REDIRECT_URI"],
-                "code": code,
-            },
-            timeout=30,
+        result = _complete_facebook_radar_oauth(
+            code=str(request.query_params.get("code") or "").strip(),
+            state=str(request.query_params.get("state") or "").strip(),
+            redirect_uri=FACEBOOK_OAUTH_REDIRECT_URI,
         )
-        if not token_response.ok:
-            raise RuntimeError(
-                f"Facebook token exchange HTTP {token_response.status_code}: "
-                f"{token_response.text[:1000]}"
-            )
-        token_data = token_response.json()
-        short_token = str(token_data.get("access_token") or "").strip()
-        if not short_token:
-            raise RuntimeError("Facebook did not return an access token")
-
-        # Prefer a long-lived user token. If Meta does not allow the exchange
-        # for this login response, keep the working short-lived token.
-        access_token = short_token
-        expires_in = token_data.get("expires_in")
-        try:
-            long_response = requests.get(
-                f"https://graph.facebook.com/{FACEBOOK_API_VERSION}/oauth/access_token",
-                params={
-                    "grant_type": "fb_exchange_token",
-                    "client_id": settings["FACEBOOK_APP_ID"],
-                    "client_secret": settings["FACEBOOK_APP_SECRET"],
-                    "fb_exchange_token": short_token,
-                },
-                timeout=30,
-            )
-            if long_response.ok:
-                long_data = long_response.json()
-                access_token = str(
-                    long_data.get("access_token") or short_token
-                ).strip()
-                expires_in = long_data.get("expires_in") or expires_in
-        except Exception as exchange_exc:
-            print(
-                "FACEBOOK_LONG_TOKEN_EXCHANGE_WARNING:",
-                f"{type(exchange_exc).__name__}: {exchange_exc}",
-                flush=True,
-            )
-
-        me = _facebook_graph_get(
-            "me",
-            access_token=access_token,
-            params={"fields": "id,name"},
-        )
-
-        pages = _facebook_graph_get(
-            "me/accounts",
-            access_token=access_token,
-            params={
-                "fields": (
-                    "id,name,access_token,"
-                    "instagram_business_account{id,username,name}"
-                ),
-                "limit": 100,
-            },
-        ).get("data") or []
-
-        owner_id = int(state_payload["owner_id"])
-        owner_name = str(state_payload.get("owner_name") or "").strip()
-
-        # If the owner's Instagram Direct connection already exists, prefer
-        # the Facebook Page linked to that same Instagram username.
-        preferred_username = ""
-        try:
-            rows = _sb_get(
-                "agency_instagram_connections",
-                {
-                    "owner_telegram_id": f"eq.{owner_id}",
-                    "status": "eq.connected",
-                    "select": "instagram_username",
-                    "limit": 1,
-                },
-            )
-            if rows:
-                preferred_username = str(
-                    rows[0].get("instagram_username") or ""
-                ).strip().casefold()
-        except Exception:
-            preferred_username = ""
-
-        candidates = []
-        for page in pages:
-            if not isinstance(page, dict):
-                continue
-            ig = page.get("instagram_business_account")
-            if not isinstance(ig, dict):
-                continue
-            ig_id = str(ig.get("id") or "").strip()
-            page_token = str(page.get("access_token") or "").strip()
-            if not ig_id or not page_token:
-                continue
-            candidates.append((page, ig))
-
-        if not candidates:
-            raise RuntimeError(
-                "Facebook не вернул Страницу с привязанным профессиональным "
-                "Instagram. Проверьте, что Instagram Business/Creator связан "
-                "со Страницей Facebook и у вашего Facebook-профиля есть доступ к ней."
-            )
-
-        selected_page, selected_ig = candidates[0]
-        if preferred_username:
-            for page, ig in candidates:
-                if str(ig.get("username") or "").strip().casefold() == preferred_username:
-                    selected_page, selected_ig = page, ig
-                    break
-
-        ig_id = str(selected_ig.get("id") or "").strip()
-        ig_username = str(selected_ig.get("username") or "").strip()
-
-        if not ig_username:
-            try:
-                ig_profile = _facebook_graph_get(
-                    ig_id,
-                    access_token=str(selected_page.get("access_token") or ""),
-                    params={"fields": "id,username,name"},
-                )
-                ig_username = str(ig_profile.get("username") or "").strip()
-            except Exception:
-                ig_username = ""
-
-        _save_instagram_radar_connection(
-            owner_id=owner_id,
-            owner_name=owner_name,
-            facebook_user_id=str(me.get("id") or "").strip(),
-            facebook_user_name=str(me.get("name") or "").strip(),
-            page_id=str(selected_page.get("id") or "").strip(),
-            page_name=str(selected_page.get("name") or "").strip(),
-            instagram_account_id=ig_id,
-            instagram_username=ig_username,
-            user_access_token=access_token,
-            page_access_token=str(selected_page.get("access_token") or "").strip(),
-            expires_in=(
-                int(expires_in)
-                if str(expires_in or "").isdigit()
-                else None
-            ),
-        )
-
         return_to = INSTAGRAM_AGENCY_RETURN_URL or "https://agency-w.streamlit.app/"
         sep = "&" if "?" in return_to else "?"
         return RedirectResponse(
@@ -1908,6 +1961,7 @@ routes = [
     Route("/instagram/connect", instagram_connect, methods=["GET"]),
     Route("/instagram/callback", instagram_oauth_callback, methods=["GET"]),
     Route("/facebook/connect", facebook_connect, methods=["GET"]),
+    Route("/facebook/exchange", facebook_exchange, methods=["POST"]),
     Route("/facebook/callback", facebook_oauth_callback, methods=["GET"]),
     Route(
         "/instagram/webhook",
