@@ -107,6 +107,7 @@ from scout_center import render_scout_center
 from vk_scout_ui import render_vk_sources
 from vk_scout_oauth import handle_vk_scout_oauth_callback
 from telegram_stories_ui import render_telegram_stories_radar
+from instagram_radar_ui import render_instagram_radar
 import asyncio
 import json
 import re
@@ -6570,6 +6571,7 @@ if telegram_login_valid or remembered_data:
                     "🎯 Определить мою целевую аудиторию",
                     "💙 Источники поиска VK",
                     "🌿 Stories Telegram",
+                    "📸 Instagram Radar",
                     "🔎 Поиск чатов",
                     "🎯 Поиск контактов в чатах по ЦА",
                     "👥 Поиск контактов",
@@ -6588,6 +6590,11 @@ if telegram_login_valid or remembered_data:
                         "🌿 Stories Telegram": (
                             "Неона смотрит верхние активные Stories людей из вашей Telegram-ленты "
                             "и предлагает только естественные тёплые ответы — без рекламы и продаж."
+                        ),
+                        "📸 Instagram Radar": (
+                            "Неония находит подходящие профессиональные Instagram-аккаунты, "
+                            "Radar собирает свежие Reels/посты, а Неона готовит до 10 "
+                            "естественных комментариев для ручной отправки."
                         ),
                         "🔎 Поиск чатов": (
                             "Здесь Неония загружает доступные Telegram-группы "
@@ -6616,6 +6623,13 @@ if telegram_login_valid or remembered_data:
 
                         elif neonia_mode == "🌿 Stories Telegram":
                             render_telegram_stories_radar(int(telegram_id))
+
+                        elif neonia_mode == "📸 Instagram Radar":
+                            render_instagram_radar(
+                                int(telegram_id),
+                                str(first_name or ""),
+                                ask_openai,
+                            )
 
                         elif neonia_mode == "🔎 Поиск чатов":
                             chats_result = render_neonia_chats()
