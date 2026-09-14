@@ -94,6 +94,42 @@ def get_member_by_telegram_id(telegram_id):
     return rows[0] if rows else None
 
 
+def _agency_owner_telegram_id():
+    """Возвращает единственного корневого владельца Агентства W.
+
+    В текущей базе владельцем считаем самый первый созданный аккаунт Agency W.
+    Это принципиально отличается от старого правила «нет referrer_code = владелец»,
+    из-за которого любой человек с потерянным кодом пригласителя мог стать legacy_active.
+    """
+    try:
+        rows = _get_json(
+            "agency_members",
+            params={
+                "select": "telegram_id,created_at",
+                "order": "created_at.asc",
+                "limit": "1",
+            },
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    try:
+        return int(rows[0].get("telegram_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_agency_owner(telegram_id):
+    owner_id = _agency_owner_telegram_id()
+    if owner_id is None:
+        return False
+    try:
+        return int(telegram_id) == int(owner_id)
+    except (TypeError, ValueError):
+        return False
+
+
 def load_partner_activations(telegram_ids=None):
     params = {
         "select": (
@@ -124,14 +160,34 @@ def ensure_partner_activation(telegram_id):
     if not member:
         return None
 
+    is_owner = _is_agency_owner(telegram_id)
     existing = get_partner_activation(telegram_id)
     if existing:
+        # Старое правило ошибочно давало legacy_active каждому, у кого потерян referrer_code.
+        # Теперь legacy_active разрешён ТОЛЬКО корневому владельцу Агентства W.
+        # Любой другой человек без подтверждённого скриншота возвращается в ожидание.
+        if existing.get("status") == "legacy_active" and not is_owner:
+            try:
+                rows = _patch_json(
+                    "partner_activations",
+                    {"telegram_id": f"eq.{int(telegram_id)}"},
+                    {
+                        "status": "awaiting_proof",
+                        "lodges_count": 0,
+                        "reviewed_at": None,
+                        "reviewed_by": None,
+                        "attention_level": "none",
+                        "last_action_at": _now_iso(),
+                    },
+                )
+                return rows[0] if rows else get_partner_activation(telegram_id)
+            except requests.HTTPError:
+                return existing
         return existing
 
-    # Корневой/старый владелец кабинета не должен внезапно потерять доступ.
-    # Новые люди, пришедшие по партнёрской ссылке, подтверждают 5 лож.
-    has_referrer = bool(str(member.get("referrer_code") or "").strip())
-    status = "awaiting_proof" if has_referrer else "legacy_active"
+    # Только корневой владелец сохраняет служебный legacy-доступ.
+    # Каждый новый/неподтверждённый партнёр обязан загрузить доказательство 5 лож.
+    status = "legacy_active" if is_owner else "awaiting_proof"
     onboarding_status = "not_started"
 
     try:
@@ -165,7 +221,7 @@ def activation_label(activation):
     status = activation.get("status")
     labels = {
         "awaiting_proof": "🟡 Ожидается подтверждение 5 лож",
-        "proof_submitted": "⏳ Скриншот отправлен наставнику",
+        "proof_submitted": "⏳ Скриншот отправлен владельцу Агентства W",
         "confirmed": "🟢 5 лож подтверждены",
         "rejected": "🔴 Нужен новый скриншот",
         "legacy_active": "🟢 Активный партнёр",
@@ -185,7 +241,7 @@ def _extract_response_text(data):
 
 
 def analyze_neoxa_proof(image_bytes, mime_type):
-    """ИИ только подсказывает, что видно на скриншоте. Решение принимает наставник."""
+    """ИИ только подсказывает, что видно на скриншоте. Решение принимает владелец Агентства W."""
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
         return {
@@ -330,7 +386,7 @@ def submit_activation_proof(telegram_id, uploaded_file):
             "confidence": "не проверено",
             "note": (
                 "Скриншот сохранён. Автоматический анализ временно недоступен; "
-                "нужна ручная проверка наставником/владельцем."
+                "нужна ручная проверка владельцем Агентства W."
             ),
         }
         # Сохраняем отметку об ошибке анализа, но не сам текст исключения целиком.
@@ -371,6 +427,11 @@ def review_activation(
     reason="",
     confirmed_lodges=None,
 ):
+    if not _is_agency_owner(reviewer_telegram_id):
+        raise RuntimeError(
+            "Подтверждать или отклонять скриншот 5 лож может только владелец Агентства W."
+        )
+
     activation = get_partner_activation(telegram_id)
     if not activation:
         raise RuntimeError("Заявка на активацию не найдена.")
@@ -554,12 +615,12 @@ def render_my_activation(telegram_id):
         return activation
 
     if activation and activation.get("status") == "proof_submitted":
-        st.info("Скриншот уже отправлен. После подтверждения наставником включится Неола.")
+        st.info("Скриншот уже отправлен. Доступ откроется только после подтверждения владельцем Агентства W.")
         return activation
 
     if activation and activation.get("status") == "rejected":
         reason = str(activation.get("rejection_reason") or "Нужен новый скриншот.")
-        st.warning(f"Наставник попросил новый скриншот: {reason}")
+        st.warning(f"Владелец Агентства W попросил новый скриншот: {reason}")
 
     st.caption(
         "Загрузите скриншот Neonexa, на котором одновременно видны ваш ник и "
@@ -586,14 +647,14 @@ def render_my_activation(telegram_id):
             if ai_error:
                 st.warning(
                     "Автоматическое распознавание временно недоступно. "
-                    "Наставник или владелец структуры проверит скриншот вручную."
+                    "Владелец Агентства W проверит скриншот вручную."
                 )
             else:
                 st.caption(
                     f"Предварительно распознано: ник — "
                     f"{analysis['nickname'] or 'не найден'}, "
                     f"ложи — {analysis['lodges_count']}. "
-                    "Окончательное решение принимает человек."
+                    "Окончательное решение принимает только владелец Агентства W."
                 )
             st.rerun()
         except Exception as exc:
@@ -623,10 +684,7 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
         ),
         None,
     )
-    is_root_owner = bool(
-        current_member
-        and not str(current_member.get("referrer_code") or "").strip()
-    )
+    is_root_owner = bool(current_member and _is_agency_owner(current_telegram_id))
 
     visible = _visible_members_for_viewer(
         members,
@@ -638,6 +696,18 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
     ids = sorted(visible_ids)
     activations = load_partner_activations(ids) if ids else []
     activation_by_id = {int(item["telegram_id"]): item for item in activations}
+
+    # Автоматически исправляем старые ошибочные legacy_active у всех, кроме владельца.
+    owner_id = _agency_owner_telegram_id()
+    for member_id, activation in list(activation_by_id.items()):
+        if (
+            activation.get("status") == "legacy_active"
+            and owner_id is not None
+            and int(member_id) != int(owner_id)
+        ):
+            repaired = ensure_partner_activation(member_id)
+            if repaired:
+                activation_by_id[int(member_id)] = repaired
 
     if is_root_owner:
         st.info(
@@ -799,13 +869,8 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                     f"внимание: {attention_text}"
                 )
 
-                # Скриншот может подтвердить:
-                # 1) прямой пригласивший;
-                # 2) корневой владелец кабинета — для любого человека в Агентстве.
-                can_review_activation = (
-                    str(member.get("referrer_code") or "") == str(current_member_code)
-                    or is_root_owner
-                )
+                # Финансовое подтверждение видит и проверяет только владелец Агентства W.
+                can_review_activation = is_root_owner
 
                 # Финансовое доказательство НЕ исчезает после подтверждения.
                 proof = load_activation_proof(member_id) if can_review_activation else None
@@ -881,8 +946,7 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
                         key=f"confirmed_lodges_{current_telegram_id}_{member_id}",
                         help=(
                             "ИИ только помогает прочитать скриншот. "
-                            "Окончательное число подтверждает наставник "
-                            "или владелец структуры."
+                            "Окончательное число подтверждает только владелец Агентства W."
                         ),
                     )
                     reason_key = f"reject_reason_{current_telegram_id}_{member_id}"
@@ -1193,7 +1257,7 @@ def _render_neola_conversation(telegram_id, owner_name, ui_context, ask_openai_f
     member = get_member_by_telegram_id(telegram_id)
 
     if not activation_is_confirmed(activation):
-        st.warning("Неола включится после подтверждения 5 лож.")
+        st.warning("Неола и рабочий кабинет включатся только после подтверждения 5 лож владельцем Агентства W.")
         st.caption(activation_label(activation))
         return
 
