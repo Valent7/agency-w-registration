@@ -1277,6 +1277,26 @@ def _process_message(
         else {}
     )
     context_before = _sanitize_relationship_memory(context_before)
+
+    # ЖЁСТКИЙ FENCE: Telegram Story-handoff, созданный старой версией, мог
+    # принести в новый диалог relationship_memory из переписки ДО первого
+    # сообщения Неоны. Такой контекст запрещён. Очищаем его один раз и дальше
+    # накапливаем память только из новых входящих после точки активации.
+    if (
+        str(context_before.get("activated_by") or "") == "telegram_story_reply"
+        and not bool(context_before.get("post_activation_memory_started"))
+    ):
+        context_before.pop(getattr(memory, "MEMORY_KEY", "relationship_memory"), None)
+        # Старая версия могла успеть увести контакт в календарную стадию из-за
+        # чужого старого контекста. При первом сообщении после обновления также
+        # сбрасываем этот ошибочный stage и его технические поля.
+        context_before = _clear_meeting_context(context_before)
+        context_before["activated_by"] = "telegram_story_reply"
+        context_before["pre_activation_history_forbidden"] = True
+        context_before["history_fence_enforced_at"] = datetime.now(core.UTC).isoformat()
+        state["stage"] = "idle"
+        state["greeted"] = True
+
     state["context"] = context_before
 
     previous_stage = str(state.get("stage") or "idle")
@@ -1311,6 +1331,10 @@ def _process_message(
             message_dt=message_dt,
         )
         context = _sanitize_relationship_memory(context)
+        # После первой реально обработанной реплики память считается новой:
+        # она содержит только диалог, начавшийся ПОСЛЕ сообщения Неоны.
+        if str(context.get("activated_by") or "") == "telegram_story_reply":
+            context["post_activation_memory_started"] = True
         if voice_unverified:
             key = getattr(memory, "MEMORY_KEY", "relationship_memory")
             mem = context.get(key)
@@ -1444,30 +1468,13 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
 
             # Создаём точку отсчёта ДО ручного ответа на Story. Благодаря greeted=True
             # Неона не начинает внезапно с нового «Здравствуйте».
-            history = []
-            if len(messages) <= 1:
-                async for item in client.iter_messages(entity, limit=12):
-                    history.append(item)
-            else:
-                history = list(messages)
-            incoming_before = [
-                int(getattr(item, "id", 0) or 0)
-                for item in history
-                if not bool(getattr(item, "out", False))
-                and int(getattr(item, "id", 0) or 0) < warmup_id
-            ]
-            baseline = max(incoming_before) if incoming_before else 0
+            # ЖЁСТКАЯ ТОЧКА ОТСЧЁТА = само первое сообщение Неоны / ручной
+            # Story-reply. Никакой текст, факт, вопрос, встреча или память из
+            # переписки с этим человеком ДО warmup_id не переносится в Неону.
+            # Telegram message id достаточно как fence: все последующие ответы
+            # человека имеют id больше этой точки.
+            baseline = warmup_id
 
-            previous = core._dialog_state(config, owner_id, contact_id)
-            previous_context = (
-                dict(previous.get("context"))
-                if isinstance(previous, dict) and isinstance(previous.get("context"), dict)
-                else {}
-            )
-            # Сохраняем долгую человеческую память, но сбрасываем старую календарную
-            # механику и ручной fence: новый ответ на Story — новая инициатива владельца.
-            keep_memory_key = getattr(memory, "MEMORY_KEY", "relationship_memory")
-            preserved_memory = previous_context.get(keep_memory_key)
             fresh_context = {
                 "activated_by": "telegram_story_reply",
                 "warmup_mode": True,
@@ -1475,9 +1482,10 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
                 "story_reply_message_id": warmup_id,
                 "story_id": story_id,
                 "first_message_sent_at": sent_at,
+                "history_fence_message_id": warmup_id,
+                "pre_activation_history_forbidden": True,
+                "post_activation_memory_started": False,
             }
-            if isinstance(preserved_memory, dict):
-                fresh_context[keep_memory_key] = preserved_memory
 
             core._save_dialog_state(
                 config,
@@ -1526,9 +1534,35 @@ def apply_policy():
     core.sync_owner_once = _story_aware_sync_owner_once
 
 
-def initialize_dialog_after_first_message(*args, **kwargs):
+def initialize_dialog_after_first_message(
+    owner_id,
+    contact_id,
+    *,
+    baseline_incoming_id=0,
+    sent_at="",
+):
+    """Жёстко начинает память Неоны только с её первого сообщения.
+
+    Даже если для этого человека раньше уже существовал dialog_state, он
+    полностью заменяется свежим состоянием без relationship_memory. Старую
+    личную переписку владельца Неона не получает и не использует.
+    """
     apply_policy()
-    return core.initialize_dialog_after_first_message(*args, **kwargs)
+    config = core.load_config()
+    core._save_dialog_state(
+        config,
+        int(owner_id),
+        int(contact_id),
+        last_incoming_id=int(baseline_incoming_id or 0),
+        stage="idle",
+        greeted=False,
+        context={
+            "first_message_sent_at": str(sent_at or ""),
+            "activated_by": "agency_w_first_message",
+            "history_fence_incoming_id": int(baseline_incoming_id or 0),
+            "pre_activation_history_forbidden": True,
+        },
+    )
 
 
 def run_sync_owner_once(*args, **kwargs):
