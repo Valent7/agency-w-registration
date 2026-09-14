@@ -1466,14 +1466,51 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
                 "story_id": story_id,
             }
 
-            # Создаём точку отсчёта ДО ручного ответа на Story. Благодаря greeted=True
-            # Неона не начинает внезапно с нового «Здравствуйте».
-            # ЖЁСТКАЯ ТОЧКА ОТСЧЁТА = само первое сообщение Неоны / ручной
-            # Story-reply. Никакой текст, факт, вопрос, встреча или память из
-            # переписки с этим человеком ДО warmup_id не переносится в Неону.
-            # Telegram message id достаточно как fence: все последующие ответы
-            # человека имеют id больше этой точки.
-            baseline = warmup_id
+            # Жёсткая граница истории должна храниться в том же измерении,
+            # которое использует core.sync_owner_once: last_incoming_message_id.
+            # Поэтому baseline = последнее ВХОДЯЩЕЕ до нашего Story-reply,
+            # а не ID исходящего Story-reply. Старый текст при этом не передаётся
+            # в Неону: мы читаем только служебные id/date для определения границы.
+            history = []
+            async for item in client.iter_messages(entity, limit=20):
+                history.append(item)
+
+            incoming_before = []
+            for item in history:
+                if bool(getattr(item, "out", False)):
+                    continue
+                item_id = int(getattr(item, "id", 0) or 0)
+                if not item_id:
+                    continue
+                item_date = getattr(item, "date", None)
+                if warmup_date is not None and item_date is not None:
+                    try:
+                        if item_date.astimezone(core.UTC) > warmup_date.astimezone(core.UTC):
+                            continue
+                    except Exception:
+                        pass
+                incoming_before.append(item_id)
+            baseline = max(incoming_before) if incoming_before else 0
+
+            previous = core._dialog_state(config, owner_id, contact_id)
+            previous_context = (
+                dict(previous.get("context"))
+                if isinstance(previous, dict) and isinstance(previous.get("context"), dict)
+                else {}
+            )
+            previous_last = int(previous.get("last_incoming_message_id") or 0) if isinstance(previous, dict) else 0
+            same_story = int(previous_context.get("story_reply_message_id") or 0) == warmup_id
+
+            # После перезапуска worker не сбрасываем уже живой диалог назад.
+            # Но автоматически лечим состояние из предыдущей версии, где
+            # last_incoming_message_id ошибочно был равен ID исходящего Story-reply.
+            old_bad_fence = bool(
+                same_story
+                and previous_last == warmup_id
+                and int(previous_context.get("history_fence_message_id") or 0) == warmup_id
+            )
+            if same_story and not old_bad_fence:
+                continue
 
             fresh_context = {
                 "activated_by": "telegram_story_reply",
@@ -1482,7 +1519,7 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
                 "story_reply_message_id": warmup_id,
                 "story_id": story_id,
                 "first_message_sent_at": sent_at,
-                "history_fence_message_id": warmup_id,
+                "history_fence_incoming_id": baseline,
                 "pre_activation_history_forbidden": True,
                 "post_activation_memory_started": False,
             }
