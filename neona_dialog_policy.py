@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
@@ -431,6 +432,207 @@ def _self_contact_reply(owner_name: str) -> str:
     )
 
 
+
+_SCHEDULING_STAGES = {
+    "invited_to_meeting",
+    "collecting_meeting_details",
+    "awaiting_confirmation",
+    "awaiting_slot_choice",
+    "scheduled",
+}
+
+
+def _meeting_cancel_intent(text: str) -> bool:
+    """Явная отмена — не приглашение начать согласование заново."""
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    patterns = (
+        r"\bотмен(?:яем|яю|ить|ите|ена|а)\s+(?:эту\s+)?встреч\w*\b",
+        r"\bвстреч\w*\s+отмен(?:яем|яю|ить|ите|ена|а)\b",
+        r"\bне\s+(?:надо|нужно|хочу)\s+(?:эту\s+)?встреч\w*\b",
+        r"\bвстреч\w*\s+не\s+(?:надо|нужна|нужно)\b",
+    )
+    return any(re.search(pattern, value) for pattern in patterns)
+
+
+def _meeting_reschedule_intent(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    return any(
+        token in value
+        for token in (
+            "перенести", "перенесем", "перенесём", "перенос",
+            "другое время", "другой день", "другую дату",
+            "на другой день", "на другое время",
+        )
+    )
+
+
+def _meeting_cannot_attend_intent(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    return bool(re.search(r"\b(?:не\s+смогу|не\s+могу\s+(?:прийти|быть|участвовать)|не\s+получится)\b", value))
+
+
+def _short_negative(text: str) -> bool:
+    value = re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").casefold()).strip()
+    return value in {
+        "нет", "не", "не надо", "не нужно", "не хочу", "не стоит",
+        "нет спасибо", "не сейчас", "не надо спасибо",
+    }
+
+
+def _clear_meeting_context(context):
+    result = dict(context or {})
+    for key in (
+        "meeting_id", "proposed_start_at", "requested_date", "requested_time",
+        "offered_slots", "contact_timezone", "meeting_format", "meeting_reason",
+    ):
+        result.pop(key, None)
+    return result
+
+
+def _cancel_meeting_record(config, owner_id, context) -> None:
+    """Best effort: если встреча уже записана, помечаем её отменённой."""
+    meeting_id = str((context or {}).get("meeting_id") or "").strip()
+    if not meeting_id:
+        return
+    try:
+        response = requests.patch(
+            f"{config.supabase_url}/rest/v1/agency_meetings",
+            headers=core._headers(config, "return=minimal"),
+            params={
+                "id": f"eq.{meeting_id}",
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+            },
+            json={"status": "Отменена"},
+            timeout=20,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        print(
+            "NEONA_MEETING_CANCEL_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+
+def _warmup_business_signal(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    return any(
+        re.search(pattern, value)
+        for pattern in (
+            r"\bагентств\w*\b", r"\bии\b", r"\bискусственн\w+\s+интеллект\w*\b",
+            r"\bассистент\w*\b", r"\bбизнес\w*\b", r"\bпартн[её]р\w*\b",
+            r"\bклиент\w*\b", r"\bавтоматизац\w*\b",
+        )
+    )
+
+
+def _meeting_allowed_now(context, text: str) -> bool:
+    """После Story не прыгаем к встрече после первой вежливой реплики."""
+    base = _has_personal_reason(context) or _current_text_has_personal_reason(text)
+    if not base:
+        return False
+    if bool((context or {}).get("warmup_mode")):
+        try:
+            turns = int((context or {}).get("warmup_incoming_count") or 0)
+        except (TypeError, ValueError):
+            turns = 0
+        if turns < 2 and not _warmup_business_signal(text):
+            return False
+    return True
+
+
+def _ack_without_question(text: str) -> str:
+    value = re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").casefold()).strip()
+    if value in {"спасибо", "благодарю", "спасибо большое"}:
+        return "Пожалуйста."
+    if _short_negative(text):
+        return "Поняла."
+    if value in {"да", "хорошо", "ок", "okay", "договорились"}:
+        return "Хорошо."
+    return "Поняла вас."
+
+
+def _question_signature(text: str) -> set[str]:
+    stop = {
+        "как", "какой", "какая", "какие", "какому", "каким", "какую",
+        "что", "где", "когда", "зачем", "почему", "ли", "вам", "вас",
+        "вы", "у", "в", "во", "на", "по", "для", "и", "или", "а", "это",
+        "указано", "указать", "скажите", "подскажите", "пожалуйста",
+    }
+    result = set()
+    for token in re.findall(r"[a-zа-яё0-9]+", str(text or "").casefold()):
+        if token in stop or len(token) <= 2:
+            continue
+        # Грубый стем достаточен для защиты от «какой часовой пояс»/«по какому часовому поясу».
+        result.add(token[:5] if len(token) >= 5 else token)
+    return result
+
+
+def _recent_neona_questions(context, *, max_turns: int = 8) -> list[str]:
+    mem = _relationship_memory(context)
+    turns = mem.get("turns") if isinstance(mem.get("turns"), list) else []
+    questions: list[str] = []
+    for turn in turns[-max_turns:]:
+        if not isinstance(turn, dict):
+            continue
+        reply = str(turn.get("neona_reply") or "")
+        for part in re.findall(r"[^?]+\?", reply):
+            value = re.sub(r"\s+", " ", part).strip()
+            if value:
+                questions.append(value)
+    return questions
+
+
+def _same_question(a: str, b: str) -> bool:
+    na = _normalize_for_similarity(a)
+    nb = _normalize_for_similarity(b)
+    if not na or not nb:
+        return False
+    if na == nb or SequenceMatcher(None, na, nb).ratio() >= 0.68:
+        return True
+    sa, sb = _question_signature(a), _question_signature(b)
+    if not sa or not sb:
+        return False
+    overlap = len(sa & sb) / max(1, min(len(sa), len(sb)))
+    return overlap >= 0.72
+
+
+def _strip_repeated_questions(reply: str, context) -> str:
+    previous_questions = _recent_neona_questions(context, max_turns=8)
+    if not previous_questions or "?" not in str(reply or ""):
+        return str(reply or "").strip()
+    parts = re.findall(r"[^.!?]+[.!?]?", str(reply or ""))
+    kept: list[str] = []
+    for part in parts:
+        clean = re.sub(r"\s+", " ", part).strip()
+        if not clean:
+            continue
+        if clean.endswith("?") and any(_same_question(clean, old) for old in previous_questions):
+            continue
+        kept.append(clean)
+    return " ".join(kept).strip()
+
+
+_RESOURCE_PROMISE_RE = re.compile(
+    r"\b(?:пришлю|отправлю|подготовлю|составлю|сделаю|могу\s+прислать|могу\s+отправить|могу\s+подготовить)\b"
+    r"[^.!?]{0,120}\b(?:руководств\w*|гайд\w*|чек[ -]?лист\w*|pdf|ссылк\w*|инструкц\w*|файл\w*|шаблон\w*|таблиц\w*|материал\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_phantom_resource_promises(reply: str) -> str:
+    value = str(reply or "").strip()
+    if not _RESOURCE_PROMISE_RE.search(value):
+        return value
+    parts = re.findall(r"[^.!?]+[.!?]?", value)
+    kept = [
+        re.sub(r"\s+", " ", part).strip()
+        for part in parts
+        if part.strip() and not _RESOURCE_PROMISE_RE.search(part)
+    ]
+    return " ".join(part for part in kept if part).strip()
+
+
 def _normalize_for_similarity(text: str) -> str:
     return re.sub(r"[^a-zа-яё0-9]+", " ", str(text or "").casefold()).strip()
 
@@ -446,33 +648,44 @@ def _reply_is_repetitive(reply: str, context) -> bool:
         return False
     if a == b:
         return True
-    return SequenceMatcher(None, a, b).ratio() >= 0.78
+    return SequenceMatcher(None, a, b).ratio() >= 0.70
 
 
 def _de_repeat_reply(config, reply: str, text: str, context) -> str:
-    """Страховка от повторения одного и того же вопроса двумя сообщениями подряд."""
-    if not _reply_is_repetitive(reply, context):
-        return reply
+    """Жёсткая страховка: Неона не повторяет вопросы и не обещает несуществующие материалы."""
+    cleaned = _strip_phantom_resource_promises(reply)
+    cleaned = _strip_repeated_questions(cleaned, context)
+    if not cleaned:
+        return _ack_without_question(text)
+
+    if not _reply_is_repetitive(cleaned, context):
+        return cleaned
+
     mem = _relationship_memory(context)
     previous = str(mem.get("last_reply") or "").strip()
-    history = _dialog_context_block(context, max_turns=6)
+    history = _dialog_context_block(context, max_turns=8)
     instructions = f"""
 Ты Неона. Предыдущий ответ уже был: «{previous}».
-Новый ответ получился слишком похожим. Исправь это.
+Новый ответ получился слишком похожим. Перепиши его ОДИН раз.
 
-Правила:
-- НЕ повторяй тот же вопрос и не перефразируй его;
+ЖЁСТКО:
+- НЕ повторяй прежний вопрос и НЕ перефразируй его;
+- не задавай вопрос, который уже задавался в последних репликах;
 - сначала ответь на последнюю реплику человека по смыслу;
-- используй контекст разговора ниже;
-- если вопрос уже понятен из контекста, ответь на него без уточнений;
-- сделай один естественный следующий шаг;
+- если человек уже отказался, отменил встречу или ответ уже известен — не выясняй это снова;
+- не предлагай и не обещай PDF, ссылки, руководства, файлы, шаблоны или материалы, которых система реально не имеет;
+- вопрос НЕ обязателен: если следующий вопрос не нужен, закончи точкой;
 - 1–3 коротких предложения.
 
 Контекст:
 {history}
 """.strip()
-    return _call_openai(config, instructions, text)
-
+    rewritten = _call_openai(config, instructions, text)
+    rewritten = _strip_phantom_resource_promises(rewritten)
+    rewritten = _strip_repeated_questions(rewritten, context)
+    if not rewritten or _reply_is_repetitive(rewritten, context):
+        return _ack_without_question(text)
+    return rewritten
 
 def _general_reply(config, owner_name, first_name, text, greet, context=None):
     greeting_rule = (
@@ -486,7 +699,7 @@ def _general_reply(config, owner_name, first_name, text, greet, context=None):
     history = _dialog_context_block(context, max_turns=8)
     personal_reason_known = _has_personal_reason(context)
     personal_reason_now = _current_text_has_personal_reason(text)
-    meeting_permission = personal_reason_known or personal_reason_now
+    meeting_permission = _meeting_allowed_now(context, text)
     voice_unverified = bool((context or {}).get("incoming_voice_unverified"))
     voice_rule = (
         "Последняя реплика получена через автоматическую расшифровку голосового. "
@@ -521,7 +734,9 @@ def _general_reply(config, owner_name, first_name, text, greet, context=None):
 - если ты сама только что задала загадку/вопрос, а человек просит ответ, ОТВЕТЬ, а не проси повторить загадку;
 - если вопрос уже понятен, не задавай уточнение ради уточнения;
 - никогда не проси человека повторить то, что уже есть в видимом контексте;
-- не повторяй один и тот же вопрос двумя сообщениями подряд.
+- не повторяй один и тот же вопрос двумя сообщениями подряд;
+- вопрос НЕ обязан быть в каждом сообщении: если вопрос не нужен, закончи ответ точкой;
+- нельзя возвращаться к уже закрытому вопросу (часовой пояс, время, формат, материал) только потому, что он есть в сценарии.
 
 {objections.NEONA_OBJECTION_RULES_TEXT}
 
@@ -804,6 +1019,14 @@ def _process_message_without_memory(
     )
     greet = not greeted
 
+    if bool(context.get("warmup_mode")):
+        try:
+            context["warmup_incoming_count"] = int(context.get("warmup_incoming_count") or 0) + 1
+        except (TypeError, ValueError):
+            context["warmup_incoming_count"] = 1
+        if _warmup_business_signal(text):
+            context["warmup_business_signal"] = True
+
     # stage="scheduled" нельзя считать истиной без проверки самой записи календаря.
     # Если встречу удалили/отменили/перенесли или она уже закончилась,
     # снимаем старый статус и обрабатываем текущее сообщение заново.
@@ -814,6 +1037,26 @@ def _process_message_without_memory(
     ):
         context = _clear_stale_meeting_context(context)
         stage = "idle"
+
+    if stage in _SCHEDULING_STAGES and _meeting_cancel_intent(text):
+        if stage == "scheduled":
+            _cancel_meeting_record(config, owner_id, context)
+        context = _clear_meeting_context(context)
+        context["meeting_cancelled_by_contact"] = True
+        context["meeting_cancelled_at"] = datetime.now(core.UTC).isoformat()
+        return "Поняла, встречу отменяю. Спасибо, что предупредили.", "idle", True, context
+
+    if stage in _SCHEDULING_STAGES and _short_negative(text):
+        if stage == "scheduled":
+            _cancel_meeting_record(config, owner_id, context)
+        context = _clear_meeting_context(context)
+        context["meeting_declined_by_contact"] = True
+        context["meeting_declined_at"] = datetime.now(core.UTC).isoformat()
+        return "Поняла. Тогда встречу не назначаем.", "idle", True, context
+
+    if stage == "idle" and (context.get("meeting_cancelled_by_contact") or context.get("meeting_declined_by_contact")) and _short_negative(text):
+        # После уже закрытого вопроса короткое «нет» не запускает сценарий заново.
+        return "Поняла.", "idle", True, context
 
     classification = objections.classify_neona_reply(text)
 
@@ -900,20 +1143,25 @@ def _process_message_without_memory(
         lowered = text.lower()
 
         if core._is_simple_acknowledgement(text):
-            return "", "scheduled", True, context
+            return _ack_without_question(text), "scheduled", True, context
 
-        if any(token in lowered for token in (
-            "перенести", "другое время", "другой день", "не смогу",
-            "не могу", "отменить", "отмена",
-        )):
-            context.pop("proposed_start_at", None)
-            context.pop("requested_date", None)
-            context.pop("requested_time", None)
-            context.pop("offered_slots", None)
+        if _meeting_cannot_attend_intent(text):
+            _cancel_meeting_record(config, owner_id, context)
+            context = _clear_meeting_context(context)
+            context["meeting_cancelled_by_contact"] = True
+            context["meeting_cancelled_at"] = datetime.now(core.UTC).isoformat()
             return (
-                "Хорошо. Напишите, пожалуйста, какой новый день и время вам удобны. "
-                "Если часовой пояс и формат встречи остаются прежними, "
-                "повторять их не нужно.",
+                "Поняла. Встречу на это время снимаю. Если захотите подобрать другое время — напишите.",
+                "idle",
+                True,
+                context,
+            )
+
+        if _meeting_reschedule_intent(text):
+            for key in ("proposed_start_at", "requested_date", "requested_time", "offered_slots"):
+                context.pop(key, None)
+            return (
+                "Хорошо. Напишите новый удобный день и время. Часовой пояс и формат повторять не нужно, если они не меняются.",
                 "collecting_meeting_details",
                 True,
                 context,
@@ -952,7 +1200,7 @@ def _process_message_without_memory(
     # Короткое «да, интересно» ведёт к встрече только если уже понятна личная причина.
     # Иначе Неона продолжает живой разговор и выясняет, что человеку действительно нужно.
     if stage == "idle" and core._is_positive_interest(text):
-        if _has_personal_reason(context):
+        if _meeting_allowed_now(context, text):
             reply, new_stage, context = core._schedule_reply(
                 config,
                 owner_id,
@@ -1005,7 +1253,7 @@ def _process_message_without_memory(
         return reply, stage, True, context
 
     reply = _general_reply(config, owner_name, first_name, text, greet, context)
-    meeting_allowed = _has_personal_reason(context) or _current_text_has_personal_reason(text)
+    meeting_allowed = _meeting_allowed_now(context, text)
     new_stage = "invited_to_meeting" if meeting_allowed and core._meeting_intent(reply) else stage
     return reply, new_stage, True, context
 
@@ -1076,12 +1324,206 @@ def _process_message(
     return reply, new_stage, greeted, context
 
 
+
+# --- Telegram Stories -> live dialogue handoff ---------------------------------
+# Пользователь отправляет подготовленный Radar-ответ вручную. Если Telegram
+# помечает исходящее как reply_to Story, Неона автоматически принимает этот
+# личный чат под наблюдение и обрабатывает следующий входящий ответ человека.
+_CORE_ALLOWED_CONTACTS = core._allowed_contacts
+_CORE_SYNC_OWNER_ONCE = core.sync_owner_once
+_STORY_ALLOWED_BY_OWNER: dict[int, dict[int, dict]] = {}
+_STORY_LAST_SCAN: dict[int, float] = {}
+_STORY_SCAN_INTERVAL_SECONDS = 60
+_STORY_LOOKBACK_HOURS = 96
+
+
+def _story_reply_id(message) -> int:
+    reply_to = getattr(message, "reply_to", None)
+    value = getattr(reply_to, "story_id", None)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _story_allowed_contacts(config, owner_id: int):
+    allowed = dict(_CORE_ALLOWED_CONTACTS(config, int(owner_id)) or {})
+    allowed.update(_STORY_ALLOWED_BY_OWNER.get(int(owner_id), {}))
+    return allowed
+
+
+async def _refresh_manual_story_warmups(owner_id: int) -> None:
+    owner_id = int(owner_id)
+    now_mono = time.monotonic()
+    last_scan = float(_STORY_LAST_SCAN.get(owner_id) or 0.0)
+    if now_mono - last_scan < _STORY_SCAN_INTERVAL_SECONDS:
+        return
+    _STORY_LAST_SCAN[owner_id] = now_mono
+
+    config = core.load_config()
+    base_allowed = _CORE_ALLOWED_CONTACTS(config, owner_id)
+    cached = dict(_STORY_ALLOWED_BY_OWNER.get(owner_id, {}))
+    session = core._get_telegram_session(config, owner_id)
+    if not session:
+        return
+
+    cutoff = datetime.now(core.UTC) - timedelta(hours=_STORY_LOOKBACK_HOURS)
+    client = core.TelegramClient(
+        core.StringSession(session),
+        config.telegram_api_id,
+        config.telegram_api_hash,
+    )
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return
+        me = await client.get_me()
+        if int(getattr(me, "id", 0) or 0) != owner_id:
+            return
+
+        async for dialog in client.iter_dialogs(limit=160):
+            entity = dialog.entity
+            contact_id = int(getattr(entity, "id", 0) or 0)
+            if not contact_id or getattr(entity, "bot", False):
+                continue
+            if not getattr(entity, "first_name", None) and not getattr(entity, "last_name", None):
+                continue
+            if contact_id in base_allowed or contact_id in cached:
+                continue
+
+            latest = getattr(dialog, "message", None)
+            latest_date = getattr(latest, "date", None)
+            if latest_date is not None:
+                try:
+                    if latest_date.astimezone(core.UTC) < cutoff:
+                        continue
+                except Exception:
+                    pass
+
+            messages = []
+            # Если последняя реплика — наша Story-reply, можно обойтись без второго запроса.
+            if latest is not None and bool(getattr(latest, "out", False)) and _story_reply_id(latest):
+                messages = [latest]
+            elif latest is not None and not bool(getattr(latest, "out", False)):
+                async for item in client.iter_messages(entity, limit=10):
+                    item_date = getattr(item, "date", None)
+                    if item_date is not None:
+                        try:
+                            if item_date.astimezone(core.UTC) < cutoff:
+                                break
+                        except Exception:
+                            pass
+                    messages.append(item)
+            else:
+                continue
+
+            story_outgoing = [
+                item for item in messages
+                if bool(getattr(item, "out", False)) and _story_reply_id(item)
+            ]
+            if not story_outgoing:
+                continue
+            warmup = max(story_outgoing, key=lambda item: int(getattr(item, "id", 0) or 0))
+            warmup_id = int(getattr(warmup, "id", 0) or 0)
+            warmup_date = getattr(warmup, "date", None)
+            sent_at = (
+                warmup_date.astimezone(core.UTC).isoformat()
+                if warmup_date is not None
+                else datetime.now(core.UTC).isoformat()
+            )
+            story_id = _story_reply_id(warmup)
+
+            name = core._first_name(entity, "")
+            cached[contact_id] = {
+                "sent_at": sent_at,
+                "recipient_name": name,
+                "message_id": warmup_id,
+                "source": "telegram_story_reply",
+                "story_id": story_id,
+            }
+
+            # Создаём точку отсчёта ДО ручного ответа на Story. Благодаря greeted=True
+            # Неона не начинает внезапно с нового «Здравствуйте».
+            history = []
+            if len(messages) <= 1:
+                async for item in client.iter_messages(entity, limit=12):
+                    history.append(item)
+            else:
+                history = list(messages)
+            incoming_before = [
+                int(getattr(item, "id", 0) or 0)
+                for item in history
+                if not bool(getattr(item, "out", False))
+                and int(getattr(item, "id", 0) or 0) < warmup_id
+            ]
+            baseline = max(incoming_before) if incoming_before else 0
+
+            previous = core._dialog_state(config, owner_id, contact_id)
+            previous_context = (
+                dict(previous.get("context"))
+                if isinstance(previous, dict) and isinstance(previous.get("context"), dict)
+                else {}
+            )
+            # Сохраняем долгую человеческую память, но сбрасываем старую календарную
+            # механику и ручной fence: новый ответ на Story — новая инициатива владельца.
+            keep_memory_key = getattr(memory, "MEMORY_KEY", "relationship_memory")
+            preserved_memory = previous_context.get(keep_memory_key)
+            fresh_context = {
+                "activated_by": "telegram_story_reply",
+                "warmup_mode": True,
+                "warmup_incoming_count": 0,
+                "story_reply_message_id": warmup_id,
+                "story_id": story_id,
+                "first_message_sent_at": sent_at,
+            }
+            if isinstance(preserved_memory, dict):
+                fresh_context[keep_memory_key] = preserved_memory
+
+            core._save_dialog_state(
+                config,
+                owner_id,
+                contact_id,
+                last_incoming_id=baseline,
+                stage="idle",
+                greeted=True,
+                context=fresh_context,
+            )
+            print(
+                f"[NeonaStoryHandoff] owner={owner_id} contact={contact_id} "
+                f"story_id={story_id} outgoing_id={warmup_id}",
+                flush=True,
+            )
+
+        _STORY_ALLOWED_BY_OWNER[owner_id] = cached
+    finally:
+        await client.disconnect()
+
+
+async def _story_aware_sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dialogs: bool = True):
+    try:
+        await _refresh_manual_story_warmups(int(owner_id))
+    except Exception as exc:
+        # Ошибка радара не должна останавливать обычные диалоги Неоны.
+        print(
+            "NEONA_STORY_HANDOFF_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+    return await _CORE_SYNC_OWNER_ONCE(
+        owner_id,
+        owner_name,
+        initialize_new_dialogs=initialize_new_dialogs,
+    )
+
+
 def apply_policy():
     """Подменяет только политику, не переписывая основной рабочий модуль."""
 
     core._slot_free = _slot_free_with_buffer
     core._openai_general_reply = _general_reply
     core._process_message = _process_message
+    core._allowed_contacts = _story_allowed_contacts
+    core.sync_owner_once = _story_aware_sync_owner_once
 
 
 def initialize_dialog_after_first_message(*args, **kwargs):
