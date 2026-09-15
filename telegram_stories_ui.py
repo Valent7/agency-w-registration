@@ -25,7 +25,7 @@ from telethon.tl.functions.stories import GetAllStoriesRequest
 
 UTC = timezone.utc
 MAX_STORIES = 10
-MAX_RECOMMENDATIONS = 3
+MAX_RECOMMENDATIONS = 10
 
 
 class TelegramStoriesError(RuntimeError):
@@ -329,21 +329,22 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     system_prompt = """
 Ты — Неона, помощница по мягкому человеческому знакомству в Агентстве W.
 Перед тобой до 10 свежих Telegram Stories реальных людей из ленты владельца кабинета.
-Твоя задача — НЕ продавать и НЕ искать повод упомянуть бизнес, а заметить людей,
-которым естественно хочется тепло ответить на Story.
+Эти люди уже проявляют активность в Telegram, поэтому в радаре утепления мы НЕ отбрасываем их: 
+для КАЖДОЙ переданной Story нужно подготовить один естественный человеческий ответ.
 
 Правила:
-- выбери от 0 до 3 Stories, где ответ будет особенно естественным;
-- даже простая бытовая Story может быть хорошим поводом сказать человеку что-то приятное;
+- верни РОВНО по одному ответу для каждой переданной Story; не выбирай только 2–3 лучших и не пропускай остальные;
+- даже простая бытовая Story — достаточный повод для короткого доброжелательного касания;
 - опирайся только на реально видимый кадр/превью и подпись; ничего не выдумывай;
+- если контекста мало, пиши спокойный нейтральный ответ без выдуманных деталей, но Story не пропускай;
 - ответ 1–2 коротких предложения, живой и конкретный;
 - вопрос добавляй только если он звучит естественно; вопрос не обязателен;
 - никакого Агентства W, ИИ, партнёрства, заработка, предложения, ссылки или рекламы;
-- не пиши пустые клише вроде «Классная сторис!» без конкретной детали;
-- не оценивай внешность, возраст, здоровье, достаток или другие чувствительные признаки;
-- если кадра/текста недостаточно, лучше не выбирать Story, чем фантазировать.
+- не делай вывод, что человеку нужны деньги, партнёры или бизнес, только потому что он публикует Story;
+- не пиши пустые клише вроде «Классная сторис!» без конкретной детали, если конкретная деталь видна;
+- не оценивай внешность, возраст, здоровье, достаток или другие чувствительные признаки.
 
-Верни ТОЛЬКО JSON-массив, максимум 3 объекта:
+Верни ТОЛЬКО JSON-массив. Количество объектов должно ТОЧНО совпадать с количеством переданных Stories:
 [{"story_index":1,"reason":"почему здесь уместно ответить","reply":"готовый ответ"}]
 """.strip()
 
@@ -396,6 +397,37 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
         if len(recommendations) >= MAX_RECOMMENDATIONS:
             break
+
+    # Жёсткое правило радара: если модель всё же вернула меньше ответов,
+    # не заставляем владельца добирать их вручную. Для пропущенных Stories
+    # создаём безопасное нейтральное касание без выдумывания деталей.
+    if len(recommendations) < min(len(stories), MAX_RECOMMENDATIONS):
+        for index, source in enumerate(stories, start=1):
+            if index in seen:
+                continue
+            caption = re.sub(r"\s+", " ", str(source.get("caption") or "")).strip()
+            media_kind = str(source.get("media_kind") or "").strip().lower()
+            if caption:
+                fallback_reply = "Спасибо, что поделились — интересно было прочитать вашу мысль."
+            elif media_kind == "video":
+                fallback_reply = "Спасибо, что поделились этим моментом — было интересно увидеть."
+            elif media_kind == "photo":
+                fallback_reply = "Спасибо, что поделились этим моментом — приятно было увидеть."
+            else:
+                fallback_reply = "Спасибо, что поделились этой Story — приятно было увидеть."
+            recommendations.append(
+                {
+                    **source,
+                    "story_index": index,
+                    "reason": "Активная Story — повод для мягкого человеческого касания без продажи.",
+                    "reply": fallback_reply,
+                }
+            )
+            seen.add(index)
+            if len(recommendations) >= MAX_RECOMMENDATIONS:
+                break
+
+    recommendations.sort(key=lambda item: int(item.get("story_index") or 0))
     return recommendations
 
 
@@ -430,8 +462,8 @@ def render_telegram_stories_radar(owner_id: int) -> None:
 
     st.markdown("### 🌿 Радар Stories Telegram")
     st.caption(
-        "Неона смотрит до 10 верхних активных Stories людей из вашей Telegram-ленты. "
-        "10 просмотренных Stories не означают 10 ответов: она выбирает только естественные касания."
+        "Неона смотрит до 10 верхних активных Stories людей из вашей Telegram-ленты и готовит тёплый ответ для каждой из них. "
+        "Если контекста мало, ответ остаётся нейтральным и человеческим — без выдуманных деталей."
     )
     st.info(
         "В Telegram ответ на Story — это личное сообщение автору, а не публичный комментарий. "
@@ -447,7 +479,7 @@ def render_telegram_stories_radar(owner_id: int) -> None:
             use_container_width=True,
         ):
             try:
-                with st.spinner("Неона смотрит свежие Stories и выбирает естественные касания..."):
+                with st.spinner("Неона смотрит свежие Stories и готовит ответы для всех доступных Stories..."):
                     result = prepare_telegram_stories_radar(owner_id, limit=10)
                 st.session_state[state_key] = result
                 for item in result.get("recommendations") or []:
