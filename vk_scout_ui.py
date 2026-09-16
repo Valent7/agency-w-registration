@@ -26,6 +26,111 @@ from vk_scout import (
 
 UTC = timezone.utc
 
+VK_AGENCY_MATERIAL_URL = (
+    "https://vk.ru/club241237638?act=s&id=241237638#section=short_videos"
+)
+
+
+def _render_vk_material_message(
+    owner_id: int,
+    contact_key: str,
+    first_name: str,
+    *,
+    intro: str = "Материал после согласия человека",
+) -> None:
+    """Показывает готовый текст со ссылкой только после явного согласия человека."""
+    st.markdown(f"**📎 {intro}**")
+    st.caption(
+        "Ссылку даём только если человек сам попросил материал или явно согласился "
+        "его посмотреть. Не используем её как рекламу в первом касании или в комментарии."
+    )
+
+    consent_key = f"vk_material_consent_{contact_key}_{int(owner_id)}"
+    consent = st.checkbox(
+        "Человек попросил или согласился получить материал",
+        key=consent_key,
+    )
+    if not consent:
+        return
+
+    name_prefix = f"{str(first_name).strip()}, " if str(first_name or "").strip() else ""
+    default_message = (
+        f"{name_prefix}вот обещанный материал об Агентстве W. "
+        "Здесь собраны короткие видео и примеры: "
+        f"{VK_AGENCY_MATERIAL_URL}\n\n"
+        "Посмотрите, когда будет удобно. Что из этого Вам покажется самым полезным?"
+    )
+    message_key = f"vk_material_message_{contact_key}_{int(owner_id)}"
+    if message_key not in st.session_state:
+        st.session_state[message_key] = default_message
+
+    st.text_area(
+        "Сообщение Неоны со ссылкой",
+        key=message_key,
+        height=170,
+    )
+    st.link_button(
+        "Открыть материалы Агентства W во VK",
+        VK_AGENCY_MATERIAL_URL,
+        use_container_width=False,
+    )
+    st.caption(
+        "Отправьте подготовленный текст вручную из своего VK. После отправки Неона "
+        "сама не напоминает «Вы посмотрели?» — ждём нового сообщения человека."
+    )
+
+
+def _render_vk_material_followup(
+    owner_id: int,
+    assignment_id: int,
+    first_name: str,
+    status: str,
+    *,
+    scope: str,
+) -> None:
+    """Материал после уже отправленного первого личного сообщения."""
+    if str(status or "").strip() != "invited" or not assignment_id:
+        return
+
+    st.divider()
+    _render_vk_material_message(
+        owner_id,
+        f"{scope}_{int(assignment_id)}",
+        first_name,
+    )
+
+
+def _render_vk_comment_followup(
+    owner_id: int,
+    contact_key: str,
+    first_name: str = "",
+) -> None:
+    """Путь после тёплого комментария: реакция -> личный диалог -> материал по согласию."""
+    st.markdown("**💬 Что дальше после комментария**")
+    st.caption(
+        "Ссылку на Агентство W не публикуем в комментарии. Если человек ответил или "
+        "проявил интерес, продолжите разговор лично. Материал даём только после его согласия."
+    )
+
+    response_key = f"vk_comment_response_{contact_key}_{int(owner_id)}"
+    responded = st.checkbox(
+        "Человек ответил на комментарий или проявил интерес",
+        key=response_key,
+    )
+    if not responded:
+        return
+
+    st.info(
+        "Продолжите общение в личных сообщениях. Неона может дать ссылку на материалы, "
+        "если человек сам попросит их или согласится посмотреть."
+    )
+    _render_vk_material_message(
+        owner_id,
+        f"comment_{contact_key}",
+        first_name,
+        intro="Материал после интереса к комментарию",
+    )
+
 
 def _disable_vk_source(owner_id: int, source_id: int) -> None:
     """Мягко отключает источник, не удаляя историю поиска."""
@@ -47,6 +152,7 @@ def _disable_vk_source(owner_id: int, source_id: int) -> None:
 def _render_vk_warmup(
     owner_id: int,
     assignment_id: int,
+    first_name: str = "",
     ask_openai_fn=None,
 ) -> None:
     """Мягкое знакомство через свежую публичную публикацию кандидата."""
@@ -127,6 +233,12 @@ def _render_vk_warmup(
 
     st.caption(
         "Комментарий пока публикуется вручную из вашего VK. Неона ничего не отправляет автоматически."
+    )
+
+    _render_vk_comment_followup(
+        owner_id,
+        f"warmup_{int(assignment_id)}",
+        first_name,
     )
 
 
@@ -234,6 +346,12 @@ def _render_vk_feed_radar(
                 height=110,
             )
 
+            _render_vk_comment_followup(
+                int(owner_id),
+                f"radar_{int(item.get('owner_id') or 0)}_{int(item.get('post_id') or 0)}",
+                str(item.get("first_name") or ""),
+            )
+
     st.caption(
         "На этапе теста комментарии публикуются вручную. Если качество нас устраивает, следующий шаг — "
         "автоматический проход каждый час и единая история реакций."
@@ -307,7 +425,7 @@ def _render_today_vk_candidates(
                     use_container_width=False,
                 )
 
-            _render_vk_warmup(owner_id, assignment_id, ask_openai_fn=ask_openai_fn)
+            _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn)
             st.divider()
 
             editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
@@ -456,6 +574,14 @@ def _render_today_vk_candidates(
                         except Exception as exc:
                             st.error(f"Не удалось пропустить кандидата: {exc}")
 
+            _render_vk_material_followup(
+                owner_id,
+                assignment_id,
+                first_name,
+                status,
+                scope="daily",
+            )
+
     st.caption(
         "Первое сообщение пока отправляется из личного VK вручную: откройте профиль, "
         "скопируйте утверждённый текст Неоны и после отправки нажмите «Отправлено». "
@@ -549,7 +675,7 @@ def _render_known_vk_contacts(
             if profile_url:
                 st.link_button("Открыть профиль VK", profile_url, use_container_width=False)
 
-            _render_vk_warmup(owner_id, assignment_id, ask_openai_fn=ask_openai_fn)
+            _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn)
             st.divider()
 
             editing_key = f"vk_known_editing_{owner_id}_{assignment_id}"
@@ -687,6 +813,14 @@ def _render_known_vk_contacts(
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Не удалось убрать контакт: {exc}")
+
+            _render_vk_material_followup(
+                owner_id,
+                assignment_id,
+                first_name,
+                status,
+                scope="known",
+            )
 
 
 def render_vk_sources(
