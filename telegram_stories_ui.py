@@ -23,6 +23,9 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.stories import GetAllStoriesRequest
 
+from neona_telegram_dialogs import initialize_dialog_after_story_reply
+from workspace_persistence import persist_workspace_if_changed
+
 UTC = timezone.utc
 MAX_STORIES = 10
 MAX_RECOMMENDATIONS = 10
@@ -446,6 +449,84 @@ def _run(coro):
             loop.close()
 
 
+async def _latest_incoming_message_id(owner_id: int, contact_id: int) -> int:
+    """Возвращает последний входящий message_id до ручного ответа на Story.
+
+    Эта точка отсчёта нужна, чтобы Неона не отвечала на старую переписку и
+    подхватила только НОВЫЙ ответ человека после тёплого касания.
+    """
+    session_string = _load_session(int(owner_id))
+    api_id, api_hash = _api_credentials()
+    client = TelegramClient(StringSession(session_string), api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise TelegramStoriesError("Telegram-сессия больше не авторизована")
+        entity = await client.get_entity(int(contact_id))
+        async for message in client.iter_messages(entity, limit=50):
+            if bool(getattr(message, "out", False)):
+                continue
+            return int(getattr(message, "id", 0) or 0)
+        return 0
+    finally:
+        await client.disconnect()
+
+
+def _register_story_reply_for_neona(
+    owner_id: int,
+    item: dict[str, Any],
+) -> None:
+    """Регистрирует вручную отправленный ответ на Story как вход в диалог Неоны."""
+    contact_id = int(item.get("telegram_id") or 0)
+    if contact_id <= 0:
+        raise TelegramStoriesError("Не найден Telegram ID автора Story")
+
+    story_id = int(item.get("story_id") or 0)
+    baseline_incoming_id = int(_run(_latest_incoming_message_id(owner_id, contact_id)) or 0)
+    sent_at = datetime.now(UTC).isoformat()
+
+    initialize_dialog_after_story_reply(
+        int(owner_id),
+        contact_id,
+        baseline_incoming_id=baseline_incoming_id,
+        sent_at=sent_at,
+        story_id=story_id,
+        recipient_name=str(item.get("name") or "Telegram-контакт"),
+    )
+
+    # Неона-worker берёт разрешённые диалоги из рабочего sent_log.
+    # Для Story используем отдельный kind и story_sent_at. Поле sent_at оставляем
+    # пустым намеренно: тёплые ответы на Stories НЕ должны уменьшать дневной лимит
+    # первых холодных сообщений, который в текущем Streamlit считает sent_at.
+    sent_log_key = f"neona_first_message_sent_log_{int(owner_id)}"
+    sent_log = st.session_state.get(sent_log_key, [])
+    if not isinstance(sent_log, list):
+        sent_log = []
+
+    already_registered = any(
+        isinstance(event, dict)
+        and str(event.get("kind") or "") == "story_reply"
+        and int(event.get("telegram_id") or 0) == contact_id
+        and int(event.get("story_id") or 0) == story_id
+        for event in sent_log
+    )
+    if not already_registered:
+        sent_log.append(
+            {
+                "telegram_id": contact_id,
+                "recipient_name": str(item.get("name") or "Telegram-контакт"),
+                "sent_at": "",
+                "story_sent_at": sent_at,
+                "message_id": 0,
+                "kind": "story_reply",
+                "story_id": story_id,
+                "source": "telegram_story",
+            }
+        )
+        st.session_state[sent_log_key] = sent_log
+        persist_workspace_if_changed(int(owner_id), force=True)
+
+
 def prepare_telegram_stories_radar(owner_id: int, *, limit: int = MAX_STORIES) -> dict[str, Any]:
     feed = _run(fetch_telegram_story_feed(int(owner_id), limit=limit))
     stories = list(feed.get("stories") or [])
@@ -562,7 +643,63 @@ def render_telegram_stories_radar(owner_id: int) -> None:
                 label_visibility="collapsed",
             )
 
+            contact_id = int(item.get("telegram_id") or 0)
+            story_id = int(item.get("story_id") or 0)
+            registered_key = (
+                f"telegram_story_registered_{owner_id}_{contact_id}_{story_id}"
+            )
+
+            # Если событие уже сохранено в рабочем sent_log, состояние переживает rerun.
+            sent_log_key = f"neona_first_message_sent_log_{owner_id}"
+            current_sent_log = st.session_state.get(sent_log_key, [])
+            if isinstance(current_sent_log, list):
+                registered_from_log = any(
+                    isinstance(event, dict)
+                    and str(event.get("kind") or "") == "story_reply"
+                    and int(event.get("telegram_id") or 0) == contact_id
+                    and int(event.get("story_id") or 0) == story_id
+                    for event in current_sent_log
+                )
+                if registered_from_log:
+                    st.session_state[registered_key] = True
+
+            if st.session_state.get(registered_key):
+                st.success(
+                    "✅ Ответ на Story отмечен как отправленный. Неона ждёт новый "
+                    "входящий ответ этого человека и продолжит диалог сама."
+                )
+                st.caption(
+                    "Если человек попросит материал или согласится посмотреть пример, "
+                    "Неона сможет дать ссылку на Telegram-канал Агентства W. "
+                    "Сама напоминать «посмотрели?» она не будет."
+                )
+            else:
+                st.caption(
+                    "Сначала отправьте этот ответ человеку вручную в Telegram, затем "
+                    "нажмите кнопку ниже. Это подключит Неону только к НОВЫМ ответам "
+                    "человека и не затронет старую переписку."
+                )
+                if st.button(
+                    "✅ Ответ на Story отправлен",
+                    key=f"telegram_story_sent_{owner_id}_{contact_id}_{story_id}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    try:
+                        _register_story_reply_for_neona(owner_id, item)
+                        st.session_state[registered_key] = True
+                        st.success(
+                            "Готово. Неона подключена к продолжению этого диалога."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось зарегистрировать ответ на Story для Неоны: "
+                            + str(exc)
+                        )
+
     st.caption(
-        "Тестовый режим: ответы пока отправляются вручную. После серии удачных примеров "
-        "можно подключить автономный просмотр Stories и отправку только естественных ответов."
+        "Ответ на Story по-прежнему отправляется вручную. После кнопки «Ответ на Story отправлен» "
+        "Неона подключается только к продолжению диалога: ждёт новый входящий ответ, ведёт "
+        "разговор и даёт материалы Агентства W только после интереса или согласия человека."
     )

@@ -317,7 +317,10 @@ def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]
     workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
     for event in workspace.get("sent_log", []) if isinstance(workspace.get("sent_log"), list) else []:
-        if not isinstance(event, dict) or event.get("kind") not in {"first_message", "first_video"}:
+        if not isinstance(event, dict):
+            continue
+        event_kind = str(event.get("kind") or "").strip()
+        if event_kind not in {"first_message", "first_video", "story_reply"}:
             continue
         try:
             contact_id = int(event.get("telegram_id"))
@@ -327,10 +330,16 @@ def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]
             first_message_id = int(event.get("message_id") or 0)
         except (TypeError, ValueError):
             first_message_id = 0
+        sent_at = (
+            str(event.get("story_sent_at") or "")
+            if event_kind == "story_reply"
+            else str(event.get("sent_at") or "")
+        )
         allowed[contact_id] = {
-            "sent_at": str(event.get("sent_at") or ""),
+            "sent_at": sent_at,
             "recipient_name": str(event.get("recipient_name") or ""),
             "message_id": first_message_id,
+            "kind": event_kind,
         }
     return allowed
 
@@ -439,6 +448,38 @@ def initialize_dialog_after_first_message(
         context={
             "first_message_sent_at": str(sent_at or ""),
             "activated_by": "agency_w_first_message",
+        },
+    )
+
+
+def initialize_dialog_after_story_reply(
+    owner_id: int,
+    contact_id: int,
+    *,
+    baseline_incoming_id: int = 0,
+    sent_at: str = "",
+    story_id: int = 0,
+    recipient_name: str = "",
+) -> None:
+    """Подключает Неону после вручную отправленного тёплого ответа на Story.
+
+    Старую переписку Неона не трогает: baseline_incoming_id фиксирует последний
+    входящий до касания, поэтому обрабатывается только следующий новый ответ.
+    """
+    config = load_config()
+    _save_dialog_state(
+        config,
+        int(owner_id),
+        int(contact_id),
+        last_incoming_id=int(baseline_incoming_id or 0),
+        stage="idle",
+        greeted=False,
+        context={
+            "story_reply_sent_at": str(sent_at or ""),
+            "story_id": int(story_id or 0),
+            "recipient_name": str(recipient_name or ""),
+            "channel": "telegram",
+            "activated_by": "telegram_story_reply",
         },
     )
 
