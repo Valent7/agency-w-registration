@@ -134,6 +134,11 @@ DURATION_MINUTES = 30
 
 MEETING_FORMATS = ("Zoom", "Telegram", "WhatsApp")
 
+# Официальный Telegram-канал с материалами Агентства W.
+# Ссылка НЕ используется в первом холодном сообщении: Неона даёт её
+# только после явного запроса человека или после его согласия посмотреть материал.
+TELEGRAM_AGENCY_MATERIAL_URL = "https://t.me/schtab_aiTM"
+
 TZ_ALIASES = {
     "мск": "Europe/Moscow",
     "москва": "Europe/Moscow",
@@ -760,6 +765,65 @@ def _find_three_slots(config: Config, owner_id: int, around_utc: datetime, conta
     return result
 
 
+
+def _normalize_intent_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+
+def _direct_material_request(text: str) -> bool:
+    """Явная просьба человека прислать ссылку/материал без догадок по одному «да»."""
+    value = _normalize_intent_text(text)
+    if not value:
+        return False
+    direct_phrases = (
+        "пришлите ссылку", "пришли ссылку", "дайте ссылку", "дай ссылку",
+        "пришлите материал", "пришли материал", "отправьте материал", "отправь материал",
+        "хочу посмотреть", "хочу увидеть", "покажите материал", "покажи материал",
+        "где посмотреть", "можно ссылку", "скиньте ссылку", "скинь ссылку",
+    )
+    return any(phrase in value for phrase in direct_phrases)
+
+
+def _explicit_material_consent(text: str) -> bool:
+    """Согласие после того, как Неона уже предложила прислать материал."""
+    value = _normalize_intent_text(text)
+    if not value:
+        return False
+    compact = re.sub(r"[^a-zа-яё0-9]+", " ", value, flags=re.IGNORECASE).strip()
+    exact = {
+        "да", "давайте", "конечно", "можно", "хорошо", "ок", "okay", "yes",
+        "интересно", "пришлите", "пришли", "отправьте", "отправь", "покажите", "покажи",
+        "да пожалуйста", "да интересно", "конечно присылайте", "давайте посмотрю",
+    }
+    if compact in exact:
+        return True
+    phrases = (
+        "да пришлите", "да пришли", "да отправьте", "да отправь", "да покажите",
+        "да покажи", "можно посмотреть", "хочу посмотреть", "интересно посмотреть",
+        "пришлите пожалуйста", "отправьте пожалуйста", "конечно пришлите",
+    )
+    return any(phrase in compact for phrase in phrases)
+
+
+def _material_offer_intent(reply: str) -> bool:
+    """Распознаёт только явное предложение Неоны прислать/показать материал."""
+    value = _normalize_intent_text(reply)
+    if not value:
+        return False
+    offer_words = ("пришлю", "могу прислать", "отправлю", "могу отправить", "могу показать")
+    material_words = ("пример", "материал", "ссылк", "ролик", "видео", "канал")
+    return any(word in value for word in offer_words) and any(word in value for word in material_words)
+
+
+def _telegram_material_reply(first_name: str, greet: bool) -> str:
+    prefix = _greeting(first_name) + " " if greet else ""
+    return (
+        prefix
+        + "Вот материалы об Агентстве W, которые можно посмотреть в удобное время: "
+        + TELEGRAM_AGENCY_MATERIAL_URL
+        + ". Если что-то откликнется, напишете, что именно?"
+    )
+
 def _openai_general_reply(config: Config, owner_name: str, first_name: str, text: str, greet: bool) -> str:
     greeting_rule = (
         f"Начни с «{_greeting(first_name)}»" if greet else "Не повторяй приветствие, если диалог уже начат."
@@ -774,6 +838,8 @@ def _openai_general_reply(config: Config, owner_name: str, first_name: str, text
 Никогда не называй ИИ-помощников ботами. Не выдумывай функций. Не говори «проверила», «записала», «отправила», «создала», если техническое действие не было реально выполнено.
 Не используй фамилию собеседника в обращении. {greeting_rule}
 Ответ — 1–4 коротких предложения.
+Материалы Агентства W в Telegram: {TELEGRAM_AGENCY_MATERIAL_URL}. Никогда не давай эту ссылку без запроса в первом холодном касании. Если человек прямо просит ссылку/материал, ссылку можно дать. Если ты сама предлагаешь «пришлю/покажу короткий пример», сначала задай вопрос и дождись отдельного согласия человека; не вставляй ссылку в то же сообщение. После отправки ссылки не обещай напомнить и не инициируй сообщение «посмотрели?».
+Если человек говорит, что занят, нет времени или не хочет дополнительной нагрузки, не толкай его сразу к встрече. Коротко признай это и предложи один небольшой пример/материал о том, как Агентство W снимает повторяющуюся рутину; закончи вопросом, хочет ли он получить этот пример. Ссылку дай только в следующем сообщении после явного согласия.
 Если человек прямо говорит, что ему интересно, не пересказывай заново первое сообщение. Дай один конкретный и правдивый повод увидеть систему вживую: {owner_name} может показать на реальном примере, как команда уже ищет подходящих людей и готовит персональные первые сообщения.
 После этого мягко подведи к короткой встрече с {owner_name} и задай один простой вопрос о готовности встретиться.
 Не назначай дату, время и формат самостоятельно — их нужно отдельно согласовать с человеком.
@@ -1038,6 +1104,31 @@ def _process_message(
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
     greet = not greeted
 
+    # Если Неона в прошлом сообщении предложила прислать материал, одно короткое
+    # «да/пришлите» достаточно. В остальных стадиях одиночное «да» не трактуем
+    # как согласие на ссылку, чтобы не спутать его с подтверждением встречи.
+    if stage == "awaiting_material_consent":
+        if _explicit_material_consent(text):
+            context = dict(context or {})
+            context["material_sent"] = True
+            context["material_url"] = TELEGRAM_AGENCY_MATERIAL_URL
+            return _telegram_material_reply(first_name, greet), "material_sent", True, context
+        if _is_no(text):
+            return (
+                (_greeting(first_name) + " " if greet else "")
+                + "Хорошо, без материалов. Что сейчас было бы для вас полезнее всего узнать?",
+                "idle",
+                True,
+                {},
+            )
+
+    # Явная просьба «пришлите ссылку/материал» работает и без промежуточной стадии.
+    if _direct_material_request(text):
+        context = dict(context or {})
+        context["material_sent"] = True
+        context["material_url"] = TELEGRAM_AGENCY_MATERIAL_URL
+        return _telegram_material_reply(first_name, greet), "material_sent", True, context
+
     scheduling_stage = stage in {"invited_to_meeting", "collecting_meeting_details", "awaiting_confirmation", "awaiting_slot_choice"}
     if _meeting_intent(text) or scheduling_stage:
         reply, new_stage, context = _schedule_reply(
@@ -1055,7 +1146,14 @@ def _process_message(
         )
     else:
         reply = _openai_general_reply(config, owner_name, first_name, text, greet)
-        new_stage = "invited_to_meeting" if _meeting_intent(reply) else stage
+        if _meeting_intent(reply):
+            new_stage = "invited_to_meeting"
+        elif _material_offer_intent(reply):
+            new_stage = "awaiting_material_consent"
+            context = dict(context or {})
+            context["material_offer_channel"] = "telegram"
+        else:
+            new_stage = stage
 
     return reply, new_stage, True, context
 
