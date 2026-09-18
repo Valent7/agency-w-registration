@@ -2465,6 +2465,127 @@ def check_vk_comment_thread(
     return {**thread, "last_checked_at": now, "last_error": None}
 
 
+
+def process_manual_vk_comment_reply(
+    thread_id: int,
+    inbound_text: str,
+    *,
+    ask_openai_fn: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Accepts a reply copied manually from VK and lets Neona continue the dialogue.
+
+    This path is intentionally independent from wall.getComments/notifications.get.
+    It is used when VK ID/profile restrictions prevent Agency W from reading the
+    public comment thread automatically. The full post + dialogue history already
+    stored in agency_vk_comment_threads remains available to Neona.
+    """
+    thread = load_vk_comment_thread_by_id(int(thread_id))
+    if not thread:
+        raise VKScoutError("VK-ветка комментария не найдена")
+
+    text = _compact_ws(inbound_text)
+    if not text:
+        raise VKScoutError("Вставьте ответ человека из VK — текст или emoji.")
+
+    now = datetime.now(UTC).isoformat()
+    fingerprint = hashlib.sha256(
+        f"{int(thread_id)}|{text}|{now}".encode("utf-8")
+    ).hexdigest()[:20]
+    event_key = f"manual:{fingerprint}"
+
+    history = _append_history(
+        thread.get("dialogue_history"),
+        {
+            "direction": "in",
+            "kind": "manual_comment",
+            "comment_id": None,
+            "reply_to_comment": None,
+            "text": text,
+            "at": now,
+        },
+    )
+    reply = _neona_vk_thread_reply(
+        {**thread, "dialogue_history": history},
+        event_kind="comment",
+        inbound_text=text,
+        ask_openai_fn=ask_openai_fn,
+    )
+
+    processed = _json_str_list(thread.get("processed_event_keys"))
+    if event_key not in processed:
+        processed.append(event_key)
+
+    patch = {
+        # paused keeps the background worker from repeating VK 1051/27 errors.
+        # Manual replies can still be processed by this function at any time.
+        "status": "paused",
+        "pending_event_kind": "manual_comment",
+        "pending_event_key": event_key,
+        "pending_reply_to_comment_id": None,
+        "pending_inbound_text": text,
+        "neona_reply_text": reply,
+        "last_inbound_comment_id": None,
+        "last_inbound_text": text,
+        "last_inbound_at": now,
+        "dialogue_history": history,
+        "processed_event_keys": processed,
+        "last_checked_at": now,
+        "last_error": None,
+        "updated_at": now,
+    }
+    _sb_patch("agency_vk_comment_threads", {"id": f"eq.{int(thread_id)}"}, patch)
+    _mark_assignment_dialogue(thread)
+    return {**thread, **patch}
+
+
+def mark_manual_vk_reply_published(
+    thread_id: int,
+    reply_text: str | None = None,
+) -> dict[str, Any]:
+    """Records that the owner manually posted Neona's prepared reply in VK.
+
+    VK does not expose a usable comment id to this auth profile, so we preserve
+    the conversational history without inventing a VK id. The thread remains in
+    manual/paused mode and is ready for the next copied inbound reply.
+    """
+    thread = load_vk_comment_thread_by_id(int(thread_id))
+    if not thread:
+        raise VKScoutError("VK-ветка комментария не найдена")
+
+    text = _compact_ws(reply_text or thread.get("neona_reply_text"))
+    if not text:
+        raise VKScoutError("Нет подготовленного ответа Неоны для отметки публикации.")
+
+    now = datetime.now(UTC).isoformat()
+    history = _append_history(
+        thread.get("dialogue_history"),
+        {
+            "direction": "out",
+            "kind": "manual_comment",
+            "comment_id": None,
+            "reply_to_comment": None,
+            "text": text,
+            "at": now,
+        },
+    )
+    patch = {
+        "status": "paused",
+        "last_outbound_text": text,
+        "dialogue_history": history,
+        "pending_event_kind": None,
+        "pending_event_key": None,
+        "pending_reply_to_comment_id": None,
+        "pending_inbound_text": None,
+        "neona_reply_text": None,
+        "neona_reply_comment_id": None,
+        "replied_at": now,
+        "last_error": None,
+        "last_checked_at": now,
+        "updated_at": now,
+    }
+    _sb_patch("agency_vk_comment_threads", {"id": f"eq.{int(thread_id)}"}, patch)
+    return {**thread, **patch}
+
 def send_pending_vk_comment_reply(thread_id: int) -> dict[str, Any]:
     """Sends a prepared Neona reply that could not/should not be auto-posted."""
     thread = load_vk_comment_thread_by_id(int(thread_id))
