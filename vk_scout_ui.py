@@ -20,6 +20,10 @@ from vk_scout import (
     prepare_vk_feed_radar,
     prepare_vk_invitation,
     prepare_vk_warmup_comment,
+    register_published_vk_comment,
+    load_vk_comment_thread,
+    check_vk_comment_thread,
+    send_pending_vk_comment_reply,
     skip_vk_assignment,
     upsert_vk_source,
 )
@@ -102,35 +106,128 @@ def _render_vk_material_followup(
 
 def _render_vk_comment_followup(
     owner_id: int,
-    contact_key: str,
+    post_owner_id: int,
+    post_id: int,
+    comment_text: str,
     first_name: str = "",
+    *,
+    post_url: str = "",
+    post_text: str = "",
+    source: str = "radar",
+    assignment_id: int | None = None,
+    ask_openai_fn=None,
 ) -> None:
-    """Путь после тёплого комментария: реакция -> личный диалог -> материал по согласию."""
+    """Registers a real published VK comment and shows its live dialogue state."""
     st.markdown("**💬 Что дальше после комментария**")
-    st.caption(
-        "Ссылку на Агентство W не публикуем в комментарии. Если человек ответил или "
-        "проявил интерес, продолжите разговор лично. Материал даём только после его согласия."
-    )
 
-    response_key = f"vk_comment_response_{contact_key}_{int(owner_id)}"
-    responded = st.checkbox(
-        "Человек ответил на комментарий или проявил интерес",
-        key=response_key,
-    )
-    if not responded:
+    try:
+        thread = load_vk_comment_thread(
+            int(owner_id),
+            int(post_owner_id),
+            int(post_id),
+        )
+    except Exception as exc:
+        thread = None
+        st.warning(f"Не удалось проверить наблюдение за комментарием: {exc}")
+
+    if not thread:
+        st.caption(
+            "Сначала опубликуйте подготовленный комментарий под этим постом в VK. "
+            "После этого нажмите кнопку ниже — Агентство найдёт реальный ID комментария "
+            "и Неона начнёт следить именно за этой веткой."
+        )
+        if st.button(
+            "✅ Комментарий опубликован",
+            key=f"vk_comment_published_{int(owner_id)}_{int(post_owner_id)}_{int(post_id)}",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                register_published_vk_comment(
+                    int(owner_id),
+                    post_owner_id=int(post_owner_id),
+                    post_id=int(post_id),
+                    comment_text=str(comment_text or "").strip(),
+                    post_url=str(post_url or "").strip(),
+                    post_text=str(post_text or "").strip(),
+                    first_name=str(first_name or "").strip(),
+                    source=str(source or "radar"),
+                    assignment_id=int(assignment_id) if assignment_id else None,
+                )
+                st.success("Комментарий найден в VK. Неона взяла ветку под наблюдение.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось зарегистрировать опубликованный комментарий: {exc}")
         return
 
-    st.info(
-        "Продолжите общение в личных сообщениях. Неона может дать ссылку на материалы, "
-        "если человек сам попросит их или согласится посмотреть."
-    )
-    _render_vk_material_message(
-        owner_id,
-        f"comment_{contact_key}",
-        first_name,
-        intro="Материал после интереса к комментарию",
+    thread_id = int(thread.get("id") or 0)
+    status = str(thread.get("status") or "watching").strip()
+    st.success("👀 Неона следит за этой веткой VK")
+    st.caption(
+        "Текстовый ответ человека Неона подхватит и продолжит в той же ветке. "
+        "Проверка идёт фоновым worker; при тесте можно проверить сразу вручную."
     )
 
+    action_cols = st.columns([1.6, 1])
+    with action_cols[0]:
+        if st.button(
+            "🔎 Проверить ответы сейчас",
+            key=f"vk_comment_check_{thread_id}",
+            use_container_width=True,
+        ):
+            try:
+                check_vk_comment_thread(
+                    thread_id,
+                    ask_openai_fn=ask_openai_fn,
+                    auto_send=True,
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось проверить ответы VK: {exc}")
+
+    last_inbound = str(thread.get("last_inbound_text") or "").strip()
+    if last_inbound:
+        if str(thread.get("pending_event_kind") or "") == "reaction":
+            st.info("Человек поставил реакцию/лайк на комментарий Неоны. VK API не сообщил точный тип реакции.")
+        else:
+            st.markdown("**Ответ человека:**")
+            st.write(last_inbound)
+
+    reply_text = str(thread.get("neona_reply_text") or "").strip()
+    if status == "reply_ready" and reply_text:
+        st.markdown("**Ответ Неоны готов:**")
+        st.code(reply_text, language=None)
+        event_kind = str(thread.get("pending_event_kind") or "")
+        if event_kind == "reaction":
+            st.caption(
+                "Реакцию Неона увидела, но точный emoji VK не передал. Поэтому такой ответ "
+                "не отправляется без вашего подтверждения."
+            )
+        elif thread.get("last_error"):
+            st.warning(
+                "Неона ответ подготовила, но VK не разрешил автоматическую отправку. "
+                "Можно попробовать отправить ещё раз кнопкой ниже."
+            )
+
+        if st.button(
+            "📤 Отправить ответ Неоны",
+            key=f"vk_comment_send_pending_{thread_id}",
+            use_container_width=True,
+        ):
+            try:
+                send_pending_vk_comment_reply(thread_id)
+                st.success("Ответ Неоны опубликован в этой же ветке VK.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"VK не отправил ответ Неоны: {exc}")
+    elif reply_text and thread.get("neona_reply_comment_id"):
+        st.markdown("**Последний ответ Неоны:**")
+        st.write(reply_text)
+        st.caption("✅ Опубликован в этой же ветке VK")
+
+    last_error = str(thread.get("last_error") or "").strip()
+    if last_error and status != "reply_ready":
+        st.warning(f"Последняя ошибка наблюдения VK: {last_error}")
 
 def _disable_vk_source(owner_id: int, source_id: int) -> None:
     """Мягко отключает источник, не удаляя историю поиска."""
@@ -237,8 +334,15 @@ def _render_vk_warmup(
 
     _render_vk_comment_followup(
         owner_id,
-        f"warmup_{int(assignment_id)}",
+        int(result.get("vk_user_id") or 0),
+        int(result.get("post_id") or 0),
+        str(comment or "").strip(),
         first_name,
+        post_url=post_url,
+        post_text=preview,
+        source="warmup",
+        assignment_id=int(assignment_id),
+        ask_openai_fn=ask_openai_fn,
     )
 
 
@@ -339,7 +443,7 @@ def _render_vk_feed_radar(
                 short = preview if len(preview) <= 420 else preview[:417].rstrip() + "..."
                 st.caption(f"Публикация: {short}")
 
-            st.text_area(
+            comment = st.text_area(
                 "Комментарий Неоны",
                 value=str(st.session_state.get(edit_key) or item.get("comment") or ""),
                 key=edit_key,
@@ -348,13 +452,20 @@ def _render_vk_feed_radar(
 
             _render_vk_comment_followup(
                 int(owner_id),
-                f"radar_{int(item.get('owner_id') or 0)}_{int(item.get('post_id') or 0)}",
+                int(item.get("owner_id") or 0),
+                int(item.get("post_id") or 0),
+                str(comment or "").strip(),
                 str(item.get("first_name") or ""),
+                post_url=post_url,
+                post_text=preview,
+                source="radar",
+                assignment_id=None,
+                ask_openai_fn=ask_openai_fn,
             )
 
     st.caption(
-        "На этапе теста комментарии публикуются вручную. Если качество нас устраивает, следующий шаг — "
-        "автоматический проход каждый час и единая история реакций."
+        "Первый комментарий по-прежнему публикуете вы. После кнопки «Комментарий опубликован» "
+        "Неона следит за этой веткой и подхватывает реальные ответы человека."
     )
 
 def _render_today_vk_candidates(
