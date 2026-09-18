@@ -357,6 +357,25 @@ def handle_vk_scout_oauth_callback() -> bool:
     return True
 
 
+def _vk_scout_error_requires_reconnect(message: Any) -> bool:
+    """True when the stored VK ID error cannot be fixed by another refresh attempt."""
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    fatal_markers = (
+        "refresh_token is missing or invalid",
+        "refresh token is missing or invalid",
+        "invalid_grant",
+        "refresh token invalid",
+        "refresh_token invalid",
+        "refresh token expired",
+        "refresh_token expired",
+        "refresh token revoked",
+        "refresh_token revoked",
+    )
+    return any(marker in text for marker in fatal_markers)
+
+
 def get_vk_scout_connection(owner_id: int) -> dict[str, Any]:
     rows = _sb_get(
         "agency_vk_oauth_tokens",
@@ -367,9 +386,15 @@ def get_vk_scout_connection(owner_id: int) -> dict[str, Any]:
         },
     )
     if not rows:
-        return {"connected": False}
+        return {"connected": False, "needs_reconnect": False}
+
     row = rows[0]
-    return {"connected": True, **row}
+    last_error = str(row.get("last_error") or "").strip()
+    return {
+        "connected": True,
+        "needs_reconnect": _vk_scout_error_requires_reconnect(last_error),
+        **row,
+    }
 
 
 def _read_token_row(owner_id: int) -> dict[str, Any] | None:
@@ -496,6 +521,14 @@ def _refresh_tokens(owner_id: int, row: dict[str, Any]) -> str:
 
 
 
+def _raise_if_reconnect_required(row: dict[str, Any]) -> None:
+    last_error = str(row.get("last_error") or "").strip()
+    if _vk_scout_error_requires_reconnect(last_error):
+        raise VKScoutOAuthError(
+            "VK Scout нужно переподключить через VK ID: сохранённый refresh token больше не действует"
+        )
+
+
 def force_refresh_vk_scout_access_token(owner_id: int) -> str:
     """Force refreshes the rotating VK ID token pair for this owner.
 
@@ -507,12 +540,15 @@ def force_refresh_vk_scout_access_token(owner_id: int) -> str:
     row = _read_token_row(int(owner_id))
     if not row:
         raise VKScoutOAuthError("VK Scout ещё не авторизован через VK ID")
+    _raise_if_reconnect_required(row)
     return _refresh_tokens(int(owner_id), row)
+
 
 def get_valid_vk_scout_access_token(owner_id: int, *, refresh_before_minutes: int = 5) -> str:
     row = _read_token_row(int(owner_id))
     if not row:
         raise VKScoutOAuthError("VK Scout ещё не авторизован через VK ID")
+    _raise_if_reconnect_required(row)
     access = _decrypt(str(row.get("access_token_encrypted") or ""))
     exp = _parse_dt(row.get("access_expires_at"))
     if access and exp and exp > _now() + timedelta(minutes=max(1, refresh_before_minutes)):
