@@ -24,6 +24,8 @@ from vk_scout import (
     load_vk_comment_thread,
     check_vk_comment_thread,
     send_pending_vk_comment_reply,
+    process_manual_vk_comment_reply,
+    mark_manual_vk_reply_published,
     skip_vk_assignment,
     upsert_vk_source,
 )
@@ -161,73 +163,96 @@ def _render_vk_comment_followup(
         return
 
     thread_id = int(thread.get("id") or 0)
-    status = str(thread.get("status") or "watching").strip()
-    st.success("👀 Неона следит за этой веткой VK")
+    st.success("💬 Ветка VK сохранена. Неона помнит контекст разговора")
     st.caption(
-        "Текстовый ответ человека Неона подхватит и продолжит в той же ветке. "
-        "Проверка идёт фоновым worker; при тесте можно проверить сразу вручную."
+        "VK сейчас не даёт Агентству автоматически читать ответы под чужими личными постами. "
+        "Поэтому ответ человека вставляем сюда вручную. Неона уже знает исходный пост, "
+        "свой предыдущий комментарий и историю этой ветки."
     )
 
-    action_cols = st.columns([1.6, 1])
-    with action_cols[0]:
-        if st.button(
-            "🔎 Проверить ответы сейчас",
-            key=f"vk_comment_check_{thread_id}",
-            use_container_width=True,
-        ):
-            try:
-                check_vk_comment_thread(
-                    thread_id,
-                    ask_openai_fn=ask_openai_fn,
-                    auto_send=True,
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Не удалось проверить ответы VK: {exc}")
+    # Keep this thread out of the background watcher while VK rejects the
+    # required read methods for the current auth profile. This also clears the
+    # noisy historic 1051/27 error once the user starts the manual path.
+    if str(thread.get("status") or "") not in {"paused", "closed"} or thread.get("last_error"):
+        try:
+            _sb_patch(
+                "agency_vk_comment_threads",
+                {"id": f"eq.{thread_id}"},
+                {
+                    "status": "paused",
+                    "last_error": None,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            thread = {**thread, "status": "paused", "last_error": None}
+        except Exception:
+            pass
+
+    inbound_key = f"vk_manual_inbound_{thread_id}"
+    st.text_area(
+        "Ответ человека",
+        key=inbound_key,
+        height=100,
+        placeholder="Вставьте точную реплику из VK — например: нейробабушка прикольно  или  🙂",
+    )
+    if st.button(
+        "🧠 Передать Неоне",
+        key=f"vk_manual_to_neona_{thread_id}",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            process_manual_vk_comment_reply(
+                thread_id,
+                st.session_state.get(inbound_key, ""),
+                ask_openai_fn=ask_openai_fn,
+            )
+            st.session_state[inbound_key] = ""
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Неона не смогла обработать ответ: {exc}")
 
     last_inbound = str(thread.get("last_inbound_text") or "").strip()
-    if last_inbound:
-        if str(thread.get("pending_event_kind") or "") == "reaction":
-            st.info("Человек поставил реакцию/лайк на комментарий Неоны. VK API не сообщил точный тип реакции.")
-        else:
-            st.markdown("**Ответ человека:**")
-            st.write(last_inbound)
+    pending_kind = str(thread.get("pending_event_kind") or "").strip()
+    if last_inbound and pending_kind == "manual_comment":
+        st.markdown("**Последняя реплика человека:**")
+        st.write(last_inbound)
 
     reply_text = str(thread.get("neona_reply_text") or "").strip()
-    if status == "reply_ready" and reply_text:
+    if pending_kind == "manual_comment" and reply_text:
         st.markdown("**Ответ Неоны готов:**")
-        st.code(reply_text, language=None)
-        event_kind = str(thread.get("pending_event_kind") or "")
-        if event_kind == "reaction":
-            st.caption(
-                "Реакцию Неона увидела, но точный emoji VK не передал. Поэтому такой ответ "
-                "не отправляется без вашего подтверждения."
-            )
-        elif thread.get("last_error"):
-            st.warning(
-                "Неона ответ подготовила, но VK не разрешил автоматическую отправку. "
-                "Можно попробовать отправить ещё раз кнопкой ниже."
-            )
-
+        edit_key = f"vk_manual_neona_reply_{thread_id}_{thread.get('pending_event_key') or 'pending'}"
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = reply_text
+        edited_reply = st.text_area(
+            "Можно отредактировать перед публикацией",
+            key=edit_key,
+            height=120,
+        )
+        st.caption(
+            "Скопируйте этот ответ и опубликуйте вручную в VK именно ответом человеку. "
+            "После публикации нажмите кнопку ниже — тогда Неона сохранит продолжение в памяти ветки."
+        )
         if st.button(
-            "📤 Отправить ответ Неоны",
-            key=f"vk_comment_send_pending_{thread_id}",
+            "✅ Ответ Неоны опубликован в VK",
+            key=f"vk_manual_reply_published_{thread_id}",
             use_container_width=True,
         ):
             try:
-                send_pending_vk_comment_reply(thread_id)
-                st.success("Ответ Неоны опубликован в этой же ветке VK.")
+                mark_manual_vk_reply_published(thread_id, edited_reply)
+                st.success("Продолжение сохранено. Следующий ответ человека можно снова вставить сюда.")
                 st.rerun()
             except Exception as exc:
-                st.error(f"VK не отправил ответ Неоны: {exc}")
-    elif reply_text and thread.get("neona_reply_comment_id"):
-        st.markdown("**Последний ответ Неоны:**")
-        st.write(reply_text)
-        st.caption("✅ Опубликован в этой же ветке VK")
+                st.error(f"Не удалось сохранить продолжение диалога: {exc}")
+    elif thread.get("replied_at") and thread.get("last_outbound_text"):
+        st.markdown("**Последний опубликованный ответ:**")
+        st.write(str(thread.get("last_outbound_text") or ""))
+        st.caption("✅ Отмечен как опубликованный вручную; контекст сохранён у Неоны.")
 
-    last_error = str(thread.get("last_error") or "").strip()
-    if last_error and status != "reply_ready":
-        st.warning(f"Последняя ошибка наблюдения VK: {last_error}")
+    st.caption(
+        "Автоматическую проверку VK не удаляем из системы: вернём её, когда VK даст подходящий "
+        "доступ к чтению комментариев. Сейчас фоновые ошибки 1051/27 для этой ветки отключены."
+    )
 
 def _disable_vk_source(owner_id: int, source_id: int) -> None:
     """Мягко отключает источник, не удаляя историю поиска."""
