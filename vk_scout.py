@@ -2470,6 +2470,7 @@ def process_manual_vk_comment_reply(
     thread_id: int,
     inbound_text: str,
     *,
+    event_kind: str = "comment",
     ask_openai_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Accepts a reply copied manually from VK and lets Neona continue the dialogue.
@@ -2487,6 +2488,9 @@ def process_manual_vk_comment_reply(
     if not text:
         raise VKScoutError("Вставьте ответ человека из VK — текст или emoji.")
 
+    kind = "reaction" if str(event_kind or "").strip().casefold() == "reaction" else "comment"
+    manual_kind = "manual_reaction" if kind == "reaction" else "manual_comment"
+
     now = datetime.now(UTC).isoformat()
     fingerprint = hashlib.sha256(
         f"{int(thread_id)}|{text}|{now}".encode("utf-8")
@@ -2497,7 +2501,7 @@ def process_manual_vk_comment_reply(
         thread.get("dialogue_history"),
         {
             "direction": "in",
-            "kind": "manual_comment",
+            "kind": manual_kind,
             "comment_id": None,
             "reply_to_comment": None,
             "text": text,
@@ -2506,7 +2510,7 @@ def process_manual_vk_comment_reply(
     )
     reply = _neona_vk_thread_reply(
         {**thread, "dialogue_history": history},
-        event_kind="comment",
+        event_kind=kind,
         inbound_text=text,
         ask_openai_fn=ask_openai_fn,
     )
@@ -2519,7 +2523,7 @@ def process_manual_vk_comment_reply(
         # paused keeps the background worker from repeating VK 1051/27 errors.
         # Manual replies can still be processed by this function at any time.
         "status": "paused",
-        "pending_event_kind": "manual_comment",
+        "pending_event_kind": manual_kind,
         "pending_event_key": event_key,
         "pending_reply_to_comment_id": None,
         "pending_inbound_text": text,
