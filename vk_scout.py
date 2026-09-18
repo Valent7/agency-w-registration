@@ -1716,6 +1716,29 @@ def _fetch_vk_post_comments(
     return _flatten_vk_comments(response)
 
 
+def _fetch_vk_post_comments_static(
+    post_owner_id: int,
+    post_id: int,
+    *,
+    count: int = 100,
+) -> list[dict[str, Any]]:
+    """Second attempt with the already configured static VK_ACCESS_TOKEN.
+
+    In Agency W this token is the existing VK integration token stored in
+    Streamlit/Render. We test it before asking the owner for any new VK key.
+    """
+    response = _vk_api(
+        "wall.getComments",
+        owner_id=int(post_owner_id),
+        post_id=int(post_id),
+        need_likes=1,
+        count=max(1, min(100, int(count))),
+        sort="desc",
+        preview_length=0,
+        extended=0,
+        thread_items_count=10,
+    )
+    return _flatten_vk_comments(response)
 
 
 def _is_profile_type_method_error(exc: Exception, method: str = "wall.getComments") -> bool:
@@ -1887,8 +1910,16 @@ def register_published_vk_comment(
         comments = _fetch_vk_post_comments(owner_telegram_id, post_owner_id, post_id, count=100)
     except Exception as exc:
         if _is_profile_type_method_error(exc):
-            comments = []
-            profile_type_fallback = True
+            try:
+                comments = _fetch_vk_post_comments_static(post_owner_id, post_id, count=100)
+            except Exception as static_exc:
+                comments = []
+                profile_type_fallback = True
+                # Keep the static-token diagnosis visible if registration must
+                # fall back to a synthetic comment id.
+                static_error = str(static_exc)[:900]
+            else:
+                static_error = ""
         else:
             raise
 
@@ -2269,6 +2300,7 @@ def check_vk_comment_thread(
         outbound_ids.add(int(thread["initial_comment_id"]))
     processed = set(_json_str_list(thread.get("processed_event_keys")))
     notification_fallback = False
+    static_token_error = ""
     try:
         comments = _fetch_vk_post_comments(
             int(thread["owner_telegram_id"]),
@@ -2278,8 +2310,19 @@ def check_vk_comment_thread(
         )
     except Exception as exc:
         if _is_profile_type_method_error(exc):
-            comments = []
-            notification_fallback = True
+            # The connected VK ID token is profile-limited. Before trying any
+            # other workaround, test the VK_ACCESS_TOKEN that Agency W already
+            # has configured for the VK integration.
+            try:
+                comments = _fetch_vk_post_comments_static(
+                    int(thread["post_owner_id"]),
+                    int(thread["post_id"]),
+                    count=100,
+                )
+            except Exception as static_exc:
+                comments = []
+                static_token_error = str(static_exc)[:1200]
+                notification_fallback = True
         else:
             raise
 
@@ -2325,11 +2368,21 @@ def check_vk_comment_thread(
     if notification_fallback:
         published = _parse_dt(thread.get("initial_comment_published_at")) or _parse_dt(thread.get("created_at")) or datetime.now(UTC)
         start_time = int((published - timedelta(minutes=15)).timestamp())
-        notifications = _fetch_vk_notifications(
-            int(thread["owner_telegram_id"]),
-            start_time=start_time,
-            count=100,
-        )
+        try:
+            notifications = _fetch_vk_notifications(
+                int(thread["owner_telegram_id"]),
+                start_time=start_time,
+                count=100,
+            )
+        except Exception as notification_exc:
+            if static_token_error:
+                raise VKScoutError(
+                    "Существующий VK_ACCESS_TOKEN тоже не смог прочитать wall.getComments: "
+                    + static_token_error
+                    + "; VK ID notifications.get: "
+                    + str(notification_exc)[:900]
+                ) from notification_exc
+            raise
         candidates = []
         for note in notifications.get("items") or []:
             if not isinstance(note, dict):
