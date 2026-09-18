@@ -1630,6 +1630,17 @@ def _vk_owner_user_id(owner_telegram_id: int) -> int:
     return int(rows[0]["vk_user_id"])
 
 
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+
 def _compact_ws(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
