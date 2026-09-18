@@ -188,13 +188,65 @@ def _render_vk_comment_followup(
         except Exception:
             pass
 
+    mode_key = f"vk_manual_input_mode_{thread_id}"
+    if mode_key not in st.session_state:
+        st.session_state[mode_key] = "text"
+    mode = str(st.session_state.get(mode_key) or "text")
+
+    st.markdown("**Что прислал человек**")
+    mode_cols = st.columns(2)
+    with mode_cols[0]:
+        if st.button(
+            "💬 Текст",
+            key=f"vk_manual_mode_text_{thread_id}",
+            type="primary" if mode == "text" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[mode_key] = "text"
+            st.rerun()
+    with mode_cols[1]:
+        if st.button(
+            "😊 Смайл / реакция",
+            key=f"vk_manual_mode_reaction_{thread_id}",
+            type="primary" if mode == "reaction" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[mode_key] = "reaction"
+            st.rerun()
+
     inbound_key = f"vk_manual_inbound_{thread_id}"
-    st.text_area(
-        "Ответ человека",
-        key=inbound_key,
-        height=100,
-        placeholder="Вставьте точную реплику из VK — например: нейробабушка прикольно  или  🙂",
-    )
+    reaction_choice_key = f"vk_manual_reaction_choice_{thread_id}"
+    custom_reaction_key = f"vk_manual_custom_reaction_{thread_id}"
+
+    if mode == "text":
+        st.text_area(
+            "Ответ человека",
+            key=inbound_key,
+            height=100,
+            placeholder="Вставьте точную реплику из VK — например: нейробабушка прикольно",
+        )
+        inbound_value = str(st.session_state.get(inbound_key, "") or "").strip()
+        event_kind = "comment"
+    else:
+        reaction = st.selectbox(
+            "Смайл / реакция",
+            options=("👍", "❤️", "😂", "😊", "👏", "🔥", "🤔", "😮", "😢", "😡", "Другая"),
+            key=reaction_choice_key,
+        )
+        if reaction == "Другая":
+            st.text_input(
+                "Вставьте смайл или коротко опишите реакцию",
+                key=custom_reaction_key,
+                placeholder="Например: 🙏  или  поставил сердечко",
+            )
+            inbound_value = str(st.session_state.get(custom_reaction_key, "") or "").strip()
+        else:
+            inbound_value = str(reaction or "").strip()
+        event_kind = "reaction"
+        st.caption(
+            "Неона воспримет это как реакцию человека и не будет приписывать смайлу лишний смысл."
+        )
+
     if st.button(
         "🧠 Передать Неоне",
         key=f"vk_manual_to_neona_{thread_id}",
@@ -204,22 +256,29 @@ def _render_vk_comment_followup(
         try:
             process_manual_vk_comment_reply(
                 thread_id,
-                st.session_state.get(inbound_key, ""),
+                inbound_value,
+                event_kind=event_kind,
                 ask_openai_fn=ask_openai_fn,
             )
-            st.session_state[inbound_key] = ""
+            if event_kind == "comment":
+                st.session_state[inbound_key] = ""
+            elif st.session_state.get(reaction_choice_key) == "Другая":
+                st.session_state[custom_reaction_key] = ""
             st.rerun()
         except Exception as exc:
             st.error(f"Неона не смогла обработать ответ: {exc}")
 
     last_inbound = str(thread.get("last_inbound_text") or "").strip()
     pending_kind = str(thread.get("pending_event_kind") or "").strip()
-    if last_inbound and pending_kind == "manual_comment":
-        st.markdown("**Последняя реплика человека:**")
+    if last_inbound and pending_kind in {"manual_comment", "manual_reaction"}:
+        if pending_kind == "manual_reaction":
+            st.markdown("**Последняя реакция человека:**")
+        else:
+            st.markdown("**Последняя реплика человека:**")
         st.write(last_inbound)
 
     reply_text = str(thread.get("neona_reply_text") or "").strip()
-    if pending_kind == "manual_comment" and reply_text:
+    if pending_kind in {"manual_comment", "manual_reaction"} and reply_text:
         st.markdown("**Ответ Неоны готов:**")
         edit_key = f"vk_manual_neona_reply_{thread_id}_{thread.get('pending_event_key') or 'pending'}"
         if edit_key not in st.session_state:
