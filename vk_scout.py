@@ -1608,3 +1608,723 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
             "profile_url": vk_profile_url(candidate) if candidate else f"https://vk.com/id{uid}",
         })
     return result
+
+# ---------------------------------------------------------------------------
+# VK live comment dialogue: published comment -> reply -> Neona continuation
+# ---------------------------------------------------------------------------
+
+
+def _vk_owner_user_id(owner_telegram_id: int) -> int:
+    """Returns the VK user id connected to this Agency W owner."""
+    rows = _sb_get(
+        "agency_vk_oauth_tokens",
+        {
+            "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+            "select": "vk_user_id",
+            "limit": 1,
+        },
+    )
+    if not rows or not rows[0].get("vk_user_id"):
+        raise VKScoutError("Не найден VK ID владельца. Переподключите VK Scout.")
+    return int(rows[0]["vk_user_id"])
+
+
+def _compact_ws(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _comment_material(comment: dict[str, Any]) -> str:
+    """Human-readable inbound comment content, including simple non-text signals."""
+    text = _compact_ws(comment.get("text"))
+    if text:
+        return text
+
+    sticker_id = comment.get("sticker_id")
+    if sticker_id:
+        return f"[стикер VK #{sticker_id}]"
+
+    attachments = comment.get("attachments") or []
+    kinds: list[str] = []
+    for attachment in attachments:
+        if isinstance(attachment, dict):
+            kind = _compact_ws(attachment.get("type"))
+            if kind:
+                kinds.append(kind)
+    if kinds:
+        return "[вложение: " + ", ".join(kinds[:4]) + "]"
+    return "[ответ без текста]"
+
+
+def _flatten_vk_comments(response: Any) -> list[dict[str, Any]]:
+    """Flattens top-level wall comments and the thread items returned with them."""
+    if not isinstance(response, dict):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def add(item: Any) -> None:
+        if not isinstance(item, dict):
+            return
+        try:
+            cid = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            cid = 0
+        if cid <= 0 or cid in seen:
+            return
+        seen.add(cid)
+        result.append(item)
+        thread = item.get("thread") if isinstance(item.get("thread"), dict) else {}
+        for child in thread.get("items") or []:
+            add(child)
+
+    for item in response.get("items") or []:
+        add(item)
+    return result
+
+
+def _fetch_vk_post_comments(
+    owner_telegram_id: int,
+    post_owner_id: int,
+    post_id: int,
+    *,
+    count: int = 100,
+) -> list[dict[str, Any]]:
+    response = _vk_user_api(
+        int(owner_telegram_id),
+        "wall.getComments",
+        owner_id=int(post_owner_id),
+        post_id=int(post_id),
+        need_likes=1,
+        count=max(1, min(100, int(count))),
+        sort="desc",
+        preview_length=0,
+        extended=0,
+        thread_items_count=10,
+    )
+    return _flatten_vk_comments(response)
+
+
+def _json_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for item in value:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number not in out:
+            out.append(number)
+    return out
+
+
+def _json_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def load_vk_comment_thread(
+    owner_telegram_id: int,
+    post_owner_id: int,
+    post_id: int,
+) -> dict[str, Any] | None:
+    """Loads the latest tracked Agency W comment thread for a VK post."""
+    rows = _sb_get(
+        "agency_vk_comment_threads",
+        {
+            "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+            "post_owner_id": f"eq.{int(post_owner_id)}",
+            "post_id": f"eq.{int(post_id)}",
+            "select": "*",
+            "order": "created_at.desc",
+            "limit": 1,
+        },
+    )
+    return rows[0] if rows else None
+
+
+def load_vk_comment_thread_by_id(thread_id: int) -> dict[str, Any] | None:
+    rows = _sb_get(
+        "agency_vk_comment_threads",
+        {"id": f"eq.{int(thread_id)}", "select": "*", "limit": 1},
+    )
+    return rows[0] if rows else None
+
+
+def register_published_vk_comment(
+    owner_telegram_id: int,
+    *,
+    post_owner_id: int,
+    post_id: int,
+    comment_text: str,
+    post_url: str = "",
+    post_text: str = "",
+    first_name: str = "",
+    source: str = "radar",
+    assignment_id: int | None = None,
+) -> dict[str, Any]:
+    """Finds the manually published comment in VK and starts watching its thread.
+
+    The owner first publishes the prepared text from their own VK account, then
+    presses "Комментарий опубликован". We locate the real VK comment id instead
+    of trusting a local checkbox, so later replies can be matched reliably.
+    """
+    owner_telegram_id = int(owner_telegram_id)
+    post_owner_id = int(post_owner_id)
+    post_id = int(post_id)
+    wanted = _compact_ws(comment_text)
+    if not wanted:
+        raise VKScoutError("Текст комментария пустой.")
+
+    owner_vk_user_id = _vk_owner_user_id(owner_telegram_id)
+    comments = _fetch_vk_post_comments(owner_telegram_id, post_owner_id, post_id, count=100)
+    candidates: list[dict[str, Any]] = []
+    for item in comments:
+        try:
+            from_id = int(item.get("from_id") or 0)
+        except (TypeError, ValueError):
+            from_id = 0
+        if from_id != owner_vk_user_id:
+            continue
+        if _compact_ws(item.get("text")) != wanted:
+            continue
+        candidates.append(item)
+
+    if not candidates:
+        raise VKScoutError(
+            "Не нашла этот комментарий в VK. Сначала опубликуйте именно показанный текст "
+            "под выбранным постом, затем нажмите «Комментарий опубликован»."
+        )
+
+    published = max(candidates, key=lambda x: int(x.get("date") or 0))
+    comment_id = int(published["id"])
+    published_ts = int(published.get("date") or 0)
+    published_at = (
+        datetime.fromtimestamp(published_ts, UTC).isoformat()
+        if published_ts > 0 else datetime.now(UTC).isoformat()
+    )
+    now = datetime.now(UTC).isoformat()
+    initial_history = [
+        {
+            "direction": "out",
+            "kind": "comment",
+            "comment_id": comment_id,
+            "text": wanted,
+            "at": published_at,
+        }
+    ]
+    payload = {
+        "owner_telegram_id": owner_telegram_id,
+        "owner_vk_user_id": owner_vk_user_id,
+        "candidate_vk_user_id": post_owner_id,
+        "post_owner_id": post_owner_id,
+        "post_id": post_id,
+        "post_url": _compact_ws(post_url) or None,
+        "post_text": str(post_text or "").strip() or None,
+        "first_name": _compact_ws(first_name) or None,
+        "source": _compact_ws(source) or "radar",
+        "assignment_id": int(assignment_id) if assignment_id else None,
+        "initial_comment_id": comment_id,
+        "initial_comment_text": wanted,
+        "initial_comment_published_at": published_at,
+        "last_outbound_comment_id": comment_id,
+        "last_outbound_text": wanted,
+        "outbound_comment_ids": [comment_id],
+        "processed_event_keys": [],
+        "dialogue_history": initial_history,
+        "status": "watching",
+        "last_checked_at": now,
+        "last_error": None,
+        "updated_at": now,
+    }
+    rows = _sb_post(
+        "agency_vk_comment_threads",
+        payload,
+        on_conflict="owner_telegram_id,post_owner_id,post_id,initial_comment_id",
+    )
+    thread = rows[0] if rows else payload
+
+    if assignment_id:
+        try:
+            _sb_patch(
+                "agency_vk_assignments",
+                {"id": f"eq.{int(assignment_id)}"},
+                {"updated_at": now},
+            )
+        except Exception:
+            pass
+    return thread
+
+
+def _candidate_liked_comment(
+    owner_telegram_id: int,
+    post_owner_id: int,
+    comment_id: int,
+    candidate_vk_user_id: int,
+) -> bool:
+    """Checks classic VK like/reaction identity for a comment.
+
+    VK API 5.199 exposes likes on wall comments, but does not reliably expose
+    the semantic emoji reaction type here. We therefore treat this only as
+    "a reaction/like was received", never inventing what the emoji meant.
+    """
+    try:
+        response = _vk_user_api(
+            int(owner_telegram_id),
+            "likes.getList",
+            type="comment",
+            owner_id=int(post_owner_id),
+            item_id=int(comment_id),
+            filter="likes",
+            count=1000,
+        )
+    except Exception:
+        return False
+    if not isinstance(response, dict):
+        return False
+    for item in response.get("items") or []:
+        try:
+            uid = int(item.get("id") if isinstance(item, dict) else item)
+        except (TypeError, ValueError):
+            continue
+        if uid == int(candidate_vk_user_id):
+            return True
+    return False
+
+
+def _reply_target_matches(comment: dict[str, Any], outbound_ids: set[int]) -> bool:
+    try:
+        direct = int(comment.get("reply_to_comment") or 0)
+    except (TypeError, ValueError):
+        direct = 0
+    if direct and direct in outbound_ids:
+        return True
+    parents = comment.get("parents_stack") if isinstance(comment.get("parents_stack"), list) else []
+    for value in parents:
+        try:
+            if int(value) in outbound_ids:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _neona_vk_thread_reply(
+    thread: dict[str, Any],
+    *,
+    event_kind: str,
+    inbound_text: str,
+    ask_openai_fn: Callable[..., Any] | None,
+) -> str:
+    first_name = _compact_ws(thread.get("first_name"))
+    post_text = str(thread.get("post_text") or "").strip()
+    history = thread.get("dialogue_history") if isinstance(thread.get("dialogue_history"), list) else []
+
+    if ask_openai_fn is None:
+        if event_kind == "reaction":
+            return "Вижу вашу реакцию 🙂 Что именно в этой мысли вам откликнулось?"
+        return "Интересно, спасибо за ответ. А что в этой теме для вас сейчас самое важное?"
+
+    system = """
+Ты — Неона, секретарь-референт владельца кабинета Агентства W, но этот разговор идёт
+в публичной ветке комментариев с ЛИЧНОГО VK-аккаунта владельца. Поэтому НЕ представляйся
+Неоной и не говори от имени бота/ИИ. Продолжай разговор естественно от лица владельца.
+
+Это уже начатый диалог. Нельзя знакомиться заново и нельзя повторять собеседнику его же фразу.
+Сначала пойми смысл последней реплики и ответь именно на неё.
+
+Стиль:
+- 1–3 коротких человеческих предложения;
+- простой язык, но мысль не примитивная;
+- можно лёгкий уместный юмор;
+- не использовать фамилию;
+- не льстить и не писать шаблонные «Согласна», «Отлично», «Очень интересно»;
+- не упоминать Агентство W, доход, регистрацию, партнёрство или встречу, пока сам человек
+  не вывел разговор к соответствующей потребности;
+- вопрос в конце только если он естественно двигает разговор дальше;
+- если человек отвечает одним emoji/стикером — учитывай смысл осторожно, не выдумывай;
+- если событие обозначено как реакция/лайк и точный тип реакции неизвестен, прямо НЕ называй
+  конкретный emoji; можно мягко спросить, что именно откликнулось.
+
+Верни только готовый ответ без пояснений и кавычек.
+""".strip()
+    request = (
+        f"Имя собеседника: {first_name or 'неизвестно'}\n"
+        f"Исходная публикация: {post_text or '[текст публикации недоступен]'}\n"
+        "История ветки:\n"
+        + json.dumps(history[-12:], ensure_ascii=False, indent=2)
+        + "\n\n"
+        + f"Новое событие: {event_kind}\n"
+        + f"Содержание: {inbound_text}"
+    )
+    answer = _compact_ws(ask_openai_fn(system, request))
+    if not answer:
+        raise VKScoutError("Неона не вернула ответ для VK-диалога")
+    return answer
+
+
+def _send_vk_thread_reply(
+    thread: dict[str, Any],
+    *,
+    reply_to_comment_id: int,
+    message: str,
+    event_key: str,
+) -> int:
+    """Posts one reply in the same VK comment thread."""
+    guid = f"agencyw_{int(thread['id'])}_{re.sub(r'[^0-9A-Za-z_:-]+', '_', event_key)[:80]}"
+    response = _vk_user_api(
+        int(thread["owner_telegram_id"]),
+        "wall.createComment",
+        owner_id=int(thread["post_owner_id"]),
+        post_id=int(thread["post_id"]),
+        message=str(message or "").strip(),
+        reply_to_comment=int(reply_to_comment_id),
+        guid=guid,
+    )
+    if isinstance(response, dict):
+        cid = response.get("comment_id") or response.get("id")
+    else:
+        cid = response
+    try:
+        comment_id = int(cid)
+    except (TypeError, ValueError) as exc:
+        raise VKScoutError("VK не вернул ID ответа Неоны") from exc
+    if comment_id <= 0:
+        raise VKScoutError("VK не вернул ID ответа Неоны")
+    return comment_id
+
+
+def _append_history(history: Any, *events: dict[str, Any]) -> list[dict[str, Any]]:
+    out = list(history) if isinstance(history, list) else []
+    out.extend(events)
+    return out[-40:]
+
+
+def _mark_assignment_dialogue(thread: dict[str, Any]) -> None:
+    assignment_id = thread.get("assignment_id")
+    if not assignment_id:
+        return
+    try:
+        _sb_patch(
+            "agency_vk_assignments",
+            {"id": f"eq.{int(assignment_id)}"},
+            {"status": "dialogue", "updated_at": datetime.now(UTC).isoformat()},
+        )
+    except Exception:
+        pass
+
+
+def _process_vk_thread_event(
+    thread: dict[str, Any],
+    *,
+    event_kind: str,
+    event_key: str,
+    reply_to_comment_id: int,
+    inbound_comment_id: int | None,
+    inbound_text: str,
+    inbound_at: str,
+    ask_openai_fn: Callable[..., Any] | None,
+    auto_send: bool,
+) -> dict[str, Any]:
+    """Generates Neona's next reply and sends it when allowed."""
+    now = datetime.now(UTC).isoformat()
+    history = _append_history(
+        thread.get("dialogue_history"),
+        {
+            "direction": "in",
+            "kind": event_kind,
+            "comment_id": int(inbound_comment_id) if inbound_comment_id else None,
+            "reply_to_comment": int(reply_to_comment_id),
+            "text": inbound_text,
+            "at": inbound_at or now,
+        },
+    )
+    reply = _neona_vk_thread_reply(
+        {**thread, "dialogue_history": history},
+        event_kind=event_kind,
+        inbound_text=inbound_text,
+        ask_openai_fn=ask_openai_fn,
+    )
+
+    processed = _json_str_list(thread.get("processed_event_keys"))
+    if event_key not in processed:
+        processed.append(event_key)
+
+    base_patch: dict[str, Any] = {
+        "status": "reply_ready",
+        "pending_event_kind": event_kind,
+        "pending_event_key": event_key,
+        "pending_reply_to_comment_id": int(reply_to_comment_id),
+        "pending_inbound_text": inbound_text,
+        "neona_reply_text": reply,
+        "last_inbound_comment_id": int(inbound_comment_id) if inbound_comment_id else None,
+        "last_inbound_text": inbound_text,
+        "last_inbound_at": inbound_at or now,
+        "dialogue_history": history,
+        "processed_event_keys": processed,
+        "last_checked_at": now,
+        "last_error": None,
+        "updated_at": now,
+    }
+    _sb_patch("agency_vk_comment_threads", {"id": f"eq.{int(thread['id'])}"}, base_patch)
+    _mark_assignment_dialogue(thread)
+    updated = {**thread, **base_patch}
+
+    # Textual replies are continued automatically. A bare like/reaction is seen
+    # and understood as a signal, but its exact emoji meaning is not exposed by
+    # this VK API surface, so we prepare the reply and leave one-click approval.
+    should_send = bool(auto_send and event_kind != "reaction")
+    if not should_send:
+        return updated
+
+    try:
+        sent_id = _send_vk_thread_reply(
+            updated,
+            reply_to_comment_id=int(reply_to_comment_id),
+            message=reply,
+            event_key=event_key,
+        )
+    except Exception as exc:
+        err_patch = {
+            "status": "reply_ready",
+            "last_error": str(exc)[:1500],
+            "last_checked_at": now,
+            "updated_at": now,
+        }
+        _sb_patch("agency_vk_comment_threads", {"id": f"eq.{int(thread['id'])}"}, err_patch)
+        return {**updated, **err_patch}
+
+    outbound = _json_int_list(thread.get("outbound_comment_ids"))
+    if sent_id not in outbound:
+        outbound.append(sent_id)
+    sent_history = _append_history(
+        history,
+        {
+            "direction": "out",
+            "kind": "comment",
+            "comment_id": sent_id,
+            "reply_to_comment": int(reply_to_comment_id),
+            "text": reply,
+            "at": now,
+        },
+    )
+    sent_patch = {
+        "status": "watching",
+        "last_outbound_comment_id": sent_id,
+        "last_outbound_text": reply,
+        "outbound_comment_ids": outbound,
+        "dialogue_history": sent_history,
+        "pending_event_kind": None,
+        "pending_event_key": None,
+        "pending_reply_to_comment_id": None,
+        "pending_inbound_text": None,
+        "neona_reply_comment_id": sent_id,
+        "replied_at": now,
+        "last_error": None,
+        "last_checked_at": now,
+        "updated_at": now,
+    }
+    _sb_patch("agency_vk_comment_threads", {"id": f"eq.{int(thread['id'])}"}, sent_patch)
+    return {**updated, **sent_patch}
+
+
+def check_vk_comment_thread(
+    thread_id: int,
+    *,
+    ask_openai_fn: Callable[..., Any] | None = None,
+    auto_send: bool = True,
+) -> dict[str, Any]:
+    """Checks one tracked VK thread and lets Neona continue a real reply."""
+    thread = load_vk_comment_thread_by_id(int(thread_id))
+    if not thread:
+        raise VKScoutError("VK-ветка комментария не найдена")
+    if str(thread.get("status") or "") in {"paused", "closed"}:
+        return thread
+    # Do not generate a second answer while one is waiting for manual send.
+    if str(thread.get("status") or "") == "reply_ready" and thread.get("pending_event_key"):
+        return thread
+
+    outbound_ids = set(_json_int_list(thread.get("outbound_comment_ids")))
+    if not outbound_ids and thread.get("initial_comment_id"):
+        outbound_ids.add(int(thread["initial_comment_id"]))
+    processed = set(_json_str_list(thread.get("processed_event_keys")))
+    comments = _fetch_vk_post_comments(
+        int(thread["owner_telegram_id"]),
+        int(thread["post_owner_id"]),
+        int(thread["post_id"]),
+        count=100,
+    )
+
+    inbound: list[dict[str, Any]] = []
+    candidate_id = int(thread["candidate_vk_user_id"])
+    for item in comments:
+        try:
+            cid = int(item.get("id") or 0)
+            from_id = int(item.get("from_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        event_key = f"comment:{cid}"
+        if cid <= 0 or from_id != candidate_id or event_key in processed:
+            continue
+        if not _reply_target_matches(item, outbound_ids):
+            continue
+        inbound.append(item)
+
+    if inbound:
+        # Process the oldest unseen reply first to preserve conversational order.
+        item = min(inbound, key=lambda x: int(x.get("date") or 0))
+        cid = int(item["id"])
+        try:
+            reply_to = int(item.get("reply_to_comment") or 0)
+        except (TypeError, ValueError):
+            reply_to = 0
+        if reply_to not in outbound_ids:
+            reply_to = int(thread.get("last_outbound_comment_id") or thread.get("initial_comment_id") or 0)
+        ts = int(item.get("date") or 0)
+        inbound_at = datetime.fromtimestamp(ts, UTC).isoformat() if ts > 0 else datetime.now(UTC).isoformat()
+        return _process_vk_thread_event(
+            thread,
+            event_kind="comment",
+            event_key=f"comment:{cid}",
+            reply_to_comment_id=cid,  # Neona replies directly to the person's new comment.
+            inbound_comment_id=cid,
+            inbound_text=_comment_material(item),
+            inbound_at=inbound_at,
+            ask_openai_fn=ask_openai_fn,
+            auto_send=auto_send,
+        )
+
+    # No text reply: notice one classic like/reaction on the latest Neona comment.
+    last_outbound = int(thread.get("last_outbound_comment_id") or thread.get("initial_comment_id") or 0)
+    if last_outbound > 0:
+        reaction_key = f"reaction:{last_outbound}:{candidate_id}"
+        if reaction_key not in processed and _candidate_liked_comment(
+            int(thread["owner_telegram_id"]),
+            int(thread["post_owner_id"]),
+            last_outbound,
+            candidate_id,
+        ):
+            return _process_vk_thread_event(
+                thread,
+                event_kind="reaction",
+                event_key=reaction_key,
+                reply_to_comment_id=last_outbound,
+                inbound_comment_id=None,
+                inbound_text="[человек поставил реакцию/лайк; точный тип реакции VK API не сообщил]",
+                inbound_at=datetime.now(UTC).isoformat(),
+                ask_openai_fn=ask_openai_fn,
+                auto_send=False,
+            )
+
+    now = datetime.now(UTC).isoformat()
+    _sb_patch(
+        "agency_vk_comment_threads",
+        {"id": f"eq.{int(thread_id)}"},
+        {"last_checked_at": now, "last_error": None, "updated_at": now},
+    )
+    return {**thread, "last_checked_at": now, "last_error": None}
+
+
+def send_pending_vk_comment_reply(thread_id: int) -> dict[str, Any]:
+    """Sends a prepared Neona reply that could not/should not be auto-posted."""
+    thread = load_vk_comment_thread_by_id(int(thread_id))
+    if not thread:
+        raise VKScoutError("VK-ветка комментария не найдена")
+    message = _compact_ws(thread.get("neona_reply_text"))
+    reply_to = int(thread.get("pending_reply_to_comment_id") or 0)
+    event_key = _compact_ws(thread.get("pending_event_key"))
+    if not message or reply_to <= 0 or not event_key:
+        raise VKScoutError("Нет подготовленного ответа Неоны для отправки")
+
+    sent_id = _send_vk_thread_reply(
+        thread,
+        reply_to_comment_id=reply_to,
+        message=message,
+        event_key=event_key,
+    )
+    now = datetime.now(UTC).isoformat()
+    outbound = _json_int_list(thread.get("outbound_comment_ids"))
+    if sent_id not in outbound:
+        outbound.append(sent_id)
+    history = _append_history(
+        thread.get("dialogue_history"),
+        {
+            "direction": "out",
+            "kind": "comment",
+            "comment_id": sent_id,
+            "reply_to_comment": reply_to,
+            "text": message,
+            "at": now,
+        },
+    )
+    patch = {
+        "status": "watching",
+        "last_outbound_comment_id": sent_id,
+        "last_outbound_text": message,
+        "outbound_comment_ids": outbound,
+        "dialogue_history": history,
+        "pending_event_kind": None,
+        "pending_event_key": None,
+        "pending_reply_to_comment_id": None,
+        "pending_inbound_text": None,
+        "neona_reply_comment_id": sent_id,
+        "replied_at": now,
+        "last_error": None,
+        "last_checked_at": now,
+        "updated_at": now,
+    }
+    _sb_patch("agency_vk_comment_threads", {"id": f"eq.{int(thread_id)}"}, patch)
+    return {**thread, **patch}
+
+
+def watch_vk_comment_threads(
+    *,
+    ask_openai_fn: Callable[..., Any] | None = None,
+    auto_send: bool = True,
+    limit: int = 100,
+) -> dict[str, int]:
+    """Background pass over active VK comment threads."""
+    rows = _sb_get(
+        "agency_vk_comment_threads",
+        {
+            "status": "in.(watching,error)",
+            "select": "*",
+            "order": "last_checked_at.asc.nullsfirst,created_at.asc",
+            "limit": max(1, min(500, int(limit))),
+        },
+    )
+    stats = {"threads": len(rows), "checked": 0, "replies": 0, "ready": 0, "errors": 0}
+    for row in rows:
+        try:
+            before_out = int(row.get("last_outbound_comment_id") or 0)
+            before_in = int(row.get("last_inbound_comment_id") or 0)
+            updated = check_vk_comment_thread(
+                int(row["id"]),
+                ask_openai_fn=ask_openai_fn,
+                auto_send=auto_send,
+            )
+            stats["checked"] += 1
+            if str(updated.get("status") or "") == "reply_ready":
+                stats["ready"] += 1
+            after_out = int(updated.get("last_outbound_comment_id") or 0)
+            after_in = int(updated.get("last_inbound_comment_id") or 0)
+            if after_in != before_in or after_out != before_out:
+                stats["replies"] += 1
+        except Exception as exc:
+            stats["errors"] += 1
+            try:
+                now = datetime.now(UTC).isoformat()
+                _sb_patch(
+                    "agency_vk_comment_threads",
+                    {"id": f"eq.{int(row['id'])}"},
+                    {"status": "error", "last_error": str(exc)[:1500], "last_checked_at": now, "updated_at": now},
+                )
+            except Exception:
+                pass
+    return stats
