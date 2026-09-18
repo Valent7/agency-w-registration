@@ -11,6 +11,7 @@ from __future__ import annotations
 - без автоматической холодной рассылки.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -1704,6 +1705,92 @@ def _fetch_vk_post_comments(
     return _flatten_vk_comments(response)
 
 
+
+
+def _is_profile_type_method_error(exc: Exception, method: str = "wall.getComments") -> bool:
+    text = str(exc or "").casefold()
+    return method.casefold() in text and ("1051" in text or "current profile type" in text)
+
+
+def _fetch_vk_notifications(
+    owner_telegram_id: int,
+    *,
+    start_time: int,
+    count: int = 100,
+) -> dict[str, Any]:
+    """Read the owner's VK bell notifications with the already connected user token.
+
+    This is a fallback for VK ID profile types where wall.getComments returns 1051.
+    VK API 5.199 documents notifications.get as a user-token method.
+    """
+    response = _vk_user_api(
+        int(owner_telegram_id),
+        "notifications.get",
+        count=max(1, min(100, int(count))),
+        filters="comments,likes",
+        start_time=max(0, int(start_time)),
+    )
+    return response if isinstance(response, dict) else {}
+
+
+def _iter_nested_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _iter_nested_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_nested_dicts(child)
+
+
+def _notification_post_ids(item: dict[str, Any]) -> set[int]:
+    result: set[int] = set()
+    for obj in _iter_nested_dicts(item):
+        if "post_id" in obj:
+            try:
+                result.add(int(obj.get("post_id") or 0))
+            except (TypeError, ValueError):
+                pass
+    result.discard(0)
+    return result
+
+
+def _notification_feedback(item: dict[str, Any]) -> dict[str, Any]:
+    value = item.get("feedback")
+    return value if isinstance(value, dict) else {}
+
+
+def _notification_candidate_match(
+    item: dict[str, Any],
+    *,
+    candidate_vk_user_id: int,
+    post_id: int,
+) -> bool:
+    feedback = _notification_feedback(item)
+    try:
+        from_id = int(feedback.get("from_id") or 0)
+    except (TypeError, ValueError):
+        from_id = 0
+    if from_id != int(candidate_vk_user_id):
+        return False
+
+    ntype = _compact_ws(item.get("type")).casefold()
+    if not (ntype.startswith("reply_comment") or ntype.startswith("comment_") or ntype.startswith("like_comment")):
+        return False
+
+    post_ids = _notification_post_ids(item)
+    if post_ids and int(post_id) not in post_ids:
+        return False
+    return True
+
+
+def _synthetic_comment_id(owner_telegram_id: int, post_owner_id: int, post_id: int, text: str) -> int:
+    """Stable negative placeholder used only when VK refuses wall.getComments for this profile type."""
+    raw = f"{int(owner_telegram_id)}|{int(post_owner_id)}|{int(post_id)}|{_compact_ws(text)}".encode("utf-8")
+    value = int.from_bytes(hashlib.sha256(raw).digest()[:7], "big") or 1
+    return -value
+
+
 def _json_int_list(value: Any) -> list[int]:
     if not isinstance(value, list):
         return []
@@ -1783,8 +1870,17 @@ def register_published_vk_comment(
         raise VKScoutError("Текст комментария пустой.")
 
     owner_vk_user_id = _vk_owner_user_id(owner_telegram_id)
-    comments = _fetch_vk_post_comments(owner_telegram_id, post_owner_id, post_id, count=100)
     candidates: list[dict[str, Any]] = []
+    profile_type_fallback = False
+    try:
+        comments = _fetch_vk_post_comments(owner_telegram_id, post_owner_id, post_id, count=100)
+    except Exception as exc:
+        if _is_profile_type_method_error(exc):
+            comments = []
+            profile_type_fallback = True
+        else:
+            raise
+
     for item in comments:
         try:
             from_id = int(item.get("from_id") or 0)
@@ -1796,19 +1892,26 @@ def register_published_vk_comment(
             continue
         candidates.append(item)
 
-    if not candidates:
+    if candidates:
+        published = max(candidates, key=lambda x: int(x.get("date") or 0))
+        comment_id = int(published["id"])
+        published_ts = int(published.get("date") or 0)
+        published_at = (
+            datetime.fromtimestamp(published_ts, UTC).isoformat()
+            if published_ts > 0 else datetime.now(UTC).isoformat()
+        )
+    elif profile_type_fallback:
+        # VK ID currently allows us to read the wall but may reject wall.getComments
+        # with 1051. Register a stable placeholder and watch the user's bell
+        # notifications instead. The first real inbound reply gives us its own
+        # comment id, which is enough to answer directly in the same thread.
+        comment_id = _synthetic_comment_id(owner_telegram_id, post_owner_id, post_id, wanted)
+        published_at = datetime.now(UTC).isoformat()
+    else:
         raise VKScoutError(
             "Не нашла этот комментарий в VK. Сначала опубликуйте именно показанный текст "
             "под выбранным постом, затем нажмите «Комментарий опубликован»."
         )
-
-    published = max(candidates, key=lambda x: int(x.get("date") or 0))
-    comment_id = int(published["id"])
-    published_ts = int(published.get("date") or 0)
-    published_at = (
-        datetime.fromtimestamp(published_ts, UTC).isoformat()
-        if published_ts > 0 else datetime.now(UTC).isoformat()
-    )
     now = datetime.now(UTC).isoformat()
     initial_history = [
         {
@@ -2154,12 +2257,20 @@ def check_vk_comment_thread(
     if not outbound_ids and thread.get("initial_comment_id"):
         outbound_ids.add(int(thread["initial_comment_id"]))
     processed = set(_json_str_list(thread.get("processed_event_keys")))
-    comments = _fetch_vk_post_comments(
-        int(thread["owner_telegram_id"]),
-        int(thread["post_owner_id"]),
-        int(thread["post_id"]),
-        count=100,
-    )
+    notification_fallback = False
+    try:
+        comments = _fetch_vk_post_comments(
+            int(thread["owner_telegram_id"]),
+            int(thread["post_owner_id"]),
+            int(thread["post_id"]),
+            count=100,
+        )
+    except Exception as exc:
+        if _is_profile_type_method_error(exc):
+            comments = []
+            notification_fallback = True
+        else:
+            raise
 
     inbound: list[dict[str, Any]] = []
     candidate_id = int(thread["candidate_vk_user_id"])
@@ -2199,6 +2310,65 @@ def check_vk_comment_thread(
             ask_openai_fn=ask_openai_fn,
             auto_send=auto_send,
         )
+
+    if notification_fallback:
+        published = _parse_dt(thread.get("initial_comment_published_at")) or _parse_dt(thread.get("created_at")) or datetime.now(UTC)
+        start_time = int((published - timedelta(minutes=15)).timestamp())
+        notifications = _fetch_vk_notifications(
+            int(thread["owner_telegram_id"]),
+            start_time=start_time,
+            count=100,
+        )
+        candidates = []
+        for note in notifications.get("items") or []:
+            if not isinstance(note, dict):
+                continue
+            if not _notification_candidate_match(
+                note,
+                candidate_vk_user_id=candidate_id,
+                post_id=int(thread["post_id"]),
+            ):
+                continue
+            feedback = _notification_feedback(note)
+            try:
+                fid = int(feedback.get("id") or 0)
+            except (TypeError, ValueError):
+                fid = 0
+            ntype = _compact_ws(note.get("type")).casefold()
+            ts = int(note.get("date") or 0)
+            event_key = f"notification:{ntype}:{fid}:{ts}"
+            if event_key in processed:
+                continue
+            candidates.append((ts, ntype, fid, feedback, event_key))
+
+        if candidates:
+            ts, ntype, fid, feedback, event_key = min(candidates, key=lambda x: x[0] or 0)
+            inbound_at = datetime.fromtimestamp(ts, UTC).isoformat() if ts > 0 else datetime.now(UTC).isoformat()
+            inbound_text = _compact_ws(feedback.get("text"))
+            if ntype.startswith("like_comment"):
+                return _process_vk_thread_event(
+                    thread,
+                    event_kind="reaction",
+                    event_key=event_key,
+                    reply_to_comment_id=(fid if fid > 0 else int(thread.get("last_outbound_comment_id") or 0)),
+                    inbound_comment_id=None,
+                    inbound_text="[человек поставил реакцию/лайк на комментарий; точный тип реакции VK API не сообщил]",
+                    inbound_at=inbound_at,
+                    ask_openai_fn=ask_openai_fn,
+                    auto_send=False,
+                )
+            if fid > 0:
+                return _process_vk_thread_event(
+                    thread,
+                    event_kind="comment",
+                    event_key=event_key,
+                    reply_to_comment_id=fid,
+                    inbound_comment_id=fid,
+                    inbound_text=inbound_text or "[ответ без текста]",
+                    inbound_at=inbound_at,
+                    ask_openai_fn=ask_openai_fn,
+                    auto_send=auto_send,
+                )
 
     # No text reply: notice one classic like/reaction on the latest Neona comment.
     last_outbound = int(thread.get("last_outbound_comment_id") or thread.get("initial_comment_id") or 0)
