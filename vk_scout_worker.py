@@ -2,16 +2,18 @@ from __future__ import annotations
 
 """Agency W — background worker for VK Partner Scout.
 
-Работает отдельно от Streamlit UI и ничего не рассылает автоматически.
+Работает отдельно от Streamlit UI. Первый холодный контакт не рассылает автоматически;
+для уже начатых VK-веток может автоматически продолжить текстовый ответ человека.
 Цикл:
 1) читает активных партнёров Агентства W;
 2) берёт сохранённый живой портрет ЦА из agency_workspace_states;
 3) обновляет общий пул кандидатов из настроенных VK-сообществ;
 4) просит Неонию оценить кандидатов;
-5) резервирует до 5 VK-кандидатов на текущий день.
+5) резервирует до 5 VK-кандидатов на текущий день;
+6) отдельно и чаще проверяет опубликованные комментарии Неоны и подхватывает реальные ответы.
 
-Первое сообщение по-прежнему только готовится в интерфейсе и отправляется
-самим партнёром после просмотра.
+Первый комментарий по-прежнему публикуется владельцем вручную. После регистрации
+комментария worker следит за веткой; текстовые ответы Неона продолжает автоматически.
 """
 
 import json
@@ -37,6 +39,7 @@ from vk_scout import (
     release_expired_vk_assignments,
     scan_vk_sources,
     score_vk_candidates,
+    watch_vk_comment_threads,
 )
 
 UTC = timezone.utc
@@ -443,25 +446,53 @@ def run_once() -> dict[str, int]:
 
 
 def worker_forever(poll_seconds: int | None = None) -> None:
-    """Запускает VK Scout сразу, затем повторяет цикл с заданным интервалом."""
+    """Runs heavy VK Scout periodically and checks live comment threads more often."""
     if poll_seconds is None:
         poll_seconds = _int_env(
             "VK_SCOUT_POLL_SECONDS",
-            21600,   # 6 часов
-            300,     # не чаще 5 минут
-            86400,   # не реже 1 раза в сутки
+            21600,   # полный поиск кандидатов раз в 6 часов
+            900,
+            86400,
         )
 
-    _log(f"worker запущен; интервал {int(poll_seconds)} сек.")
+    comment_poll_seconds = _int_env(
+        "VK_COMMENT_POLL_SECONDS",
+        300,      # живые ответы проверяем каждые 5 минут
+        300,
+        3600,
+    )
+
+    _log(
+        f"worker запущен; поиск кандидатов каждые {int(poll_seconds)} сек.; "
+        f"VK-диалоги каждые {int(comment_poll_seconds)} сек."
+    )
+    next_scout_at = 0.0
 
     while True:
-        try:
-            run_once()
-        except Exception as exc:
-            # VK Scout никогда не должен уронить Неону/весь Render worker.
-            _log(f"цикл не выполнен: {exc}")
+        now_mono = time.monotonic()
+        if now_mono >= next_scout_at:
+            try:
+                run_once()
+            except Exception as exc:
+                # VK Scout never takes down Neona/the whole Render worker.
+                _log(f"цикл поиска кандидатов не выполнен: {exc}")
+            next_scout_at = time.monotonic() + max(900, int(poll_seconds))
 
-        time.sleep(max(300, int(poll_seconds)))
+        try:
+            comment_stats = watch_vk_comment_threads(
+                ask_openai_fn=_ask_openai,
+                auto_send=True,
+                limit=100,
+            )
+            if comment_stats.get("replies") or comment_stats.get("ready") or comment_stats.get("errors"):
+                _log(
+                    "VK-диалоги | "
+                    + ", ".join(f"{key}={value}" for key, value in comment_stats.items())
+                )
+        except Exception as exc:
+            _log(f"проверка VK-диалогов не выполнена: {exc}")
+
+        time.sleep(max(300, int(comment_poll_seconds)))
 
 
 if __name__ == "__main__":
