@@ -1276,6 +1276,25 @@ def fetch_vk_candidate_feed(
     errors: list[str] = []
     checked_candidates = 0
 
+    # Не показываем в Радаре посты, под которыми владелец уже опубликовал
+    # комментарий через Агентство W. Источник истины — существующая таблица
+    # agency_vk_comment_threads, поэтому отдельная миграция Supabase не нужна.
+    # Новый пост того же человека в будущем снова может попасть в Радар.
+    commented_rows = _sb_get(
+        "agency_vk_comment_threads",
+        {
+            "owner_telegram_id": f"eq.{owner_id}",
+            "select": "post_owner_id,post_id",
+            "limit": 5000,
+        },
+    )
+    commented_post_keys: set[tuple[int, int]] = set()
+    for row in commented_rows:
+        try:
+            commented_post_keys.add((int(row.get("post_owner_id")), int(row.get("post_id"))))
+        except (TypeError, ValueError):
+            continue
+
     for uid in ids:
         candidate = candidate_by_id.get(uid)
         if not candidate:
@@ -1296,6 +1315,11 @@ def fetch_vk_candidate_feed(
             continue
 
         post = posts[0]
+        post_key = (uid, int(post.get("post_id") or 0))
+        if post_key in commented_post_keys:
+            # Этот конкретный пост уже был точкой касания. Не крутим его по кругу.
+            continue
+
         first_name = str(candidate.get("first_name") or "").strip()
         last_name = str(candidate.get("last_name") or "").strip()
         author_name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {uid}"
@@ -1329,6 +1353,7 @@ def fetch_vk_candidate_feed(
         "pool_size": len(ids),
         "people": len(items),
         "commentable": len(items),
+        "already_commented_posts": len(commented_post_keys),
         "errors": errors,
     }
 
