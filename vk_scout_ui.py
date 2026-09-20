@@ -11,6 +11,7 @@ from vk_scout_oauth import (
 
 from vk_scout import (
     VKScoutError,
+    _sb_get,
     _sb_patch,
     add_known_vk_contact,
     load_known_vk_contacts,
@@ -118,6 +119,7 @@ def _render_vk_comment_followup(
     source: str = "radar",
     assignment_id: int | None = None,
     ask_openai_fn=None,
+    ui_scope: str = "",
 ) -> None:
     """Registers a real published VK comment and shows its live dialogue state."""
     st.markdown("**💬 Что дальше после комментария**")
@@ -163,6 +165,7 @@ def _render_vk_comment_followup(
         return
 
     thread_id = int(thread.get("id") or 0)
+    widget_scope = f"{thread_id}_{str(ui_scope).strip()}" if str(ui_scope).strip() else str(thread_id)
     st.success("💬 Ветка VK сохранена. Неона помнит контекст разговора")
     st.caption(
         "VK сейчас не даёт Агентству автоматически читать ответы под чужими личными постами. "
@@ -188,7 +191,7 @@ def _render_vk_comment_followup(
         except Exception:
             pass
 
-    mode_key = f"vk_manual_input_mode_{thread_id}"
+    mode_key = f"vk_manual_input_mode_{widget_scope}"
     if mode_key not in st.session_state:
         st.session_state[mode_key] = "text"
     mode = str(st.session_state.get(mode_key) or "text")
@@ -198,7 +201,7 @@ def _render_vk_comment_followup(
     with mode_cols[0]:
         if st.button(
             "💬 Текст",
-            key=f"vk_manual_mode_text_{thread_id}",
+            key=f"vk_manual_mode_text_{widget_scope}",
             type="primary" if mode == "text" else "secondary",
             use_container_width=True,
         ):
@@ -207,16 +210,26 @@ def _render_vk_comment_followup(
     with mode_cols[1]:
         if st.button(
             "😊 Смайл / реакция",
-            key=f"vk_manual_mode_reaction_{thread_id}",
+            key=f"vk_manual_mode_reaction_{widget_scope}",
             type="primary" if mode == "reaction" else "secondary",
             use_container_width=True,
         ):
             st.session_state[mode_key] = "reaction"
             st.rerun()
 
-    inbound_key = f"vk_manual_inbound_{thread_id}"
-    reaction_choice_key = f"vk_manual_reaction_choice_{thread_id}"
-    custom_reaction_key = f"vk_manual_custom_reaction_{thread_id}"
+    inbound_key = f"vk_manual_inbound_{widget_scope}"
+    reaction_choice_key = f"vk_manual_reaction_choice_{widget_scope}"
+    custom_reaction_key = f"vk_manual_custom_reaction_{widget_scope}"
+    reset_inbound_key = f"vk_manual_reset_inbound_{widget_scope}"
+    reset_custom_key = f"vk_manual_reset_custom_{widget_scope}"
+
+    # Streamlit forbids changing a widget value after that widget has already
+    # been instantiated in the same run. We therefore schedule clearing for
+    # the next rerun, before the widget is created.
+    if st.session_state.pop(reset_inbound_key, False):
+        st.session_state[inbound_key] = ""
+    if st.session_state.pop(reset_custom_key, False):
+        st.session_state[custom_reaction_key] = ""
 
     if mode == "text":
         st.text_area(
@@ -249,7 +262,7 @@ def _render_vk_comment_followup(
 
     if st.button(
         "🧠 Передать Неоне",
-        key=f"vk_manual_to_neona_{thread_id}",
+        key=f"vk_manual_to_neona_{widget_scope}",
         type="primary",
         use_container_width=True,
     ):
@@ -261,9 +274,9 @@ def _render_vk_comment_followup(
                 ask_openai_fn=ask_openai_fn,
             )
             if event_kind == "comment":
-                st.session_state[inbound_key] = ""
+                st.session_state[reset_inbound_key] = True
             elif st.session_state.get(reaction_choice_key) == "Другая":
-                st.session_state[custom_reaction_key] = ""
+                st.session_state[reset_custom_key] = True
             st.rerun()
         except Exception as exc:
             st.error(f"Неона не смогла обработать ответ: {exc}")
@@ -280,7 +293,7 @@ def _render_vk_comment_followup(
     reply_text = str(thread.get("neona_reply_text") or "").strip()
     if pending_kind in {"manual_comment", "manual_reaction"} and reply_text:
         st.markdown("**Ответ Неоны готов:**")
-        edit_key = f"vk_manual_neona_reply_{thread_id}_{thread.get('pending_event_key') or 'pending'}"
+        edit_key = f"vk_manual_neona_reply_{widget_scope}_{thread.get('pending_event_key') or 'pending'}"
         if edit_key not in st.session_state:
             st.session_state[edit_key] = reply_text
         edited_reply = st.text_area(
@@ -294,7 +307,7 @@ def _render_vk_comment_followup(
         )
         if st.button(
             "✅ Ответ Неоны опубликован в VK",
-            key=f"vk_manual_reply_published_{thread_id}",
+            key=f"vk_manual_reply_published_{widget_scope}",
             use_container_width=True,
         ):
             try:
@@ -312,6 +325,124 @@ def _render_vk_comment_followup(
         "Автоматическую проверку VK не удаляем из системы: вернём её, когда VK даст подходящий "
         "доступ к чтению комментариев. Сейчас фоновые ошибки 1051/27 для этой ветки отключены."
     )
+
+
+def _load_vk_dialog_threads(owner_id: int, limit: int = 100) -> list[dict]:
+    """Loads saved VK comment threads independently of today's Neonia lists."""
+    rows = _sb_get(
+        "agency_vk_comment_threads",
+        {
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "select": "*",
+            "order": "updated_at.desc.nullslast,created_at.desc",
+            "limit": max(1, min(300, int(limit))),
+        },
+    )
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _vk_thread_label(thread: dict) -> str:
+    name = str(thread.get("first_name") or "").strip() or "VK-контакт"
+    pending_kind = str(thread.get("pending_event_kind") or "").strip()
+    reply_ready = bool(str(thread.get("neona_reply_text") or "").strip()) and pending_kind in {
+        "manual_comment",
+        "manual_reaction",
+    }
+    last_inbound = str(thread.get("last_inbound_text") or "").strip()
+    if reply_ready:
+        status = "🟠 ответ Неоны готов"
+    elif last_inbound:
+        status = "🟢 диалог идёт"
+    else:
+        status = "🟡 ждём ответа"
+    return f"{name} · {status}"
+
+
+def _render_vk_dialog_center(
+    owner_id: int,
+    ask_openai_fn=None,
+) -> None:
+    """Persistent VK dialogue desk for all saved comment threads."""
+    st.markdown("### 💬 Диалоги VK")
+    st.caption(
+        "Здесь остаются все начатые ветки после опубликованных комментариев. "
+        "Они не исчезают, даже если человек больше не попал в сегодняшнюю подборку Неонии."
+    )
+
+    try:
+        threads = _load_vk_dialog_threads(int(owner_id))
+    except Exception as exc:
+        st.warning(f"Не удалось загрузить сохранённые VK-диалоги: {exc}")
+        return
+
+    active_threads = [
+        thread for thread in threads
+        if str(thread.get("status") or "").strip().casefold() != "closed"
+    ]
+    if not active_threads:
+        st.info("Пока нет сохранённых VK-диалогов. Они появятся после кнопки «Комментарий опубликован».")
+        return
+
+    waiting = sum(
+        1
+        for thread in active_threads
+        if not str(thread.get("last_inbound_text") or "").strip()
+    )
+    replied = len(active_threads) - waiting
+    ready = sum(
+        1
+        for thread in active_threads
+        if str(thread.get("pending_event_kind") or "").strip() in {"manual_comment", "manual_reaction"}
+        and str(thread.get("neona_reply_text") or "").strip()
+    )
+    st.caption(
+        f"Активных веток: {len(active_threads)} · ответили: {replied} · "
+        f"ждём ответа: {waiting} · ответ Неоны готов: {ready}"
+    )
+
+    for thread in active_threads:
+        thread_id = int(thread.get("id") or 0)
+        post_owner_id = int(thread.get("post_owner_id") or 0)
+        post_id = int(thread.get("post_id") or 0)
+        if not thread_id or not post_owner_id or not post_id:
+            continue
+
+        with st.expander(_vk_thread_label(thread), expanded=False):
+            post_url = str(thread.get("post_url") or "").strip()
+            if post_url:
+                st.link_button("Открыть пост VK", post_url, use_container_width=False)
+
+            history = thread.get("dialogue_history")
+            if isinstance(history, list) and history:
+                st.markdown("**История ветки:**")
+                for event in history:
+                    if not isinstance(event, dict):
+                        continue
+                    body = str(event.get("text") or "").strip()
+                    if not body:
+                        continue
+                    direction = str(event.get("direction") or "").strip()
+                    who = "Неона / вы" if direction == "out" else "Человек"
+                    st.markdown(f"**{who}:** {body}")
+
+            _render_vk_comment_followup(
+                int(owner_id),
+                post_owner_id,
+                post_id,
+                str(thread.get("initial_comment_text") or "").strip(),
+                str(thread.get("first_name") or "").strip(),
+                post_url=post_url,
+                post_text=str(thread.get("post_text") or "").strip(),
+                source=str(thread.get("source") or "radar").strip() or "radar",
+                assignment_id=(
+                    int(thread.get("assignment_id"))
+                    if thread.get("assignment_id") not in (None, "")
+                    else None
+                ),
+                ask_openai_fn=ask_openai_fn,
+                ui_scope="center",
+            )
+
 
 def _disable_vk_source(owner_id: int, source_id: int) -> None:
     """Мягко отключает источник, не удаляя историю поиска."""
@@ -1092,6 +1223,11 @@ def render_vk_sources(
             st.caption("После разрешения VK вернёт вас обратно в Агентство W.")
 
     if vk_ready:
+        _render_vk_dialog_center(
+            owner_id,
+            ask_openai_fn=ask_openai_fn,
+        )
+        st.divider()
         _render_vk_feed_radar(
             owner_id,
             ask_openai_fn=ask_openai_fn,
