@@ -2593,6 +2593,287 @@ async def fetch_telegram_private_dialog(
         await client.disconnect()
 
 
+def load_neona_telegram_dialog_states(owner_telegram_id):
+    """Загружает сохранённые состояния Telegram-диалогов Неоны из Supabase."""
+    owner_telegram_id = int(owner_telegram_id)
+    response = requests.get(
+        f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_dialog_states",
+        headers={
+            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+            "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+        },
+        params={
+            "owner_telegram_id": f"eq.{owner_telegram_id}",
+            "select": "*",
+            "order": "updated_at.desc",
+        },
+        timeout=20,
+    )
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+    rows = response.json()
+    return rows if isinstance(rows, list) else []
+
+
+def _neona_telegram_stage_label(state):
+    state = state if isinstance(state, dict) else {}
+    stage = str(state.get("stage") or "idle").strip()
+    context = state.get("context") if isinstance(state.get("context"), dict) else {}
+    replied = bool(state.get("greeted")) or bool(context.get("last_reply_text"))
+
+    if stage == "scheduled":
+        return "📅 встреча назначена", "meeting", replied
+    if stage in {
+        "invited_to_meeting",
+        "collecting_meeting_details",
+        "awaiting_confirmation",
+        "awaiting_slot_choice",
+    }:
+        return "🟣 согласование встречи", "meeting_progress", replied
+    if replied:
+        return "🟢 диалог идёт", "dialogue", True
+    return "🟡 ждём ответа", "waiting", False
+
+
+def _format_neona_dialog_datetime(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        local = parsed.astimezone(ZoneInfo("Europe/Berlin"))
+        return local.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return raw[:16].replace("T", " ")
+
+
+def render_neona_telegram_dialog_center(
+    owner_telegram_id,
+    contacts,
+    sent_log,
+):
+    """
+    Постоянный рабочий стол Telegram-диалогов Неоны.
+
+    Показывает людей, которым Агентство уже отправляло первое касание
+    или продолжение, статус ответа и по кнопке читает реальную переписку
+    из Telegram. Автоматическую логику Неоны не меняет.
+    """
+    owner_telegram_id = int(owner_telegram_id)
+    contacts = contacts if isinstance(contacts, list) else []
+    sent_log = sent_log if isinstance(sent_log, list) else []
+
+    st.markdown("### 💬 Диалоги Telegram")
+    st.caption(
+        "Здесь остаются люди, которым уже было отправлено первое сообщение, "
+        "видео или тёплое касание. Видно, кто ответил, где диалог идёт и на каком "
+        "этапе находится разговор Неоны."
+    )
+
+    allowed_kinds = {
+        "first_message",
+        "first_video",
+        "story_reply",
+        "director_continue_dialog_video",
+    }
+
+    latest_event_by_id = {}
+    for event in sent_log:
+        if not isinstance(event, dict):
+            continue
+        kind = str(event.get("kind") or "").strip()
+        if kind and kind not in allowed_kinds:
+            continue
+        try:
+            contact_id = int(event.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        previous = latest_event_by_id.get(contact_id)
+        if previous is None or str(event.get("sent_at") or "") >= str(
+            previous.get("sent_at") or ""
+        ):
+            latest_event_by_id[contact_id] = event
+
+    if not latest_event_by_id:
+        st.info(
+            "Пока нет Telegram-контактов, которым из Агентства W было отправлено "
+            "первое сообщение, видео или тёплое касание."
+        )
+        return
+
+    try:
+        state_rows = load_neona_telegram_dialog_states(owner_telegram_id)
+    except Exception as exc:
+        state_rows = []
+        st.warning(
+            "Не удалось загрузить статусы диалогов Неоны: "
+            + str(exc)
+        )
+
+    state_by_id = {}
+    for row in state_rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            contact_id = int(row.get("contact_telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in state_by_id:
+            state_by_id[contact_id] = row
+
+    contact_by_id = {}
+    for item in contacts:
+        if not isinstance(item, dict):
+            continue
+        try:
+            contact_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        contact_by_id[contact_id] = item
+
+    cards = []
+    for contact_id, event in latest_event_by_id.items():
+        state = state_by_id.get(contact_id, {})
+        context = state.get("context") if isinstance(state.get("context"), dict) else {}
+        contact = contact_by_id.get(contact_id, {})
+
+        name = str(
+            contact.get("name")
+            or event.get("recipient_name")
+            or context.get("recipient_name")
+            or "Без имени"
+        ).strip()
+        first_name = str(
+            contact.get("first_name")
+            or name.split()[0]
+            or "Собеседник"
+        ).strip()
+        username = str(contact.get("username") or "").strip()
+
+        status_label, status_code, replied = _neona_telegram_stage_label(state)
+        sort_time = str(
+            state.get("updated_at")
+            or event.get("sent_at")
+            or ""
+        )
+        cards.append(
+            {
+                "contact_id": contact_id,
+                "name": name,
+                "first_name": first_name,
+                "username": username,
+                "event": event,
+                "state": state,
+                "context": context,
+                "status_label": status_label,
+                "status_code": status_code,
+                "replied": replied,
+                "sort_time": sort_time,
+            }
+        )
+
+    cards.sort(key=lambda item: item["sort_time"], reverse=True)
+
+    total = len(cards)
+    replied_count = sum(1 for item in cards if item["replied"])
+    waiting_count = sum(
+        1 for item in cards
+        if item["status_code"] == "waiting"
+    )
+    meeting_count = sum(
+        1 for item in cards
+        if item["status_code"] in {"meeting", "meeting_progress"}
+    )
+
+    st.caption(
+        f"Контактов: {total} · ответили: {replied_count} · "
+        f"ждём ответа: {waiting_count} · к встрече: {meeting_count}"
+    )
+
+    if total > 50:
+        st.caption(
+            "Показываю 50 самых свежих диалогов. Более старые остаются в истории."
+        )
+        cards = cards[:50]
+
+    for item in cards:
+        contact_id = int(item["contact_id"])
+        name = item["name"]
+        username = item["username"]
+        status_label = item["status_label"]
+        state = item["state"]
+        context = item["context"]
+        event = item["event"]
+
+        display_name = name
+        if username:
+            display_name += f" · @{username}"
+
+        with st.expander(
+            f"{display_name} · {status_label}",
+            expanded=False,
+        ):
+            sent_at = _format_neona_dialog_datetime(event.get("sent_at"))
+            if sent_at:
+                st.caption(f"Первое/последнее касание из Агентства: {sent_at}")
+
+            stage = str(state.get("stage") or "idle").strip()
+            if stage and stage != "idle":
+                st.caption(f"Этап Неоны: {stage}")
+
+            last_reply = str(context.get("last_reply_text") or "").strip()
+            if last_reply:
+                st.markdown("**Последний автоматический ответ Неоны:**")
+                st.write(last_reply)
+
+            history_key = (
+                f"neona_dialog_center_history_{owner_telegram_id}_{contact_id}"
+            )
+            if st.button(
+                "📖 Показать переписку",
+                key=f"neona_dialog_center_open_{owner_telegram_id}_{contact_id}",
+                use_container_width=False,
+            ):
+                try:
+                    with st.spinner("Читаем последние сообщения Telegram..."):
+                        history = run_telegram_async(
+                            fetch_telegram_private_dialog(
+                                owner_telegram_id,
+                                contact_id,
+                                limit=40,
+                            )
+                        )
+                    st.session_state[history_key] = history
+                except Exception as exc:
+                    st.error(
+                        "Не удалось открыть переписку: "
+                        + friendly_telegram_send_error(exc)
+                    )
+
+            history = st.session_state.get(history_key, [])
+            if isinstance(history, list) and history:
+                last_reply_id = int(context.get("last_reply_id") or 0)
+                st.markdown("**Последние сообщения:**")
+                for message in history[-16:]:
+                    if not isinstance(message, dict):
+                        continue
+                    message_id = int(message.get("message_id") or 0)
+                    if message.get("direction") == "от контакта":
+                        speaker = item["first_name"] or "Собеседник"
+                    elif last_reply_id and message_id == last_reply_id:
+                        speaker = "Неона"
+                    else:
+                        speaker = "Вы / Неона"
+                    st.write(
+                        f"**{speaker}:** {str(message.get('text') or '')}"
+                    )
+            elif isinstance(history, list) and history == [] and history_key in st.session_state:
+                st.info("В последних сообщениях текстовой переписки не найдено.")
+
+
 def prepare_telegram_video_note(video_bytes):
     """
     Превращает вертикальное HeyGen-видео 720x1280 в квадратный MPEG4
@@ -8465,6 +8746,17 @@ if telegram_login_valid or remembered_data:
                         except (TypeError, ValueError):
                             continue
                         candidate_by_id[normalized_id] = contact
+
+                    # --------------------------------------------------
+                    # Постоянный рабочий стол Telegram-диалогов Неоны.
+                    # Не зависит от сегодняшней пятёрки кандидатов.
+                    # --------------------------------------------------
+                    render_neona_telegram_dialog_center(
+                        telegram_id,
+                        all_contacts,
+                        sent_log_for_today,
+                    )
+                    st.divider()
 
                     # --------------------------------------------------
                     # Сегодняшняя пятёрка Стагирита прямо у Неоны.
