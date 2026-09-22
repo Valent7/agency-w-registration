@@ -71,6 +71,320 @@ def _patch_json(path, params, payload, prefer="return=representation", timeout=1
     return response.json()
 
 
+# ---------------------------------------------------------------------------
+# Закрытая директорская очередь знаний Неолы
+# ---------------------------------------------------------------------------
+
+NEOLA_STUDY_STATUSES = (
+    "Новый",
+    "Ищем источник",
+    "Источник найден",
+    "Ответ подготовлен",
+    "Ответ передан человеку",
+)
+
+
+def create_neola_study_question(
+    partner_telegram_id,
+    question,
+    *,
+    partner_name="",
+    topic="",
+    context="",
+):
+    """
+    Внутренняя функция для Неолы.
+
+    Создаёт карточку вопроса, который требует дополнительного изучения.
+    Партнёру существование этой карточки НЕ сообщается. Карточку видит
+    только корневой владелец Агентства W в директорском интерфейсе.
+
+    На этом этапе функция подготовлена как безопасная точка интеграции.
+    Автоматический вызов из диалога Неолы подключается отдельным шагом.
+    """
+    question_text = str(question or "").strip()
+    if not question_text:
+        return None
+
+    payload = {
+        "partner_telegram_id": int(partner_telegram_id),
+        "partner_name": str(partner_name or "").strip()[:200],
+        "question": question_text[:8000],
+        "topic": str(topic or "").strip()[:300],
+        "context": str(context or "").strip()[:8000],
+        "status": "Новый",
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    rows = _post_json(
+        "neola_study_questions",
+        payload,
+        prefer="return=representation",
+    )
+    return rows[0] if rows else None
+
+
+def _load_neola_study_questions(viewer_telegram_id, limit=300):
+    """
+    Возвращает карточки ТОЛЬКО корневому владельцу Агентства W.
+    Даже если функцию ошибочно вызвать из партнёрского интерфейса,
+    данные партнёру не выдаются.
+    """
+    if not _is_agency_owner(viewer_telegram_id):
+        return []
+
+    try:
+        return _get_json(
+            "neola_study_questions",
+            params={
+                "select": (
+                    "id,partner_telegram_id,partner_name,question,topic,context,"
+                    "status,source_title,source_reference,source_url,source_notes,"
+                    "prepared_answer,director_note,created_at,updated_at,answered_at"
+                ),
+                "order": "created_at.desc",
+                "limit": str(int(limit)),
+            },
+        )
+    except requests.HTTPError as exc:
+        # До применения SQL-миграции раздел остаётся безопасно пустым.
+        if exc.response is not None and exc.response.status_code in {400, 404}:
+            return []
+        raise
+
+
+def _update_neola_study_question(viewer_telegram_id, question_id, changes):
+    """Редактировать карточку может только корневой владелец Агентства W."""
+    if not _is_agency_owner(viewer_telegram_id):
+        raise RuntimeError("Раздел «Вопросы на изучение» доступен только владельцу Агентства W.")
+
+    allowed = {
+        "status",
+        "topic",
+        "source_title",
+        "source_reference",
+        "source_url",
+        "source_notes",
+        "prepared_answer",
+        "director_note",
+        "answered_at",
+    }
+    payload = {
+        key: value
+        for key, value in dict(changes or {}).items()
+        if key in allowed
+    }
+    if "status" in payload and payload["status"] not in NEOLA_STUDY_STATUSES:
+        raise RuntimeError("Неизвестный статус карточки.")
+    payload["updated_at"] = _now_iso()
+
+    rows = _patch_json(
+        "neola_study_questions",
+        {"id": f"eq.{int(question_id)}"},
+        payload,
+        prefer="return=representation",
+    )
+    return rows[0] if rows else None
+
+
+def _study_question_partner_label(row):
+    name = str(row.get("partner_name") or "").strip()
+    partner_id = row.get("partner_telegram_id")
+    if name and partner_id:
+        return f"{name} · Telegram {partner_id}"
+    if name:
+        return name
+    if partner_id:
+        return f"Telegram {partner_id}"
+    return "Партнёр"
+
+
+def _study_question_date_label(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC_TZ)
+        return parsed.astimezone(BERLIN_TZ).strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return raw
+
+
+def render_neola_study_questions(viewer_telegram_id):
+    """
+    Закрытый кабинет роста знаний Неолы.
+    Функция сама проверяет роль владельца и ничего не показывает партнёрам.
+    """
+    if not _is_agency_owner(viewer_telegram_id):
+        return
+
+    st.markdown("### 📚 Вопросы на изучение")
+    st.caption(
+        "Закрытый раздел Директора. Партнёры его не видят. "
+        "Здесь остаются вопросы, для которых Неоле нужен более точный и надёжный ответ."
+    )
+
+    try:
+        rows = _load_neola_study_questions(viewer_telegram_id)
+    except Exception as exc:
+        st.error(f"Не удалось загрузить вопросы Неолы: {exc}")
+        return
+
+    counts = {status: 0 for status in NEOLA_STUDY_STATUSES}
+    for row in rows:
+        status = str(row.get("status") or "Новый")
+        if status in counts:
+            counts[status] += 1
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Новые", counts["Новый"])
+    c2.metric("Ищем источник", counts["Ищем источник"])
+    c3.metric(
+        "Готовится ответ",
+        counts["Источник найден"] + counts["Ответ подготовлен"],
+    )
+    c4.metric("Передано человеку", counts["Ответ передан человеку"])
+
+    filter_value = st.segmented_control(
+        "Статус",
+        ["Все", *NEOLA_STUDY_STATUSES],
+        default="Все",
+        key=f"neola_study_filter_{viewer_telegram_id}",
+    )
+
+    filtered = [
+        row
+        for row in rows
+        if filter_value == "Все"
+        or str(row.get("status") or "Новый") == filter_value
+    ]
+
+    if not filtered:
+        st.info(
+            "В этой категории вопросов пока нет. "
+            "Когда Неола зафиксирует вопрос на изучение, он появится здесь."
+        )
+        return
+
+    for row in filtered:
+        question_id = int(row.get("id") or 0)
+        if not question_id:
+            continue
+
+        status = str(row.get("status") or "Новый")
+        topic = str(row.get("topic") or "").strip()
+        question = str(row.get("question") or "").strip()
+        created_label = _study_question_date_label(row.get("created_at"))
+        partner_label = _study_question_partner_label(row)
+
+        title = f"{status} · {topic or 'Тема не определена'} · {partner_label}"
+        with st.expander(title, expanded=status == "Новый"):
+            st.markdown("**Вопрос партнёра**")
+            st.write(question or "—")
+            st.caption(f"Получен: {created_label}")
+
+            context = str(row.get("context") or "").strip()
+            if context:
+                with st.expander("Контекст диалога", expanded=False):
+                    st.write(context)
+
+            status_options = list(NEOLA_STUDY_STATUSES)
+            status_index = (
+                status_options.index(status)
+                if status in status_options
+                else 0
+            )
+            selected_status = st.selectbox(
+                "Статус работы",
+                status_options,
+                index=status_index,
+                key=f"neola_study_status_{question_id}",
+            )
+            topic_value = st.text_input(
+                "Тема",
+                value=topic,
+                key=f"neola_study_topic_{question_id}",
+                placeholder="Например: устойчивость, отказ, доминанта, смысл",
+            )
+
+            st.markdown("**Источник ответа**")
+            source_title = st.text_input(
+                "Автор / название",
+                value=str(row.get("source_title") or ""),
+                key=f"neola_study_source_title_{question_id}",
+                placeholder="Например: Виктор Франкл — «Сказать жизни „Да!“»",
+            )
+            source_reference = st.text_input(
+                "Глава / статья / страницы / DOI",
+                value=str(row.get("source_reference") or ""),
+                key=f"neola_study_source_ref_{question_id}",
+                placeholder="Точное место в источнике, если известно",
+            )
+            source_url = st.text_input(
+                "Ссылка на источник",
+                value=str(row.get("source_url") or ""),
+                key=f"neola_study_source_url_{question_id}",
+                placeholder="https://…",
+            )
+            source_notes = st.text_area(
+                "Что именно подтверждает источник",
+                value=str(row.get("source_notes") or ""),
+                key=f"neola_study_source_notes_{question_id}",
+                height=100,
+            )
+
+            prepared_answer = st.text_area(
+                "Подготовленный ответ Неолы",
+                value=str(row.get("prepared_answer") or ""),
+                key=f"neola_study_answer_{question_id}",
+                height=150,
+                placeholder=(
+                    "Ответ, который Неола сможет озвучить партнёру после проверки."
+                ),
+            )
+            director_note = st.text_area(
+                "Заметка Директора",
+                value=str(row.get("director_note") or ""),
+                key=f"neola_study_director_note_{question_id}",
+                height=90,
+            )
+
+            if st.button(
+                "💾 Сохранить карточку",
+                type="primary",
+                key=f"neola_study_save_{question_id}",
+            ):
+                answered_at = row.get("answered_at")
+                if (
+                    selected_status == "Ответ передан человеку"
+                    and not answered_at
+                ):
+                    answered_at = _now_iso()
+
+                try:
+                    _update_neola_study_question(
+                        viewer_telegram_id,
+                        question_id,
+                        {
+                            "status": selected_status,
+                            "topic": topic_value.strip(),
+                            "source_title": source_title.strip(),
+                            "source_reference": source_reference.strip(),
+                            "source_url": source_url.strip(),
+                            "source_notes": source_notes.strip(),
+                            "prepared_answer": prepared_answer.strip(),
+                            "director_note": director_note.strip(),
+                            "answered_at": answered_at,
+                        },
+                    )
+                    st.success("Карточка сохранена.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Не удалось сохранить карточку: {exc}")
+
+
 def load_agency_members():
     return _get_json(
         "agency_members",
@@ -1383,6 +1697,30 @@ def render_neola_agent(telegram_id, owner_name, ui_context, ask_openai_fn):
         return
 
     step = int((activation or {}).get("onboarding_step") or 0)
+
+    if _is_agency_owner(telegram_id):
+        mentor_tab, study_tab = st.tabs(
+            ["🎙 Неола", "📚 Вопросы на изучение"]
+        )
+        with mentor_tab:
+            st.progress(
+                min(max(step / 7.0, 0.0), 1.0),
+                text=f"Прогресс Неолы: {step}/7",
+            )
+            with st.container(border=True):
+                _render_neola_conversation(
+                    telegram_id,
+                    owner_name,
+                    ui_context,
+                    ask_openai_fn,
+                    compact=False,
+                )
+        with study_tab:
+            render_neola_study_questions(telegram_id)
+        return
+
+    # Обычный партнёр видит только наставника.
+    # Директорская очередь вопросов для него не существует даже в интерфейсе.
     st.progress(min(max(step / 7.0, 0.0), 1.0), text=f"Прогресс Неолы: {step}/7")
     with st.container(border=True):
         _render_neola_conversation(
