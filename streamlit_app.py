@@ -122,7 +122,7 @@ from pathlib import Path
 from io import BytesIO
 
 from PIL import Image
-from telethon import TelegramClient
+from telethon import TelegramClient, functions
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest, GetStatusesRequest
 from telethon.tl.functions.users import GetFullUserRequest
@@ -1583,6 +1583,35 @@ def get_telegram_api_credentials():
     return api_id, api_hash
 
 
+def _telegram_code_type_name(value):
+    if value is None:
+        return ""
+    return type(value).__name__
+
+
+def _telegram_code_delivery_label(type_name):
+    name = str(type_name or "").lower()
+    if "email" in name:
+        return "код отправлен на привязанную к Telegram электронную почту"
+    if "fragment" in name:
+        return "код отправлен через Fragment"
+    if "sms" in name:
+        return "код должен прийти по SMS"
+    if "missedcall" in name or "missed_call" in name:
+        return "код передаётся через пропущенный звонок"
+    if "flashcall" in name or "flash_call" in name:
+        return "код передаётся через короткий звонок"
+    if "call" in name:
+        return "код должен прийти через звонок Telegram"
+    if "app" in name:
+        return "код отправлен в Telegram на уже авторизованное устройство"
+    if "set up email" in name or "setupemail" in name:
+        return "Telegram просит настроить электронную почту для получения кода"
+    if name:
+        return f"Telegram выбрал способ доставки: {type_name}"
+    return "Telegram принял запрос на код"
+
+
 async def request_telegram_login_code(phone):
     api_id, api_hash = get_telegram_api_credentials()
     client = TelegramClient(StringSession(), api_id, api_hash)
@@ -1596,7 +1625,58 @@ async def request_telegram_login_code(phone):
             "pending_session": encrypt_telegram_session(
                 client.session.save()
             ),
-            "phone_code_hash": sent_code.phone_code_hash,
+            "phone_code_hash": str(
+                getattr(sent_code, "phone_code_hash", "") or ""
+            ),
+            "delivery_type": _telegram_code_type_name(
+                getattr(sent_code, "type", None)
+            ),
+            "next_type": _telegram_code_type_name(
+                getattr(sent_code, "next_type", None)
+            ),
+            "timeout": int(getattr(sent_code, "timeout", 0) or 0),
+        }
+    finally:
+        await client.disconnect()
+
+
+async def resend_telegram_login_code(
+    phone,
+    pending_session,
+    phone_code_hash,
+):
+    session_string = decrypt_telegram_session(pending_session)
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+
+    await client.connect()
+    try:
+        sent_code = await client(
+            functions.auth.ResendCodeRequest(
+                str(phone).strip(),
+                str(phone_code_hash or "").strip(),
+            )
+        )
+        return {
+            "pending_session": encrypt_telegram_session(
+                client.session.save()
+            ),
+            "phone_code_hash": str(
+                getattr(sent_code, "phone_code_hash", "")
+                or phone_code_hash
+                or ""
+            ),
+            "delivery_type": _telegram_code_type_name(
+                getattr(sent_code, "type", None)
+            ),
+            "next_type": _telegram_code_type_name(
+                getattr(sent_code, "next_type", None)
+            ),
+            "timeout": int(getattr(sent_code, "timeout", 0) or 0),
         }
     finally:
         await client.disconnect()
@@ -1635,6 +1715,11 @@ async def verify_telegram_login_code(
             }
 
         telegram_user = await client.get_me()
+        if telegram_user is None:
+            raise RuntimeError(
+                "Telegram не завершил вход. Проверьте, что введён именно "
+                "полученный код, либо запросите код повторно."
+            )
 
         return {
             "needs_password": False,
@@ -5599,6 +5684,9 @@ def render_telegram_connection(expected_telegram_id):
     phone_key = f"telegram_phone_{expected_telegram_id}"
     pending_key = f"telegram_pending_session_{expected_telegram_id}"
     hash_key = f"telegram_phone_code_hash_{expected_telegram_id}"
+    delivery_key = f"telegram_code_delivery_{expected_telegram_id}"
+    next_delivery_key = f"telegram_code_next_delivery_{expected_telegram_id}"
+    timeout_key = f"telegram_code_timeout_{expected_telegram_id}"
     password_step_key = f"telegram_needs_password_{expected_telegram_id}"
 
     if connected_key not in st.session_state:
@@ -5645,6 +5733,9 @@ def render_telegram_connection(expected_telegram_id):
 
                 st.session_state[pending_key] = result["pending_session"]
                 st.session_state[hash_key] = result["phone_code_hash"]
+                st.session_state[delivery_key] = result.get("delivery_type", "")
+                st.session_state[next_delivery_key] = result.get("next_type", "")
+                st.session_state[timeout_key] = int(result.get("timeout", 0) or 0)
                 st.rerun()
 
             except PhoneNumberInvalidError:
@@ -5701,6 +5792,68 @@ def render_telegram_connection(expected_telegram_id):
 
         return False
 
+    delivery_type = str(st.session_state.get(delivery_key) or "")
+    next_delivery = str(st.session_state.get(next_delivery_key) or "")
+    timeout_seconds = int(st.session_state.get(timeout_key, 0) or 0)
+
+    st.info(_telegram_code_delivery_label(delivery_type))
+    if next_delivery:
+        st.caption(
+            "Если код не придёт, Telegram допускает следующий способ: "
+            + _telegram_code_delivery_label(next_delivery).replace("код ", "", 1)
+            + (f". Ориентировочно через {timeout_seconds} сек." if timeout_seconds else ".")
+        )
+
+    resend_col, restart_col = st.columns(2)
+    if resend_col.button(
+        "🔄 Код не пришёл — отправить повторно",
+        key=f"telegram_resend_code_{expected_telegram_id}",
+        use_container_width=True,
+    ):
+        try:
+            result = run_telegram_async(
+                resend_telegram_login_code(
+                    phone.strip(),
+                    st.session_state[pending_key],
+                    st.session_state[hash_key],
+                )
+            )
+            st.session_state[pending_key] = result["pending_session"]
+            st.session_state[hash_key] = result["phone_code_hash"]
+            st.session_state[delivery_key] = result.get("delivery_type", "")
+            st.session_state[next_delivery_key] = result.get("next_type", "")
+            st.session_state[timeout_key] = int(result.get("timeout", 0) or 0)
+            st.success("Telegram принял повторный запрос. Проверьте способ доставки выше.")
+            st.rerun()
+        except PhoneCodeExpiredError:
+            st.session_state.pop(pending_key, None)
+            st.session_state.pop(hash_key, None)
+            st.session_state.pop(delivery_key, None)
+            st.session_state.pop(next_delivery_key, None)
+            st.session_state.pop(timeout_key, None)
+            st.warning("Старый запрос истёк. Нажмите «Получить код Telegram» ещё раз.")
+            st.rerun()
+        except FloodWaitError as exc:
+            seconds = int(getattr(exc, "seconds", 0) or 0)
+            st.warning(
+                "Telegram временно ограничил повторные запросы. "
+                + (f"Подождите около {seconds} сек." if seconds else "Попробуйте немного позже.")
+            )
+        except Exception as exc:
+            st.error(f"Не удалось повторно запросить код: {exc}")
+
+    if restart_col.button(
+        "↩️ Начать подключение заново",
+        key=f"telegram_restart_login_{expected_telegram_id}",
+        use_container_width=True,
+    ):
+        for key in (
+            pending_key, hash_key, delivery_key, next_delivery_key,
+            timeout_key, password_step_key,
+        ):
+            st.session_state.pop(key, None)
+        st.rerun()
+
     code = st.text_input(
         "Код из Telegram",
         placeholder="12345",
@@ -5711,7 +5864,11 @@ def render_telegram_connection(expected_telegram_id):
         "Подтвердить код",
         type="primary",
         key=f"telegram_confirm_code_{expected_telegram_id}",
+        disabled=not bool(code.strip()),
     ):
+        if not code.strip():
+            st.warning("Сначала введите код, который прислал Telegram.")
+            return False
         try:
             result = run_telegram_async(
                 verify_telegram_login_code(
@@ -5742,6 +5899,9 @@ def render_telegram_connection(expected_telegram_id):
             st.session_state[connected_key] = True
             st.session_state.pop(pending_key, None)
             st.session_state.pop(hash_key, None)
+            st.session_state.pop(delivery_key, None)
+            st.session_state.pop(next_delivery_key, None)
+            st.session_state.pop(timeout_key, None)
             st.rerun()
 
         except PhoneCodeInvalidError:
@@ -5750,6 +5910,9 @@ def render_telegram_connection(expected_telegram_id):
         except PhoneCodeExpiredError:
             st.session_state.pop(pending_key, None)
             st.session_state.pop(hash_key, None)
+            st.session_state.pop(delivery_key, None)
+            st.session_state.pop(next_delivery_key, None)
+            st.session_state.pop(timeout_key, None)
             st.error("Срок действия кода закончился. Получите новый код.")
 
         except Exception as exc:
@@ -6374,17 +6537,11 @@ if telegram_login_valid or remembered_data:
             f"## {greeting}, {first_name}! {greeting_icon}"
         )
         
-        telegram_connected = render_telegram_connection(telegram_id)
-        st.session_state["neonia_telegram_connected"] = telegram_connected
-
-        if not telegram_connected:
-            st.stop()
-
         # ---------------------------------------------------------
         # ШЛЮЗ АКТИВАЦИИ НОВОГО ПАРТНЁРА
-        # До подтверждения 5 лож Neonexa рабочий кабинет не открывается.
-        # При этом партнёр обязательно должен иметь доступ к экрану,
-        # где он сам загружает скриншот подтверждения.
+        # Сначала партнёр подтверждает 5 лож Neonexa скриншотом.
+        # Только ПОСЛЕ подтверждения владельцем просим подключить Telegram.
+        # Так ошибка/задержка доставки Telegram-кода не блокирует активацию.
         # ---------------------------------------------------------
         try:
             entry_activation = ensure_partner_activation(int(telegram_id))
@@ -6403,8 +6560,8 @@ if telegram_login_valid or remembered_data:
                 "не менее 5 лож в Neonexa."
             )
             st.caption(
-                "До подтверждения скриншота рабочие разделы Агентства W "
-                "и Неола недоступны."
+                "Загрузите скриншот подтверждения. После проверки владельцем "
+                "Агентства W откроется следующий шаг — подключение Telegram."
             )
 
             # render_neola_agent при неподтверждённой активации
@@ -6415,6 +6572,13 @@ if telegram_login_valid or remembered_data:
                 "🔐 Активация доступа",
                 ask_openai,
             )
+            st.stop()
+
+        # Telegram подключаем только после подтверждения 5 лож.
+        telegram_connected = render_telegram_connection(telegram_id)
+        st.session_state["neonia_telegram_connected"] = telegram_connected
+
+        if not telegram_connected:
             st.stop()
 
         instagram_connected = render_instagram_connection(
