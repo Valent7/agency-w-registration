@@ -5703,11 +5703,11 @@ def render_telegram_connection(expected_telegram_id):
         st.success("🟢 Telegram подключён")
         return True
 
-    st.subheader("Подключение Telegram")
+    st.subheader("Подключение рабочего Telegram")
 
     st.write(
-        "Подключите Telegram один раз. "
-        "После этого Неония сможет работать с доступными контактами и чатами."
+        "Это не вход на сайт Агентства W. Подключение нужно Неонии только для работы "
+        "с доступными Telegram-контактами и чатами. Его можно выполнить позже."
     )
 
     phone = st.text_input(
@@ -6574,12 +6574,33 @@ if telegram_login_valid or remembered_data:
             )
             st.stop()
 
-        # Telegram подключаем только после подтверждения 5 лож.
-        telegram_connected = render_telegram_connection(telegram_id)
-        st.session_state["neonia_telegram_connected"] = telegram_connected
+        # После подтверждения 5 лож доступ к Агентству W уже открыт.
+        # Рабочий Telegram для Неонии — отдельное подключение и НЕ является шлюзом входа.
+        # Если с Telegram-кодом есть проблема, партнёр всё равно может пользоваться сайтом,
+        # а подключение Telegram завершить позже.
+        try:
+            existing_telegram_session = load_telegram_session_from_supabase(
+                int(telegram_id)
+            )
+        except Exception:
+            existing_telegram_session = ""
 
-        if not telegram_connected:
-            st.stop()
+        if existing_telegram_session:
+            telegram_connected = True
+            st.session_state[f"telegram_connected_{int(telegram_id)}"] = True
+            st.caption("🟢 Рабочий Telegram подключён для Неонии")
+        else:
+            with st.expander(
+                "📱 Подключить Telegram для Неонии — можно позже",
+                expanded=False,
+            ):
+                st.caption(
+                    "Доступ к Агентству W уже открыт. Этот шаг нужен только для "
+                    "работы Неонии с Telegram-контактами и чатами и не блокирует сайт."
+                )
+                telegram_connected = render_telegram_connection(telegram_id)
+
+        st.session_state["neonia_telegram_connected"] = bool(telegram_connected)
 
         instagram_connected = render_instagram_connection(
             int(telegram_id),
