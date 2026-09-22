@@ -74,11 +74,13 @@ mark_first_message_retry_for_stagirite = getattr(
     lambda *args, **kwargs: None,
 )
 from neola_partner_center import (
+    _is_agency_owner as is_agency_owner,
     activation_is_confirmed,
     activation_label,
     ensure_partner_activation,
     render_neola_agent,
     render_neola_quick_assistant,
+    render_neola_study_questions,
     render_partner_center,
 )
 from neola_realtime_voice import render_neola_realtime_voice
@@ -11844,12 +11846,33 @@ if telegram_login_valid or remembered_data:
                             min(max(neola_agent_step / 7.0, 0.0), 1.0),
                             text=f"Прогресс Неолы: {neola_agent_step}/7",
                         )
-                        render_neola_realtime_voice(
-                            int(telegram_id),
-                            neola_first_name,
-                            "🤖 Агенты → 🧭 Стагирит → Неола",
-                            neola_agent_step,
-                        )
+
+                        # У корневого владельца Агентства W есть закрытый
+                        # директорский раздел роста знаний Неолы.
+                        # Обычный партнёр даже вкладку «Вопросы на изучение»
+                        # не видит.
+                        if is_agency_owner(int(telegram_id)):
+                            neola_voice_tab, neola_study_tab = st.tabs(
+                                ["🎙 Неола", "📚 Вопросы на изучение"]
+                            )
+                            with neola_voice_tab:
+                                render_neola_realtime_voice(
+                                    int(telegram_id),
+                                    neola_first_name,
+                                    "🤖 Агенты → 🧭 Стагирит → Неола",
+                                    neola_agent_step,
+                                )
+                            with neola_study_tab:
+                                render_neola_study_questions(
+                                    int(telegram_id)
+                                )
+                        else:
+                            render_neola_realtime_voice(
+                                int(telegram_id),
+                                neola_first_name,
+                                "🤖 Агенты → 🧭 Стагирит → Неола",
+                                neola_agent_step,
+                            )
                     else:
                         # До подтверждения 5 лож сохраняем прежний экран
                         # загрузки/подтверждения активации.
