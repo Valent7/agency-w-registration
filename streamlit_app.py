@@ -81,6 +81,7 @@ from neola_partner_center import (
     render_neola_agent,
     render_neola_quick_assistant,
     render_neola_study_questions,
+    render_neola_knowledge_base,
     render_partner_center,
 )
 from neola_realtime_voice import render_neola_realtime_voice
@@ -11852,8 +11853,8 @@ if telegram_login_valid or remembered_data:
                         # Обычный партнёр даже вкладку «Вопросы на изучение»
                         # не видит.
                         if is_agency_owner(int(telegram_id)):
-                            neola_voice_tab, neola_study_tab = st.tabs(
-                                ["🎙 Неола", "📚 Вопросы на изучение"]
+                            neola_voice_tab, neola_study_tab, neola_knowledge_tab = st.tabs(
+                                ["🎙 Неола", "📚 Вопросы на изучение", "🧠 База знаний"]
                             )
                             with neola_voice_tab:
                                 render_neola_realtime_voice(
@@ -11864,6 +11865,10 @@ if telegram_login_valid or remembered_data:
                                 )
                             with neola_study_tab:
                                 render_neola_study_questions(
+                                    int(telegram_id)
+                                )
+                            with neola_knowledge_tab:
+                                render_neola_knowledge_base(
                                     int(telegram_id)
                                 )
                         else:

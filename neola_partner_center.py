@@ -1,6 +1,8 @@
 import base64
+import hashlib
 import json
 import re
+from urllib.parse import quote
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -383,6 +385,438 @@ def render_neola_study_questions(viewer_telegram_id):
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Не удалось сохранить карточку: {exc}")
+
+
+
+
+# ---------------------------------------------------------------------------
+# Закрытая база знаний Неолы
+# ---------------------------------------------------------------------------
+
+NEOLA_KNOWLEDGE_BUCKET = "neola-knowledge"
+NEOLA_KNOWLEDGE_SOURCE_TYPES = (
+    "Внутренний документ Агентства W",
+    "Книга / первоисточник",
+    "Научная статья",
+    "Научный обзор / метаанализ",
+    "Философский труд",
+    "Практический материал",
+    "Другое",
+)
+NEOLA_KNOWLEDGE_TRUST_LEVELS = (
+    "Внутренний стандарт Агентства W",
+    "Первоисточник автора",
+    "Рецензируемое научное исследование",
+    "Научный обзор / метаанализ",
+    "Философский источник",
+    "Требует дополнительной проверки",
+)
+NEOLA_KNOWLEDGE_STATUSES = ("Одобрен", "Черновик", "Архив")
+
+
+def _storage_object_url(bucket, path):
+    base = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+    safe_bucket = quote(str(bucket), safe="")
+    safe_path = quote(str(path), safe="/")
+    return f"{base}/storage/v1/object/{safe_bucket}/{safe_path}"
+
+
+def _upload_neola_knowledge_file(viewer_telegram_id, uploaded_file):
+    """Сохраняет оригинал источника в приватный Supabase Storage."""
+    if not _is_agency_owner(viewer_telegram_id):
+        raise RuntimeError("База знаний доступна только владельцу Агентства W.")
+
+    file_bytes = uploaded_file.getvalue()
+    if not file_bytes:
+        raise RuntimeError("Файл пуст.")
+    if len(file_bytes) > 50 * 1024 * 1024:
+        raise RuntimeError("Файл слишком большой. Максимум 50 МБ.")
+
+    original_name = str(getattr(uploaded_file, "name", "source.bin") or "source.bin")
+    safe_name = re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", original_name).strip("._")
+    safe_name = safe_name[:140] or "source.bin"
+    stamp = datetime.now(UTC_TZ).strftime("%Y%m%dT%H%M%S%fZ")
+    storage_path = f"sources/{stamp}_{safe_name}"
+    mime_type = str(getattr(uploaded_file, "type", "") or "application/octet-stream")
+
+    response = requests.post(
+        _storage_object_url(NEOLA_KNOWLEDGE_BUCKET, storage_path),
+        headers={
+            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+            "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+            "Content-Type": mime_type,
+            "x-upsert": "false",
+        },
+        data=file_bytes,
+        timeout=120,
+    )
+    response.raise_for_status()
+    return {
+        "storage_bucket": NEOLA_KNOWLEDGE_BUCKET,
+        "storage_path": storage_path,
+        "original_filename": original_name[:255],
+        "mime_type": mime_type[:150],
+        "file_size_bytes": len(file_bytes),
+        "content_sha256": hashlib.sha256(file_bytes).hexdigest(),
+    }
+
+
+def _find_neola_knowledge_source_by_hash(viewer_telegram_id, content_sha256):
+    if not _is_agency_owner(viewer_telegram_id) or not content_sha256:
+        return None
+    rows = _get_json(
+        "neola_knowledge_sources",
+        params={
+            "content_sha256": f"eq.{content_sha256}",
+            "select": "id,title,author,original_filename,status",
+            "limit": "1",
+        },
+    )
+    return rows[0] if rows else None
+
+
+def create_neola_knowledge_source(
+    viewer_telegram_id,
+    *,
+    title,
+    author="",
+    source_type="Книга / первоисточник",
+    knowledge_area="",
+    publication_year=None,
+    trust_level="Первоисточник автора",
+    purpose="",
+    notes="",
+    status="Одобрен",
+    uploaded_file=None,
+):
+    """Создаёт утверждённый Директором источник знаний Неолы."""
+    if not _is_agency_owner(viewer_telegram_id):
+        raise RuntimeError("Добавлять знания Неоле может только владелец Агентства W.")
+
+    clean_title = str(title or "").strip()
+    if not clean_title:
+        raise RuntimeError("Укажите название источника.")
+    if source_type not in NEOLA_KNOWLEDGE_SOURCE_TYPES:
+        raise RuntimeError("Неизвестный тип источника.")
+    if trust_level not in NEOLA_KNOWLEDGE_TRUST_LEVELS:
+        raise RuntimeError("Неизвестный уровень доверия.")
+    if status not in NEOLA_KNOWLEDGE_STATUSES:
+        raise RuntimeError("Неизвестный статус источника.")
+
+    file_meta = {}
+    if uploaded_file is not None:
+        raw = uploaded_file.getvalue()
+        content_hash = hashlib.sha256(raw).hexdigest() if raw else ""
+        duplicate = _find_neola_knowledge_source_by_hash(
+            viewer_telegram_id, content_hash
+        ) if content_hash else None
+        if duplicate:
+            raise RuntimeError(
+                "Этот файл уже есть в базе знаний: "
+                + str(duplicate.get("title") or duplicate.get("original_filename") or "источник")
+            )
+        file_meta = _upload_neola_knowledge_file(
+            viewer_telegram_id, uploaded_file
+        )
+
+    year_value = None
+    try:
+        if publication_year not in {None, "", 0}:
+            year_value = int(publication_year)
+    except (TypeError, ValueError):
+        year_value = None
+
+    payload = {
+        "title": clean_title[:500],
+        "author": str(author or "").strip()[:300] or None,
+        "source_type": source_type,
+        "knowledge_area": str(knowledge_area or "").strip()[:300] or None,
+        "publication_year": year_value,
+        "trust_level": trust_level,
+        "purpose": str(purpose or "").strip()[:4000] or None,
+        "notes": str(notes or "").strip()[:8000] or None,
+        "status": status,
+        "processing_status": (
+            "Файл сохранён — ожидает индексации"
+            if file_meta else "Источник без файла — ожидает наполнения"
+        ),
+        "added_by": int(viewer_telegram_id),
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+        **file_meta,
+    }
+    rows = _post_json(
+        "neola_knowledge_sources",
+        payload,
+        prefer="return=representation",
+        timeout=30,
+    )
+    return rows[0] if rows else None
+
+
+def _load_neola_knowledge_sources(viewer_telegram_id, limit=500):
+    if not _is_agency_owner(viewer_telegram_id):
+        return []
+    try:
+        return _get_json(
+            "neola_knowledge_sources",
+            params={
+                "select": (
+                    "id,title,author,source_type,knowledge_area,publication_year,"
+                    "trust_level,purpose,notes,status,processing_status,"
+                    "storage_bucket,storage_path,original_filename,mime_type,"
+                    "file_size_bytes,content_sha256,added_by,created_at,updated_at,indexed_at"
+                ),
+                "order": "created_at.desc",
+                "limit": str(int(limit)),
+            },
+        )
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code in {400, 404}:
+            return []
+        raise
+
+
+def _update_neola_knowledge_source(viewer_telegram_id, source_id, changes):
+    if not _is_agency_owner(viewer_telegram_id):
+        raise RuntimeError("База знаний доступна только владельцу Агентства W.")
+    allowed = {
+        "title", "author", "source_type", "knowledge_area",
+        "publication_year", "trust_level", "purpose", "notes", "status",
+    }
+    payload = {
+        key: value
+        for key, value in dict(changes or {}).items()
+        if key in allowed
+    }
+    if payload.get("source_type") and payload["source_type"] not in NEOLA_KNOWLEDGE_SOURCE_TYPES:
+        raise RuntimeError("Неизвестный тип источника.")
+    if payload.get("trust_level") and payload["trust_level"] not in NEOLA_KNOWLEDGE_TRUST_LEVELS:
+        raise RuntimeError("Неизвестный уровень доверия.")
+    if payload.get("status") and payload["status"] not in NEOLA_KNOWLEDGE_STATUSES:
+        raise RuntimeError("Неизвестный статус источника.")
+    payload["updated_at"] = _now_iso()
+    rows = _patch_json(
+        "neola_knowledge_sources",
+        {"id": f"eq.{int(source_id)}"},
+        payload,
+        prefer="return=representation",
+    )
+    return rows[0] if rows else None
+
+
+def _knowledge_file_size_label(value):
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if size <= 0:
+        return "—"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} КБ"
+    return f"{size / (1024 * 1024):.1f} МБ"
+
+
+def render_neola_knowledge_base(viewer_telegram_id):
+    """Закрытая библиотека знаний Неолы. Партнёры её не видят."""
+    if not _is_agency_owner(viewer_telegram_id):
+        return
+
+    st.markdown("### 🧠 База знаний Неолы")
+    st.caption(
+        "Закрытая библиотека Директора. Здесь хранятся только те источники, "
+        "которые вы разрешили Неоле использовать. Партнёры эту библиотеку не видят."
+    )
+
+    try:
+        rows = _load_neola_knowledge_sources(viewer_telegram_id)
+    except Exception as exc:
+        st.error(f"Не удалось загрузить базу знаний Неолы: {exc}")
+        return
+
+    approved = sum(1 for row in rows if row.get("status") == "Одобрен")
+    scientific = sum(
+        1 for row in rows
+        if row.get("source_type") in {"Научная статья", "Научный обзор / метаанализ"}
+    )
+    with_files = sum(1 for row in rows if row.get("storage_path"))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Источников", len(rows))
+    c2.metric("Одобрено", approved)
+    c3.metric("Научные", scientific)
+    c4.metric("Файлы сохранены", with_files)
+
+    with st.expander("➕ Добавить источник", expanded=not bool(rows)):
+        with st.form(f"neola_knowledge_add_{int(viewer_telegram_id)}", clear_on_submit=False):
+            title = st.text_input(
+                "Название *",
+                placeholder="Например: Сказать жизни «Да!»",
+            )
+            author = st.text_input(
+                "Автор",
+                placeholder="Например: Виктор Франкл",
+            )
+            col_a, col_b = st.columns(2)
+            source_type = col_a.selectbox(
+                "Тип источника",
+                NEOLA_KNOWLEDGE_SOURCE_TYPES,
+                index=1,
+            )
+            trust_level = col_b.selectbox(
+                "Уровень доверия / статус знания",
+                NEOLA_KNOWLEDGE_TRUST_LEVELS,
+                index=1,
+            )
+            col_c, col_d = st.columns(2)
+            knowledge_area = col_c.text_input(
+                "Область знаний",
+                placeholder="Смысл, устойчивость, внимание, наставничество…",
+            )
+            publication_year = col_d.number_input(
+                "Год издания / публикации",
+                min_value=0,
+                max_value=2200,
+                value=0,
+                step=1,
+                help="Можно оставить 0, если год неважен или неизвестен.",
+            )
+            purpose = st.text_area(
+                "Для чего этот источник нужен Неоле",
+                placeholder="Какие вопросы и ситуации он помогает разбирать.",
+                height=90,
+            )
+            notes = st.text_area(
+                "Заметка Директора",
+                placeholder="Границы применения, важные оговорки, что считать особенно ценным.",
+                height=90,
+            )
+            uploaded = st.file_uploader(
+                "Файл источника",
+                type=["pdf", "txt", "md", "docx"],
+                help="PDF, DOCX, TXT или MD. До 50 МБ. Файл хранится в приватном хранилище.",
+            )
+            status = st.selectbox(
+                "Статус",
+                NEOLA_KNOWLEDGE_STATUSES,
+                index=0,
+            )
+            submitted = st.form_submit_button(
+                "📥 Добавить в базу знаний",
+                type="primary",
+            )
+
+        if submitted:
+            try:
+                with st.spinner("Сохраняю источник в закрытой библиотеке Неолы..."):
+                    create_neola_knowledge_source(
+                        viewer_telegram_id,
+                        title=title,
+                        author=author,
+                        source_type=source_type,
+                        knowledge_area=knowledge_area,
+                        publication_year=publication_year,
+                        trust_level=trust_level,
+                        purpose=purpose,
+                        notes=notes,
+                        status=status,
+                        uploaded_file=uploaded,
+                    )
+                st.success("Источник добавлен в базу знаний Неолы.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось добавить источник: {exc}")
+
+    if not rows:
+        st.info(
+            "База пока пуста. Начнём с Конституции Неолы, архитектуры Агентства W, "
+            "затем добавим выбранные вами источники Франкла и Ухтомского."
+        )
+        return
+
+    st.caption(
+        "Сейчас источники надёжно сохраняются и каталогизируются. "
+        "Интеллектуальный поиск по тексту и автоматическое цитирование подключим следующим этапом."
+    )
+
+    status_filter = st.segmented_control(
+        "Показать",
+        ["Все", *NEOLA_KNOWLEDGE_STATUSES],
+        default="Все",
+        key=f"neola_knowledge_status_filter_{viewer_telegram_id}",
+    )
+    filtered = [
+        row for row in rows
+        if status_filter == "Все" or row.get("status") == status_filter
+    ]
+
+    for row in filtered:
+        source_id = int(row.get("id") or 0)
+        if not source_id:
+            continue
+        title_value = str(row.get("title") or "Без названия")
+        author_value = str(row.get("author") or "").strip()
+        label = title_value + (f" · {author_value}" if author_value else "")
+        with st.expander(label, expanded=False):
+            st.caption(
+                f"{row.get('source_type') or 'Источник'} · "
+                f"{row.get('trust_level') or '—'} · "
+                f"статус: {row.get('status') or '—'}"
+            )
+            if row.get("original_filename"):
+                st.write(
+                    f"**Файл:** {row.get('original_filename')} · "
+                    f"{_knowledge_file_size_label(row.get('file_size_bytes'))}"
+                )
+            st.write(
+                f"**Состояние обработки:** {row.get('processing_status') or '—'}"
+            )
+            if row.get("purpose"):
+                st.write(f"**Для чего Неоле:** {row.get('purpose')}")
+            if row.get("notes"):
+                st.write(f"**Заметка:** {row.get('notes')}")
+
+            source_status = str(row.get("status") or "Одобрен")
+            status_index = (
+                list(NEOLA_KNOWLEDGE_STATUSES).index(source_status)
+                if source_status in NEOLA_KNOWLEDGE_STATUSES else 0
+            )
+            edited_status = st.selectbox(
+                "Статус источника",
+                NEOLA_KNOWLEDGE_STATUSES,
+                index=status_index,
+                key=f"neola_knowledge_edit_status_{source_id}",
+            )
+            edited_purpose = st.text_area(
+                "Для чего Неоле",
+                value=str(row.get("purpose") or ""),
+                key=f"neola_knowledge_edit_purpose_{source_id}",
+                height=80,
+            )
+            edited_notes = st.text_area(
+                "Заметка Директора",
+                value=str(row.get("notes") or ""),
+                key=f"neola_knowledge_edit_notes_{source_id}",
+                height=80,
+            )
+            if st.button(
+                "💾 Сохранить изменения",
+                key=f"neola_knowledge_save_{source_id}",
+            ):
+                try:
+                    _update_neola_knowledge_source(
+                        viewer_telegram_id,
+                        source_id,
+                        {
+                            "status": edited_status,
+                            "purpose": edited_purpose.strip(),
+                            "notes": edited_notes.strip(),
+                        },
+                    )
+                    st.success("Источник обновлён.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Не удалось сохранить изменения: {exc}")
+
 
 
 def load_agency_members():
@@ -1699,8 +2133,8 @@ def render_neola_agent(telegram_id, owner_name, ui_context, ask_openai_fn):
     step = int((activation or {}).get("onboarding_step") or 0)
 
     if _is_agency_owner(telegram_id):
-        mentor_tab, study_tab = st.tabs(
-            ["🎙 Неола", "📚 Вопросы на изучение"]
+        mentor_tab, study_tab, knowledge_tab = st.tabs(
+            ["🎙 Неола", "📚 Вопросы на изучение", "🧠 База знаний"]
         )
         with mentor_tab:
             st.progress(
@@ -1717,6 +2151,8 @@ def render_neola_agent(telegram_id, owner_name, ui_context, ask_openai_fn):
                 )
         with study_tab:
             render_neola_study_questions(telegram_id)
+        with knowledge_tab:
+            render_neola_knowledge_base(telegram_id)
         return
 
     # Обычный партнёр видит только наставника.
