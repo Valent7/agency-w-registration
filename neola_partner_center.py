@@ -433,10 +433,15 @@ def _upload_neola_knowledge_file(viewer_telegram_id, uploaded_file):
         raise RuntimeError("Файл слишком большой. Максимум 50 МБ.")
 
     original_name = str(getattr(uploaded_file, "name", "source.bin") or "source.bin")
-    safe_name = re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", original_name).strip("._")
-    safe_name = safe_name[:140] or "source.bin"
+
+    # Supabase Storage object keys should stay ASCII-safe.  Keep the human
+    # filename (including Cyrillic) only as metadata and use a stable ASCII
+    # object name for the private Storage path.
+    extension = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else "bin"
+    extension = re.sub(r"[^0-9a-z]+", "", extension)[:12] or "bin"
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
     stamp = datetime.now(UTC_TZ).strftime("%Y%m%dT%H%M%S%fZ")
-    storage_path = f"sources/{stamp}_{safe_name}"
+    storage_path = f"sources/{stamp}_{content_hash[:16]}.{extension}"
     mime_type = str(getattr(uploaded_file, "type", "") or "application/octet-stream")
 
     response = requests.post(
@@ -457,7 +462,7 @@ def _upload_neola_knowledge_file(viewer_telegram_id, uploaded_file):
         "original_filename": original_name[:255],
         "mime_type": mime_type[:150],
         "file_size_bytes": len(file_bytes),
-        "content_sha256": hashlib.sha256(file_bytes).hexdigest(),
+        "content_sha256": content_hash,
     }
 
 
