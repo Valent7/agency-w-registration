@@ -628,6 +628,9 @@ def render_neola_knowledge_base(viewer_telegram_id):
         return
 
     st.markdown("### 🧠 База знаний Неолы")
+    index_flash = st.session_state.pop("neola_index_flash", None)
+    if index_flash:
+        st.success(index_flash)
     st.caption(
         "Закрытая библиотека Директора. Здесь хранятся только те источники, "
         "которые вы разрешили Неоле использовать. Партнёры эту библиотеку не видят."
@@ -739,8 +742,10 @@ def render_neola_knowledge_base(viewer_telegram_id):
         return
 
     st.caption(
-        "Сейчас источники надёжно сохраняются и каталогизируются. "
-        "Интеллектуальный поиск по тексту и автоматическое цитирование подключим следующим этапом."
+        "Одобренные источники с файлами можно индексировать по одному: "
+        "Неола разделит их на фрагменты и подготовит смысловой поиск. "
+        "Индексация использует OpenAI API и может повлечь расходы. "
+        "Само подключение найденных фрагментов к голосовому диалогу — отдельный этап."
     )
 
     status_filter = st.segmented_control(
@@ -822,6 +827,48 @@ def render_neola_knowledge_base(viewer_telegram_id):
                 except Exception as exc:
                     st.error(f"Не удалось сохранить изменения: {exc}")
 
+            # Только Директор видит этот раздел. Индексируем лишь уже
+            # СОХРАНЁННЫЕ источники со статусом «Одобрен» и реальным файлом.
+            has_file = bool(str(row.get("storage_path") or "").strip())
+            indexed = bool(row.get("indexed_at"))
+            if source_status == "Одобрен" and has_file:
+                st.divider()
+                st.caption(
+                    "Индексация создаёт смысловые фрагменты. "
+                    "Расходы OpenAI зависят от объёма документа. "
+                    "Начните с Конституции Неолы — это небольшой файл."
+                )
+                index_label = (
+                    "🔁 Переиндексировать источник" if indexed
+                    else "🧠 Индексировать источник"
+                )
+                if st.button(
+                    index_label,
+                    key=f"neola_knowledge_index_{source_id}",
+                    type="primary" if not indexed else "secondary",
+                ):
+                    try:
+                        from neola_knowledge_indexer import index_neola_knowledge_source
+
+                        with st.spinner(
+                            "Неола читает документ и создаёт смысловой индекс. "
+                            "Для больших книг это может занять несколько минут..."
+                        ):
+                            result = index_neola_knowledge_source(source_id)
+                        st.session_state["neola_index_flash"] = (
+                            f"✅ Индексировано: {result['title']} "
+                            f"· {result['chunks']} фрагментов."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось индексировать источник: {exc}")
+            elif source_status == "Одобрен" and not has_file:
+                st.info("Для индексации этого источника сначала нужен файл.")
+            elif has_file:
+                st.caption(
+                    "Для индексации сначала сохраните статус «Одобрен». "
+                    "Черновики и архивные источники в поиск не попадают."
+                )
 
 
 def load_agency_members():
