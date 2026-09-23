@@ -5636,12 +5636,36 @@ def _instagram_connect_url(owner_telegram_id: int, owner_name: str) -> str:
     return "https://www.instagram.com/oauth/authorize?" + urlencode(params)
 
 
+def _render_connected_channel_card(title: str, caption: str, label: str):
+    """Единая карточка подключённого канала в стиле Agency W."""
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        st.caption(caption)
+        st.markdown(
+            f"""
+            <div style="
+                display:flex; align-items:center; justify-content:center;
+                width:100%; box-sizing:border-box; padding:0.85rem 1rem;
+                min-height:58px; border-radius:0.55rem; font-weight:700;
+                font-size:1.05rem; color:white;
+                background:linear-gradient(90deg,#176b3a,#238b4f);
+                border:1px solid rgba(255,255,255,.10);
+            ">{html.escape(label)}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool:
     connection = _load_instagram_connection(int(owner_telegram_id))
     if connection:
         username = str(connection.get("instagram_username") or "").strip()
         suffix = f" · @{username}" if username else ""
-        st.success(f"🟢 Instagram подключён{suffix}")
+        _render_connected_channel_card(
+            "Instagram",
+            "Профессиональный аккаунт подключён. Неона может работать с входящими сообщениями Direct.",
+            f"✅ Instagram подключён{suffix}",
+        )
         return True
 
     if str(st.query_params.get("instagram") or "").strip() == "connected":
@@ -5666,7 +5690,7 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
             <a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="
                 display:flex; align-items:center; justify-content:center;
                 width:100%; box-sizing:border-box; padding:0.85rem 1rem;
-                border-radius:0.55rem; text-decoration:none; font-weight:700;
+                min-height:58px; border-radius:0.55rem; text-decoration:none; font-weight:700;
                 font-size:1.05rem; color:white;
                 background:linear-gradient(90deg,#6f2dbd,#8b2fc9);
                 border:1px solid rgba(255,255,255,.10);
@@ -6588,7 +6612,11 @@ if telegram_login_valid or remembered_data:
         if existing_telegram_session:
             telegram_connected = True
             st.session_state[f"telegram_connected_{int(telegram_id)}"] = True
-            st.caption("🟢 Рабочий Telegram подключён для Неонии")
+            _render_connected_channel_card(
+                "Telegram",
+                "Рабочий Telegram подключён. Неония может работать с доступными контактами и чатами.",
+                "✅ Telegram подключён",
+            )
         else:
             with st.expander(
                 "📱 Подключить Telegram для Неонии — можно позже",
