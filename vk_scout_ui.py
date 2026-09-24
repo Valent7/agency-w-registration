@@ -27,15 +27,51 @@ from vk_scout import (
     send_pending_vk_comment_reply,
     process_manual_vk_comment_reply,
     mark_manual_vk_reply_published,
+    mark_vk_partner,
     skip_vk_assignment,
     upsert_vk_source,
 )
 
 UTC = timezone.utc
 
+
 VK_AGENCY_MATERIAL_URL = (
     "https://vk.ru/club241237638?act=s&id=241237638#section=short_videos"
 )
+
+
+def _render_vk_partner_mark(
+    owner_id: int,
+    assignment_id: int,
+    first_name: str = "",
+    *,
+    scope: str,
+) -> None:
+    """Manual handoff: this VK person is already an Agency W partner."""
+    if not assignment_id:
+        return
+
+    label = "✅ Стал партнёром — исключить из поиска"
+    if st.button(
+        label,
+        key=f"vk_mark_partner_{scope}_{int(owner_id)}_{int(assignment_id)}",
+        use_container_width=True,
+    ):
+        try:
+            result = mark_vk_partner(int(assignment_id), int(owner_id))
+            name = str(result.get("name") or first_name or "Человек").strip()
+            st.success(
+                f"✅ {name} отмечен как партнёр. Неония больше не будет "
+                "включать этот VK-профиль в подбор кандидатов."
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Не удалось отметить партнёра: {exc}")
+
+    st.caption(
+        "Нажимайте только после фактической регистрации человека. Отметка постоянная: "
+        "Неония исключит этот VK-профиль из будущих подборок и Радара."
+    )
 
 
 def _render_vk_material_message(
@@ -424,6 +460,20 @@ def _render_vk_dialog_center(
                     direction = str(event.get("direction") or "").strip()
                     who = "Неона / вы" if direction == "out" else "Человек"
                     st.markdown(f"**{who}:** {body}")
+
+            thread_assignment_id = (
+                int(thread.get("assignment_id"))
+                if thread.get("assignment_id") not in (None, "")
+                else 0
+            )
+            if thread_assignment_id:
+                _render_vk_partner_mark(
+                    int(owner_id),
+                    thread_assignment_id,
+                    str(thread.get("first_name") or "").strip(),
+                    scope=f"dialog_{thread_id}",
+                )
+                st.divider()
 
             _render_vk_comment_followup(
                 int(owner_id),
@@ -900,6 +950,15 @@ def _render_today_vk_candidates(
                         except Exception as exc:
                             st.error(f"Не удалось пропустить кандидата: {exc}")
 
+            if assignment_id:
+                st.divider()
+                _render_vk_partner_mark(
+                    owner_id,
+                    assignment_id,
+                    first_name,
+                    scope="daily",
+                )
+
             _render_vk_material_followup(
                 owner_id,
                 assignment_id,
@@ -1139,6 +1198,15 @@ def _render_known_vk_contacts(
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Не удалось убрать контакт: {exc}")
+
+            if assignment_id:
+                st.divider()
+                _render_vk_partner_mark(
+                    owner_id,
+                    assignment_id,
+                    first_name,
+                    scope="known",
+                )
 
             _render_vk_material_followup(
                 owner_id,
