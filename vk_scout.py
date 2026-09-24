@@ -428,6 +428,7 @@ def score_vk_candidates(
         },
     )
     already_scored: set[int] = set()
+    partner_vk_ids = _partner_vk_ids()
     for item in scored_rows:
         try:
             already_scored.add(int(item.get("vk_user_id")))
@@ -456,7 +457,7 @@ def score_vk_candidates(
                 uid = int(candidate.get("vk_user_id"))
             except (TypeError, ValueError):
                 continue
-            if uid in already_scored:
+            if uid in already_scored or uid in partner_vk_ids:
                 continue
             rows.append(candidate)
             if len(rows) >= analysis_limit:
@@ -479,6 +480,12 @@ def score_vk_candidates(
                 "limit": analysis_limit,
             },
         )
+        rows = [
+            candidate
+            for candidate in rows
+            if str(candidate.get("vk_user_id") or "").isdigit()
+            and int(candidate.get("vk_user_id")) not in partner_vk_ids
+        ][:analysis_limit]
 
     profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
     system_prompt = f"""
@@ -609,8 +616,146 @@ def _messageable_vk_ids(user_ids: Iterable[int]) -> set[int]:
     return result
 
 
-def _used_vk_ids() -> set[int]:
+
+
+def _partner_vk_ids() -> set[int]:
+    """VK profiles already marked/claimed as Agency W partners.
+
+    Source of truth is the social registration bridge. This covers both
+    automatic registration links (claimed after Telegram OIDC) and manual
+    Director marks from the VK UI.
+    """
     result: set[int] = set()
+    try:
+        rows = _sb_get(
+            "agency_social_registration_links",
+            {
+                "channel": "eq.vk",
+                "status": "eq.claimed",
+                "select": "external_user_id",
+                "limit": 5000,
+            },
+        )
+    except Exception:
+        # The VK Scout must keep working even if the bridge is temporarily
+        # unavailable. It simply skips this extra exclusion for that cycle.
+        return result
+
+    for row in rows:
+        try:
+            uid = int(str(row.get("external_user_id") or "").strip())
+        except (TypeError, ValueError):
+            continue
+        if uid > 0:
+            result.add(uid)
+    return result
+
+
+def is_vk_partner(vk_user_id: int) -> bool:
+    try:
+        return int(vk_user_id) in _partner_vk_ids()
+    except (TypeError, ValueError):
+        return False
+
+
+def mark_vk_partner(assignment_id: int, owner_id: int | None = None) -> dict[str, Any]:
+    """Permanently excludes a VK profile from Neonia candidate selection.
+
+    This is for the current manual VK workflow: the Director explicitly marks
+    a person as already being a partner. We store that fact in the same social
+    bridge used by automatic registration attribution, then release the active
+    assignment and close saved VK comment threads for this person.
+    """
+    rows = _sb_get(
+        "agency_vk_assignments",
+        {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1},
+    )
+    if not rows:
+        raise VKScoutError("VK-назначение не найдено")
+
+    assignment = rows[0]
+    actual_owner = int(assignment.get("owner_telegram_id") or 0)
+    if owner_id is not None and int(owner_id) != actual_owner:
+        raise VKScoutError("Это VK-назначение принадлежит другому кабинету Агентства W")
+
+    vk_user_id = int(assignment.get("vk_user_id") or 0)
+    if vk_user_id <= 0:
+        raise VKScoutError("У назначения не найден VK ID человека")
+
+    candidate_rows = _sb_get(
+        "agency_vk_candidates",
+        {"vk_user_id": f"eq.{vk_user_id}", "select": "first_name,last_name", "limit": 1},
+    )
+    candidate = candidate_rows[0] if candidate_rows else {}
+    display_name = " ".join(
+        part for part in (
+            str(candidate.get("first_name") or "").strip(),
+            str(candidate.get("last_name") or "").strip(),
+        ) if part
+    ) or None
+
+    existing = _sb_get(
+        "agency_social_registration_links",
+        {
+            "channel": "eq.vk",
+            "external_user_id": f"eq.{vk_user_id}",
+            "status": "eq.claimed",
+            "select": "*",
+            "limit": 1,
+        },
+    )
+
+    now = datetime.now(UTC).isoformat()
+    if not existing:
+        fingerprint = hashlib.sha256(
+            f"manual-vk-partner|{actual_owner}|{vk_user_id}|{now}".encode("utf-8")
+        ).hexdigest()[:40]
+        _sb_post(
+            "agency_social_registration_links",
+            {
+                "token": f"manual_{fingerprint}",
+                "channel": "vk",
+                "external_user_id": str(vk_user_id),
+                "external_display_name": display_name,
+                "owner_telegram_id": actual_owner,
+                "owner_member_code": str(assignment.get("owner_member_code") or "").strip() or None,
+                "source_ref": "manual_partner_mark",
+                "status": "claimed",
+                "claimed_at": now,
+            },
+        )
+
+    # Remove this card from active candidate work. We do not add a new status to
+    # agency_vk_assignments, so the existing DB status constraint remains valid.
+    _sb_patch(
+        "agency_vk_assignments",
+        {"id": f"eq.{int(assignment_id)}"},
+        {"status": "released", "released_at": now, "updated_at": now},
+    )
+
+    # Any saved manual comment dialogue with this VK person is no longer a lead.
+    try:
+        _sb_patch(
+            "agency_vk_comment_threads",
+            {
+                "owner_telegram_id": f"eq.{actual_owner}",
+                "post_owner_id": f"eq.{vk_user_id}",
+            },
+            {"status": "closed", "updated_at": now, "last_error": None},
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "vk_user_id": vk_user_id,
+        "name": display_name or f"VK user {vk_user_id}",
+        "owner_telegram_id": actual_owner,
+    }
+
+
+def _used_vk_ids() -> set[int]:
+    result: set[int] = set(_partner_vk_ids())
     for table, params in (
         ("agency_vk_leads", {"select": "vk_user_id", "limit": 5000}),
         ("agency_vk_assignments", {"status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")", "select": "vk_user_id", "limit": 5000}),
@@ -1246,6 +1391,7 @@ def fetch_vk_candidate_feed(
             "errors": [],
         }
 
+    partner_vk_ids = _partner_vk_ids()
     ids: list[int] = []
     score_by_id: dict[int, dict[str, Any]] = {}
     for row in scores:
@@ -1253,7 +1399,7 @@ def fetch_vk_candidate_feed(
             uid = int(row.get("vk_user_id") or 0)
         except (TypeError, ValueError):
             continue
-        if uid <= 0 or uid in score_by_id:
+        if uid <= 0 or uid in score_by_id or uid in partner_vk_ids:
             continue
         ids.append(uid)
         score_by_id[uid] = row
