@@ -1491,77 +1491,216 @@ def vk_profile_url(candidate: dict[str, Any]) -> str:
 
 
 
+def _clean_vk_context_value(value: Any, *, max_len: int = 700) -> str:
+    """Нормализует короткий публичный фрагмент для смыслового контекста Неоны."""
+    cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
+    return cleaned[:max_len]
+
+
+def _vk_invitation_semantic_context(
+    assignment: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    posts_limit: int = 5,
+) -> dict[str, Any]:
+    """
+    Собирает только доступный публичный контекст VK перед первым сообщением.
+
+    Важно: это не скрытое профилирование и не повод додумывать профессию.
+    Неоне передаются публичные поля профиля, заметка/сигнал Неонии и несколько
+    последних публичных записей, если VK разрешает их прочитать.
+    """
+    vk_user_id = int(candidate.get("vk_user_id") or assignment.get("vk_user_id") or 0)
+    owner_id = int(assignment.get("owner_telegram_id") or 0)
+    fit = _clean_vk_context_value(assignment.get("fit_summary"), max_len=1200)
+    known_contact = assignment.get("daily_position") is None or fit.startswith(KNOWN_CONTACT_LABEL)
+
+    owner_note = ""
+    if known_contact and fit.startswith(KNOWN_CONTACT_LABEL):
+        owner_note = fit[len(KNOWN_CONTACT_LABEL):].lstrip(" :—-").strip()
+
+    profile: dict[str, Any] = {
+        "status": _clean_vk_context_value(candidate.get("status_text")),
+        "city": _clean_vk_context_value(candidate.get("city_name"), max_len=160),
+        "country": _clean_vk_context_value(candidate.get("country_name"), max_len=160),
+    }
+
+    # Берём более содержательные, но всё равно публичные поля прямо перед
+    # подготовкой сообщения. Если VK их не отдаёт, просто остаёмся на том,
+    # что уже сохранено в карточке кандидата.
+    if owner_id > 0 and vk_user_id > 0:
+        try:
+            rows = _vk_user_api(
+                owner_id,
+                "users.get",
+                user_ids=vk_user_id,
+                fields="status,about,activities,interests,occupation,career,site,city,country",
+            )
+            row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+            if row:
+                city = row.get("city") if isinstance(row.get("city"), dict) else {}
+                country = row.get("country") if isinstance(row.get("country"), dict) else {}
+                occupation = row.get("occupation") if isinstance(row.get("occupation"), dict) else {}
+                career = row.get("career") if isinstance(row.get("career"), list) else []
+                career_items = []
+                for item in career[:4]:
+                    if not isinstance(item, dict):
+                        continue
+                    piece = " · ".join(
+                        value for value in (
+                            _clean_vk_context_value(item.get("company"), max_len=180),
+                            _clean_vk_context_value(item.get("position"), max_len=180),
+                        )
+                        if value
+                    )
+                    if piece:
+                        career_items.append(piece)
+
+                profile.update({
+                    "status": _clean_vk_context_value(row.get("status")) or profile.get("status", ""),
+                    "about": _clean_vk_context_value(row.get("about"), max_len=1200),
+                    "activities": _clean_vk_context_value(row.get("activities"), max_len=1200),
+                    "interests": _clean_vk_context_value(row.get("interests"), max_len=1200),
+                    "occupation": _clean_vk_context_value(occupation.get("name"), max_len=500),
+                    "occupation_type": _clean_vk_context_value(occupation.get("type"), max_len=120),
+                    "career": career_items,
+                    "site": _clean_vk_context_value(row.get("site"), max_len=500),
+                    "city": _clean_vk_context_value(city.get("title"), max_len=160) or profile.get("city", ""),
+                    "country": _clean_vk_context_value(country.get("title"), max_len=160) or profile.get("country", ""),
+                })
+        except Exception:
+            # Нехватка отдельных публичных полей не должна блокировать сообщение.
+            pass
+
+    recent_posts: list[dict[str, Any]] = []
+    if owner_id > 0 and vk_user_id > 0:
+        try:
+            response = _vk_user_api(
+                owner_id,
+                "wall.get",
+                owner_id=vk_user_id,
+                count=max(1, min(10, int(posts_limit))),
+                filter="owner",
+                extended=0,
+            )
+            if isinstance(response, dict):
+                for post in response.get("items") or []:
+                    if not isinstance(post, dict):
+                        continue
+                    material = _clean_vk_context_value(_vk_post_material(post), max_len=1800)
+                    if not material:
+                        continue
+                    recent_posts.append({
+                        "date": int(post.get("date") or 0),
+                        "content": material,
+                    })
+                    if len(recent_posts) >= max(1, min(5, int(posts_limit))):
+                        break
+        except Exception:
+            pass
+
+    # Удаляем пустые значения, чтобы модель не принимала отсутствие данных
+    # за содержательный сигнал.
+    profile = {
+        key: value
+        for key, value in profile.items()
+        if value not in (None, "", [], {})
+    }
+
+    return {
+        "known_contact": bool(known_contact),
+        "owner_note": owner_note or None,
+        "neonia_fit_summary": fit or None,
+        "public_profile": profile,
+        "recent_public_posts": recent_posts,
+    }
+
+
 def prepare_vk_invitation(
     assignment_id: int,
     member_code: str,
     *,
     ask_openai_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    rows = _sb_get("agency_vk_assignments", {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1})
+    rows = _sb_get(
+        "agency_vk_assignments",
+        {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1},
+    )
     if not rows:
         raise VKScoutError("VK-назначение не найдено")
     assignment = rows[0]
-    candidates = _sb_get("agency_vk_candidates", {"vk_user_id": f"eq.{int(assignment['vk_user_id'])}", "select": "*", "limit": 1})
+    candidates = _sb_get(
+        "agency_vk_candidates",
+        {
+            "vk_user_id": f"eq.{int(assignment['vk_user_id'])}",
+            "select": "*",
+            "limit": 1,
+        },
+    )
     if not candidates:
         raise VKScoutError("VK-кандидат не найден")
+
     candidate = candidates[0]
     first_name = str(candidate.get("first_name") or "").strip()
     fit = str(assignment.get("fit_summary") or "").strip()
     known_contact = assignment.get("daily_position") is None or fit.startswith(KNOWN_CONTACT_LABEL)
+    semantic_context = _vk_invitation_semantic_context(assignment, candidate)
 
     if ask_openai_fn:
-        if known_contact:
-            system = """
-Ты — Неона, секретарь-референт владельца кабинета Агентства W.
-Подготовь короткое первое сообщение знакомому владельца в VK.
-Текст сначала увидит и при необходимости поправит сам владелец.
-Правила:
-- обращаться только по имени, если оно надёжно известно;
-- 1–3 коротких предложения;
-- в первых двух предложениях понятно представить Неону;
-- учитывать заметку владельца о знакомстве, но не выдумывать степень близости;
-- одна понятная польза Агентства W, без презентации списком;
+        system = """
+Ты — Неона, секретарь-референт Агентства W.
+Подготовь короткое первое сообщение человеку в VK.
+Текст сначала увидит и при необходимости поправит владелец кабинета.
+
+ПЕРЕД ТЕКСТОМ МОЛЧА СДЕЛАЙ СМЫСЛОВОЙ РАЗБОР КОНТЕКСТА:
+1. Чем человек действительно занимается или что для него важно — только если это
+   прямо подтверждается публичным профилем, свежими постами или заметкой владельца.
+2. Какие темы повторяются в его публичных материалах.
+3. Какая ОДНА польза Агентства W может естественно связаться с этим контекстом.
+
+ЖЁСТКИЕ ПРАВИЛА ПЕРСОНАЛИЗАЦИИ:
+- не придумывай профессию, нишу, задачи, боли, клиентов, подрядчиков, команду, продажи
+  или бизнес-модель, если этого нет в переданном контексте;
+- слова вроде «подрядчики», «клиенты», «лиды», «сетевой бизнес», «коучинг», «здоровье»,
+  «инвестиции» и любые другие отраслевые термины разрешены ТОЛЬКО когда они прямо
+  подтверждены контекстом;
+- не цепляйся за случайную деталь профиля: ищи главную деятельность и повторяющиеся темы;
+- если данных мало или они неоднозначны, пиши нейтрально и НЕ маскируй догадку под факт;
+- если в публичных материалах явно названы проекты/направления, учитывай их смысл,
+  но не демонстрируй человеку, что его «изучали»;
+- не говори и не намекай, что человека анализировали, оценивали или отбирали;
+- не используй формулировку «по его/её просьбе», если личность владельца не дана
+  в контексте. Представляйся нейтрально: «Я — Неона, секретарь-референт Агентства W»;
+- обращаться только по имени, без фамилии;
+- 1–3 коротких естественных предложения;
+- одна понятная польза Агентства W, без списка функций;
 - ровно один простой вопрос, и он должен быть последним предложением;
-- не давать ссылку на сообщество в первом сообщении;
-- не обещать доход, результат или гарантированных партнёров.
-Верни только готовый текст.
-""".strip()
-        else:
-            system = """
-Ты — Неона, секретарь-референт владельца кабинета Агентства W.
-Подготовь короткое первое сообщение холодному контакту VK, которого Неония отобрала по публичным данным.
-Текст сначала увидит и при необходимости поправит сам владелец.
-Правила:
-- обращаться только по имени, если оно надёжно известно;
-- 1–3 коротких предложения;
-- не говорить и не намекать, что человека анализировали или оценивали;
-- не выдумывать факты о человеке;
-- раскрыть только одну понятную пользу Агентства W простым человеческим языком;
-- ровно один простой вопрос, и он должен быть последним предложением;
-- не давать ссылку на сообщество в первом сообщении;
-- без давления, срочности, обещаний дохода или результата.
-Верни только готовый текст.
+- не давать ссылку в первом сообщении;
+- без давления, срочности, обещаний дохода, результата или гарантированных партнёров.
+
+ЕСЛИ ЭТО ЗНАКОМЫЙ ВЛАДЕЛЬЦА:
+- учитывай заметку владельца, если она есть;
+- не выдумывай степень близости и не делай сообщение искусственно холодным.
+
+ЦЕЛЬ: сообщение должно ощущаться написанным именно этому человеку, но без эффекта
+«досье» и без вымышленных деталей.
+
+Верни только готовый текст первого сообщения.
 """.strip()
         request = (
             f"Имя: {first_name or 'неизвестно'}\n"
             f"Режим: {'знакомый владельца' if known_contact else 'холодный контакт'}\n"
-            f"Контекст/заметка: {fit or 'данных мало'}"
+            "ДОСТУПНЫЙ КОНТЕКСТ VK:\n"
+            + json.dumps(semantic_context, ensure_ascii=False, indent=2)
         )
         message = str(ask_openai_fn(system, request) or "").strip()
     else:
         greeting = f"{first_name}, здравствуйте!" if first_name else "Здравствуйте!"
-        if known_contact:
-            message = (
-                f"{greeting} Я Неона, секретарь-референт в Агентстве W. "
-                "Мы помогаем снять часть повседневной рутины с помощью ИИ-команды. "
-                "Вам было бы интересно посмотреть, что из этого могло бы пригодиться именно вам?"
-            )
-        else:
-            message = (
-                f"{greeting} Я Неона, секретарь-референт в Агентстве W. "
-                "Мы помогаем освобождать время от повторяющейся работы с помощью ИИ-команды. "
-                "Вам было бы интересно посмотреть, как это работает?"
-            )
+        message = (
+            f"{greeting} Я — Неона, секретарь-референт Агентства W. "
+            "Мы помогаем освобождать время от повторяющихся рабочих задач с помощью ИИ-команды. "
+            "Вам было бы интересно коротко посмотреть, что из этого могло бы пригодиться именно вам?"
+        )
 
     now = datetime.now(UTC).isoformat()
     _sb_patch(
@@ -1579,11 +1718,26 @@ def prepare_vk_invitation(
     return {
         "assignment_id": int(assignment_id),
         "vk_user_id": int(candidate["vk_user_id"]),
-        "name": " ".join(x for x in [str(candidate.get("first_name") or "").strip(), str(candidate.get("last_name") or "").strip()] if x),
+        "name": " ".join(
+            x
+            for x in [
+                str(candidate.get("first_name") or "").strip(),
+                str(candidate.get("last_name") or "").strip(),
+            ]
+            if x
+        ),
         "profile_url": vk_profile_url(candidate),
         "invitation_text": message,
         "invitation_link": None,
         "known_contact": known_contact,
+        # Для диагностики в коде/тестах; в пользовательский интерфейс это поле
+        # выводить не нужно.
+        "context_available": bool(
+            semantic_context.get("public_profile")
+            or semantic_context.get("recent_public_posts")
+            or semantic_context.get("owner_note")
+            or semantic_context.get("neonia_fit_summary")
+        ),
     }
 
 
