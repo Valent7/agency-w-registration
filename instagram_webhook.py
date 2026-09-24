@@ -1745,13 +1745,17 @@ def _vk_neona_config(core, owner: dict | None = None):
 
 
 def _process_vk_message(payload: dict) -> None:
+    """Route incoming VK community messages to Theo, not Neona."""
     try:
         obj = payload.get("object")
         if not isinstance(obj, dict):
             return
+
         message = obj.get("message")
         if not isinstance(message, dict):
             return
+
+        # Ignore messages sent by the community itself.
         if int(message.get("out") or 0) != 0:
             return
 
@@ -1766,11 +1770,14 @@ def _process_vk_message(payload: dict) -> None:
 
         ref_code = str(message.get("ref") or "").strip()
         ref_source = str(message.get("ref_source") or "").strip()
+
         profile = _vk_user_profile(from_id)
         first_name = str(profile.get("first_name") or "").strip()
         display_name = str(profile.get("display_name") or first_name).strip()
 
-        lead, owner = _ensure_vk_lead(
+        # Preserve the existing Agency W first-touch attribution:
+        # the visitor stays attached to the Director/partner who first invited them.
+        _, owner = _ensure_vk_lead(
             vk_user_id=from_id,
             peer_id=peer_id,
             ref_code=ref_code,
@@ -1778,118 +1785,69 @@ def _process_vk_message(payload: dict) -> None:
             display_name=display_name,
         )
 
-        import neona_dialog_policy as policy
-
-        policy.apply_policy()
-        core = policy.core
-        config, owner_id, owner_name = _vk_neona_config(core, owner)
-
-        contact_id = _vk_contact_id(from_id)
         message_key = str(
             message.get("id")
             or message.get("conversation_message_id")
             or ""
         ).strip()
-        message_dt = _message_datetime(message.get("date"))
 
-        state = core._dialog_state(config, owner_id, contact_id)
-        if state is None:
-            state = {
-                "last_incoming_message_id": 0,
-                "stage": "idle",
-                "greeted": False,
-                "context": {
-                    "channel": "vk",
-                    "vk_user_id": from_id,
-                    "vk_peer_id": peer_id,
-                },
-            }
+        # Theo has his own VK-community memory in agency_theo_vk_dialogs.
+        # Import locally so Instagram and the rest of this service stay isolated.
+        from theo_consultant import process_vk_community_message
 
-        context = dict(state.get("context")) if isinstance(state.get("context"), dict) else {}
-        if message_key and str(context.get("vk_last_message_id") or "") == message_key:
-            return
-
-        # "ВРЕМЯ" is the Agency W entry keyword, not a request for the clock.
-        first_time_keyword = (
-            _is_vk_time_keyword(incoming_text)
-            and str(state.get("stage") or "idle") == "idle"
-            and not bool(context.get("vk_time_entry_started"))
+        result = process_vk_community_message(
+            vk_user_id=from_id,
+            vk_peer_id=peer_id,
+            owner=owner,
+            visitor_first_name=first_name,
+            incoming_text=incoming_text,
+            message_id=message_key,
         )
 
-        if first_time_keyword:
-            reply_text = _vk_time_entry_reply(policy, owner_name, first_name)
-            new_stage = "idle"
-            greeted = True
-            new_context = dict(context)
-            new_context["vk_time_entry_started"] = True
-        else:
-            reply, new_stage, greeted, new_context = core._process_message(
-                config,
-                owner_id,
-                owner_name,
-                contact_id,
-                first_name,
-                "",
-                incoming_text,
-                message_dt,
-                state,
+        # VK can retry the same webhook. Theo detects this from his own memory.
+        # Never send the cached reply again on a duplicate delivery.
+        if bool(result.get("duplicate")):
+            print(
+                "VK_THEO_DUPLICATE:",
+                {
+                    "peer_id": peer_id,
+                    "vk_user_id": from_id,
+                    "message_id": message_key,
+                },
+                flush=True,
             )
-            reply_text = _polish_instagram_reply(str(reply or ""), owner_name)
-            if not reply_text:
-                raise RuntimeError("Neona returned an empty VK reply.")
+            return
+
+        reply_text = str(result.get("reply") or "").strip()
+        if not reply_text:
+            raise RuntimeError("Theo returned an empty VK reply.")
+
+        stage = str(result.get("stage") or "consulting").strip() or "consulting"
 
         _send_vk_text(peer_id, reply_text)
 
-        new_context = dict(new_context or {})
-        new_context.update(
-            {
-                "channel": "vk",
-                "vk_user_id": from_id,
-                "vk_peer_id": peer_id,
-                "vk_display_name": display_name,
-                "vk_first_name": first_name,
-                "vk_ref": ref_code,
-                "vk_ref_source": ref_source,
-                "vk_owner_member_code": str(owner.get("member_code") or ""),
-                "vk_attribution_status": str(owner.get("attribution_status") or ""),
-                "vk_last_message_id": message_key,
-                "vk_last_incoming_text": incoming_text,
-                "vk_last_reply": reply_text,
-                "vk_last_processed_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-
-        dedupe_source = message_key or f"{from_id}|{message.get('date')}|{incoming_text}"
-        core._save_dialog_state(
-            config,
-            owner_id,
-            contact_id,
-            last_incoming_id=_stable_message_id(f"vk:{dedupe_source}"),
-            stage=str(new_stage or "idle"),
-            greeted=bool(greeted),
-            context=new_context,
-        )
-
         _update_vk_lead_after_dialog(
             from_id,
-            stage=str(new_stage or "idle"),
+            stage=stage,
             incoming_text=incoming_text,
         )
 
         print(
-            "VK_NEONA_SENT:",
+            "VK_THEO_SENT:",
             {
                 "peer_id": peer_id,
-                "owner_id": owner_id,
+                "vk_user_id": from_id,
+                "owner_id": owner.get("telegram_id"),
                 "owner_code": owner.get("member_code"),
                 "ref": ref_code,
+                "stage": stage,
                 "incoming": incoming_text,
                 "reply": reply_text,
             },
             flush=True,
         )
     except Exception as exc:
-        print("VK_NEONA_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
+        print("VK_THEO_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
 
 
 async def vk_webhook_receive(request: Request):
