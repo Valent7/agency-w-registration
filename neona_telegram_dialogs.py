@@ -345,6 +345,197 @@ def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]
 
 
 
+
+def _load_partner_lifecycle_map(
+    config: Config,
+    owner_id: int,
+    contact_ids: list[int] | set[int] | tuple[int, ...],
+) -> dict[int, dict[str, Any]]:
+    """Возвращает актуальный статус людей относительно партнёрства в Агентстве W.
+
+    Это стоп-сигнал для кандидатского диалога Неоны:
+    - candidate: человека ещё можно вести по воронке;
+    - registered: человек уже зарегистрирован партнёром, продажи прекращаются;
+    - active: 5 лож подтверждены, кандидатский диалог закрыт окончательно и
+      дальнейшее сопровождение переходит к Неоле/разделу «Команда».
+
+    Проверка выполняется по серверной базе Агентства W, а не по словам в чате.
+    Поэтому Неона не должна угадывать, стал ли человек партнёром.
+    """
+    ids = sorted({int(value) for value in contact_ids if int(value) > 0})
+    result: dict[int, dict[str, Any]] = {
+        contact_id: {
+            "state": "candidate",
+            "is_member": False,
+            "is_direct_partner": False,
+            "member_code": "",
+            "referrer_code": "",
+            "registered_at": "",
+            "activation_status": "",
+            "lodges_count": 0,
+            "onboarding_status": "",
+        }
+        for contact_id in ids
+    }
+    if not ids:
+        return result
+
+    # Код владельца нужен, чтобы отличать прямого партнёра от участника другой ветки.
+    owner_response = requests.get(
+        f"{config.supabase_url}/rest/v1/agency_members",
+        headers=_headers(config),
+        params={
+            "telegram_id": f"eq.{int(owner_id)}",
+            "select": "telegram_id,member_code",
+            "limit": 1,
+        },
+        timeout=20,
+    )
+    owner_response.raise_for_status()
+    owner_rows = owner_response.json()
+    owner_code = ""
+    if isinstance(owner_rows, list) and owner_rows:
+        owner_code = str(owner_rows[0].get("member_code") or "").strip()
+
+    members_by_id: dict[int, dict[str, Any]] = {}
+    activations_by_id: dict[int, dict[str, Any]] = {}
+
+    for start in range(0, len(ids), 200):
+        chunk = ids[start:start + 200]
+        in_filter = "in.(" + ",".join(str(value) for value in chunk) + ")"
+
+        member_response = requests.get(
+            f"{config.supabase_url}/rest/v1/agency_members",
+            headers=_headers(config),
+            params={
+                "telegram_id": in_filter,
+                "select": (
+                    "telegram_id,member_code,referrer_code,created_at,"
+                    "first_name,username"
+                ),
+                "limit": 1000,
+            },
+            timeout=20,
+        )
+        member_response.raise_for_status()
+        for row in member_response.json() if member_response.text.strip() else []:
+            try:
+                members_by_id[int(row.get("telegram_id"))] = row
+            except (TypeError, ValueError):
+                continue
+
+        activation_response = requests.get(
+            f"{config.supabase_url}/rest/v1/partner_activations",
+            headers=_headers(config),
+            params={
+                "telegram_id": in_filter,
+                "select": (
+                    "telegram_id,status,lodges_count,onboarding_status,"
+                    "reviewed_at,last_action_at"
+                ),
+                "limit": 1000,
+            },
+            timeout=20,
+        )
+        # Таблица partner_activations уже является частью текущего онбординга.
+        # Если она временно недоступна, НЕ продолжаем вслепую продажный диалог:
+        # лучше пропустить цикл, чем снова продавать уже зарегистрированному партнёру.
+        activation_response.raise_for_status()
+        for row in activation_response.json() if activation_response.text.strip() else []:
+            try:
+                activations_by_id[int(row.get("telegram_id"))] = row
+            except (TypeError, ValueError):
+                continue
+
+    for contact_id in ids:
+        member = members_by_id.get(contact_id)
+        activation = activations_by_id.get(contact_id)
+        referrer_code = str((member or {}).get("referrer_code") or "").strip()
+        activation_status = str((activation or {}).get("status") or "").strip()
+        is_member = bool(member) and contact_id != int(owner_id)
+        is_registered = bool(
+            is_member
+            and (
+                referrer_code
+                or activation is not None
+            )
+        )
+        is_active = activation_status in {"confirmed", "legacy_active"}
+
+        if is_active:
+            lifecycle_state = "active"
+        elif is_registered:
+            lifecycle_state = "registered"
+        else:
+            lifecycle_state = "candidate"
+
+        result[contact_id] = {
+            "state": lifecycle_state,
+            "is_member": is_member,
+            "is_direct_partner": bool(owner_code and referrer_code == owner_code),
+            "member_code": str((member or {}).get("member_code") or "").strip(),
+            "referrer_code": referrer_code,
+            "registered_at": str((member or {}).get("created_at") or "").strip(),
+            "activation_status": activation_status,
+            "lodges_count": int((activation or {}).get("lodges_count") or 0),
+            "onboarding_status": str((activation or {}).get("onboarding_status") or "").strip(),
+        }
+
+    return result
+
+
+def _partner_handoff_reply(first_name: str, lifecycle: dict[str, Any]) -> str:
+    """Одно переходное сообщение: закрывает воронку кандидата без новой продажи."""
+    prefix = f"{first_name}, " if first_name else ""
+    state = str(lifecycle.get("state") or "candidate")
+
+    if state == "active":
+        return (
+            prefix
+            + "вижу, что вы уже активный партнёр Агентства W. "
+            "Поэтому наш ознакомительный диалог я закрываю. "
+            "Дальше по первым рабочим шагам вас сопровождает Неола, "
+            "а связь с наставником и командой идёт уже в партнёрском контуре Агентства W."
+        )
+
+    return (
+        prefix
+        + "вижу, что вы уже зарегистрировались в Агентстве W. "
+        "Поэтому я больше не веду вас как кандидата. "
+        "Следующий шаг — подтвердить в Агентстве W не меньше 5 лож Neonexa; "
+        "после подтверждения подключится Неола и поведёт вас по первым рабочим шагам."
+    )
+
+
+def _partner_lifecycle_context(
+    context: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> dict[str, Any]:
+    updated = dict(context or {})
+    now = datetime.now(UTC).isoformat()
+    state = str(lifecycle.get("state") or "candidate")
+    if not updated.get("candidate_dialog_closed_at"):
+        updated["candidate_dialog_closed_at"] = now
+    updated.update(
+        {
+            "relationship_status": (
+                "partner_active" if state == "active" else "partner_registered"
+            ),
+            "partner_status_checked_at": now,
+            "partner_activation_status": str(
+                lifecycle.get("activation_status") or ""
+            ),
+            "partner_lodges_count": int(lifecycle.get("lodges_count") or 0),
+            "partner_member_code": str(lifecycle.get("member_code") or ""),
+            "partner_referrer_code": str(lifecycle.get("referrer_code") or ""),
+            "partner_is_direct": bool(lifecycle.get("is_direct_partner")),
+            "candidate_dialog_closed": True,
+            "handoff_target": "neola_and_team",
+        }
+    )
+    return updated
+
+
 def _load_stagirite_zoom_link(config: Config, owner_id: int) -> tuple[str, str]:
     """Берёт сохранённую владельцем ссылку Zoom из настроек Стагирита."""
     try:
@@ -1231,7 +1422,17 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
     """
     config = load_config()
     allowed = _allowed_contacts(config, int(owner_id))
-    stats = {"allowed": len(allowed), "initialized": 0, "processed": 0, "replied": 0, "errors": 0}
+    stats = {
+        "allowed": len(allowed),
+        "initialized": 0,
+        "processed": 0,
+        "replied": 0,
+        "partner_registered": 0,
+        "partner_active": 0,
+        "partner_handoffs": 0,
+        "partner_suppressed": 0,
+        "errors": 0,
+    }
 
     diag_this_run = int(owner_id) not in _NEONA_DIAG_PRINTED_OWNERS
     if diag_this_run:
@@ -1252,6 +1453,26 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
         )
 
     if not allowed:
+        return stats
+
+    # Серверный стоп-сигнал для старой воронки Неоны. Загружаем один раз на
+    # каждый цикл worker: регистрация/активация становится видна без догадок
+    # по тексту переписки.
+    try:
+        partner_lifecycle = _load_partner_lifecycle_map(
+            config,
+            int(owner_id),
+            set(allowed),
+        )
+    except Exception as exc:
+        # Fail closed: если статус партнёрства проверить не удалось, Неона не
+        # должна рисковать и продолжать продажный диалог вслепую.
+        print(
+            f"[NeonaPartnerGate] owner={int(owner_id)} lookup_error="
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        stats["errors"] += 1
         return stats
 
     matched_allowed_ids: set[int] = set()
@@ -1430,6 +1651,135 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                     f"new_message_ids={[int(message.id) for message in new_messages]}",
                     flush=True,
                 )
+
+            # ------------------------------------------------------------
+            # ПАРТНЁРСКИЙ СТОП-КРАН.
+            # Как только человек зарегистрирован в Агентстве W, старая воронка
+            # «интерес -> встреча -> регистрация» для него навсегда закрывается.
+            # Неона больше не запускает _process_message / sales prompt.
+            # При первом новом сообщении после смены статуса она один раз
+            # объясняет переход; дальше старый outreach-диалог молчит.
+            # ------------------------------------------------------------
+            lifecycle = partner_lifecycle.get(
+                contact_id,
+                {"state": "candidate"},
+            )
+            lifecycle_state = str(lifecycle.get("state") or "candidate")
+            if lifecycle_state in {"registered", "active"}:
+                if lifecycle_state == "active":
+                    stats["partner_active"] += 1
+                    partner_stage = "partner_active"
+                else:
+                    stats["partner_registered"] += 1
+                    partner_stage = "partner_registered"
+
+                partner_context = _partner_lifecycle_context(
+                    state_context,
+                    lifecycle,
+                )
+
+                # Даже без нового входящего сразу фиксируем новый статус в
+                # agency_dialog_states — кандидатский сценарий уже закрыт.
+                if str(state.get("stage") or "idle") != partner_stage:
+                    _save_dialog_state(
+                        config,
+                        int(owner_id),
+                        contact_id,
+                        last_incoming_id=last_id,
+                        stage=partner_stage,
+                        greeted=bool(state.get("greeted", False)),
+                        context=partner_context,
+                    )
+                    state = {
+                        **state,
+                        "stage": partner_stage,
+                        "context": partner_context,
+                    }
+                    state_context = partner_context
+
+                if not new_messages:
+                    continue
+
+                stats["processed"] += len(new_messages)
+                latest_partner_message = new_messages[-1]
+                latest_partner_id = int(latest_partner_message.id)
+
+                # Один раз объясняем смену режима. После этого старый диалог
+                # кандидата больше автоматически не отвечает: сопровождение уже
+                # идёт через партнёрский контур, Неолу и раздел «Команда».
+                if not bool(partner_context.get("partner_handoff_sent")):
+                    first_name = _first_name(
+                        entity,
+                        allowed[contact_id].get("recipient_name", ""),
+                    )
+                    handoff_reply = _partner_handoff_reply(
+                        first_name,
+                        lifecycle,
+                    )
+                    try:
+                        sent = await client.send_message(
+                            entity,
+                            handoff_reply,
+                            parse_mode=None,
+                            link_preview=False,
+                        )
+                        verified_sent = await _verified_sent_message(
+                            client,
+                            entity,
+                            contact_id,
+                            int(sent.id),
+                        )
+                        if verified_sent is None:
+                            raise DialogError(
+                                "Telegram вернул ID переходного ответа, но "
+                                "сообщение не найдено в нужном чате."
+                            )
+
+                        partner_context = {
+                            **partner_context,
+                            "partner_handoff_sent": True,
+                            "partner_handoff_sent_at": datetime.now(UTC).isoformat(),
+                            "last_reply_id": int(sent.id),
+                            "last_reply_text": handoff_reply,
+                            "last_reply_verified": True,
+                        }
+                        _save_dialog_state(
+                            config,
+                            int(owner_id),
+                            contact_id,
+                            last_incoming_id=latest_partner_id,
+                            stage=partner_stage,
+                            greeted=True,
+                            context=partner_context,
+                        )
+                        stats["replied"] += 1
+                        stats["partner_handoffs"] += 1
+                    except Exception as exc:
+                        print(
+                            f"[NeonaPartnerGate] owner={int(owner_id)} "
+                            f"contact={contact_id} handoff_error="
+                            f"{type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                        stats["errors"] += 1
+                    continue
+
+                partner_context = {
+                    **partner_context,
+                    "partner_last_suppressed_incoming_id": latest_partner_id,
+                    "partner_last_suppressed_at": datetime.now(UTC).isoformat(),
+                }
+                _save_dialog_state(
+                    config,
+                    int(owner_id),
+                    contact_id,
+                    last_incoming_id=latest_partner_id,
+                    stage=partner_stage,
+                    greeted=True,
+                    context=partner_context,
+                )
+                stats["partner_suppressed"] += len(new_messages)
+                continue
 
             # Проверяем сохранённый ответ. Если владелец удалил сообщение
             # Неоны, не восстанавливаем его автоматически: удаление считаем
