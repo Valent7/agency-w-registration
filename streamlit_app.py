@@ -312,7 +312,13 @@ def decrypt_telegram_session(encrypted_session):
         return ""
 # Получаем код пригласившего из ссылки вида:
 # https://agency-w.streamlit.app/?ref=W12345
+#
+# Параметр awt (Agency W token) — короткоживущий мост между внешней
+# соцсетью (VK/Instagram) и Telegram-регистрацией. Его создают транспортные
+# модули Неоны; после входа мы привязываем конкретный внешний профиль к
+# telegram_id зарегистрированного партнёра.
 referral_code = st.query_params.get("ref", "").strip()
+social_registration_token = st.query_params.get("awt", "").strip()
 def ask_openai(
     system_prompt,
     user_message,
@@ -6344,22 +6350,31 @@ if not _agency_user_logged_in:
 
     if referral_code:
         st.success(f"Приглашение партнёра принято: {referral_code}")
-        # Сохраняем код приглашения только локально в браузере на короткое время,
-        # чтобы штатный OIDC-редирект Streamlit не потерял его.
-        _pending_ref_json = json.dumps(str(referral_code))
+    elif social_registration_token:
+        st.success("Персональное приглашение из соцсети принято.")
+    else:
+        st.info("Вы открыли сайт без персональной партнёрской ссылки.")
+
+    if referral_code or social_registration_token:
+        # Сохраняем ref + непрозрачный social-token локально на короткое время,
+        # чтобы штатный OIDC-редирект Streamlit не потерял источник регистрации.
+        _pending_ref_json = json.dumps(str(referral_code or ""))
+        _pending_awt_json = json.dumps(str(social_registration_token or ""))
         st.html(
             f"""
             <script>
             localStorage.setItem(
               'agency_w_pending_ref',
-              JSON.stringify({{ref: {_pending_ref_json}, ts: Date.now()}})
+              JSON.stringify({{
+                ref: {_pending_ref_json},
+                awt: {_pending_awt_json},
+                ts: Date.now()
+              }})
             );
             </script>
             """,
             unsafe_allow_javascript=True,
         )
-    else:
-        st.info("Вы открыли сайт без персональной партнёрской ссылки.")
 # Защищённый вход через Telegram — встроенный OIDC Streamlit.
 import time
 # Streamlit сам обрабатывает state, nonce, PKCE, проверку ID token
@@ -6368,6 +6383,112 @@ telegram_data = {}
 oidc_error = ""
 remembered_data = {}
 
+
+
+def claim_social_registration_token(token, telegram_id, member_code):
+    """Привязывает VK/Instagram-кандидата к зарегистрированному партнёру.
+
+    Токен создаётся модулем соответствующей соцсети и хранится в
+    agency_social_registration_links. Здесь мы только подтверждаем его после
+    доверенного Telegram OIDC-входа. Ошибка моста не должна блокировать вход
+    человека в Агентство W, поэтому функция возвращает результат, а не роняет UI.
+    """
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        return {"ok": False, "reason": "no_token"}
+
+    # Токен должен быть непрозрачным ASCII-идентификатором, а не внешним user id.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,160}", clean_token):
+        return {"ok": False, "reason": "invalid_token"}
+
+    base = f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_social_registration_links"
+    secret = str(st.secrets["SUPABASE_SECRET_KEY"])
+    headers = {
+        "apikey": secret,
+        "Authorization": f"Bearer {secret}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        lookup = requests.get(
+            base,
+            headers=headers,
+            params={
+                "token": f"eq.{clean_token}",
+                "select": (
+                    "id,token,channel,external_user_id,owner_telegram_id,"
+                    "owner_member_code,status,expires_at,claimed_at,"
+                    "member_telegram_id,member_code"
+                ),
+                "limit": 1,
+            },
+            timeout=10,
+        )
+        lookup.raise_for_status()
+        rows = lookup.json()
+        row = rows[0] if isinstance(rows, list) and rows else None
+        if not row:
+            return {"ok": False, "reason": "not_found"}
+
+        existing_member = row.get("member_telegram_id")
+        if existing_member not in (None, ""):
+            try:
+                same_member = int(existing_member) == int(telegram_id)
+            except (TypeError, ValueError):
+                same_member = False
+            return {
+                "ok": bool(same_member),
+                "reason": "already_claimed_same" if same_member else "already_claimed_other",
+                "channel": str(row.get("channel") or ""),
+                "external_user_id": str(row.get("external_user_id") or ""),
+            }
+
+        status = str(row.get("status") or "pending").strip().lower()
+        if status not in {"pending", ""}:
+            return {"ok": False, "reason": f"status_{status}"}
+
+        expires_at = str(row.get("expires_at") or "").strip()
+        if expires_at:
+            try:
+                expires_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                if expires_dt <= datetime.now(timezone.utc):
+                    return {"ok": False, "reason": "expired"}
+            except ValueError:
+                return {"ok": False, "reason": "bad_expiry"}
+
+        now = datetime.now(timezone.utc).isoformat()
+        patch = requests.patch(
+            base,
+            headers={**headers, "Prefer": "return=representation"},
+            params={
+                "id": f"eq.{int(row['id'])}",
+                "member_telegram_id": "is.null",
+            },
+            json={
+                "member_telegram_id": int(telegram_id),
+                "member_code": str(member_code or f"W{int(telegram_id)}"),
+                "claimed_at": now,
+                "status": "claimed",
+            },
+            timeout=10,
+        )
+        patch.raise_for_status()
+        updated = patch.json()
+        if not isinstance(updated, list) or not updated:
+            return {"ok": False, "reason": "claim_race"}
+
+        return {
+            "ok": True,
+            "reason": "claimed",
+            "channel": str(row.get("channel") or ""),
+            "external_user_id": str(row.get("external_user_id") or ""),
+        }
+    except requests.exceptions.RequestException as exc:
+        return {"ok": False, "reason": "request_error", "error": str(exc)[:500]}
+    except (TypeError, ValueError, KeyError) as exc:
+        return {"ok": False, "reason": "data_error", "error": str(exc)[:500]}
 
 
 def load_member_record(telegram_id):
@@ -6483,15 +6604,17 @@ if telegram_login_valid or remembered_data:
         telegram_id = telegram_data.get("id", "")
 
         # st.login возвращает пользователя на /oauth2callback -> главную страницу.
-        # Если вход начат по партнёрской ссылке, восстанавливаем ref из localStorage
-        # до первой записи нового участника в Supabase. Маркер не даёт зациклиться.
+        # Если вход начат по партнёрской/VK/Instagram-ссылке, восстанавливаем
+        # ref и awt из localStorage до первой записи нового участника в Supabase.
+        # Маркер не даёт зациклиться.
         _ref_checked = str(st.query_params.get("_aw_ref_checked", "") or "") == "1"
-        if not referral_code and not _ref_checked:
+        if (not referral_code or not social_registration_token) and not _ref_checked:
             st.html(
                 """
                 <script>
                 (() => {
                   let ref = '';
+                  let awt = '';
                   try {
                     const raw = localStorage.getItem('agency_w_pending_ref');
                     if (raw) {
@@ -6499,6 +6622,7 @@ if telegram_login_valid or remembered_data:
                       const age = Date.now() - Number(item.ts || 0);
                       if (age >= 0 && age < 2 * 60 * 60 * 1000) {
                         ref = String(item.ref || '');
+                        awt = String(item.awt || '');
                       } else {
                         localStorage.removeItem('agency_w_pending_ref');
                       }
@@ -6506,7 +6630,8 @@ if telegram_login_valid or remembered_data:
                   } catch (_) {}
                   const url = new URL(window.location.href);
                   url.searchParams.set('_aw_ref_checked', '1');
-                  if (ref) url.searchParams.set('ref', ref);
+                  if (ref && !url.searchParams.get('ref')) url.searchParams.set('ref', ref);
+                  if (awt && !url.searchParams.get('awt')) url.searchParams.set('awt', awt);
                   window.location.replace(url.toString());
                 })();
                 </script>
@@ -6517,14 +6642,31 @@ if telegram_login_valid or remembered_data:
 
         member_code, created = save_member_to_supabase(telegram_data, referral_code)
 
+        social_link_result = claim_social_registration_token(
+            social_registration_token,
+            telegram_id,
+            member_code,
+        )
+        if social_registration_token and not social_link_result.get("ok"):
+            # Не блокируем регистрацию, но оставляем диагностический след для Директора.
+            st.session_state["_agency_social_link_warning"] = str(
+                social_link_result.get("reason") or "unknown"
+            )
+
         # После успешной привязки приглашения очищаем временный браузерный след.
         st.html(
             """
             <script>
             localStorage.removeItem('agency_w_pending_ref');
             const url = new URL(window.location.href);
-            if (url.searchParams.has('_aw_ref_checked')) {
-              url.searchParams.delete('_aw_ref_checked');
+            let changed = false;
+            for (const key of ['_aw_ref_checked', 'awt']) {
+              if (url.searchParams.has(key)) {
+                url.searchParams.delete(key);
+                changed = true;
+              }
+            }
+            if (changed) {
               window.history.replaceState({}, document.title, url.pathname + (url.search ? url.search : ''));
             }
             </script>
