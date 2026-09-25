@@ -385,27 +385,49 @@ def _detect_time(text: str) -> str | None:
     return None
 
 
+
+def _normalize_calendar_text(text: str) -> str:
+    """Нормализует пользовательский текст для календарных дат."""
+    value = str(text or "")
+    value = value.replace("\u00a0", " ").replace("\u202f", " ")
+    value = value.replace("ё", "е").casefold()
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
 def _detect_date(text: str, message_dt: datetime, tz_name: str | None) -> str | None:
     raw = str(text or "")
-    lowered = raw.casefold()
-    tz = ZoneInfo(tz_name) if tz_name else MSK
+    lowered = _normalize_calendar_text(raw)
+
+    try:
+        tz = ZoneInfo(tz_name) if tz_name else MSK
+    except Exception:
+        tz = MSK
+
     base = message_dt.astimezone(tz).date()
 
-    if "послезавтра" in lowered:
+    # Самые частые естественные ответы после вопроса Тео:
+    # "сегодня", "сегодня в 15:00", "завтра вечером", "послезавтра".
+    if re.search(r"(?:^|\W)послезавтра(?:\W|$)", lowered):
         return (base + timedelta(days=2)).isoformat()
-    if "завтра" in lowered:
+    if re.search(r"(?:^|\W)завтра(?:\W|$)", lowered):
         return (base + timedelta(days=1)).isoformat()
-    if "сегодня" in lowered:
+    if re.search(r"(?:^|\W)сегодня(?:\W|$)", lowered):
         return base.isoformat()
 
-    match = re.search(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b", raw)
+    match = re.search(
+        r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b",
+        raw,
+    )
     if match:
         day = int(match.group(1))
         month = int(match.group(2))
         year_raw = match.group(3)
         year = int(year_raw) if year_raw else base.year
+
         if year < 100:
             year += 2000
+
         try:
             candidate = date(year, month, day)
             if not year_raw and candidate < base - timedelta(days=2):
@@ -415,7 +437,11 @@ def _detect_date(text: str, message_dt: datetime, tz_name: str | None) -> str | 
             return None
 
     for word, weekday in WEEKDAYS_RU.items():
-        if word in lowered:
+        normalized_word = word.replace("ё", "е").casefold()
+        if re.search(
+            rf"(?:^|\W){re.escape(normalized_word)}(?:\W|$)",
+            lowered,
+        ):
             delta = (weekday - base.weekday()) % 7
             if delta == 0:
                 delta = 7
@@ -559,6 +585,19 @@ def _schedule_reply(
         datetime.now(UTC),
     )
     state = str(meeting_state or "collecting_meeting_details").strip()
+
+    print(
+        "THEO_CALENDAR_PARSE:",
+        {
+            "state": state,
+            "incoming": incoming_text,
+            "requested_date": context.get("requested_date"),
+            "requested_time": context.get("requested_time"),
+            "contact_timezone": context.get("contact_timezone"),
+            "meeting_format": context.get("meeting_format"),
+        },
+        flush=True,
+    )
     person = str(visitor_first_name or "").strip()
     intro = (
         "Я Тео, консультант Агентства W. Помогу подобрать удобное время. "
