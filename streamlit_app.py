@@ -1618,6 +1618,35 @@ def _telegram_code_delivery_label(type_name):
     return "Telegram принял запрос на код"
 
 
+def _telegram_code_unavailable(exc):
+    """True, если Telegram исчерпал доступные способы доставки кода."""
+    message = str(exc or "").strip().lower()
+    markers = (
+        "send_code_unavailable",
+        "sendcodeunavailable",
+        "all available options for this type of number were already used",
+        "all available options",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _telegram_code_unavailable_message():
+    return (
+        "Telegram уже использовал доступные сейчас способы доставки кода для этого номера. "
+        "Не нажимайте повторную отправку снова. Если ранее отправленный код появится — "
+        "его всё ещё можно ввести ниже. Если код так и не придёт, начните новое подключение позже."
+    )
+
+
+def _telegram_retry_remaining(deadline_value):
+    try:
+        deadline = int(deadline_value or 0)
+    except (TypeError, ValueError):
+        deadline = 0
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    return max(0, deadline - now_ts)
+
+
 async def request_telegram_login_code(phone):
     api_id, api_hash = get_telegram_api_credentials()
     client = TelegramClient(StringSession(), api_id, api_hash)
@@ -5712,11 +5741,14 @@ def render_telegram_connection(expected_telegram_id):
 
     connected_key = f"telegram_connected_{expected_telegram_id}"
     phone_key = f"telegram_phone_{expected_telegram_id}"
+    requested_phone_key = f"telegram_requested_phone_{expected_telegram_id}"
     pending_key = f"telegram_pending_session_{expected_telegram_id}"
     hash_key = f"telegram_phone_code_hash_{expected_telegram_id}"
     delivery_key = f"telegram_code_delivery_{expected_telegram_id}"
     next_delivery_key = f"telegram_code_next_delivery_{expected_telegram_id}"
     timeout_key = f"telegram_code_timeout_{expected_telegram_id}"
+    deadline_key = f"telegram_code_retry_after_{expected_telegram_id}"
+    unavailable_key = f"telegram_code_unavailable_{expected_telegram_id}"
     password_step_key = f"telegram_needs_password_{expected_telegram_id}"
 
     if connected_key not in st.session_state:
@@ -5736,21 +5768,33 @@ def render_telegram_connection(expected_telegram_id):
     st.subheader("Подключение рабочего Telegram")
 
     st.write(
-        "Это не вход на сайт Агентства W. Подключение нужно Неонии только для работы "
-        "с доступными Telegram-контактами и чатами. Его можно выполнить позже."
+        "Подключение нужно Неонии для работы с доступными Telegram-контактами и чатами. "
+        "Код может прийти не по SMS, а в служебный чат Telegram на уже авторизованном устройстве."
     )
 
+    pending_exists = pending_key in st.session_state
     phone = st.text_input(
         "Номер телефона Telegram",
         placeholder="+49...",
         key=phone_key,
+        disabled=pending_exists,
     )
 
     if pending_key not in st.session_state:
+        retry_remaining = _telegram_retry_remaining(
+            st.session_state.get(deadline_key)
+        )
+        if retry_remaining > 0:
+            st.info(
+                f"Telegram разрешит следующий запрос примерно через {retry_remaining} сек. "
+                "Пока новый код не запрашиваем."
+            )
+
         if st.button(
             "Получить код Telegram",
             type="primary",
             key=f"telegram_request_code_{expected_telegram_id}",
+            disabled=retry_remaining > 0,
         ):
             if not phone.strip():
                 st.warning("Введите номер телефона вместе с кодом страны.")
@@ -5761,18 +5805,44 @@ def render_telegram_connection(expected_telegram_id):
                     request_telegram_login_code(phone.strip())
                 )
 
+                timeout_seconds = int(result.get("timeout", 0) or 0)
+                st.session_state[requested_phone_key] = phone.strip()
                 st.session_state[pending_key] = result["pending_session"]
                 st.session_state[hash_key] = result["phone_code_hash"]
                 st.session_state[delivery_key] = result.get("delivery_type", "")
                 st.session_state[next_delivery_key] = result.get("next_type", "")
-                st.session_state[timeout_key] = int(result.get("timeout", 0) or 0)
+                st.session_state[timeout_key] = timeout_seconds
+                st.session_state[deadline_key] = (
+                    int(datetime.now(timezone.utc).timestamp()) + timeout_seconds
+                    if timeout_seconds > 0
+                    else 0
+                )
+                st.session_state[unavailable_key] = False
                 st.rerun()
 
             except PhoneNumberInvalidError:
                 st.error("Telegram не распознал номер телефона.")
 
+            except FloodWaitError as exc:
+                seconds = int(getattr(exc, "seconds", 0) or 0)
+                if seconds > 0:
+                    st.session_state[deadline_key] = (
+                        int(datetime.now(timezone.utc).timestamp()) + seconds
+                    )
+                st.warning(
+                    "Telegram временно ограничил запросы кода. "
+                    + (
+                        f"Подождите около {seconds} сек. и обновите страницу."
+                        if seconds
+                        else "Попробуйте позже."
+                    )
+                )
+
             except Exception as exc:
-                st.error(f"Не удалось отправить код: {exc}")
+                if _telegram_code_unavailable(exc):
+                    st.warning(_telegram_code_unavailable_message())
+                else:
+                    st.error(f"Не удалось отправить код: {exc}")
 
         return False
 
@@ -5809,9 +5879,12 @@ def render_telegram_connection(expected_telegram_id):
                 )
 
                 st.session_state[connected_key] = True
-                st.session_state.pop(pending_key, None)
-                st.session_state.pop(hash_key, None)
-                st.session_state.pop(password_step_key, None)
+                for key in (
+                    requested_phone_key, pending_key, hash_key, delivery_key,
+                    next_delivery_key, timeout_key, deadline_key, unavailable_key,
+                    password_step_key,
+                ):
+                    st.session_state.pop(key, None)
                 st.rerun()
 
             except PasswordHashInvalidError:
@@ -5825,61 +5898,140 @@ def render_telegram_connection(expected_telegram_id):
     delivery_type = str(st.session_state.get(delivery_key) or "")
     next_delivery = str(st.session_state.get(next_delivery_key) or "")
     timeout_seconds = int(st.session_state.get(timeout_key, 0) or 0)
+    requested_phone = str(
+        st.session_state.get(requested_phone_key) or phone or ""
+    ).strip()
 
-    st.info(_telegram_code_delivery_label(delivery_type))
-    if next_delivery:
-        st.caption(
-            "Если код не придёт, Telegram допускает следующий способ: "
-            + _telegram_code_delivery_label(next_delivery).replace("код ", "", 1)
-            + (f". Ориентировочно через {timeout_seconds} сек." if timeout_seconds else ".")
+    # Для сессий, начатых до этой версии, создаём дедлайн один раз.
+    if timeout_seconds > 0 and not st.session_state.get(deadline_key):
+        st.session_state[deadline_key] = (
+            int(datetime.now(timezone.utc).timestamp()) + timeout_seconds
         )
 
+    retry_remaining = _telegram_retry_remaining(
+        st.session_state.get(deadline_key)
+    )
+    resend_unavailable = bool(st.session_state.get(unavailable_key, False))
+
+    st.info(_telegram_code_delivery_label(delivery_type))
+    st.caption(
+        "Откройте Telegram, найдите служебное сообщение с кодом, запомните его и вернитесь сюда. "
+        "На одном телефоне достаточно просто переключиться между приложениями."
+    )
+
+    if next_delivery:
+        next_label = _telegram_code_delivery_label(next_delivery).replace(
+            "код ", "", 1
+        )
+        if retry_remaining > 0:
+            st.caption(
+                "Если код не придёт, Telegram допускает следующий способ: "
+                + next_label
+                + f". Запрос станет доступен примерно через {retry_remaining} сек."
+            )
+        else:
+            st.caption(
+                "Если код не пришёл, Telegram допускает следующий способ: "
+                + next_label
+                + ". Теперь его можно запросить кнопкой ниже."
+            )
+    elif not resend_unavailable:
+        st.caption(
+            "Telegram не сообщил дополнительный способ доставки. "
+            "Не нажимайте повторный запрос много раз подряд."
+        )
+
+    if resend_unavailable:
+        st.warning(_telegram_code_unavailable_message())
+
     resend_col, restart_col = st.columns(2)
+
+    resend_disabled = (
+        retry_remaining > 0
+        or resend_unavailable
+        or not bool(next_delivery)
+    )
+    if retry_remaining > 0:
+        resend_label = f"🔄 Повторить через {retry_remaining} сек."
+    elif resend_unavailable:
+        resend_label = "🔄 Повторная отправка недоступна"
+    elif next_delivery:
+        resend_label = "🔄 Запросить следующий способ"
+    else:
+        resend_label = "🔄 Повторная отправка недоступна"
+
     if resend_col.button(
-        "🔄 Код не пришёл — отправить повторно",
+        resend_label,
         key=f"telegram_resend_code_{expected_telegram_id}",
         use_container_width=True,
+        disabled=resend_disabled,
     ):
         try:
             result = run_telegram_async(
                 resend_telegram_login_code(
-                    phone.strip(),
+                    requested_phone,
                     st.session_state[pending_key],
                     st.session_state[hash_key],
                 )
             )
+            timeout_seconds = int(result.get("timeout", 0) or 0)
             st.session_state[pending_key] = result["pending_session"]
             st.session_state[hash_key] = result["phone_code_hash"]
             st.session_state[delivery_key] = result.get("delivery_type", "")
             st.session_state[next_delivery_key] = result.get("next_type", "")
-            st.session_state[timeout_key] = int(result.get("timeout", 0) or 0)
-            st.success("Telegram принял повторный запрос. Проверьте способ доставки выше.")
+            st.session_state[timeout_key] = timeout_seconds
+            st.session_state[deadline_key] = (
+                int(datetime.now(timezone.utc).timestamp()) + timeout_seconds
+                if timeout_seconds > 0
+                else 0
+            )
+            st.session_state[unavailable_key] = False
+            st.success("Telegram принял следующий запрос. Проверьте способ доставки выше.")
             st.rerun()
+
         except PhoneCodeExpiredError:
-            st.session_state.pop(pending_key, None)
-            st.session_state.pop(hash_key, None)
-            st.session_state.pop(delivery_key, None)
-            st.session_state.pop(next_delivery_key, None)
-            st.session_state.pop(timeout_key, None)
-            st.warning("Старый запрос истёк. Нажмите «Получить код Telegram» ещё раз.")
+            for key in (
+                pending_key, hash_key, delivery_key, next_delivery_key,
+                timeout_key, unavailable_key,
+            ):
+                st.session_state.pop(key, None)
+            st.warning(
+                "Старый запрос истёк. Нажмите «Получить код Telegram» ещё раз."
+            )
             st.rerun()
+
         except FloodWaitError as exc:
             seconds = int(getattr(exc, "seconds", 0) or 0)
+            if seconds > 0:
+                st.session_state[deadline_key] = (
+                    int(datetime.now(timezone.utc).timestamp()) + seconds
+                )
             st.warning(
                 "Telegram временно ограничил повторные запросы. "
-                + (f"Подождите около {seconds} сек." if seconds else "Попробуйте немного позже.")
+                + (
+                    f"Подождите около {seconds} сек. и обновите страницу."
+                    if seconds
+                    else "Попробуйте позже."
+                )
             )
+
         except Exception as exc:
-            st.error(f"Не удалось повторно запросить код: {exc}")
+            if _telegram_code_unavailable(exc):
+                st.session_state[unavailable_key] = True
+                st.warning(_telegram_code_unavailable_message())
+            else:
+                st.error(f"Не удалось повторно запросить код: {exc}")
 
     if restart_col.button(
         "↩️ Начать подключение заново",
         key=f"telegram_restart_login_{expected_telegram_id}",
         use_container_width=True,
     ):
+        # deadline_key намеренно не удаляем: кнопка «Начать заново»
+        # не должна позволять обойти тайм-аут Telegram.
         for key in (
-            pending_key, hash_key, delivery_key, next_delivery_key,
-            timeout_key, password_step_key,
+            requested_phone_key, pending_key, hash_key, delivery_key,
+            next_delivery_key, timeout_key, unavailable_key, password_step_key,
         ):
             st.session_state.pop(key, None)
         st.rerun()
@@ -5902,7 +6054,7 @@ def render_telegram_connection(expected_telegram_id):
         try:
             result = run_telegram_async(
                 verify_telegram_login_code(
-                    phone,
+                    requested_phone,
                     code.strip(),
                     st.session_state[pending_key],
                     st.session_state[hash_key],
@@ -5927,28 +6079,30 @@ def render_telegram_connection(expected_telegram_id):
             )
 
             st.session_state[connected_key] = True
-            st.session_state.pop(pending_key, None)
-            st.session_state.pop(hash_key, None)
-            st.session_state.pop(delivery_key, None)
-            st.session_state.pop(next_delivery_key, None)
-            st.session_state.pop(timeout_key, None)
+            for key in (
+                requested_phone_key, pending_key, hash_key, delivery_key,
+                next_delivery_key, timeout_key, deadline_key, unavailable_key,
+                password_step_key,
+            ):
+                st.session_state.pop(key, None)
             st.rerun()
 
         except PhoneCodeInvalidError:
             st.error("Неверный код Telegram.")
 
         except PhoneCodeExpiredError:
-            st.session_state.pop(pending_key, None)
-            st.session_state.pop(hash_key, None)
-            st.session_state.pop(delivery_key, None)
-            st.session_state.pop(next_delivery_key, None)
-            st.session_state.pop(timeout_key, None)
+            for key in (
+                pending_key, hash_key, delivery_key, next_delivery_key,
+                timeout_key, unavailable_key,
+            ):
+                st.session_state.pop(key, None)
             st.error("Срок действия кода закончился. Получите новый код.")
 
         except Exception as exc:
             st.error(f"Не удалось подтвердить код: {exc}")
 
     return False
+
 
 
 st.markdown(
