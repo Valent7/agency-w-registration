@@ -11,7 +11,7 @@ import streamlit as st
 from neola_cabinet_map import NEOLA_MISSION, neola_cabinet_knowledge
 
 
-REALTIME_MODEL = "gpt-realtime-2"
+REALTIME_MODEL = "gpt-realtime-2.1-mini"
 REALTIME_VOICE = "marin"
 # Даем партнёру достаточно времени прочитать экран и нажать кнопку.
 # После установления WebRTC-сессии истечение client secret разговор не прерывает.
