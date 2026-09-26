@@ -5847,17 +5847,35 @@ def render_telegram_connection(expected_telegram_id):
         return False
 
     if st.session_state.get(password_step_key, False):
-        password = st.text_input(
-            "Пароль двухэтапной защиты Telegram",
-            type="password",
-            key=f"telegram_2fa_password_{expected_telegram_id}",
+        st.info(
+            "Telegram принял код. Остался только пароль двухэтапной защиты "
+            "этого Telegram-аккаунта."
         )
 
-        if st.button(
-            "Подтвердить пароль",
-            type="primary",
-            key=f"telegram_confirm_password_{expected_telegram_id}",
+        # На мобильных устройствах обычная связка text_input + button внутри
+        # st.expander иногда перестаёт принимать касания после возврата из Telegram.
+        # Форма даёт полю и кнопке единый устойчивый цикл отправки.
+        with st.form(
+            key=f"telegram_2fa_form_{expected_telegram_id}",
+            clear_on_submit=False,
         ):
+            password = st.text_input(
+                "Пароль двухэтапной защиты Telegram",
+                type="password",
+                key=f"telegram_2fa_password_{expected_telegram_id}",
+                autocomplete="current-password",
+            )
+            confirm_password = st.form_submit_button(
+                "Подтвердить пароль",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if confirm_password:
+            if not str(password or "").strip():
+                st.warning("Введите пароль двухэтапной защиты Telegram.")
+                return False
+
             try:
                 result = run_telegram_async(
                     verify_telegram_2fa_password(
@@ -6914,15 +6932,47 @@ if telegram_login_valid or remembered_data:
                 "✅ Telegram подключён",
             )
         else:
-            with st.expander(
-                "📱 Подключить Telegram для Неонии — можно позже",
-                expanded=False,
-            ):
+            # На телефонах не используем st.expander для Telegram-авторизации:
+            # после переключения в приложение Telegram и обратно мобильный браузер
+            # иногда оставляет вложенные поля/кнопки некликабельными.
+            telegram_panel_key = f"telegram_panel_open_{int(telegram_id)}"
+            telegram_password_key = f"telegram_needs_password_{int(telegram_id)}"
+
+            # Если пользователь уже дошёл до 2FA, панель должна оставаться открытой
+            # автоматически — пароль нельзя прятать обратно под раскрывающийся блок.
+            if st.session_state.get(telegram_password_key, False):
+                st.session_state[telegram_panel_key] = True
+
+            with st.container(border=True):
+                st.markdown("#### Telegram")
                 st.caption(
-                    "Доступ к Агентству W уже открыт. Этот шаг нужен только для "
+                    "Доступ к Агентству W уже открыт. Telegram нужен только для "
                     "работы Неонии с Telegram-контактами и чатами и не блокирует сайт."
                 )
-                telegram_connected = render_telegram_connection(telegram_id)
+
+                if not st.session_state.get(telegram_panel_key, False):
+                    if st.button(
+                        "📱 Подключить Telegram для Неонии — можно позже",
+                        key=f"telegram_open_panel_{int(telegram_id)}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[telegram_panel_key] = True
+                        st.rerun()
+                    telegram_connected = False
+                else:
+                    telegram_connected = render_telegram_connection(telegram_id)
+
+                    if (
+                        not telegram_connected
+                        and not st.session_state.get(telegram_password_key, False)
+                        and st.button(
+                            "Свернуть подключение Telegram",
+                            key=f"telegram_close_panel_{int(telegram_id)}",
+                            use_container_width=True,
+                        )
+                    ):
+                        st.session_state[telegram_panel_key] = False
+                        st.rerun()
 
         st.session_state["neonia_telegram_connected"] = bool(telegram_connected)
 
