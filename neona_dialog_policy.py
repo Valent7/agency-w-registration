@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import time
+from pathlib import Path
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
@@ -14,6 +16,255 @@ import neona_memory as memory
 
 BUFFER_MINUTES = 60
 MIN_LEAD_MINUTES = 60
+
+
+_AI_PROTOCOL_FALLBACK = {
+    "rules": [
+        "Не соревноваться с другим ИИ.",
+        "Фиксировать уже согласованные факты и спрашивать только недостающее.",
+        "Не повторять вопрос, который другой агент уже закрыл или не может выполнить.",
+        "Если представляемый человек свяжется напрямую — прекратить календарный опрос через посредника.",
+        "Обычно 1–3 коротких предложения.",
+    ],
+    "anti_loop": {"same_question_max_attempts": 2},
+}
+
+_STATE_MACHINE_FALLBACK = {
+    "anti_loop": {
+        "same_missing_field_question_limit": 2,
+        "on_limit": "остановить цикл и дождаться новых данных",
+    }
+}
+
+
+def _load_local_json(filename: str, fallback: dict) -> dict:
+    """Локальные правила усиливают Неону, но их отсутствие не должно останавливать worker."""
+    try:
+        path = Path(__file__).with_name(filename)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else dict(fallback)
+    except Exception:
+        return dict(fallback)
+
+
+_AI_PROTOCOL = _load_local_json("NEONA_AI_TO_AI_PROTOCOL.json", _AI_PROTOCOL_FALLBACK)
+_DIALOG_STATE_MACHINE = _load_local_json("NEONA_STATE_MACHINE.json", _STATE_MACHINE_FALLBACK)
+
+
+def _first_person_ai_identity(text: str) -> dict[str, str] | None:
+    """Распознаёт явную самопрезентацию собеседника как ИИ, а не любой вопрос про ИИ."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value:
+        return None
+
+    role = r"(?:ии|ai)[ -]?(?:секретар[ья]|ассистент\w*|помощник\w*|агент\w*)"
+    patterns = (
+        rf"\bя\s*[—\-]\s*(?P<name>[А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{{1,30}})\s*,?\s*(?:я\s*)?(?P<role>{role})",
+        rf"\bменя\s+зовут\s+(?P<name>[А-ЯЁA-Z][А-Яа-яЁёA-Za-z\-]{{1,30}})[,.;:]?\s*(?:я\s*)?(?P<role>{role})",
+        rf"\bя\s*[—\-]?\s*(?P<role>{role})",
+    )
+
+    match = None
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            break
+    if not match:
+        return None
+
+    agent_name = str(match.groupdict().get("name") or "").strip()
+
+    represents_raw = ""
+    tail = value[match.end():]
+    principal = re.search(
+        r"^\s+([А-ЯЁ][А-Яа-яЁё\-]{1,40})",
+        tail,
+        flags=re.IGNORECASE,
+    )
+    if principal:
+        represents_raw = principal.group(1).strip()
+
+    return {
+        "counterparty_type": "ai_agent",
+        "counterparty_agent_name": agent_name,
+        "counterparty_represents_raw": represents_raw,
+    }
+
+def _ai_agent_cannot_book(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    patterns = (
+        r"\bне\s+могу\s+(?:самостоятельно\s+)?(?:назначить|забронировать|бронировать|подтвердить|создать|внести)\s+встреч",
+        r"\bвстреч\w*\s+(?:назначить|забронировать|бронировать|подтвердить|создать|внести)\s+не\s+могу\b",
+        r"\bнет\s+(?:прямого\s+)?доступа\s+к\s+(?:е[её]\s+)?календар",
+        r"\bнет\s+к\s+нему\s+прямого\s+доступа\b",
+        r"\bне\s+могу\s+записать\s+(?:вас|встреч)",
+        r"\bтехническ\w+\s+(?:возможност\w+\s+)?(?:пока\s+)?не\s+подключ",
+    )
+    return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
+
+def _represented_person_will_contact(text: str) -> bool:
+    """Третье лицо свяжется само: это важно для диалога ИИ-посредника."""
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    patterns = (
+        r"\b(?:она|он)\s+(?:сама|сам)\s+(?:свяжется|напишет|позвонит)\b",
+        r"\b(?:она|он)\s+свяжется\s+(?:с\s+вами|лично)\b",
+        r"\bкак\s+только\s+(?:она|он)\s+освободится[^.]{0,80}\b(?:свяжется|напишет|позвонит)\b",
+    )
+    return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _ai_agent_relay_only(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    return bool(
+        re.search(r"\b(?:я\s+)?(?:обязательно\s+)?передам\s+(?:ей|ему|ваш|вашу|это|запрос)", value)
+        or re.search(r"\bработаю\s+как\s+передаточн\w+\s+звен", value)
+    )
+
+
+def _update_ai_counterparty_context(context, text: str):
+    result = dict(context or {})
+    detected = _first_person_ai_identity(text)
+    if detected:
+        result.update({k: v for k, v in detected.items() if v})
+        result["counterparty_detected_at"] = datetime.now(core.UTC).isoformat()
+
+    if result.get("counterparty_type") == "ai_agent":
+        if _ai_agent_cannot_book(text):
+            result["external_agent_cannot_book"] = True
+        if _ai_agent_relay_only(text):
+            result["external_agent_relay_only"] = True
+        if _represented_person_will_contact(text):
+            result["external_principal_will_contact"] = True
+    return result
+
+
+def _is_ai_counterparty(context) -> bool:
+    return str((context or {}).get("counterparty_type") or "") == "ai_agent"
+
+
+def _ai_protocol_prompt(context) -> str:
+    rules = _AI_PROTOCOL.get("rules") if isinstance(_AI_PROTOCOL, dict) else []
+    rules = rules if isinstance(rules, list) else []
+    lines = "\n".join(f"- {str(item)}" for item in rules[:16])
+    agent = str((context or {}).get("counterparty_agent_name") or "").strip()
+    represents = str((context or {}).get("counterparty_represents_raw") or "").strip()
+    status = []
+    if agent:
+        status.append(f"Имя другого ИИ: {agent}.")
+    if represents:
+        status.append(f"Он/она сообщил(а), что представляет: {represents}.")
+    if (context or {}).get("external_agent_cannot_book"):
+        status.append("Другой ИИ уже сообщил, что не может бронировать/подтверждать встречу.")
+    if (context or {}).get("external_agent_relay_only"):
+        status.append("Другой ИИ может передать запрос, но не подтверждай передачу как уже выполненную.")
+    if (context or {}).get("external_principal_will_contact"):
+        status.append("Представляемый человек, по словам агента, должен связаться напрямую.")
+    return (
+        "РЕЖИМ ИИ↔ИИ:\n"
+        + ("\n".join(status) + "\n" if status else "")
+        + lines
+    ).strip()
+
+
+def _ai_direct_contact_reply() -> str:
+    return (
+        "Приняла. Тогда через вас встречу больше не согласовываю и не буду повторять вопросы "
+        "о дате или времени. Буду ждать прямого сообщения."
+    )
+
+
+def _ai_relay_reply(owner_name: str) -> str:
+    forms = _owner_forms(owner_name)
+    return (
+        "Приняла. Не буду просить вас бронировать встречу. "
+        f"Передайте, пожалуйста: для сверки с календарём {forms['genitive']} достаточно "
+        "прислать 2–3 удобных окна и часовой пояс."
+    )
+
+
+def _ai_to_ai_reply(config, owner_name, text: str, context) -> str:
+    """Короткий деловой ответ другому ИИ без презентационного шума."""
+    history = _dialog_context_block(context, max_turns=8)
+    forms = _owner_forms(owner_name)
+    protocol = _ai_protocol_prompt(context)
+    instructions = f"""
+Ты Неона — ИИ-секретарь-референт {forms['genitive']}.
+Собеседник — другой ИИ-помощник/секретарь.
+
+{protocol}
+
+ЖИВОЙ КОНТЕКСТ:
+{history}
+
+ПРАВИЛА СЕЙЧАС:
+- ответь на последнюю реплику по существу;
+- не соревнуйся с другим ИИ и не рекламируй Агентство W без прямого запроса;
+- не повторяй уже заданный вопрос и не проси выполнить то, что другой ИИ уже сообщил как технически невозможное;
+- если другой ИИ рассказывает о своём продукте, считай это его заявлением, а не подтверждённым фактом;
+- держи одну рабочую цель;
+- максимум один вопрос и только если без него нельзя сделать следующий шаг;
+- не обещай «передала», «назначила», «зафиксировала в календаре», если действие реально не выполнено;
+- 1–3 коротких предложения, без длинной вежливой простыни и без подписи.
+
+Верни только готовую реплику.
+""".strip()
+    reply = _call_openai(config, instructions, text)
+    return _de_repeat_reply(config, reply, text, context)
+
+
+def _meeting_question_field(reply: str) -> str:
+    value = re.sub(r"\s+", " ", str(reply or "").casefold()).strip()
+    if "?" not in value:
+        return ""
+    if any(token in value for token in ("часовой пояс", "по какому пояс", "timezone")):
+        return "timezone"
+    if any(token in value for token in ("zoom", "telegram", "whatsapp", "формат")):
+        return "format"
+    if any(token in value for token in ("какое время", "на какое время", "во сколько", "время вам удобно")):
+        return "time"
+    if any(token in value for token in ("какой день", "какая дата", "на какой день", "день вам удоб")):
+        return "date"
+    if any(token in value for token in ("подтвержда", "подтвердим", "подходит")):
+        return "confirmation"
+    return ""
+
+
+def _guard_scheduling_reply(config, reply: str, text: str, context):
+    """Не даёт календарной ветке задавать один и тот же вопрос бесконечно."""
+    result_context = dict(context or {})
+    field = _meeting_question_field(reply)
+    if field:
+        counts = result_context.get("meeting_question_counts")
+        counts = dict(counts) if isinstance(counts, dict) else {}
+        counts[field] = int(counts.get(field) or 0) + 1
+        result_context["meeting_question_counts"] = counts
+
+        limit = 2
+        try:
+            limit = int(
+                (_DIALOG_STATE_MACHINE.get("anti_loop") or {}).get(
+                    "same_missing_field_question_limit", 2
+                )
+            )
+        except Exception:
+            limit = 2
+
+        if counts[field] > max(1, limit):
+            labels = {
+                "date": "удобная дата",
+                "time": "удобное время",
+                "timezone": "часовой пояс",
+                "format": "формат встречи",
+                "confirmation": "подтверждение",
+            }
+            return (
+                "Чтобы не ходить по кругу, остановлюсь здесь. "
+                f"Когда появится {labels.get(field, 'недостающая информация')}, продолжим с этого места."
+            ), result_context
+
+    guarded = _de_repeat_reply(config, reply, text, result_context)
+    return guarded, result_context
+
 
 
 def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
@@ -439,6 +690,7 @@ _SCHEDULING_STAGES = {
     "awaiting_confirmation",
     "awaiting_slot_choice",
     "scheduled",
+    "awaiting_external_agent_options",
 }
 
 
@@ -709,6 +961,12 @@ def _general_reply(config, owner_name, first_name, text, greet, context=None):
         else "Последняя реплика не требует специальной оговорки о голосовой расшифровке."
     )
 
+    ai_counterparty_rule = (
+        _ai_protocol_prompt(context)
+        if _is_ai_counterparty(context)
+        else "Собеседник не обозначен как другой ИИ-помощник."
+    )
+
     meeting_rule = (
         "Личная причина уже проявилась. Ты МОЖЕШЬ очень мягко связать её с пользой Агентства W и, "
         "только если это действительно естественно именно сейчас, предложить знакомство/встречу с владельцем аккаунта."
@@ -726,6 +984,8 @@ def _general_reply(config, owner_name, first_name, text, greet, context=None):
 
 ЖИВОЙ КОНТЕКСТ ПОСЛЕДНИХ РЕПЛИК:
 {history}
+
+{ai_counterparty_rule}
 
 КРИТИЧЕСКОЕ ПРАВИЛО КОНТЕКСТА:
 {voice_rule}
@@ -1018,6 +1278,8 @@ def _process_message_without_memory(
         else {}
     )
     greet = not greeted
+    context = _update_ai_counterparty_context(context, text)
+    state["context"] = context
 
     if bool(context.get("warmup_mode")):
         try:
@@ -1073,6 +1335,46 @@ def _process_message_without_memory(
         context.pop("contact_boundary", None)
         context["contact_reinitiated_at"] = datetime.now(core.UTC).isoformat()
         stage = "idle"
+
+    # Другой ИИ-посредник: уважать его реальные полномочия и не зацикливать календарь.
+    if _is_ai_counterparty(context):
+        if _represented_person_will_contact(text):
+            context = _clear_meeting_context(context)
+            context["external_principal_will_contact"] = True
+            context["ai_next_actor"] = "represented_person"
+            return _ai_direct_contact_reply(), "idle", True, context
+
+        if _ai_agent_cannot_book(text):
+            context = _clear_meeting_context(context)
+            context["counterparty_type"] = "ai_agent"
+            context["external_agent_cannot_book"] = True
+            context["external_agent_relay_only"] = True
+            context["ai_next_actor"] = "represented_person_or_agent_options"
+            return _ai_relay_reply(owner_name), "awaiting_external_agent_options", True, context
+
+        if stage == "awaiting_external_agent_options":
+            # Если другой ИИ прислал реальные данные встречи — возвращаемся в обычный календарь.
+            if _schedule_data_present(text, message_dt, context) and not core._is_simple_acknowledgement(text):
+                reply, new_stage, context = core._schedule_reply(
+                    config,
+                    owner_id,
+                    owner_name,
+                    contact_id,
+                    first_name,
+                    username,
+                    text,
+                    message_dt,
+                    "collecting_meeting_details",
+                    context,
+                    greet,
+                )
+                reply, context = _guard_scheduling_reply(config, reply, text, context)
+                return reply, new_stage, True, context
+
+            if core._is_simple_acknowledgement(text):
+                return _ack_without_question(text), stage, True, context
+
+            return _ai_to_ai_reply(config, owner_name, text, context), stage, True, context
 
     # Человек сам берёт связь с владельцем на себя. Это не повод продолжать
     # собирать дату/время — наоборот, уважительно отпускаем инициативу человеку.
@@ -1137,6 +1439,16 @@ def _process_message_without_memory(
     if classification.get("kind") in {"interest", "question", "other"}:
         context.pop("last_objection_category", None)
         context.pop("soft_objection_closed", None)
+
+    # Обычная содержательная реплика от другого ИИ: отвечаем в коротком деловом режиме.
+    # Явное намерение встречи ниже по коду всё равно попадёт в календарную ветку.
+    if (
+        _is_ai_counterparty(context)
+        and stage == "idle"
+        and not core._meeting_intent(text)
+        and not _commercial_intent(text)
+    ):
+        return _ai_to_ai_reply(config, owner_name, text, context), "idle", True, context
 
     # Уже назначенная встреча.
     if stage == "scheduled":
@@ -1214,6 +1526,7 @@ def _process_message_without_memory(
                 context,
                 greet,
             )
+            reply, context = _guard_scheduling_reply(config, reply, text, context)
             return reply, new_stage, True, context
         reply = _general_reply(config, owner_name, first_name, text, greet, context)
         return reply, "idle", True, context
@@ -1244,6 +1557,7 @@ def _process_message_without_memory(
             context,
             greet,
         )
+        reply, context = _guard_scheduling_reply(config, reply, text, context)
         return reply, new_stage, True, context
 
     # Если мы технически остались в стадии встречи, но человек пишет обычную реплику,

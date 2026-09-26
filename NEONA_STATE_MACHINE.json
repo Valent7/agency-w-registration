@@ -1,0 +1,95 @@
+{
+  "version": "1.0",
+  "name": "NEONA dialogue state machine",
+  "principle": "Смысл последней реплики важнее сценария.",
+  "states": {
+    "idle": {
+      "goal": "понять смысл и ответить",
+      "next": [
+        "idle",
+        "invited_to_meeting",
+        "opted_out"
+      ]
+    },
+    "invited_to_meeting": {
+      "goal": "понять готовность к встрече",
+      "next": [
+        "collecting_meeting_details",
+        "idle",
+        "awaiting_external_agent_options"
+      ]
+    },
+    "collecting_meeting_details": {
+      "goal": "собрать только недостающие данные",
+      "required_fields": [
+        "date",
+        "time",
+        "timezone",
+        "format"
+      ],
+      "next": [
+        "awaiting_confirmation",
+        "awaiting_slot_choice",
+        "awaiting_external_agent_options",
+        "idle"
+      ]
+    },
+    "awaiting_slot_choice": {
+      "goal": "получить выбор из уже предложенных слотов",
+      "next": [
+        "awaiting_confirmation",
+        "idle"
+      ]
+    },
+    "awaiting_confirmation": {
+      "goal": "получить явное подтверждение",
+      "next": [
+        "scheduled",
+        "idle"
+      ]
+    },
+    "scheduled": {
+      "goal": "не назначать повторно; отвечать по существу",
+      "next": [
+        "scheduled",
+        "collecting_meeting_details",
+        "idle"
+      ]
+    },
+    "awaiting_external_agent_options": {
+      "goal": "ждать окна/данные от другого ИИ или прямой контакт представляемого человека",
+      "next": [
+        "collecting_meeting_details",
+        "idle"
+      ]
+    },
+    "opted_out": {
+      "goal": "не инициировать продолжение",
+      "next": [
+        "idle"
+      ]
+    }
+  },
+  "memory_fields": [
+    "counterparty_type",
+    "counterparty_agent_name",
+    "counterparty_represents_raw",
+    "dialog_goal",
+    "agreed_facts",
+    "missing_fields",
+    "next_actor",
+    "meeting_format",
+    "contact_timezone",
+    "requested_date",
+    "requested_time",
+    "external_agent_cannot_book",
+    "external_principal_will_contact",
+    "meeting_question_counts"
+  ],
+  "anti_loop": {
+    "never_repeat_known_field_question": true,
+    "same_missing_field_question_limit": 2,
+    "on_limit": "остановить цикл и дождаться новых данных",
+    "do_not_restart_closed_meeting_branch": true
+  }
+}
