@@ -730,6 +730,125 @@ def _create_meeting(config: Config, payload: dict[str, Any]) -> dict[str, Any]:
     return rows[0]
 
 
+URGENT_CALLBACK_STATUS = "Просили срочно позвонить"
+URGENT_CALLBACK_SOURCE = "Неона — срочный обратный звонок"
+
+
+def _urgent_callback_intent(text: str) -> bool:
+    """Распознаёт прямую просьбу, чтобы владелец сам позвонил человеку.
+
+    Важно не путать её с «я сам позвоню Валентине»: такой ответ не создаёт
+    задачу владельцу.
+    """
+    value = _normalize_intent_text(text)
+    if not value:
+        return False
+
+    self_call = (
+        r"\bя\s+(?:сам|сама)?\s*(?:ей|ему|вам|валентин\w*)?\s*позвон\w*",
+        r"\bсам(?:а)?\s+позвон\w*",
+        r"\bя\s+наберу\b",
+    )
+    if any(re.search(pattern, value) for pattern in self_call):
+        return False
+
+    callback_patterns = (
+        r"\bпусть\s+(?:она|он|валентин\w*)?\s*позвон\w*",
+        r"\bпозвоните\s+мне\b",
+        r"\bпозвони\s+мне\b",
+        r"\bможет\s+(?:она|он|валентин\w*)?\s*позвон\w*",
+        r"\bхочу,?\s+чтобы\s+.*позвон\w*",
+        r"\bжду\s+(?:е[её]|его|ваш)?\s*звон\w*",
+        r"\bперезвоните\s+мне\b",
+        r"\bперезвони\s+мне\b",
+        r"\bсвяжитесь\s+со\s+мной\s+по\s+телефону\b",
+    )
+    return any(re.search(pattern, value) for pattern in callback_patterns)
+
+
+def _ensure_urgent_callback_marker(
+    config: Config,
+    *,
+    owner_id: int,
+    owner_name: str,
+    contact_id: int,
+    contact_name: str,
+    username: str,
+    message_dt: datetime,
+    incoming_message_id: int,
+    incoming_text: str,
+    context: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Создаёт в календаре одну заметную карточку срочного обратного звонка.
+
+    Карточка не является назначенной встречей: она фиксирует просьбу человека
+    позвонить как можно скорее. Повторный цикл worker не создаёт дубль.
+    """
+    updated = dict(context or {})
+    existing_id = str(updated.get("urgent_callback_id") or "").strip()
+    if existing_id:
+        return None, updated
+
+    # Дополнительная серверная защита от дублей при перезапуске worker или
+    # временной ошибке сохранения dialog_state.
+    response = requests.get(
+        f"{config.supabase_url}/rest/v1/agency_meetings",
+        headers=_headers(config),
+        params={
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "contact_telegram_id": f"eq.{int(contact_id)}",
+            "status": f"eq.{URGENT_CALLBACK_STATUS}",
+            "source": f"eq.{URGENT_CALLBACK_SOURCE}",
+            "select": "id,start_at,status",
+            "limit": 1,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    rows = response.json() if response.text.strip() else []
+    if isinstance(rows, list) and rows:
+        updated["urgent_callback_id"] = rows[0].get("id")
+        updated["urgent_callback_status"] = URGENT_CALLBACK_STATUS
+        updated["urgent_callback_requested_at"] = str(rows[0].get("start_at") or "")
+        return rows[0], updated
+
+    start_utc = message_dt.astimezone(UTC) if message_dt.tzinfo else message_dt.replace(tzinfo=UTC)
+    # Для отображения в календаре нужна временная точка. Это короткая 10-минутная
+    # карточка-напоминание в момент просьбы, а не забронированный слот встречи.
+    end_utc = start_utc + timedelta(minutes=10)
+    compact_text = re.sub(r"\s+", " ", str(incoming_text or "")).strip()[:500]
+    notes = (
+        "🔴 Просили срочно позвонить. "
+        + (f"Сообщение: «{compact_text}». " if compact_text else "")
+        + f"Telegram message_id: {int(incoming_message_id)}."
+    )
+
+    created = _create_meeting(
+        config,
+        {
+            "owner_telegram_id": int(owner_id),
+            "owner_name": owner_name,
+            "contact_telegram_id": int(contact_id),
+            "contact_name": contact_name or "Без имени",
+            "contact_username": username or None,
+            "contact_city": updated.get("contact_city") or None,
+            "contact_timezone": updated.get("contact_timezone") or "Europe/Moscow",
+            "start_at": start_utc.isoformat(),
+            "end_at": end_utc.isoformat(),
+            "meeting_format": "Телефонный звонок",
+            "meeting_link": None,
+            "status": URGENT_CALLBACK_STATUS,
+            "notes": notes,
+            "source": URGENT_CALLBACK_SOURCE,
+        },
+    )
+    updated["urgent_callback_id"] = created.get("id")
+    updated["urgent_callback_status"] = URGENT_CALLBACK_STATUS
+    updated["urgent_callback_requested_at"] = start_utc.isoformat()
+    updated["urgent_callback_incoming_message_id"] = int(incoming_message_id)
+    return created, updated
+
+
 def _first_name(entity: Any, fallback: str = "") -> str:
     """Возвращает только безопасное личное имя для обращения Неоны.
 
@@ -810,42 +929,56 @@ def _detect_timezone(text: str) -> str | None:
     return None
 
 
-def _detect_time(text: str) -> str | None:
-    """Распознаёт обычные варианты времени: 17:00, 17-00, 17.00, 17–00, «в 17»."""
+def _detect_times(text: str) -> list[str]:
+    """
+    Возвращает ВСЕ явно названные варианты времени в порядке сообщения.
+
+    Понимает, в частности: 11:00, 11.00, 11-00, 11–00, 11.00ч,
+    «в 11», «11 часов». Это важно, когда человек сам предлагает
+    несколько вариантов: «завтра в 11.00ч, 12.00ч, 16.00ч по МСК».
+    """
     raw = str(text or "")
     lowered = raw.casefold()
+    found: list[tuple[int, str]] = []
 
-    # 17:00
-    match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw)
-    if match:
-        return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
-
-    # «в 17-00», «в 17.00», «в 17–00»
-    match = re.search(
-        r"(?:^|\s)в\s+([01]?\d|2[0-3])\s*[-–—.]\s*([0-5]\d)\b(?![./-]\d)",
+    # Время с минутами. Разрешаем необязательное «ч» сразу после минут.
+    for match in re.finditer(
+        r"(?<!\d)([01]?\d|2[0-3])\s*[:.\-–—]\s*([0-5]\d)\s*(?:ч\b|час(?:а|ов)?\b)?",
         lowered,
-    )
-    if match:
-        return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+    ):
+        value = f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+        found.append((match.start(), value))
 
-    # «17-00 МСК», «17.00 по Москве»
-    match = re.search(
-        r"\b([01]?\d|2[0-3])\s*[-–—.]\s*([0-5]\d)\s*"
-        r"(?:мск|по\s+москве|москов\w*(?:\s+врем\w*)?)\b",
+    # Часы без минут: «в 11», «11 часов». Не захватываем числа, уже
+    # являющиеся частью записи 11.00 / даты / другого числового выражения.
+    for match in re.finditer(
+        r"(?<![\d.:/\-])(?:в\s+)?([01]?\d|2[0-3])\s*(?:час(?:а|ов)?|ч)\b",
         lowered,
-    )
-    if match:
-        return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+    ):
+        value = f"{int(match.group(1)):02d}:00"
+        found.append((match.start(), value))
 
-    # «в 17», «17 часов»
-    match = re.search(
-        r"(?:^|\s)(?:в\s+)?([01]?\d|2[0-3])\s*(?:час(?:а|ов)?|ч)?(?:\s|$)",
+    # Отдельное «в 11» без слова «час».
+    for match in re.finditer(
+        r"(?<!\w)в\s+([01]?\d|2[0-3])(?=\s|[,;!?]|$)",
         lowered,
-    )
-    if match:
-        return f"{int(match.group(1)):02d}:00"
+    ):
+        value = f"{int(match.group(1)):02d}:00"
+        found.append((match.start(), value))
 
-    return None
+    result: list[str] = []
+    seen: set[str] = set()
+    for _, value in sorted(found, key=lambda item: item[0]):
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _detect_time(text: str) -> str | None:
+    """Совместимость со старой логикой: возвращает первый найденный вариант."""
+    times = _detect_times(text)
+    return times[0] if times else None
 
 
 def _detect_date(text: str, message_dt: datetime, tz_name: str | None) -> str | None:
@@ -1202,9 +1335,16 @@ def _update_context_from_message(context: dict[str, Any], text: str, message_dt:
     detected_format = _detect_format(text)
     if detected_format:
         context["meeting_format"] = detected_format
-    detected_time = _detect_time(text)
-    if detected_time:
-        context["requested_time"] = detected_time
+    detected_times = _detect_times(text)
+    if len(detected_times) > 1:
+        # Человек уже дал выбор времени. Не заставляем его повторять то,
+        # что он только что написал: сохраняем все варианты для проверки
+        # календаря и убираем возможное старое одиночное значение.
+        context["requested_time_options"] = detected_times
+        context.pop("requested_time", None)
+    elif len(detected_times) == 1:
+        context["requested_time"] = detected_times[0]
+        context.pop("requested_time_options", None)
     detected_date = _detect_date(text, message_dt, context.get("contact_timezone"))
     if detected_date:
         context["requested_date"] = detected_date
@@ -1350,6 +1490,86 @@ def _schedule_reply(
         return (
             prefix + lead + "На какой день вам удобна встреча?",
             "collecting_meeting_details",
+            context,
+        )
+
+    time_options = context.get("requested_time_options")
+    if isinstance(time_options, list) and time_options:
+        # Если человек сам предложил несколько вариантов, сначала сохраняем
+        # недостающие параметры, а затем проверяем КАЖДЫЙ вариант по календарю.
+        # Повторно спрашивать «На какое время вам удобно?» здесь нельзя.
+        if not context.get("contact_timezone"):
+            return (
+                prefix + "Вы предложили несколько вариантов времени. По какому часовому поясу они указаны?",
+                "collecting_meeting_details",
+                context,
+            )
+        if not context.get("meeting_format"):
+            return (
+                prefix + "Вижу ваши варианты времени. Как вам удобнее созвониться — Telegram или WhatsApp?",
+                "collecting_meeting_details",
+                context,
+            )
+
+        tz_name = str(context["contact_timezone"])
+        meeting_format = str(context["meeting_format"])
+        try:
+            local_date = date.fromisoformat(str(context["requested_date"]))
+            contact_tz = ZoneInfo(tz_name)
+        except Exception:
+            return (
+                prefix + "Не смогла точно определить дату. Напишите, пожалуйста, дату ещё раз.",
+                "collecting_meeting_details",
+                context,
+            )
+
+        valid_starts: list[datetime] = []
+        for option in time_options:
+            try:
+                hh, mm = [int(part) for part in str(option).split(":", 1)]
+                local_start = datetime.combine(local_date, dt_time(hh, mm), contact_tz)
+                start_option_utc = local_start.astimezone(UTC)
+            except Exception:
+                continue
+            if start_option_utc <= datetime.now(UTC) + timedelta(minutes=5):
+                continue
+            valid_starts.append(start_option_utc)
+            if _slot_free(
+                config,
+                owner_id,
+                start_option_utc,
+                start_option_utc + timedelta(minutes=DURATION_MINUTES),
+            ):
+                context["requested_time"] = str(option)
+                context["proposed_start_at"] = start_option_utc.isoformat()
+                context.pop("requested_time_options", None)
+                return (
+                    prefix
+                    + f"Я проверила ваши варианты по календарю. {_format_slot(start_option_utc, tz_name)} у {owner_name} свободно. Формат — {meeting_format}. Подтверждаем это время?",
+                    "awaiting_confirmation",
+                    context,
+                )
+
+        around_utc = valid_starts[0] if valid_starts else datetime.now(UTC) + timedelta(hours=1)
+        slots = _find_three_slots(config, owner_id, around_utc, tz_name)
+        if not slots:
+            return (
+                prefix + "Я проверила все предложенные вами варианты — они заняты. Напишите, пожалуйста, другой удобный день, и я проверю календарь.",
+                "collecting_meeting_details",
+                context,
+            )
+        context["offered_slots"] = [slot.isoformat() for slot in slots]
+        context.pop("requested_time_options", None)
+        options = "\n".join(
+            f"{index}. {_format_slot(slot, tz_name)}"
+            for index, slot in enumerate(slots, 1)
+        )
+        return (
+            prefix
+            + "Я проверила все предложенные вами варианты — они заняты. Вот ближайшие свободные:\n"
+            + options
+            + "\nНапишите номер подходящего варианта.",
+            "awaiting_slot_choice",
             context,
         )
 
@@ -1527,6 +1747,7 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
         "partner_active": 0,
         "partner_handoffs": 0,
         "partner_suppressed": 0,
+        "urgent_callbacks": 0,
         "errors": 0,
     }
 
@@ -1629,6 +1850,70 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                     f"latest_incoming_id={latest_incoming_id}",
                     flush=True,
                 )
+
+            # Восстановление отметки для уже обработанной просьбы позвонить.
+            # Это нужно, например, если новая версия с календарной отметкой
+            # установлена ПОСЛЕ того, как Неона уже ответила человеку.
+            if state is not None and recent:
+                latest_existing = recent[-1]
+                latest_existing_text = str(
+                    getattr(latest_existing, "message", "") or ""
+                ).strip()
+                state_context_for_callback = (
+                    dict(state.get("context"))
+                    if isinstance(state.get("context"), dict)
+                    else {}
+                )
+                already_processed = int(
+                    state.get("last_incoming_message_id") or 0
+                ) >= int(getattr(latest_existing, "id", 0) or 0)
+                if (
+                    already_processed
+                    and latest_existing_text
+                    and _urgent_callback_intent(latest_existing_text)
+                    and not state_context_for_callback.get("urgent_callback_id")
+                ):
+                    try:
+                        callback_name = _first_name(
+                            entity,
+                            allowed[contact_id].get("recipient_name", ""),
+                        )
+                        callback_username = str(
+                            getattr(entity, "username", "") or ""
+                        )
+                        _, callback_context = _ensure_urgent_callback_marker(
+                            config,
+                            owner_id=int(owner_id),
+                            owner_name=owner_name,
+                            contact_id=contact_id,
+                            contact_name=callback_name,
+                            username=callback_username,
+                            message_dt=latest_existing.date.astimezone(UTC),
+                            incoming_message_id=int(latest_existing.id),
+                            incoming_text=latest_existing_text,
+                            context=state_context_for_callback,
+                        )
+                        _save_dialog_state(
+                            config,
+                            int(owner_id),
+                            contact_id,
+                            last_incoming_id=int(
+                                state.get("last_incoming_message_id") or 0
+                            ),
+                            stage=str(state.get("stage") or "idle"),
+                            greeted=bool(state.get("greeted", False)),
+                            context=callback_context,
+                        )
+                        state = {**state, "context": callback_context}
+                        stats["urgent_callbacks"] += 1
+                    except Exception as exc:
+                        print(
+                            "NEONA_URGENT_CALLBACK_BACKFILL_ERROR:",
+                            f"owner={int(owner_id)} contact={contact_id} "
+                            f"{type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
+                        stats["errors"] += 1
 
             if state is None:
                 # Если точка отсчёта не была создана в момент отправки,
@@ -2241,6 +2526,43 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                             "Telegram вернул ID ответа, но сообщение не найдено "
                             "в нужном чате после отправки."
                         )
+
+                    # Прямая просьба «пусть Валентина позвонит / позвоните мне»
+                    # должна сразу стать видимой в календаре. Делаем это ПОСЛЕ
+                    # подтверждённой отправки ответа Неоны и идемпотентно, чтобы
+                    # повтор worker не создавал несколько одинаковых карточек.
+                    if _urgent_callback_intent(combined_text):
+                        try:
+                            _, context = _ensure_urgent_callback_marker(
+                                config,
+                                owner_id=int(owner_id),
+                                owner_name=owner_name,
+                                contact_id=contact_id,
+                                contact_name=first_name,
+                                username=username,
+                                message_dt=latest.date.astimezone(UTC),
+                                incoming_message_id=int(latest.id),
+                                incoming_text=combined_text,
+                                context=context,
+                            )
+                            stats["urgent_callbacks"] += 1
+                        except Exception as exc:
+                            # Не ломаем живой Telegram-диалог из-за временной
+                            # ошибки календаря: ответ человеку уже отправлен.
+                            context = dict(context or {})
+                            context["urgent_callback_calendar_error"] = (
+                                f"{type(exc).__name__}: {exc}"
+                            )[:500]
+                            context["urgent_callback_calendar_error_at"] = (
+                                datetime.now(UTC).isoformat()
+                            )
+                            print(
+                                "NEONA_URGENT_CALLBACK_ERROR:",
+                                f"owner={int(owner_id)} contact={contact_id} "
+                                f"{type(exc).__name__}: {exc}",
+                                flush=True,
+                            )
+                            stats["errors"] += 1
 
                     if any(
                         _telegram_message_kind(item) in {"voice", "audio"}
