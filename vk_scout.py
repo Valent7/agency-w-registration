@@ -49,6 +49,7 @@ ACTIVE_ASSIGNMENT_STATUSES = (
 )
 
 KNOWN_CONTACT_LABEL = "Знакомый владельца"
+RADAR_ASSIGNMENT_LABEL = "VK Радар"
 
 
 class VKScoutError(RuntimeError):
@@ -569,18 +570,14 @@ def score_vk_candidates(
 
 
 def release_expired_vk_assignments() -> int:
-    now = datetime.now(UTC).isoformat()
-    rows = _sb_get(
-        "agency_vk_assignments",
-        {
-            "status": "in.(reserved,prepared)",
-            "reservation_until": f"lt.{now}",
-            "select": "id",
-        },
-    )
-    for row in rows:
-        _sb_patch("agency_vk_assignments", {"id": f"eq.{int(row['id'])}"}, {"status": "released", "released_at": now, "updated_at": now})
-    return len(rows)
+    """Не освобождает кандидатов автоматически по таймеру.
+
+    В Агентстве W действует правило «один VK-кандидат = один партнёр». Поэтому
+    reserved/prepared больше не переходят другому владельцу просто потому, что
+    прошло 7 дней. Освободить человека можно только явным действием (skip/not_fit/
+    blocked/released), а начатый диалог остаётся закреплён за своим партнёром.
+    """
+    return 0
 
 
 def _messageable_vk_ids(user_ids: Iterable[int]) -> set[int]:
@@ -755,17 +752,179 @@ def mark_vk_partner(assignment_id: int, owner_id: int | None = None) -> dict[str
 
 
 def _used_vk_ids() -> set[int]:
+    """VK ID, которые уже заняты где-либо в Агентстве W.
+
+    Это глобальная защита от ситуации, когда один и тот же человек одновременно
+    попадает Валентине, Юрию Васильевичу, Надежде или любому другому партнёру.
+    Учитываем партнёров, лидов, активные назначения и уже начатые VK-диалоги.
+    """
     result: set[int] = set(_partner_vk_ids())
-    for table, params in (
-        ("agency_vk_leads", {"select": "vk_user_id", "limit": 5000}),
-        ("agency_vk_assignments", {"status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")", "select": "vk_user_id", "limit": 5000}),
+    for table, params, fields in (
+        (
+            "agency_vk_leads",
+            {"select": "vk_user_id", "limit": 5000},
+            ("vk_user_id",),
+        ),
+        (
+            "agency_vk_assignments",
+            {
+                "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+                "select": "vk_user_id",
+                "limit": 5000,
+            },
+            ("vk_user_id",),
+        ),
+        (
+            "agency_vk_comment_threads",
+            {"select": "candidate_vk_user_id,post_owner_id", "limit": 5000},
+            ("candidate_vk_user_id", "post_owner_id"),
+        ),
     ):
         for row in _sb_get(table, params):
-            try:
-                result.add(int(row.get("vk_user_id")))
-            except (TypeError, ValueError):
-                pass
+            for field in fields:
+                try:
+                    uid = int(row.get(field) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if uid > 0:
+                    result.add(uid)
+                    break
     return result
+
+
+def _active_vk_ids_for_owner(owner_id: int) -> set[int]:
+    """Активные VK-кандидаты, уже закреплённые именно за этим владельцем."""
+    result: set[int] = set()
+    rows = _sb_get(
+        "agency_vk_assignments",
+        {
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+            "select": "vk_user_id",
+            "limit": 5000,
+        },
+    )
+    for row in rows:
+        try:
+            uid = int(row.get("vk_user_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0:
+            result.add(uid)
+    return result
+
+
+def _reserve_vk_radar_candidate(
+    owner_id: int,
+    candidate: dict[str, Any],
+    *,
+    reservation_days: int = 7,
+) -> dict[str, Any] | None:
+    """Эксклюзивно закрепляет кандидата Радара за одним партнёром.
+
+    Радар раньше только показывал людей и поэтому один профиль мог одновременно
+    появляться в нескольких кабинетах. Теперь рекомендация сначала получает
+    активное назначение. Если профиль уже занят другим партнёром, возвращаем None
+    и Радар его этому владельцу не показывает.
+    """
+    owner_id = int(owner_id)
+    try:
+        vk_user_id = int(candidate.get("owner_id") or candidate.get("vk_user_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if vk_user_id <= 0:
+        return None
+
+    active = _sb_get(
+        "agency_vk_assignments",
+        {
+            "vk_user_id": f"eq.{vk_user_id}",
+            "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+            "select": "*",
+            "order": "id.asc",
+            "limit": 20,
+        },
+    )
+    if active:
+        winner = active[0]
+        try:
+            winner_owner = int(winner.get("owner_telegram_id") or 0)
+        except (TypeError, ValueError):
+            winner_owner = 0
+        return winner if winner_owner == owner_id else None
+
+    # Если человек уже стал лидом, партнёром или с ним уже начат комментарийный
+    # диалог, не создаём второе назначение через Радар.
+    if vk_user_id in _used_vk_ids():
+        return None
+
+    now = datetime.now(UTC)
+    fit_summary = re.sub(r"\s+", " ", str(candidate.get("fit_summary") or "")).strip()
+    payload = {
+        "vk_user_id": vk_user_id,
+        "owner_telegram_id": owner_id,
+        "owner_member_code": None,
+        "assignment_date": date.today().isoformat(),
+        # NULL: это не ежедневная пятёрка. Отдельный поток VK Радара.
+        "daily_position": None,
+        "status": "reserved",
+        "score": int(candidate.get("score") or 0),
+        "fit_summary": RADAR_ASSIGNMENT_LABEL + (f": {fit_summary}" if fit_summary else ""),
+        "reserved_at": now.isoformat(),
+        # Не отдаём этого человека другому партнёру автоматически через N дней.
+        "reservation_until": None,
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+
+    try:
+        created = _sb_post("agency_vk_assignments", payload)
+    except VKScoutError:
+        return None
+    created_row = created[0] if created else payload
+
+    # Повторная проверка закрывает почти весь риск одновременного клика двух
+    # партнёров: победителем считается самое раннее активное назначение.
+    active_after = _sb_get(
+        "agency_vk_assignments",
+        {
+            "vk_user_id": f"eq.{vk_user_id}",
+            "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+            "select": "*",
+            "order": "id.asc",
+            "limit": 20,
+        },
+    )
+    if not active_after:
+        return created_row
+
+    winner = active_after[0]
+    try:
+        winner_owner = int(winner.get("owner_telegram_id") or 0)
+    except (TypeError, ValueError):
+        winner_owner = 0
+    try:
+        created_id = int(created_row.get("id") or 0)
+        winner_id = int(winner.get("id") or 0)
+    except (TypeError, ValueError):
+        created_id = winner_id = 0
+
+    if winner_owner != owner_id:
+        if created_id > 0 and created_id != winner_id:
+            try:
+                _sb_patch(
+                    "agency_vk_assignments",
+                    {"id": f"eq.{created_id}"},
+                    {
+                        "status": "released",
+                        "released_at": datetime.now(UTC).isoformat(),
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+            except Exception:
+                pass
+        return None
+    return winner
 
 
 
@@ -855,6 +1014,9 @@ def load_known_vk_contacts(owner_id: int) -> list[dict[str, Any]]:
             "owner_telegram_id": f"eq.{int(owner_id)}",
             "daily_position": "is.null",
             "status": "not.in.(released,skipped,blocked,not_fit)",
+            # daily_position=NULL используется и Радаром; знакомых отличаем
+            # по специальной метке, чтобы карточки Радара не попадали сюда.
+            "fit_summary": f"like.{KNOWN_CONTACT_LABEL}*",
             "select": "*",
             "order": "created_at.desc",
             "limit": 100,
@@ -1025,14 +1187,51 @@ def ensure_daily_vk_assignments(
             "score": int(item.get("score") or 0),
             "fit_summary": str(item.get("fit_summary") or "").strip() or None,
             "reserved_at": now.isoformat(),
-            "reservation_until": (now + timedelta(days=max(1, int(reservation_days)))).isoformat(),
+            # Эксклюзивное закрепление: освобождение только явным действием партнёра.
+            "reservation_until": None,
             "created_at": now.isoformat(),
             "updated_at": now.isoformat(),
         }
         try:
-            _sb_post("agency_vk_assignments", payload)
+            created_rows = _sb_post("agency_vk_assignments", payload)
         except VKScoutError:
             continue
+
+        # Финальная глобальная проверка: даже если два кабинета запросили
+        # пятёрку почти одновременно, один VK-профиль остаётся только у одного.
+        created_row = created_rows[0] if created_rows else payload
+        active_after = _sb_get(
+            "agency_vk_assignments",
+            {
+                "vk_user_id": f"eq.{uid}",
+                "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+                "select": "id,owner_telegram_id",
+                "order": "id.asc",
+                "limit": 20,
+            },
+        )
+        winner = active_after[0] if active_after else created_row
+        try:
+            winner_owner = int(winner.get("owner_telegram_id") or 0)
+        except (TypeError, ValueError):
+            winner_owner = 0
+        if winner_owner != owner_id:
+            try:
+                created_id = int(created_row.get("id") or 0)
+            except (TypeError, ValueError):
+                created_id = 0
+            if created_id > 0:
+                now_release = datetime.now(UTC).isoformat()
+                try:
+                    _sb_patch(
+                        "agency_vk_assignments",
+                        {"id": f"eq.{created_id}"},
+                        {"status": "released", "released_at": now_release, "updated_at": now_release},
+                    )
+                except Exception:
+                    pass
+            continue
+
         created += 1
         existing_ids.add(uid)
         free_positions.pop(0)
@@ -1392,6 +1591,8 @@ def fetch_vk_candidate_feed(
         }
 
     partner_vk_ids = _partner_vk_ids()
+    globally_used_vk_ids = _used_vk_ids()
+    owner_active_vk_ids = _active_vk_ids_for_owner(owner_id)
     ids: list[int] = []
     score_by_id: dict[int, dict[str, Any]] = {}
     for row in scores:
@@ -1400,6 +1601,10 @@ def fetch_vk_candidate_feed(
         except (TypeError, ValueError):
             continue
         if uid <= 0 or uid in score_by_id or uid in partner_vk_ids:
+            continue
+        # Кандидат, занятый в другом кабинете Агентства W, в Радар этого
+        # владельца вообще не попадает. Своё активное назначение видеть можно.
+        if uid in globally_used_vk_ids and uid not in owner_active_vk_ids:
             continue
         ids.append(uid)
         score_by_id[uid] = row
@@ -1422,14 +1627,11 @@ def fetch_vk_candidate_feed(
     errors: list[str] = []
     checked_candidates = 0
 
-    # Не показываем в Радаре посты, под которыми владелец уже опубликовал
-    # комментарий через Агентство W. Источник истины — существующая таблица
-    # agency_vk_comment_threads, поэтому отдельная миграция Supabase не нужна.
-    # Новый пост того же человека в будущем снова может попасть в Радар.
+    # Не показываем повторно посты, под которыми уже было касание через
+    # Агентство W. Проверка глобальная для всех партнёров, а не только владельца.
     commented_rows = _sb_get(
         "agency_vk_comment_threads",
         {
-            "owner_telegram_id": f"eq.{owner_id}",
             "select": "post_owner_id,post_id",
             "limit": 5000,
         },
@@ -1600,8 +1802,14 @@ def prepare_vk_feed_radar(
         comment = re.sub(r"\s+", " ", str(choice.get("comment") or "")).strip()
         if not comment:
             continue
+        assignment = _reserve_vk_radar_candidate(int(owner_id), source)
+        if not assignment:
+            # Пока Неона готовила комментарий, кандидат мог уже закрепиться
+            # за другим партнёром. В таком случае просто не показываем дубль.
+            continue
         recommendations.append({
             **source,
+            "assignment_id": int(assignment.get("id") or 0),
             "business_signal": str(source.get("fit_summary") or "").strip(),
             "reason": re.sub(r"\s+", " ", str(choice.get("reason") or "")).strip(),
             "comment": comment,
