@@ -1085,6 +1085,54 @@ def _is_positive_interest(text: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _contact_stop_intent(text: str) -> bool:
+    """Явная просьба прекратить автоматический диалог или признак, что сообщения мешают.
+
+    Это жёсткий стоп: после него Неона отправляет одно короткое завершение и
+    больше не пишет автоматически, пока человек сам явно не возобновит диалог.
+    """
+    value = _normalize_intent_text(text)
+    if not value:
+        return False
+
+    patterns = (
+        r"\bне\s+хочу\s+(?:с\s+(?:тобой|вами)\s+)?общат",
+        r"\bмне\s+(?:с\s+(?:тобой|вами)\s+)?не\s*интересн\w*\s+общат",
+        r"\bне\s+интересн\w*\s+(?:с\s+(?:тобой|вами)\s+)?общат",
+        r"\bне\s+(?:пиши|пишите)\b",
+        r"\b(?:не\s+)?(?:беспокой|беспокойте)\s+(?:меня)?\b",
+        r"\bне\s+надо\s+(?:мне\s+)?писать\b",
+        r"\b(?:вы\s+)?(?:только\s+)?(?:лишь\s+)?отвлека(?:ете|ешь)\s+меня\b",
+        r"\bсообщени\w*\s+.*\bне\s+по\s+тем",
+        r"\bоставьте\s+меня\s+в\s+покое\b",
+        r"\bотстаньте\b",
+    )
+    return any(re.search(pattern, value) for pattern in patterns)
+
+
+def _contact_reopen_intent(text: str) -> bool:
+    """Человек после стопа сам явно просит снова продолжить разговор."""
+    value = _normalize_intent_text(text)
+    if not value:
+        return False
+    phrases = (
+        "давайте продолжим",
+        "можно продолжить",
+        "продолжим разговор",
+        "хочу продолжить",
+        "мне интересно узнать",
+        "расскажите об агентстве",
+        "расскажи об агентстве",
+        "можно вопрос",
+    )
+    return any(phrase in value for phrase in phrases)
+
+
+def _contact_stop_reply(first_name: str, greet: bool) -> str:
+    prefix = _greeting(first_name) + " " if greet else ""
+    return prefix + "Поняла. Больше не буду вас отвлекать."
+
+
 def _is_simple_acknowledgement(text: str) -> bool:
     """Короткая реакция после уже назначенной встречи не требует ответа."""
     raw = text.strip().lower()
@@ -1279,6 +1327,10 @@ def _openai_general_reply(
 
 Операционные правила этого диалога:
 - Сначала пойми, на что именно отвечает человек. Короткое «да/нет/хорошо» трактуй только относительно последнего сообщения Неоны, которое дано во входном контексте.
+- Если человек исправляет одно слово, формулировку или факт в предыдущем сообщении Неоны, просто коротко признай поправку. Не превращай поправку в новую тему и не задавай вслед новый вопрос без необходимости.
+- Не используй местоимения «он/она/оно/её/его/это», если из предыдущей фразы не совершенно ясно, к чему они относятся. Лучше повтори конкретное слово.
+- Если человек спрашивает, пишет ли бот/ИИ, отвечай прозрачно: ты Неона, ИИ-секретарь Валентины. Не оправдывайся и не продолжай продажу без интереса человека.
+- Если человек говорит, что ему неинтересно общаться, просит не писать, говорит, что сообщения отвлекают или не по теме, не убеждай и не задавай вопросов. Коротко извинись/подтверди остановку и прекрати автоматический диалог.
 - Сначала ответь на текущий вопрос или реши текущую задачу; только затем предлагай следующий шаг.
 - Не превращай техническую проблему, просьбу о помощи или просьбу связать с владельцем в автоматическое приглашение на встречу.
 - Если человек уже ясно сказал, чего хочет, не спрашивай то же самое другими словами.
@@ -1726,6 +1778,53 @@ def _process_message(
     greeted = bool(state.get("greeted", False))
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
     greet = not greeted
+
+    # Жёсткий приоритет уважения к границе человека. Если он просит прекратить
+    # общение или прямо говорит, что сообщения мешают, Неона не пытается
+    # "спасти" диалог новым вопросом/продажей. Отправляется одно завершение,
+    # после чего автоматический диалог закрывается.
+    if _contact_stop_intent(text):
+        closed_context = dict(context or {})
+        closed_context.update(
+            {
+                "contact_dialog_closed": True,
+                "contact_dialog_closed_reason": "explicit_stop",
+                "contact_dialog_closed_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        return _contact_stop_reply(first_name, greet), "contact_closed", True, closed_context
+
+    # После явного стопа Неона молчит. Учитываем и уже состоявшиеся диалоги,
+    # где старая версия успела написать «больше не буду вас беспокоить», но ещё
+    # не сохраняла специальный stage=contact_closed. Это закрывает текущий кейс
+    # без необходимости вручную править запись в Supabase.
+    previous_reply_text = _normalize_intent_text(
+        str((context or {}).get("last_reply_text") or "")
+    )
+    legacy_closed_reply = any(
+        phrase in previous_reply_text
+        for phrase in (
+            "больше не буду вас беспокоить",
+            "больше не буду вас отвлекать",
+            "не буду больше вас беспокоить",
+        )
+    )
+    if (
+        stage == "contact_closed"
+        or bool(context.get("contact_dialog_closed"))
+        or legacy_closed_reply
+    ):
+        if not _contact_reopen_intent(text):
+            closed_context = dict(context or {})
+            closed_context["contact_dialog_closed"] = True
+            closed_context.setdefault("contact_dialog_closed_reason", "explicit_stop")
+            closed_context.setdefault("contact_dialog_closed_at", datetime.now(UTC).isoformat())
+            return "", "contact_closed", greeted, closed_context
+        context = dict(context or {})
+        context.pop("contact_dialog_closed", None)
+        context.pop("contact_dialog_closed_reason", None)
+        context["contact_dialog_reopened_at"] = datetime.now(UTC).isoformat()
+        stage = "idle"
 
     # Если Неона в прошлом сообщении предложила прислать материал, одно короткое
     # «да/пришлите» достаточно. В остальных стадиях одиночное «да» не трактуем
@@ -2719,6 +2818,27 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         latest.date.astimezone(UTC),
                         state,
                     )
+                    # Закрытый по просьбе человека диалог не должен отвечать
+                    # автоматически на последующие сообщения. Мы всё равно
+                    # отмечаем входящее обработанным, чтобы worker не возвращался
+                    # к нему на каждом цикле.
+                    if not reply:
+                        context = _processing_attempts_remove(
+                            context,
+                            int(latest.id),
+                        )
+                        _save_dialog_state(
+                            config,
+                            int(owner_id),
+                            contact_id,
+                            last_incoming_id=int(latest.id),
+                            stage=stage,
+                            greeted=greeted,
+                            context=context,
+                        )
+                        stats["skipped"] = int(stats.get("skipped", 0)) + 1
+                        continue
+
                     sent = await client.send_message(
                         entity,
                         reply,
