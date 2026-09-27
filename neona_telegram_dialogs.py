@@ -1351,6 +1351,79 @@ def _update_context_from_message(context: dict[str, Any], text: str, message_dt:
     return context
 
 
+def _apply_owner_manual_scheduling_message(
+    config: Config,
+    owner_id: int,
+    text: str,
+    message_dt: datetime,
+    stage: str,
+    context: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Учитывает ручное сообщение владельца как часть согласования встречи.
+
+    Владелец может сам написать, например, «11:00» после того, как кандидат
+    предложил несколько вариантов. Раньше такое сообщение служило только
+    fence-сигналом и его смысл терялся: следующий ответ кандидата уже нельзя
+    было связать с выбранным временем. Теперь ручной выбор становится частью
+    того же state machine, что и выбор Неоны.
+    """
+    current = dict(context or {})
+    scheduling_stage = stage in {
+        "invited_to_meeting",
+        "collecting_meeting_details",
+        "awaiting_confirmation",
+        "awaiting_slot_choice",
+    }
+
+    # Одиночное «11:00» имеет смысл как встреча только внутри уже начатого
+    # согласования. Вне него не превращаем любое ручное время в календарь.
+    if not scheduling_stage and not any(
+        current.get(key)
+        for key in (
+            "requested_date",
+            "requested_time",
+            "requested_time_options",
+            "proposed_start_at",
+        )
+    ) and not _meeting_intent(text):
+        return stage, current
+
+    updated = _update_context_from_message(current, text, message_dt)
+    detected_time = _detect_time(text)
+    detected_date = _detect_date(
+        text,
+        message_dt,
+        updated.get("contact_timezone"),
+    )
+
+    # Если владелец выбрал один из ранее предложенных вариантов, сохраняем
+    # именно его и снимаем список вариантов.
+    if detected_time:
+        updated["requested_time"] = detected_time
+        updated.pop("requested_time_options", None)
+        updated["owner_selected_time"] = detected_time
+    if detected_date:
+        updated["requested_date"] = detected_date
+        updated["owner_selected_date"] = detected_date
+
+    # Формат владелец тоже может уточнить вручную.
+    detected_format = _detect_format(text)
+    if detected_format:
+        updated["meeting_format"] = detected_format
+
+    start_utc = _parse_start(updated)
+    if start_utc is not None and start_utc > datetime.now(UTC) + timedelta(minutes=5):
+        updated["proposed_start_at"] = start_utc.isoformat()
+        updated["owner_manual_schedule_pending_confirmation"] = True
+        updated["owner_manual_schedule_selected_at"] = datetime.now(UTC).isoformat()
+        # Даже если формат ещё не назван, оставляем awaiting_confirmation:
+        # следующий ответ кандидата может одновременно подтвердить встречу и
+        # уточнить формат («Отлично, созвонимся в WhatsApp»).
+        return "awaiting_confirmation", updated
+
+    return stage, updated
+
+
 def _schedule_reply(
     config: Config,
     owner_id: int,
@@ -1374,7 +1447,13 @@ def _schedule_reply(
             {},
         )
 
-    if stage == "awaiting_confirmation":
+    # Подтверждение работает одинаково, независимо от того, кто выбрал слот:
+    # сама Неона, кандидат или владелец, вручную вмешавшийся в Telegram.
+    # owner_manual_schedule_pending_confirmation выставляется при ручном выборе
+    # владельцем даты/времени и не даёт такому согласованию выпасть из календаря.
+    if stage == "awaiting_confirmation" or bool(
+        context.get("owner_manual_schedule_pending_confirmation")
+    ):
         if _is_meeting_confirmation(text):
             proposed = context.get("proposed_start_at")
             tz_name = str(context.get("contact_timezone") or "")
@@ -1440,6 +1519,8 @@ def _schedule_reply(
                 )
                 confirmed_start = datetime.fromisoformat(str(created["start_at"]).replace("Z", "+00:00")).astimezone(UTC)
                 context["meeting_id"] = created.get("id")
+                context["owner_manual_schedule_pending_confirmation"] = False
+                context["meeting_confirmed_at"] = datetime.now(UTC).isoformat()
                 stage = "scheduled"
 
                 zoom_part = ""
@@ -1457,6 +1538,7 @@ def _schedule_reply(
                 )
         if _is_no(text):
             context.pop("proposed_start_at", None)
+            context["owner_manual_schedule_pending_confirmation"] = False
             stage = "collecting_meeting_details"
             return (
                 prefix + "Хорошо. Напишите, пожалуйста, какой день и время вам удобнее.",
@@ -1991,7 +2073,12 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 and int(message.id) not in known_automatic_ids
             ]
             if manual_outgoing:
-                owner_fence_id = max(int(message.id) for message in manual_outgoing)
+                ordered_owner_messages = sorted(
+                    manual_outgoing,
+                    key=lambda message: int(message.id),
+                )
+                owner_message = ordered_owner_messages[-1]
+                owner_fence_id = int(owner_message.id)
                 handled_incoming_ids = [
                     int(message.id)
                     for message in recent
@@ -1999,25 +2086,148 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 ]
                 if handled_incoming_ids:
                     last_id = max(last_id, max(handled_incoming_ids))
+
+                # Владелец может разбить выбор на несколько сообщений:
+                # «завтра» -> «11:00» -> «WhatsApp». Применяем их по порядку.
+                owner_stage = str(state.get("stage") or "idle")
+                owner_text = ""
+                for owner_part in ordered_owner_messages:
+                    owner_part_text = str(
+                        getattr(owner_part, "message", "") or ""
+                    ).strip()
+                    if not owner_part_text:
+                        continue
+                    owner_text = owner_part_text
+                    owner_stage, state_context = _apply_owner_manual_scheduling_message(
+                        config,
+                        int(owner_id),
+                        owner_part_text,
+                        owner_part.date.astimezone(UTC),
+                        owner_stage,
+                        state_context,
+                    )
+
                 state_context = {
                     **state_context,
                     "owner_outgoing_fence_id": owner_fence_id,
                     "owner_outgoing_fence_at": datetime.now(UTC).isoformat(),
+                    "owner_outgoing_scheduling_applied_id": owner_fence_id,
+                    "owner_outgoing_text": owner_text[:500],
                 }
                 _save_dialog_state(
                     config,
                     int(owner_id),
                     contact_id,
                     last_incoming_id=last_id,
-                    stage=str(state.get("stage") or "idle"),
+                    stage=owner_stage,
                     greeted=bool(state.get("greeted", False)),
                     context=state_context,
                 )
                 state = {
                     **state,
                     "last_incoming_message_id": last_id,
+                    "stage": owner_stage,
                     "context": state_context,
                 }
+
+            # Backfill для диалогов, где владелец уже выбрал время ДО установки
+            # этой версии. Старый код сохранил owner_outgoing_fence_id, но не
+            # сохранил смысл ручного сообщения. Один раз восстанавливаем его.
+            applied_owner_id = int(
+                state_context.get("owner_outgoing_scheduling_applied_id") or 0
+            )
+            if owner_fence_id and applied_owner_id != owner_fence_id:
+                fenced_owner_message = next(
+                    (
+                        message
+                        for message in all_recent
+                        if bool(getattr(message, "out", False))
+                        and int(message.id) == owner_fence_id
+                    ),
+                    None,
+                )
+                if fenced_owner_message is not None:
+                    fenced_text = str(
+                        getattr(fenced_owner_message, "message", "") or ""
+                    ).strip()
+                    recovered_stage = str(state.get("stage") or "idle")
+                    if fenced_text:
+                        recovered_stage, state_context = _apply_owner_manual_scheduling_message(
+                            config,
+                            int(owner_id),
+                            fenced_text,
+                            fenced_owner_message.date.astimezone(UTC),
+                            recovered_stage,
+                            state_context,
+                        )
+                    state_context = {
+                        **state_context,
+                        "owner_outgoing_scheduling_applied_id": owner_fence_id,
+                        "owner_outgoing_text": fenced_text[:500],
+                        "owner_outgoing_backfilled_at": datetime.now(UTC).isoformat(),
+                    }
+
+                    # Если кандидат уже успел подтвердить выбранный владельцем
+                    # слот, создаём пропущенную запись в календаре без повторного
+                    # сообщения человеку. Это чинит уже состоявшийся сценарий.
+                    already_seen_after_owner = [
+                        message
+                        for message in recent
+                        if owner_fence_id < int(message.id) <= last_id
+                    ]
+                    if (
+                        already_seen_after_owner
+                        and bool(state_context.get("owner_manual_schedule_pending_confirmation"))
+                        and not state_context.get("meeting_id")
+                    ):
+                        confirmation_message = already_seen_after_owner[-1]
+                        confirmation_text = str(
+                            getattr(confirmation_message, "message", "") or ""
+                        ).strip()
+                        if confirmation_text and _is_meeting_confirmation(confirmation_text):
+                            try:
+                                first_name_for_backfill = _first_name(
+                                    entity,
+                                    allowed[contact_id].get("recipient_name", ""),
+                                )
+                                username_for_backfill = str(
+                                    getattr(entity, "username", "") or ""
+                                )
+                                _, recovered_stage, state_context = _schedule_reply(
+                                    config,
+                                    int(owner_id),
+                                    owner_name,
+                                    contact_id,
+                                    first_name_for_backfill,
+                                    username_for_backfill,
+                                    confirmation_text,
+                                    confirmation_message.date.astimezone(UTC),
+                                    recovered_stage,
+                                    state_context,
+                                    False,
+                                )
+                                if recovered_stage == "scheduled":
+                                    state_context["meeting_backfilled_after_owner_choice"] = True
+                                    state_context["meeting_backfilled_at"] = datetime.now(UTC).isoformat()
+                            except Exception as exc:
+                                state_context["owner_schedule_backfill_error"] = (
+                                    f"{type(exc).__name__}: {exc}"
+                                )[:500]
+
+                    _save_dialog_state(
+                        config,
+                        int(owner_id),
+                        contact_id,
+                        last_incoming_id=last_id,
+                        stage=recovered_stage,
+                        greeted=bool(state.get("greeted", False)),
+                        context=state_context,
+                    )
+                    state = {
+                        **state,
+                        "stage": recovered_stage,
+                        "context": state_context,
+                    }
 
             new_messages = [
                 message
