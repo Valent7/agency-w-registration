@@ -2820,13 +2820,10 @@ def render_neona_telegram_dialog_center(
         ):
             latest_event_by_id[contact_id] = event
 
-    if not latest_event_by_id:
-        st.info(
-            "Пока нет Telegram-контактов, которым из Агентства W было отправлено "
-            "первое сообщение, видео или тёплое касание."
-        )
-        return
-
+    # Состояния реальных диалогов хранятся отдельно в Supabase.
+    # Загружаем их до проверки sent_log: это даёт безопасное восстановление
+    # рабочего стола, если локальный журнал касаний временно пуст или был
+    # создан более старой версией workspace_persistence.
     try:
         state_rows = load_neona_telegram_dialog_states(owner_telegram_id)
     except Exception as exc:
@@ -2846,6 +2843,34 @@ def render_neona_telegram_dialog_center(
             continue
         if contact_id not in state_by_id:
             state_by_id[contact_id] = row
+
+    # Если sent_log пуст, не объявляем, что диалогов нет.
+    # Восстанавливаем карточки из постоянной таблицы agency_dialog_states.
+    if not latest_event_by_id and state_by_id:
+        for contact_id, state in state_by_id.items():
+            context = (
+                state.get("context")
+                if isinstance(state.get("context"), dict)
+                else {}
+            )
+            latest_event_by_id[contact_id] = {
+                "telegram_id": contact_id,
+                "kind": "first_message",
+                "sent_at": str(state.get("updated_at") or ""),
+                "recipient_name": str(
+                    context.get("recipient_name")
+                    or context.get("first_name")
+                    or ""
+                ),
+                "recovered_from_dialog_state": True,
+            }
+
+    if not latest_event_by_id:
+        st.info(
+            "Пока нет Telegram-контактов, которым из Агентства W было отправлено "
+            "первое сообщение, видео или тёплое касание."
+        )
+        return
 
     contact_by_id = {}
     for item in contacts:
