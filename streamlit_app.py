@@ -6984,6 +6984,33 @@ if telegram_login_valid or remembered_data:
 
         hydrate_workspace_state_once(telegram_id)
 
+        # Персональный режим доступности для TalkBack/экранных дикторов.
+        # По умолчанию выключен, поэтому обычный интерфейс других партнёров
+        # остаётся без изменений. Настройка хранится отдельно для telegram_id.
+        accessibility_key = f"agency_accessibility_talkback_{telegram_id}"
+        talkback_mode = bool(st.session_state.get(accessibility_key, False))
+
+        if talkback_mode:
+            # Базовая тема Агентства W убирает стандартный outline у кнопок.
+            # В режиме доступности возвращаем хорошо заметный фокус.
+            st.markdown(
+                """
+                <style>
+                button:focus, button:focus-visible,
+                input:focus, input:focus-visible,
+                textarea:focus, textarea:focus-visible,
+                [role="radio"]:focus, [role="radio"]:focus-visible,
+                [role="tab"]:focus, [role="tab"]:focus-visible,
+                [role="button"]:focus, [role="button"]:focus-visible {
+                    outline: 4px solid #ffffff !important;
+                    outline-offset: 3px !important;
+                    box-shadow: 0 0 0 3px #111111 !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
         persistence_ready = st.session_state.get(
             f"agency_workspace_persistence_ready_{telegram_id}",
             False,
@@ -7013,15 +7040,45 @@ if telegram_login_valid or remembered_data:
         if pending_main_section:
             st.session_state["main_section"] = pending_main_section
 
-        main_section = st.segmented_control(
-            "Главное меню",
-            ["☀️ День", "📅 Календарь", "📖 Дневник", "🤖 Агенты", "👥 Команда", "🗺️ Развитие", "👤 Профиль"],
-            default="☀️ День",
-            required=True,
-            label_visibility="collapsed",
-            width="stretch",
-            key="main_section",
-        )
+        main_menu_options = [
+            "☀️ День",
+            "📅 Календарь",
+            "📖 Дневник",
+            "🤖 Агенты",
+            "👥 Команда",
+            "🗺️ Развитие",
+            "👤 Профиль",
+        ]
+        if talkback_mode:
+            # Вертикальный список проще и предсказуемее читается TalkBack.
+            # Значения оставляем прежними, чтобы вся существующая логика
+            # переходов Агентства W продолжала работать без изменений.
+            accessible_main_labels = {
+                "☀️ День": "День",
+                "📅 Календарь": "Календарь",
+                "📖 Дневник": "Дневник",
+                "🤖 Агенты": "Агенты",
+                "👥 Команда": "Команда",
+                "🗺️ Развитие": "Развитие",
+                "👤 Профиль": "Профиль",
+            }
+            main_section = st.radio(
+                "Главное меню Агентства W",
+                main_menu_options,
+                horizontal=False,
+                format_func=lambda value: accessible_main_labels.get(value, value),
+                key="main_section",
+            )
+        else:
+            main_section = st.segmented_control(
+                "Главное меню",
+                main_menu_options,
+                default="☀️ День",
+                required=True,
+                label_visibility="collapsed",
+                width="stretch",
+                key="main_section",
+            )
 
         # Постоянный быстрый вызов Неолы. Она получает контекст текущего экрана
         # и учитывает вложенную навигацию («матрёшки») Агентства W.
@@ -7408,21 +7465,41 @@ if telegram_login_valid or remembered_data:
                 "помогает владельцу разбирать контакты партиями по 10."
             )
 
-                    neonia_mode = st.radio(
-                "Выберите задачу Неонии:",
-                [
-                    "🎯 Определить мою целевую аудиторию",
-                    "💙 Источники поиска VK",
-                    "🌿 Stories Telegram",
-                    "📸 Instagram Radar",
-                    "🔎 Поиск чатов",
-                    "🎯 Поиск контактов в чатах по ЦА",
-                    "👥 Поиск контактов",
-                    "🧠 Анализ 10 контактов",
-                ],
-                horizontal=True,
-                key="neonia_mode",
-            )
+                    neonia_options = [
+                        "🎯 Определить мою целевую аудиторию",
+                        "💙 Источники поиска VK",
+                        "🌿 Stories Telegram",
+                        "📸 Instagram Radar",
+                        "🔎 Поиск чатов",
+                        "🎯 Поиск контактов в чатах по ЦА",
+                        "👥 Поиск контактов",
+                        "🧠 Анализ 10 контактов",
+                    ]
+                    if talkback_mode:
+                        accessible_neonia_labels = {
+                            "🎯 Определить мою целевую аудиторию": "Определить мою целевую аудиторию",
+                            "💙 Источники поиска VK": "Источники поиска VK",
+                            "🌿 Stories Telegram": "Stories Telegram",
+                            "📸 Instagram Radar": "Instagram Radar",
+                            "🔎 Поиск чатов": "Поиск чатов",
+                            "🎯 Поиск контактов в чатах по ЦА": "Поиск контактов в чатах по целевой аудитории",
+                            "👥 Поиск контактов": "Поиск контактов",
+                            "🧠 Анализ 10 контактов": "Анализ 10 контактов",
+                        }
+                        neonia_mode = st.radio(
+                            "Выберите задачу Неонии",
+                            neonia_options,
+                            horizontal=False,
+                            format_func=lambda value: accessible_neonia_labels.get(value, value),
+                            key="neonia_mode",
+                        )
+                    else:
+                        neonia_mode = st.radio(
+                            "Выберите задачу Неонии:",
+                            neonia_options,
+                            horizontal=True,
+                            key="neonia_mode",
+                        )
                     if neonia_mode != "🎯 Определить мою целевую аудиторию":
                         mode_messages = {
                         "💙 Источники поиска VK": (
@@ -12488,6 +12565,27 @@ if telegram_login_valid or remembered_data:
 
             st.markdown("**Персональная партнёрская ссылка:**")
             st.code(partner_link, language=None)
+
+            st.divider()
+            st.markdown("#### ♿ Доступность")
+            st.caption(
+                "Режим TalkBack меняет интерфейс только для вашего аккаунта. "
+                "У остальных партнёров Агентство W остаётся без изменений."
+            )
+            talkback_profile_value = st.checkbox(
+                "Включить режим TalkBack",
+                value=talkback_mode,
+                key=f"talkback_profile_toggle_{telegram_id}",
+                help=(
+                    "Главное меню и меню Неонии становятся вертикальными, "
+                    "декоративные значки убираются из названий пунктов, "
+                    "а фокус клавиатуры и экранного диктора становится заметнее."
+                ),
+            )
+            if talkback_profile_value != talkback_mode:
+                st.session_state[accessibility_key] = bool(talkback_profile_value)
+                persist_workspace_if_changed(int(telegram_id), force=True)
+                st.rerun()
 
             st.divider()
             st.markdown("#### 🔐 Вход на этом устройстве")

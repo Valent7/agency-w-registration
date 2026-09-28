@@ -29,24 +29,6 @@ def get_workspace_state_keys(telegram_id):
         "contacts_search_done": (
             f"neonia_contacts_search_done_{telegram_id}"
         ),
-        "chats": (
-            f"neonia_telegram_chats_{telegram_id}"
-        ),
-        "chats_search_done": (
-            f"neonia_chats_search_done_{telegram_id}"
-        ),
-        "selected_source_chat": (
-            f"neonia_selected_source_chat_{telegram_id}"
-        ),
-        "chat_members": (
-            f"neonia_chat_members_{telegram_id}"
-        ),
-        "chat_candidates": (
-            f"neonia_chat_candidates_{telegram_id}"
-        ),
-        "chat_offsets": (
-            f"neonia_chat_offsets_{telegram_id}"
-        ),
         "candidates": (
             f"neonia_candidates_{telegram_id}"
         ),
@@ -62,11 +44,8 @@ def get_workspace_state_keys(telegram_id):
         "neona_drafts": (
             f"neona_first_message_drafts_{telegram_id}"
         ),
-        "sent_log": (
-            f"neona_first_message_sent_log_{telegram_id}"
-        ),
-        "blocked_first_messages": (
-            f"neona_first_message_blocked_{telegram_id}"
+        "accessibility_talkback": (
+            f"agency_accessibility_talkback_{telegram_id}"
         ),
     }
 
@@ -82,19 +61,9 @@ def collect_workspace_state(telegram_id):
         keys["neona_drafts"],
         {},
     )
-    sent_log = st.session_state.get(
-        keys["sent_log"],
-        [],
-    )
-    blocked_first_messages = st.session_state.get(
-        keys["blocked_first_messages"],
-        [],
-    )
-    if not isinstance(blocked_first_messages, list):
-        blocked_first_messages = []
 
     return {
-        "schema_version": 5,
+        "schema_version": 2,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -107,31 +76,6 @@ def collect_workspace_state(telegram_id):
                 keys["contacts_search_done"],
                 False,
             )
-        ),
-        "chats": st.session_state.get(
-            keys["chats"],
-            [],
-        ),
-        "chats_search_done": bool(
-            st.session_state.get(
-                keys["chats_search_done"],
-                False,
-            )
-        ),
-        "selected_source_chat": st.session_state.get(
-            keys["selected_source_chat"]
-        ),
-        "chat_members": st.session_state.get(
-            keys["chat_members"],
-            {},
-        ),
-        "chat_candidates": st.session_state.get(
-            keys["chat_candidates"],
-            {},
-        ),
-        "chat_offsets": st.session_state.get(
-            keys["chat_offsets"],
-            {},
         ),
         "candidates": st.session_state.get(
             keys["candidates"],
@@ -162,16 +106,12 @@ def collect_workspace_state(telegram_id):
             }
             for contact_id, draft in drafts.items()
         ],
-        "sent_log": [
-            event
-            for event in sent_log
-            if isinstance(event, dict)
-        ],
-        "blocked_first_messages": [
-            item
-            for item in blocked_first_messages
-            if isinstance(item, dict)
-        ],
+        "accessibility_talkback": bool(
+            st.session_state.get(
+                keys["accessibility_talkback"],
+                False,
+            )
+        ),
     }
 
 
@@ -191,107 +131,6 @@ def _normalize_workspace_state(state):
                 )
             except (TypeError, ValueError):
                 pass
-
-    chats = (
-        state.get("chats")
-        if isinstance(state.get("chats"), list)
-        else []
-    )
-    for chat in chats:
-        if not isinstance(chat, dict):
-            continue
-        try:
-            chat["chat_id"] = int(chat.get("chat_id"))
-        except (TypeError, ValueError):
-            pass
-        for numeric_key in (
-            "participants_count",
-            "unread_count",
-        ):
-            try:
-                chat[numeric_key] = int(
-                    chat.get(numeric_key, 0) or 0
-                )
-            except (TypeError, ValueError):
-                chat[numeric_key] = 0
-
-    selected_source_chat = state.get("selected_source_chat")
-    try:
-        selected_source_chat = (
-            int(selected_source_chat)
-            if selected_source_chat is not None
-            else None
-        )
-    except (TypeError, ValueError):
-        selected_source_chat = None
-
-    chat_members_raw = state.get("chat_members", {})
-    if not isinstance(chat_members_raw, dict):
-        chat_members_raw = {}
-    chat_members = {}
-    for chat_id, members in chat_members_raw.items():
-        if not isinstance(members, list):
-            continue
-        normalized_members = []
-        for member in members:
-            if not isinstance(member, dict):
-                continue
-            try:
-                member["telegram_id"] = int(
-                    member.get("telegram_id")
-                )
-            except (TypeError, ValueError):
-                continue
-            try:
-                member["source_chat_id"] = int(
-                    member.get("source_chat_id", chat_id)
-                )
-            except (TypeError, ValueError):
-                pass
-            access_hash = member.get("access_hash")
-            if access_hash is not None:
-                try:
-                    member["access_hash"] = int(access_hash)
-                except (TypeError, ValueError):
-                    member["access_hash"] = None
-            normalized_members.append(member)
-        chat_members[str(chat_id)] = normalized_members
-
-    chat_candidates_raw = state.get("chat_candidates", {})
-    if not isinstance(chat_candidates_raw, dict):
-        chat_candidates_raw = {}
-    chat_candidates = {}
-    for chat_id, items in chat_candidates_raw.items():
-        if not isinstance(items, list):
-            continue
-        normalized_items = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            try:
-                item["telegram_id"] = int(
-                    item.get("telegram_id")
-                )
-            except (TypeError, ValueError):
-                continue
-            try:
-                item["source_chat_id"] = int(
-                    item.get("source_chat_id", chat_id)
-                )
-            except (TypeError, ValueError):
-                pass
-            normalized_items.append(item)
-        chat_candidates[str(chat_id)] = normalized_items
-
-    chat_offsets_raw = state.get("chat_offsets", {})
-    if not isinstance(chat_offsets_raw, dict):
-        chat_offsets_raw = {}
-    chat_offsets = {}
-    for chat_id, offset in chat_offsets_raw.items():
-        try:
-            chat_offsets[str(chat_id)] = max(0, int(offset or 0))
-        except (TypeError, ValueError):
-            chat_offsets[str(chat_id)] = 0
 
     candidates = (
         state.get("candidates")
@@ -371,40 +210,6 @@ def _normalize_workspace_state(state):
     except (TypeError, ValueError):
         selection_offset = 0
 
-    sent_log_raw = state.get("sent_log", [])
-    if not isinstance(sent_log_raw, list):
-        sent_log_raw = []
-
-    sent_log = []
-    for event in sent_log_raw:
-        if not isinstance(event, dict):
-            continue
-        try:
-            event_contact_id = int(event.get("telegram_id"))
-        except (TypeError, ValueError):
-            continue
-        sent_log.append(
-            {
-                **event,
-                "telegram_id": event_contact_id,
-            }
-        )
-
-    blocked_raw = state.get("blocked_first_messages", [])
-    if not isinstance(blocked_raw, list):
-        blocked_raw = []
-    blocked_first_messages = []
-    for item in blocked_raw:
-        if not isinstance(item, dict):
-            continue
-        try:
-            contact_id = int(item.get("telegram_id"))
-        except (TypeError, ValueError):
-            continue
-        blocked_first_messages.append(
-            {**item, "telegram_id": contact_id}
-        )
-
     return {
         "passport": (
             state.get("passport")
@@ -415,21 +220,14 @@ def _normalize_workspace_state(state):
         "contacts_search_done": bool(
             state.get("contacts_search_done", False)
         ),
-        "chats": chats,
-        "chats_search_done": bool(
-            state.get("chats_search_done", False)
-        ),
-        "selected_source_chat": selected_source_chat,
-        "chat_members": chat_members,
-        "chat_candidates": chat_candidates,
-        "chat_offsets": chat_offsets,
         "candidates": candidates,
         "selection_offset": max(0, selection_offset),
         "selected_candidates": selected_candidates,
         "owner_known_contacts": owner_contacts,
         "neona_drafts": drafts,
-        "sent_log": sent_log,
-        "blocked_first_messages": blocked_first_messages,
+        "accessibility_talkback": bool(
+            state.get("accessibility_talkback", False)
+        ),
     }
 
 
@@ -566,24 +364,6 @@ def hydrate_workspace_state_once(telegram_id):
             keys["contacts_search_done"]
         ] = state["contacts_search_done"]
         st.session_state[
-            keys["chats"]
-        ] = state["chats"]
-        st.session_state[
-            keys["chats_search_done"]
-        ] = state["chats_search_done"]
-        st.session_state[
-            keys["selected_source_chat"]
-        ] = state["selected_source_chat"]
-        st.session_state[
-            keys["chat_members"]
-        ] = state["chat_members"]
-        st.session_state[
-            keys["chat_candidates"]
-        ] = state["chat_candidates"]
-        st.session_state[
-            keys["chat_offsets"]
-        ] = state["chat_offsets"]
-        st.session_state[
             keys["candidates"]
         ] = state["candidates"]
         st.session_state[
@@ -599,11 +379,8 @@ def hydrate_workspace_state_once(telegram_id):
             keys["neona_drafts"]
         ] = state["neona_drafts"]
         st.session_state[
-            keys["sent_log"]
-        ] = state["sent_log"]
-        st.session_state[
-            keys["blocked_first_messages"]
-        ] = state["blocked_first_messages"]
+            keys["accessibility_talkback"]
+        ] = state["accessibility_talkback"]
 
         current_state = collect_workspace_state(
             telegram_id
