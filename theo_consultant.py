@@ -532,6 +532,22 @@ def _is_meeting_acceptance(text: str) -> bool:
     return any(phrase in lowered for phrase in phrases)
 
 
+def _has_fresh_schedule_details(text: str) -> bool:
+    """True when this message itself contains both a date hint and a time."""
+    lowered = _normalize_calendar_text(text)
+    has_date_hint = (
+        any(token in lowered for token in ("сегодня", "завтра", "послезавтра"))
+        or bool(
+            re.search(
+                r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b",
+                str(text or ""),
+            )
+        )
+        or any(word in lowered for word in WEEKDAYS_RU)
+    )
+    return bool(has_date_hint and _detect_time(text))
+
+
 def _update_meeting_context(context: dict, text: str, message_dt: datetime) -> dict:
     context = dict(context or {})
 
@@ -1394,14 +1410,32 @@ def process_vk_community_message(
         # явные фразы вроде "согласна встретиться" и "ну записывай"
         # всегда передаются календарному модулю.
         explicit_meeting_acceptance = _is_meeting_acceptance(incoming_text)
-        if (
-            (result["stage"] == "meeting_ready" or explicit_meeting_acceptance)
-            and meeting_state != "scheduled"
-        ):
-            meeting_context = _seed_meeting_context_from_history(
-                meeting_context,
-                history,
-            )
+        fresh_schedule_details = _has_fresh_schedule_details(incoming_text)
+        calendar_trigger = (
+            result["stage"] == "meeting_ready"
+            or explicit_meeting_acceptance
+        )
+
+        # После уже назначенной встречи контакт должен иметь возможность
+        # записаться ещё раз. Но одно только повторное "да/записывай" без
+        # новой даты и времени не должно создавать дубль старой встречи.
+        can_start_calendar = (
+            meeting_state != "scheduled"
+            or fresh_schedule_details
+        )
+
+        if calendar_trigger and can_start_calendar:
+            if meeting_state == "scheduled":
+                # Это новый запрос после прежней назначенной встречи.
+                # Не переносим в него старые дату, время и meeting_id.
+                meeting_context = {}
+                meeting_id = None
+            else:
+                meeting_context = _seed_meeting_context_from_history(
+                    meeting_context,
+                    history,
+                )
+
             reply, meeting_state, meeting_context, created_meeting_id = _schedule_reply(
                 owner_id=owner_id,
                 owner_name=owner_name,
@@ -1417,6 +1451,7 @@ def process_vk_community_message(
                 meeting_id = created_meeting_id
 
             result["reply"] = reply
+            result["stage"] = "meeting_ready"
 
     now = _now_iso()
 
