@@ -417,17 +417,16 @@ def _render_vk_dialog_center(
     ]
     if not active_threads:
         st.info("Пока нет сохранённых VK-диалогов. Они появятся после кнопки «Комментарий опубликован».")
+        st.caption("📚 История диалогов пока пуста.")
         return
 
     waiting = sum(
-        1
-        for thread in active_threads
+        1 for thread in active_threads
         if not str(thread.get("last_inbound_text") or "").strip()
     )
     replied = len(active_threads) - waiting
     ready = sum(
-        1
-        for thread in active_threads
+        1 for thread in active_threads
         if str(thread.get("pending_event_kind") or "").strip() in {"manual_comment", "manual_reaction"}
         and str(thread.get("neona_reply_text") or "").strip()
     )
@@ -436,12 +435,20 @@ def _render_vk_dialog_center(
         f"ждём ответа: {waiting} · ответ Неоны готов: {ready}"
     )
 
-    for thread in active_threads:
+    current_threads = active_threads[:20]
+    history_threads = active_threads[20:]
+
+    st.caption(
+        f"На рабочем экране: {len(current_threads)} · "
+        f"в истории: {len(history_threads)}"
+    )
+
+    def _render_vk_dialog_thread(thread: dict) -> None:
         thread_id = int(thread.get("id") or 0)
         post_owner_id = int(thread.get("post_owner_id") or 0)
         post_id = int(thread.get("post_id") or 0)
         if not thread_id or not post_owner_id or not post_id:
-            continue
+            return
 
         with st.expander(_vk_thread_label(thread), expanded=False):
             post_url = str(thread.get("post_url") or "").strip()
@@ -492,6 +499,36 @@ def _render_vk_dialog_center(
                 ask_openai_fn=ask_openai_fn,
                 ui_scope="center",
             )
+
+    for thread in current_threads:
+        _render_vk_dialog_thread(thread)
+
+    history_key = f"vk_dialog_history_open_{int(owner_id)}"
+    history_open = bool(st.session_state.get(history_key, False))
+    label = (
+        f"📚 История диалогов ({len(history_threads)}) · "
+        + ("Скрыть" if history_open else "Показать")
+    )
+
+    if st.button(
+        label,
+        key=f"vk_dialog_history_toggle_{int(owner_id)}",
+        use_container_width=True,
+        disabled=not bool(history_threads),
+    ):
+        st.session_state[history_key] = not history_open
+        st.rerun()
+
+    if history_threads and history_open:
+        st.caption(
+            "Здесь сохранены более старые VK-диалоги. "
+            "Если человек снова отвечает, ветка обновляется и автоматически "
+            "поднимается в текущие 20."
+        )
+        for thread in history_threads:
+            _render_vk_dialog_thread(thread)
+    elif not history_threads:
+        st.caption("Сейчас в истории нет дополнительных VK-диалогов.")
 
 
 def _disable_vk_source(owner_id: int, source_id: int) -> None:
