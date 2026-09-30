@@ -2844,26 +2844,29 @@ def render_neona_telegram_dialog_center(
         if contact_id not in state_by_id:
             state_by_id[contact_id] = row
 
-    # Если sent_log пуст, не объявляем, что диалогов нет.
-    # Восстанавливаем карточки из постоянной таблицы agency_dialog_states.
-    if not latest_event_by_id and state_by_id:
-        for contact_id, state in state_by_id.items():
-            context = (
-                state.get("context")
-                if isinstance(state.get("context"), dict)
-                else {}
-            )
-            latest_event_by_id[contact_id] = {
-                "telegram_id": contact_id,
-                "kind": "first_message",
-                "sent_at": str(state.get("updated_at") or ""),
-                "recipient_name": str(
-                    context.get("recipient_name")
-                    or context.get("first_name")
-                    or ""
-                ),
-                "recovered_from_dialog_state": True,
-            }
+    # Постоянная история диалогов должна дополнять текущий sent_log всегда,
+    # а не только когда sent_log полностью пуст. Иначе при появлении новой
+    # рабочей группы старые диалоги исчезают из интерфейса, хотя их состояния
+    # продолжают храниться в agency_dialog_states.
+    for contact_id, state in state_by_id.items():
+        if contact_id in latest_event_by_id:
+            continue
+        context = (
+            state.get("context")
+            if isinstance(state.get("context"), dict)
+            else {}
+        )
+        latest_event_by_id[contact_id] = {
+            "telegram_id": contact_id,
+            "kind": "first_message",
+            "sent_at": str(state.get("updated_at") or ""),
+            "recipient_name": str(
+                context.get("recipient_name")
+                or context.get("first_name")
+                or ""
+            ),
+            "recovered_from_dialog_state": True,
+        }
 
     if not latest_event_by_id:
         st.info(
@@ -2941,85 +2944,117 @@ def render_neona_telegram_dialog_center(
         f"ждём ответа: {waiting_count} · к встрече: {meeting_count}"
     )
 
-    if total > 50:
-        st.caption(
-            "Показываю 50 самых свежих диалогов. Более старые остаются в истории."
-        )
-        cards = cards[:50]
+    current_limit = 20
+    current_cards = cards[:current_limit]
+    history_cards = cards[current_limit:]
 
-    for item in cards:
-        contact_id = int(item["contact_id"])
-        name = item["name"]
-        username = item["username"]
-        status_label = item["status_label"]
-        state = item["state"]
-        context = item["context"]
-        event = item["event"]
+    st.caption(
+        f"На рабочем экране: {len(current_cards)} · "
+        f"в истории: {len(history_cards)}"
+    )
 
-        display_name = name
-        if username:
-            display_name += f" · @{username}"
+    def _render_neona_dialog_card(item):
+            contact_id = int(item["contact_id"])
+            name = item["name"]
+            username = item["username"]
+            status_label = item["status_label"]
+            state = item["state"]
+            context = item["context"]
+            event = item["event"]
 
-        with st.expander(
-            f"{display_name} · {status_label}",
-            expanded=False,
-        ):
-            sent_at = _format_neona_dialog_datetime(event.get("sent_at"))
-            if sent_at:
-                st.caption(f"Первое/последнее касание из Агентства: {sent_at}")
+            display_name = name
+            if username:
+                display_name += f" · @{username}"
 
-            stage = str(state.get("stage") or "idle").strip()
-            if stage and stage != "idle":
-                st.caption(f"Этап Неоны: {stage}")
-
-            last_reply = str(context.get("last_reply_text") or "").strip()
-            if last_reply:
-                st.markdown("**Последний автоматический ответ Неоны:**")
-                st.write(last_reply)
-
-            history_key = (
-                f"neona_dialog_center_history_{owner_telegram_id}_{contact_id}"
-            )
-            if st.button(
-                "📖 Показать переписку",
-                key=f"neona_dialog_center_open_{owner_telegram_id}_{contact_id}",
-                use_container_width=False,
+            with st.expander(
+                f"{display_name} · {status_label}",
+                expanded=False,
             ):
-                try:
-                    with st.spinner("Читаем последние сообщения Telegram..."):
-                        history = run_telegram_async(
-                            fetch_telegram_private_dialog(
-                                owner_telegram_id,
-                                contact_id,
-                                limit=40,
-                            )
-                        )
-                    st.session_state[history_key] = history
-                except Exception as exc:
-                    st.error(
-                        "Не удалось открыть переписку: "
-                        + friendly_telegram_send_error(exc)
-                    )
+                sent_at = _format_neona_dialog_datetime(event.get("sent_at"))
+                if sent_at:
+                    st.caption(f"Первое/последнее касание из Агентства: {sent_at}")
 
-            history = st.session_state.get(history_key, [])
-            if isinstance(history, list) and history:
-                last_reply_id = int(context.get("last_reply_id") or 0)
-                st.markdown("**Последние сообщения:**")
-                for message in history[-16:]:
-                    if not isinstance(message, dict):
-                        continue
-                    message_id = int(message.get("message_id") or 0)
-                    if message.get("direction") == "от контакта":
-                        speaker = item["first_name"] or "Собеседник"
-                    elif last_reply_id and message_id == last_reply_id:
-                        speaker = "Неона"
-                    else:
-                        speaker = "Вы / Неона"
-                    st.write(
-                        f"**{speaker}:** {str(message.get('text') or '')}"
-                    )
-            elif isinstance(history, list) and history == [] and history_key in st.session_state:
-                st.info("В последних сообщениях текстовой переписки не найдено.")
+                stage = str(state.get("stage") or "idle").strip()
+                if stage and stage != "idle":
+                    st.caption(f"Этап Неоны: {stage}")
+
+                last_reply = str(context.get("last_reply_text") or "").strip()
+                if last_reply:
+                    st.markdown("**Последний автоматический ответ Неоны:**")
+                    st.write(last_reply)
+
+                history_key = (
+                    f"neona_dialog_center_history_{owner_telegram_id}_{contact_id}"
+                )
+                if st.button(
+                    "📖 Показать переписку",
+                    key=f"neona_dialog_center_open_{owner_telegram_id}_{contact_id}",
+                    use_container_width=False,
+                ):
+                    try:
+                        with st.spinner("Читаем последние сообщения Telegram..."):
+                            history = run_telegram_async(
+                                fetch_telegram_private_dialog(
+                                    owner_telegram_id,
+                                    contact_id,
+                                    limit=40,
+                                )
+                            )
+                        st.session_state[history_key] = history
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось открыть переписку: "
+                            + friendly_telegram_send_error(exc)
+                        )
+
+                history = st.session_state.get(history_key, [])
+                if isinstance(history, list) and history:
+                    last_reply_id = int(context.get("last_reply_id") or 0)
+                    st.markdown("**Последние сообщения:**")
+                    for message in history[-16:]:
+                        if not isinstance(message, dict):
+                            continue
+                        message_id = int(message.get("message_id") or 0)
+                        if message.get("direction") == "от контакта":
+                            speaker = item["first_name"] or "Собеседник"
+                        elif last_reply_id and message_id == last_reply_id:
+                            speaker = "Неона"
+                        else:
+                            speaker = "Вы / Неона"
+                        st.write(
+                            f"**{speaker}:** {str(message.get('text') or '')}"
+                        )
+                elif isinstance(history, list) and history == [] and history_key in st.session_state:
+                    st.info("В последних сообщениях текстовой переписки не найдено.")
+
+    for item in current_cards:
+        _render_neona_dialog_card(item)
+
+    history_open_key = f"neona_dialog_history_open_{owner_telegram_id}"
+    if history_cards:
+        history_is_open = bool(st.session_state.get(history_open_key, False))
+        history_button_label = (
+            f"📚 История диалогов ({len(history_cards)}) · "
+            + ("Скрыть" if history_is_open else "Показать")
+        )
+        if st.button(
+            history_button_label,
+            key=f"neona_dialog_history_toggle_{owner_telegram_id}",
+            use_container_width=True,
+        ):
+            history_is_open = not history_is_open
+            st.session_state[history_open_key] = history_is_open
+
+        if history_is_open:
+            st.caption(
+                "Здесь сохранены более старые диалоги. "
+                "Если человек снова отвечает, его карточка автоматически "
+                "поднимается в текущий список по времени обновления."
+            )
+            for item in history_cards:
+                _render_neona_dialog_card(item)
+    else:
+        st.caption("📚 История диалогов пока пуста.")
 
 
 def prepare_telegram_video_note(video_bytes):
