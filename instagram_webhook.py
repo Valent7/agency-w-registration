@@ -29,6 +29,11 @@ INSTAGRAM_OWNER_ID = os.getenv("INSTAGRAM_OWNER_ID", "").strip()
 INSTAGRAM_OWNER_NAME = os.getenv("INSTAGRAM_OWNER_NAME", "").strip()
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
 INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0").strip() or "v23.0"
+INSTAGRAM_OAUTH_SCOPES = (
+    "instagram_business_basic,"
+    "instagram_business_manage_messages,"
+    "instagram_business_manage_comments"
+)
 
 # Multi-partner Instagram Business Login. These values are configured once
 # by the Agency W operator in Render; partners never see them.
@@ -109,13 +114,13 @@ async def privacy(request: Request):
 <h2>Data we may process</h2>
 <ul>
   <li>Instagram account identifiers and profile information made available by Instagram;</li>
-  <li>messages and content voluntarily sent to Instagram accounts connected by Agency W partners;</li>
-  <li>technical metadata required to receive, process, secure and troubleshoot messages.</li>
+  <li>messages, public comments and content voluntarily sent to Instagram accounts connected by Agency W partners;</li>
+  <li>technical metadata required to receive, process, secure and troubleshoot messages or comments.</li>
 </ul>
 
 <h2>How we use data</h2>
 <ul>
-  <li>to receive and respond to Instagram messages;</li>
+  <li>to receive and respond to Instagram messages and public comments;</li>
   <li>to maintain conversation context;</li>
   <li>to operate, secure and improve Agency W.</li>
 </ul>
@@ -600,6 +605,36 @@ def _save_instagram_connection(
     )
 
 
+def _subscribe_instagram_webhooks(
+    instagram_account_id: str,
+    access_token: str,
+) -> dict:
+    """Subscribe the connected professional account to Direct and comments."""
+    account_id = str(instagram_account_id or "").strip()
+    token = str(access_token or "").strip()
+    if not account_id or not token:
+        raise RuntimeError("Instagram webhook subscription requires account and token.")
+
+    response = requests.post(
+        f"https://graph.instagram.com/{INSTAGRAM_API_VERSION}/"
+        f"{account_id}/subscribed_apps",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"subscribed_fields": "messages,comments"},
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"Instagram webhook subscription HTTP {response.status_code}: "
+            f"{response.text[:800]}"
+        )
+    payload = response.json() if response.text.strip() else {}
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise RuntimeError(
+            "Instagram did not confirm the messages/comments webhook subscription."
+        )
+    return payload
+
+
 def _instagram_oauth_settings() -> dict:
     required = {
         "INSTAGRAM_APP_ID": INSTAGRAM_APP_ID,
@@ -640,7 +675,7 @@ async def instagram_connect(request: Request):
             "client_id": settings["INSTAGRAM_APP_ID"],
             "redirect_uri": settings["INSTAGRAM_OAUTH_REDIRECT_URI"],
             "response_type": "code",
-            "scope": "instagram_business_basic,instagram_business_manage_messages",
+            "scope": INSTAGRAM_OAUTH_SCOPES,
             "state": state,
             "force_reauth": "true",
         }
@@ -749,10 +784,25 @@ async def instagram_oauth_callback(request: Request):
             expires_in=int(expires_in) if str(expires_in or "").isdigit() else None,
         )
 
+        comments_ready = True
+        try:
+            _subscribe_instagram_webhooks(
+                instagram_account_id,
+                access_token,
+            )
+        except Exception as subscription_exc:
+            comments_ready = False
+            print(
+                "INSTAGRAM_WEBHOOK_SUBSCRIPTION_ERROR:",
+                f"{type(subscription_exc).__name__}: {subscription_exc}",
+                flush=True,
+            )
+
         return_to = INSTAGRAM_AGENCY_RETURN_URL or "https://agency-w.streamlit.app/"
         sep = "&" if "?" in return_to else "?"
         return RedirectResponse(
-            f"{return_to}{sep}instagram=connected",
+            f"{return_to}{sep}instagram=connected&comments="
+            + ("ready" if comments_ready else "subscription_warning"),
             status_code=302,
         )
     except Exception as exc:
@@ -1191,6 +1241,447 @@ def _send_instagram_text(
         raise RuntimeError(f"Instagram API error: {payload['error']}")
     return payload
 
+
+def _iter_instagram_comments(payload: dict):
+    """Yield comment notifications sent through the Instagram webhook."""
+    for entry in payload.get("entry") or []:
+        if not isinstance(entry, dict):
+            continue
+        account_id = str(entry.get("id") or "").strip()
+        entry_time = entry.get("time")
+        for change in entry.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            field = str(change.get("field") or "").strip().lower()
+            if field not in {"comments", "live_comments"}:
+                continue
+            value = change.get("value") if isinstance(change.get("value"), dict) else {}
+            comment_id = str(value.get("id") or value.get("comment_id") or "").strip()
+            text = str(value.get("text") or value.get("message") or "").strip()
+            if not account_id or not comment_id:
+                continue
+
+            author = value.get("from") if isinstance(value.get("from"), dict) else {}
+            media = value.get("media") if isinstance(value.get("media"), dict) else {}
+            yield {
+                "instagram_account_id": account_id,
+                "comment_id": comment_id,
+                "parent_comment_id": str(
+                    value.get("parent_id")
+                    or value.get("parent_comment_id")
+                    or ""
+                ).strip(),
+                "comment_text": text,
+                "author_id": str(author.get("id") or value.get("from_id") or "").strip(),
+                "author_username": str(
+                    author.get("username")
+                    or value.get("username")
+                    or ""
+                ).strip(),
+                "media_id": str(media.get("id") or value.get("media_id") or "").strip(),
+                "media_type": str(
+                    media.get("media_type")
+                    or media.get("media_product_type")
+                    or ""
+                ).strip(),
+                "comment_timestamp": (
+                    value.get("timestamp")
+                    or value.get("created_time")
+                    or entry_time
+                ),
+                "webhook_field": field,
+                "raw_value": value,
+            }
+
+
+def _instagram_event_datetime(value) -> str:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+    return _message_datetime(value).isoformat()
+
+
+def _instagram_graph_get(
+    object_id: str,
+    *,
+    access_token: str,
+    fields: str,
+) -> dict:
+    response = requests.get(
+        f"https://graph.instagram.com/{INSTAGRAM_API_VERSION}/"
+        f"{str(object_id or '').strip()}",
+        headers={"Authorization": f"Bearer {str(access_token or '').strip()}"},
+        params={"fields": fields},
+        timeout=25,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"Instagram Graph HTTP {response.status_code}: {response.text[:800]}"
+        )
+    data = response.json() if response.text.strip() else {}
+    if not isinstance(data, dict) or data.get("error"):
+        raise RuntimeError(f"Instagram Graph returned an error: {data}")
+    return data
+
+
+def _enrich_instagram_comment(event: dict, access_token: str) -> dict:
+    enriched = dict(event or {})
+    try:
+        detail = _instagram_graph_get(
+            enriched["comment_id"],
+            access_token=access_token,
+            fields="id,text,username,timestamp,parent_id,media",
+        )
+        enriched["comment_text"] = str(
+            detail.get("text") or enriched.get("comment_text") or ""
+        ).strip()
+        enriched["author_username"] = str(
+            detail.get("username") or enriched.get("author_username") or ""
+        ).strip()
+        enriched["parent_comment_id"] = str(
+            detail.get("parent_id") or enriched.get("parent_comment_id") or ""
+        ).strip()
+        detail_media = detail.get("media")
+        if isinstance(detail_media, dict):
+            enriched["media_id"] = str(
+                detail_media.get("id") or enriched.get("media_id") or ""
+            ).strip()
+        enriched["comment_timestamp"] = (
+            detail.get("timestamp") or enriched.get("comment_timestamp")
+        )
+    except Exception as exc:
+        print(
+            "INSTAGRAM_COMMENT_DETAIL_WARNING:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+
+    media_id = str(enriched.get("media_id") or "").strip()
+    if media_id:
+        try:
+            media = _instagram_graph_get(
+                media_id,
+                access_token=access_token,
+                fields="id,caption,media_type,media_product_type,permalink",
+            )
+            enriched["media_caption"] = str(media.get("caption") or "").strip()
+            enriched["media_type"] = str(
+                media.get("media_product_type")
+                or media.get("media_type")
+                or enriched.get("media_type")
+                or ""
+            ).strip()
+            enriched["media_permalink"] = str(media.get("permalink") or "").strip()
+        except Exception as exc:
+            print(
+                "INSTAGRAM_COMMENT_MEDIA_WARNING:",
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+    return enriched
+
+
+def _generate_instagram_comment_draft(event: dict, owner_name: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY")
+
+    prompt = (
+        "Ты — Неона, секретарь-референт Агентства W. Подготовь ответ от лица "
+        f"владельца Instagram-аккаунта {str(owner_name or '').strip() or 'Агентства W'}. "
+        "Это публичный ответ на комментарий под постом или Reels. Пиши по-русски, "
+        "тепло, естественно и уважительно, максимум 2 коротких предложения. "
+        "Не называй себя ботом или искусственным интеллектом, не обещай доход или "
+        "результат, не выдумывай факты. Если уместно, заверши одним лёгким вопросом. "
+        "Верни только готовый ответ без кавычек и пояснений.\n\n"
+        f"Текст публикации: {str(event.get('media_caption') or '')[:3000]}\n"
+        f"Автор комментария: @{str(event.get('author_username') or 'пользователь')}\n"
+        f"Комментарий: {str(event.get('comment_text') or '')[:3000]}"
+    )
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": os.getenv("OPENAI_COMMENT_MODEL", "gpt-5-mini").strip()
+            or "gpt-5-mini",
+            "instructions": "Создавай только безопасные публичные ответы Instagram.",
+            "input": prompt,
+            "max_output_tokens": 220,
+            "store": False,
+        },
+        timeout=90,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"OpenAI HTTP {response.status_code}: {response.text[:800]}"
+        )
+    data = response.json() if response.text.strip() else {}
+    parts = []
+    for item in data.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and content.get("type") == "output_text":
+                parts.append(str(content.get("text") or ""))
+    draft = "\n".join(parts).strip().strip('"').strip()
+    draft = re.sub(r"\s+", " ", draft).strip()
+    if not draft:
+        raise RuntimeError("Neona returned an empty Instagram comment draft.")
+    return draft[:1000]
+
+
+def _store_instagram_comment(event: dict, connection: dict) -> None:
+    comment_id = str(event.get("comment_id") or "").strip()
+    if not comment_id:
+        return
+    existing = _sb_get(
+        "agency_instagram_comments",
+        {"comment_id": f"eq.{comment_id}", "select": "comment_id", "limit": 1},
+    )
+    if existing:
+        return
+
+    owner_id = int(connection["owner_telegram_id"])
+    owner_name = str(connection.get("owner_name") or "").strip()
+    try:
+        draft = _generate_instagram_comment_draft(event, owner_name)
+        draft_error = None
+    except Exception as exc:
+        print(
+            "INSTAGRAM_COMMENT_DRAFT_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        draft = (
+            "Спасибо, что написали. Расскажите, пожалуйста, "
+            "что именно вы хотели бы уточнить?"
+        )
+        draft_error = str(exc)[:1000]
+
+    now = datetime.now(timezone.utc).isoformat()
+    _sb_post(
+        "agency_instagram_comments",
+        {
+            "owner_telegram_id": owner_id,
+            "instagram_account_id": str(event.get("instagram_account_id") or ""),
+            "comment_id": comment_id,
+            "parent_comment_id": str(event.get("parent_comment_id") or "") or None,
+            "media_id": str(event.get("media_id") or "") or None,
+            "media_type": str(event.get("media_type") or "") or None,
+            "media_permalink": str(event.get("media_permalink") or "") or None,
+            "media_caption": str(event.get("media_caption") or "") or None,
+            "author_id": str(event.get("author_id") or "") or None,
+            "author_username": str(event.get("author_username") or "") or None,
+            "comment_text": str(event.get("comment_text") or ""),
+            "comment_timestamp": _instagram_event_datetime(
+                event.get("comment_timestamp")
+            ),
+            "ai_draft": draft,
+            "status": "pending",
+            "error_text": draft_error,
+            "payload": event.get("raw_value") or {},
+            "created_at": now,
+            "updated_at": now,
+        },
+        merge=True,
+        on_conflict="comment_id",
+    )
+
+
+def _process_instagram_comments(payload: dict) -> None:
+    for raw_event in _iter_instagram_comments(payload):
+        try:
+            connection = _resolve_instagram_connection(
+                raw_event["instagram_account_id"]
+            )
+            account_id = str(connection.get("instagram_account_id") or "").strip()
+            account_username = str(connection.get("instagram_username") or "").strip()
+            if (
+                str(raw_event.get("author_id") or "").strip() == account_id
+                or (
+                    account_username
+                    and str(raw_event.get("author_username") or "").strip().lower()
+                    == account_username.lower()
+                )
+            ):
+                continue
+            event = _enrich_instagram_comment(
+                raw_event,
+                str(connection.get("access_token") or ""),
+            )
+            if (
+                account_username
+                and str(event.get("author_username") or "").strip().lower()
+                == account_username.lower()
+            ):
+                continue
+            _store_instagram_comment(event, connection)
+        except Exception as exc:
+            print(
+                "INSTAGRAM_COMMENT_PROCESSING_ERROR:",
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+
+def _send_instagram_comment_reply(
+    comment_id: str,
+    message: str,
+    *,
+    access_token: str,
+) -> dict:
+    response = requests.post(
+        f"https://graph.instagram.com/{INSTAGRAM_API_VERSION}/"
+        f"{str(comment_id or '').strip()}/replies",
+        headers={"Authorization": f"Bearer {str(access_token or '').strip()}"},
+        data={"message": str(message or "").strip()},
+        timeout=30,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"Instagram comment reply HTTP {response.status_code}: "
+            f"{response.text[:1000]}"
+        )
+    data = response.json() if response.text.strip() else {}
+    if not isinstance(data, dict) or data.get("error"):
+        raise RuntimeError(f"Instagram comment reply error: {data}")
+    return data
+
+
+def _validated_comment_action(payload: dict, required_purpose: str) -> tuple[int, str]:
+    state_payload = _decode_instagram_state(str(payload.get("state") or ""))
+    if str(state_payload.get("purpose") or "").strip() != required_purpose:
+        raise RuntimeError("Invalid Instagram comment action.")
+    owner_id = int(state_payload["owner_id"])
+    comment_id = str(payload.get("comment_id") or "").strip()
+    if not comment_id or comment_id != str(state_payload.get("comment_id") or "").strip():
+        raise RuntimeError("Instagram comment action does not match this comment.")
+    return owner_id, comment_id
+
+
+async def instagram_comment_draft(request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Invalid request body.")
+        owner_id, comment_id = _validated_comment_action(
+            payload,
+            "agency_w_instagram_comment_draft",
+        )
+        rows = _sb_get(
+            "agency_instagram_comments",
+            {
+                "owner_telegram_id": f"eq.{owner_id}",
+                "comment_id": f"eq.{comment_id}",
+                "select": "*",
+                "limit": 1,
+            },
+        )
+        if not rows:
+            return JSONResponse({"error": "Комментарий не найден."}, status_code=404)
+        row = dict(rows[0])
+        connection = _resolve_instagram_connection(row["instagram_account_id"])
+        draft = _generate_instagram_comment_draft(
+            row,
+            str(connection.get("owner_name") or ""),
+        )
+        _sb_patch(
+            "agency_instagram_comments",
+            {
+                "owner_telegram_id": f"eq.{owner_id}",
+                "comment_id": f"eq.{comment_id}",
+            },
+            {
+                "ai_draft": draft,
+                "error_text": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return JSONResponse({"ok": True, "draft": draft})
+    except Exception as exc:
+        print(
+            "INSTAGRAM_COMMENT_DRAFT_ENDPOINT_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def instagram_comment_reply(request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Invalid request body.")
+        owner_id, comment_id = _validated_comment_action(
+            payload,
+            "agency_w_instagram_comment_reply",
+        )
+        message = re.sub(r"\s+", " ", str(payload.get("message") or "")).strip()
+        if not message:
+            raise RuntimeError("Ответ не может быть пустым.")
+        if len(message) > 1000:
+            raise RuntimeError("Ответ слишком длинный: максимум 1000 знаков.")
+
+        rows = _sb_get(
+            "agency_instagram_comments",
+            {
+                "owner_telegram_id": f"eq.{owner_id}",
+                "comment_id": f"eq.{comment_id}",
+                "select": "*",
+                "limit": 1,
+            },
+        )
+        if not rows:
+            return JSONResponse({"error": "Комментарий не найден."}, status_code=404)
+        row = dict(rows[0])
+        if str(row.get("status") or "").strip() == "replied":
+            return JSONResponse(
+                {"error": "Ответ на этот комментарий уже отправлен."},
+                status_code=409,
+            )
+
+        connection = _resolve_instagram_connection(row["instagram_account_id"])
+        result = _send_instagram_comment_reply(
+            comment_id,
+            message,
+            access_token=str(connection.get("access_token") or ""),
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        _sb_patch(
+            "agency_instagram_comments",
+            {
+                "owner_telegram_id": f"eq.{owner_id}",
+                "comment_id": f"eq.{comment_id}",
+            },
+            {
+                "approved_reply": message,
+                "reply_id": str(result.get("id") or "") or None,
+                "status": "replied",
+                "error_text": None,
+                "replied_at": now,
+                "updated_at": now,
+            },
+        )
+        return JSONResponse(
+            {"ok": True, "reply_id": str(result.get("id") or "")}
+        )
+    except Exception as exc:
+        print(
+            "INSTAGRAM_COMMENT_REPLY_ENDPOINT_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
 def _neona_config(core, connection: dict | None = None):
     connection = dict(connection or {})
     required = {
@@ -1378,11 +1869,13 @@ def _build_neona_draft(event: dict) -> None:
 
 
 def _process_instagram_payload(payload: dict) -> None:
-    """Process one webhook delivery, generate Neona replies and send them to Direct."""
+    """Process Direct messages and public comments from one webhook delivery."""
     try:
+        _process_instagram_comments(payload)
         events = list(_iter_instagram_messages(payload))
         if not events:
-            print("INSTAGRAM_NEONA_NO_SUPPORTED_MESSAGES", flush=True)
+            if not list(_iter_instagram_comments(payload)):
+                print("INSTAGRAM_NEONA_NO_SUPPORTED_EVENTS", flush=True)
             return
 
         for event in events:
@@ -1918,6 +2411,8 @@ routes = [
     Route("/instagram/oauth-config", instagram_oauth_config, methods=["GET"]),
     Route("/instagram/connect", instagram_connect, methods=["GET"]),
     Route("/instagram/callback", instagram_oauth_callback, methods=["GET"]),
+    Route("/instagram/comments/draft", instagram_comment_draft, methods=["POST"]),
+    Route("/instagram/comments/reply", instagram_comment_reply, methods=["POST"]),
     Route("/facebook/connect", facebook_connect, methods=["GET"]),
     Route("/facebook/exchange", facebook_exchange, methods=["POST"]),
     Route("/facebook/callback", facebook_oauth_callback, methods=["GET"]),

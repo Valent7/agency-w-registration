@@ -5731,7 +5731,11 @@ def _instagram_connect_url(owner_telegram_id: int, owner_name: str) -> str:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": "instagram_business_basic,instagram_business_manage_messages",
+        "scope": (
+            "instagram_business_basic,"
+            "instagram_business_manage_messages,"
+            "instagram_business_manage_comments"
+        ),
         "state": state,
         "force_reauth": "true",
     }
@@ -5760,14 +5764,37 @@ def _render_connected_channel_card(title: str, caption: str, label: str):
 
 def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool:
     connection = _load_instagram_connection(int(owner_telegram_id))
+    comments_state = str(st.query_params.get("comments") or "").strip()
+    if comments_state == "ready":
+        st.success("✅ Instagram Direct и комментарии подключены.")
+    elif comments_state == "subscription_warning":
+        st.warning(
+            "Instagram подключён, но Meta не подтвердила подписку на комментарии. "
+            "Нажмите «Подключить Instagram» ещё раз после проверки поля comments в Webhooks."
+        )
     if connection:
         username = str(connection.get("instagram_username") or "").strip()
         suffix = f" · @{username}" if username else ""
         _render_connected_channel_card(
             "Instagram",
-            "Профессиональный аккаунт подключён. Неона может работать с входящими сообщениями Direct.",
+            "Профессиональный аккаунт подключён. Неона может работать с Direct и комментариями к Reels и постам.",
             f"✅ Instagram подключён{suffix}",
         )
+        with st.expander("Разрешения Instagram", expanded=comments_state == "subscription_warning"):
+            st.caption(
+                "Если Instagram подключали до появления центра комментариев, "
+                "один раз обновите разрешения — Direct при этом не отключится."
+            )
+            try:
+                refresh_url = _instagram_connect_url(owner_telegram_id, owner_name)
+                safe_refresh_url = html.escape(refresh_url, quote=True)
+                st.markdown(
+                    f'<a href="{safe_refresh_url}" target="_blank" '
+                    'rel="noopener noreferrer">🔄 Обновить разрешения Instagram</a>',
+                    unsafe_allow_html=True,
+                )
+            except Exception as exc:
+                st.caption(f"Обновление разрешений пока недоступно: {exc}")
         return True
 
     if str(st.query_params.get("instagram") or "").strip() == "connected":
@@ -5777,7 +5804,7 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
         st.markdown("**Instagram**")
         st.caption(
             "Подключите профессиональный аккаунт один раз. После этого Неона сможет "
-            "отвечать на входящие сообщения Direct от вашего имени."
+            "работать с входящими сообщениями Direct и готовить ответы на комментарии."
         )
         try:
             connect_url = _instagram_connect_url(owner_telegram_id, owner_name)
@@ -5801,6 +5828,270 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
             unsafe_allow_html=True,
         )
     return False
+
+
+def _load_instagram_comments(owner_telegram_id: int) -> list[dict]:
+    response = requests.get(
+        f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_instagram_comments",
+        headers={
+            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+            "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+        },
+        params={
+            "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+            "select": "*",
+            "order": "updated_at.desc",
+            "limit": 500,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    rows = response.json() if response.text.strip() else []
+    return rows if isinstance(rows, list) else []
+
+
+def _instagram_comment_action_state(
+    owner_telegram_id: int,
+    comment_id: str,
+    purpose: str,
+) -> str:
+    key = str(st.secrets.get("FERNET_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("FERNET_KEY не найден в Streamlit Secrets.")
+    payload = {
+        "owner_id": int(owner_telegram_id),
+        "comment_id": str(comment_id or "").strip(),
+        "purpose": str(purpose or "").strip(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return Fernet(key.encode("utf-8")).encrypt(
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ).decode("utf-8")
+
+
+def _instagram_comment_service_post(path: str, payload: dict) -> dict:
+    base_url = str(st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
+    if not base_url:
+        raise RuntimeError("Сервис Instagram ещё не указан в настройках Агентства W.")
+    response = requests.post(
+        f"{base_url}/{str(path or '').strip().lstrip('/')}",
+        json=payload,
+        timeout=100,
+    )
+    try:
+        data = response.json() if response.text.strip() else {}
+    except ValueError:
+        data = {}
+    if not response.ok:
+        raise RuntimeError(
+            str(data.get("error") or "")
+            or f"Сервис Instagram вернул ошибку {response.status_code}."
+        )
+    return data if isinstance(data, dict) else {}
+
+
+def render_instagram_comments_center(
+    owner_telegram_id: int,
+    owner_name: str,
+) -> None:
+    """Public Instagram comments with Neona drafts and owner approval."""
+    owner_telegram_id = int(owner_telegram_id)
+    st.markdown("### 📸 Instagram комментарии")
+    st.caption(
+        "Комментарии к Reels и постам появляются здесь. Неона готовит ответ, "
+        "но отправка в Instagram происходит только после вашего утверждения."
+    )
+
+    refresh_col, summary_col = st.columns([1, 3])
+    with refresh_col:
+        if st.button(
+            "🔄 Обновить",
+            key=f"instagram_comments_refresh_{owner_telegram_id}",
+            use_container_width=True,
+        ):
+            st.rerun()
+
+    try:
+        rows = _load_instagram_comments(owner_telegram_id)
+    except Exception as exc:
+        error_text = str(exc)
+        if "404" in error_text or "agency_instagram_comments" in error_text:
+            st.info(
+                "Центр комментариев готов в интерфейсе. Осталось один раз "
+                "создать таблицу из файла instagram_comments_setup.sql."
+            )
+        else:
+            st.warning("Не удалось загрузить комментарии Instagram: " + error_text)
+        return
+
+    pending_count = sum(
+        1 for row in rows if str(row.get("status") or "pending") != "replied"
+    )
+    replied_count = sum(
+        1 for row in rows if str(row.get("status") or "") == "replied"
+    )
+    with summary_col:
+        st.caption(
+            f"Всего: {len(rows)} · ждут утверждения: {pending_count} · "
+            f"ответ отправлен: {replied_count}"
+        )
+
+    if not rows:
+        st.info(
+            "Новых комментариев пока нет. После обновления разрешений Instagram "
+            "первый комментарий к вашему Reels или посту появится здесь автоматически."
+        )
+        return
+
+    current_limit = 20
+    current_rows = rows[:current_limit]
+    archive_rows = rows[current_limit:]
+    st.caption(
+        f"На рабочем экране: {len(current_rows)} · в архиве: {len(archive_rows)}"
+    )
+
+    def _render_comment_card(row: dict) -> None:
+        comment_id = str(row.get("comment_id") or "").strip()
+        if not comment_id:
+            return
+        key_suffix = hashlib.sha256(comment_id.encode("utf-8")).hexdigest()[:16]
+        username = str(row.get("author_username") or "пользователь").strip()
+        comment_text = str(row.get("comment_text") or "").strip()
+        status = str(row.get("status") or "pending").strip()
+        status_label = (
+            "✅ ответ отправлен" if status == "replied" else "🟡 ждёт утверждения"
+        )
+        timestamp = _format_neona_dialog_datetime(row.get("comment_timestamp"))
+        title_text = comment_text.replace("\n", " ")
+        if len(title_text) > 70:
+            title_text = title_text[:67].rstrip() + "…"
+
+        with st.expander(
+            f"@{username} · {status_label} · {title_text or 'Комментарий'}",
+            expanded=False,
+        ):
+            if timestamp:
+                st.caption(f"Комментарий получен: {timestamp}")
+            st.markdown(f"**@{username}:** {comment_text or 'Текст комментария не передан Meta.'}")
+
+            media_caption = str(row.get("media_caption") or "").strip()
+            if media_caption:
+                st.caption("Публикация: " + media_caption[:500])
+            media_permalink = str(row.get("media_permalink") or "").strip()
+            if media_permalink.startswith("https://"):
+                safe_link = html.escape(media_permalink, quote=True)
+                st.markdown(
+                    f'<a href="{safe_link}" target="_blank" rel="noopener noreferrer">'
+                    "Открыть Reels / пост в Instagram</a>",
+                    unsafe_allow_html=True,
+                )
+
+            if status == "replied":
+                approved_reply = str(row.get("approved_reply") or "").strip()
+                st.markdown("**Отправленный ответ:**")
+                st.write(approved_reply or "Ответ отправлен.")
+                replied_at = _format_neona_dialog_datetime(row.get("replied_at"))
+                if replied_at:
+                    st.caption(f"Отправлено: {replied_at}")
+                return
+
+            draft_key = f"instagram_comment_draft_{owner_telegram_id}_{key_suffix}"
+            marker_key = f"instagram_comment_marker_{owner_telegram_id}_{key_suffix}"
+            marker = (
+                str(row.get("updated_at") or "")
+                + "|"
+                + str(row.get("ai_draft") or "")
+            )
+            if st.session_state.get(marker_key) != marker:
+                st.session_state[draft_key] = str(row.get("ai_draft") or "").strip()
+                st.session_state[marker_key] = marker
+
+            st.text_area(
+                "Ответ Неоны — можно отредактировать",
+                key=draft_key,
+                height=110,
+                max_chars=1000,
+            )
+            send_col, regenerate_col = st.columns(2)
+            with send_col:
+                if st.button(
+                    "✅ Утвердить и отправить",
+                    key=f"instagram_comment_send_{owner_telegram_id}_{key_suffix}",
+                    use_container_width=True,
+                ):
+                    final_text = str(st.session_state.get(draft_key) or "").strip()
+                    if not final_text:
+                        st.warning("Сначала напишите ответ.")
+                    else:
+                        try:
+                            with st.spinner("Отправляем утверждённый ответ в Instagram..."):
+                                state = _instagram_comment_action_state(
+                                    owner_telegram_id,
+                                    comment_id,
+                                    "agency_w_instagram_comment_reply",
+                                )
+                                _instagram_comment_service_post(
+                                    "/instagram/comments/reply",
+                                    {
+                                        "state": state,
+                                        "comment_id": comment_id,
+                                        "message": final_text,
+                                    },
+                                )
+                            st.session_state.pop(marker_key, None)
+                            st.success("✅ Ответ опубликован под комментарием.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error("Не удалось отправить ответ: " + str(exc))
+
+            with regenerate_col:
+                if st.button(
+                    "✨ Новый вариант Неоны",
+                    key=f"instagram_comment_regenerate_{owner_telegram_id}_{key_suffix}",
+                    use_container_width=True,
+                ):
+                    try:
+                        with st.spinner("Неона готовит новый вариант..."):
+                            state = _instagram_comment_action_state(
+                                owner_telegram_id,
+                                comment_id,
+                                "agency_w_instagram_comment_draft",
+                            )
+                            result = _instagram_comment_service_post(
+                                "/instagram/comments/draft",
+                                {
+                                    "state": state,
+                                    "comment_id": comment_id,
+                                    "owner_name": str(owner_name or "").strip(),
+                                },
+                            )
+                        st.session_state[draft_key] = str(result.get("draft") or "").strip()
+                        st.session_state.pop(marker_key, None)
+                        st.rerun()
+                    except Exception as exc:
+                        st.error("Неона не смогла подготовить новый вариант: " + str(exc))
+
+    for row in current_rows:
+        if isinstance(row, dict):
+            _render_comment_card(row)
+
+    archive_key = f"instagram_comments_archive_open_{owner_telegram_id}"
+    if archive_rows:
+        archive_open = bool(st.session_state.get(archive_key, False))
+        if st.button(
+            f"📚 Архив комментариев ({len(archive_rows)}) · "
+            + ("Скрыть" if archive_open else "Показать"),
+            key=f"instagram_comments_archive_toggle_{owner_telegram_id}",
+            use_container_width=True,
+        ):
+            archive_open = not archive_open
+            st.session_state[archive_key] = archive_open
+        if archive_open:
+            for row in archive_rows:
+                if isinstance(row, dict):
+                    _render_comment_card(row)
+    else:
+        st.caption("📚 Архив комментариев пока пуст.")
 
 
 def render_telegram_connection(expected_telegram_id):
@@ -9452,6 +9743,23 @@ if telegram_login_valid or remembered_data:
                         except (TypeError, ValueError):
                             continue
                         candidate_by_id[normalized_id] = contact
+
+                    # --------------------------------------------------
+                    # Комментарии Instagram: отдельный рабочий стол Неоны.
+                    # Ответ публикуется только после утверждения владельца.
+                    # --------------------------------------------------
+                    if st.session_state.get("neona_instagram_connected", False):
+                        render_instagram_comments_center(
+                            telegram_id,
+                            first_name,
+                        )
+                    else:
+                        st.markdown("### 📸 Instagram комментарии")
+                        st.info(
+                            "Подключите профессиональный Instagram в блоке каналов, "
+                            "чтобы Неона получала комментарии к Reels и постам."
+                        )
+                    st.divider()
 
                     # --------------------------------------------------
                     # Постоянный рабочий стол Telegram-диалогов Неоны.
