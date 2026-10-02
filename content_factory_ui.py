@@ -1,11 +1,17 @@
 import json
+import math
 import re
+import shutil
+import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import requests
 import streamlit as st
+from PIL import Image, ImageOps
 
 
 PROFESSIONAL_PORTRAITS = {
@@ -95,6 +101,391 @@ FACTORY_SYSTEM_PROMPT = """
 
 def _clean_text(value, limit=12000):
     return str(value or "").strip()[:limit]
+
+
+_DIRECTION_MARKERS = re.compile(
+    r"(?im)(?:^|[\n.!?]\s*)(?:сцена|кадр|план|камера|переход|подпись|экран)\s*\d*\s*[:—-]"
+    r"|\b(?:в кадре|крупный план|общий план|на экране|появляется надпись|смена сцены)\b"
+)
+
+
+def _has_direction_markers(text):
+    """Не разрешает отправлять режиссёрские команды в платную озвучку."""
+    return bool(_DIRECTION_MARKERS.search(str(text or "")))
+
+
+def _prepare_reel_content(item, ask_ai_fn):
+    """Создаёт отдельно чистую речь диктора и технический план кадров."""
+    source_scenes = "\n".join(item.get("scenes") or [])
+    user_prompt = f"""
+Подготовь финальную основу короткого Instagram Reels длительностью 25–45 секунд.
+
+ТЕМА: {item.get('title') or ''}
+ХУК: {item.get('hook') or ''}
+ИСХОДНЫЙ ТЕКСТ: {item.get('script') or ''}
+ТЕХНИЧЕСКИЙ ПЛАН:
+{source_scenes}
+ПРИЗЫВ: {item.get('cta') or ''}
+
+Верни только JSON:
+{{
+  "spoken_text": "только слова, которые естественно произносит диктор",
+  "scenes": ["короткое визуальное описание сцены 1", "сцена 2"]
+}}
+
+ОБЯЗАТЕЛЬНО:
+- spoken_text содержит 65–105 слов и звучит как живая русская речь;
+- в spoken_text запрещены слова и конструкции «сцена», «кадр», «план»,
+  «камера», «на экране», «появляется надпись», номера сцен, ремарки в скобках;
+- не описывай, что зритель увидит; говори с самим зрителем о его ситуации;
+- первая фраза цепляет, последняя естественно приводит к одному действию;
+- scenes содержит 4–6 визуальных сцен без реплик диктора;
+- не обещай доход и не используй давление.
+""".strip()
+    system_prompt = (
+        "Ты — режиссёр коротких деловых Reels Агентства W. "
+        "Никогда не смешивай произносимую речь с техническими указаниями. "
+        "Возвращай только корректный JSON без Markdown."
+    )
+
+    last_error = ""
+    for _ in range(2):
+        try:
+            answer = ask_ai_fn(system_prompt, user_prompt)
+            data = _json_from_answer(answer)
+            spoken_text = _clean_text(data.get("spoken_text"), 1800)
+            scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
+            scenes = [_clean_text(scene, 700) for scene in scenes[:6] if _clean_text(scene, 700)]
+            word_count = len(re.findall(r"\b[\wЁёА-Яа-я-]+\b", spoken_text))
+            if not spoken_text or word_count < 35:
+                last_error = "Текст диктора получился слишком коротким."
+            elif _has_direction_markers(spoken_text):
+                last_error = "В речи диктора остались технические команды."
+            elif len(scenes) < 3:
+                last_error = "Получилось слишком мало сцен."
+            else:
+                return {
+                    "ok": True,
+                    "spoken_text": spoken_text,
+                    "scenes": scenes,
+                }
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            last_error = str(exc)
+
+        user_prompt += (
+            "\n\nПредыдущий вариант не прошёл проверку. Перепиши его: "
+            + (last_error or "строго раздели речь и технический план.")
+        )
+
+    return {
+        "ok": False,
+        "error": (
+            "Не удалось безопасно подготовить речь диктора. HeyGen не запущен, "
+            "деньги не списаны. " + (last_error or "")
+        ).strip(),
+    }
+
+
+def _scene_professionals(scene, selected_names):
+    scene_lower = str(scene or "").lower()
+    named = [
+        name for name in selected_names or [] if name.lower() in scene_lower
+    ]
+    return named
+
+
+def _generate_reel_scenes(item, scenes, spoken_text, generate_illustration_fn):
+    """Создаёт отдельный вертикальный визуал для каждой сцены."""
+    generated = []
+    selected = item.get("professionals") or []
+    for index, scene in enumerate(scenes[:6], start=1):
+        names = _scene_professionals(scene, selected)
+        references = _portrait_references(names)
+        visual_task = (
+            f"Вертикальный кадр {index} из {len(scenes[:6])} для одного Reels. "
+            f"Содержание сцены: {scene}. "
+            "Фотореалистичная кинематографичная сцена, единый премиальный стиль "
+            "Агентства W, тёмно-синие фирменные пиджаки у профессионалов, "
+            "золотой знак W на лацкане. Без букв, подписей, интерфейсного мусора, "
+            "рамок и белых полей. Не добавляй людей, которых нет в описании."
+        )
+        result = generate_illustration_fn(
+            spoken_text,
+            change_request=visual_task,
+            size="1024x1536",
+            reference_images=references,
+            fast_mode=True,
+        )
+        if not isinstance(result, dict) or not result.get("ok") or not result.get("image_bytes"):
+            return {
+                "ok": False,
+                "error": (
+                    f"Не удалось создать сцену {index}. "
+                    + str((result or {}).get("error") or "Неизвестная ошибка Художника.")
+                ),
+            }
+        generated.append(result["image_bytes"])
+    return {"ok": True, "images": generated}
+
+
+def _download_video_bytes(video_url):
+    response = requests.get(str(video_url or "").strip(), timeout=180)
+    response.raise_for_status()
+    if not response.content:
+        raise RuntimeError("HeyGen вернул пустой видеофайл.")
+    return response.content
+
+
+def _probe_video_duration(video_path):
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
+        raise RuntimeError("На сервере не найден ffprobe.")
+    result = subprocess.run(
+        [
+            ffprobe_path,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    try:
+        duration = float(result.stdout.decode("utf-8", errors="ignore").strip())
+    except ValueError as exc:
+        raise RuntimeError("Не удалось определить длительность озвучки.") from exc
+    if duration <= 1:
+        raise RuntimeError("Озвучка получилась слишком короткой.")
+    return duration
+
+
+def _ass_time(seconds):
+    value = max(0.0, float(seconds))
+    hours = int(value // 3600)
+    minutes = int((value % 3600) // 60)
+    secs = value % 60
+    return f"{hours}:{minutes:02d}:{secs:05.2f}"
+
+
+def _subtitle_chunks(text):
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+", str(text or "").strip())
+        if part.strip()
+    ]
+    chunks = []
+    for sentence in sentences:
+        words = sentence.split()
+        current = []
+        for word in words:
+            candidate = " ".join(current + [word])
+            if current and (len(candidate) > 31 or len(current) >= 5):
+                chunks.append(" ".join(current))
+                current = [word]
+            else:
+                current.append(word)
+        if current:
+            chunks.append(" ".join(current))
+    return chunks or [str(text or "").strip()]
+
+
+def _normalised_words(text):
+    return " ".join(re.findall(r"[\wЁёА-Яа-я]+", str(text or "").lower()))
+
+
+def _wrap_caption(text, max_chars=29):
+    words = str(text or "").split()
+    lines = []
+    current = []
+    for word in words:
+        candidate = " ".join(current + [word])
+        if current and len(candidate) > max_chars:
+            lines.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(" ".join(current))
+    return "\n".join(lines[:3])
+
+
+def _ass_escape(text):
+    return (
+        str(text or "")
+        .replace("\\", r"\\")
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("\n", r"\N")
+    )
+
+
+def _write_subtitles(path, spoken_text, cta, duration):
+    chunks = _subtitle_chunks(spoken_text)
+    cta_normalised = _normalised_words(cta)
+    if cta_normalised and chunks:
+        last_normalised = _normalised_words(chunks[-1])
+        if last_normalised and (
+            last_normalised in cta_normalised or cta_normalised in last_normalised
+        ):
+            chunks = chunks[:-1] or chunks
+    weights = [max(4, len(chunk)) for chunk in chunks]
+    available = max(1.0, duration - 0.4)
+    cursor = 0.2
+    events = []
+    for chunk, weight in zip(chunks, weights):
+        chunk_duration = available * weight / sum(weights)
+        end = min(duration, cursor + chunk_duration)
+        events.append(
+            f"Dialogue: 0,{_ass_time(cursor)},{_ass_time(end)},Default,,0,0,0,,{_ass_escape(chunk)}"
+        )
+        cursor = end
+    if cta:
+        start = max(0.0, duration - 3.8)
+        events.append(
+            f"Dialogue: 1,{_ass_time(start)},{_ass_time(duration)},CTA,,0,0,0,,{_ass_escape(_wrap_caption(cta))}"
+        )
+    content = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+
+[V4+ Styles]
+Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+Style: Default,DejaVu Sans,48,&H00FFFFFF,&H000000FF,&H00101010,&H98000000,-1,0,0,0,100,100,0,0,3,2,0,2,90,90,170,1
+Style: CTA,DejaVu Sans,50,&H0000D7FF,&H000000FF,&H00101010,&HBA000000,-1,0,0,0,100,100,0,0,3,2,0,8,90,90,135,1
+
+[Events]
+Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+""" + "\n".join(events) + "\n"
+    path.write_text(content, encoding="utf-8")
+
+
+def _render_vertical_frame(image_bytes, output_path, logo_path=None):
+    with Image.open(BytesIO(image_bytes)) as source:
+        source = ImageOps.exif_transpose(source).convert("RGB")
+        frame = ImageOps.fit(
+            source,
+            (1080, 1920),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+    if logo_path and Path(logo_path).exists():
+        try:
+            with Image.open(logo_path) as logo_source:
+                logo = logo_source.convert("RGBA")
+                logo.thumbnail((120, 120), Image.Resampling.LANCZOS)
+                overlay = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+                overlay.alpha_composite(logo, (900, 55))
+                frame = Image.alpha_composite(frame.convert("RGBA"), overlay).convert("RGB")
+        except OSError:
+            pass
+    frame.save(output_path, "JPEG", quality=94, optimize=True)
+
+
+def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta):
+    """Собирает 1080x1920 MP4: сцены + голос + субтитры + знак W."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "На сервере не найден ffmpeg. Добавьте packages.txt со строкой ffmpeg."
+        )
+    if not scene_images:
+        raise RuntimeError("Нет изображений для сцен Reels.")
+
+    with tempfile.TemporaryDirectory(prefix="agency_w_reel_") as temp_dir:
+        temp_path = Path(temp_dir)
+        narration_path = temp_path / "narration.mp4"
+        narration_path.write_bytes(narration_video)
+        duration = _probe_video_duration(narration_path)
+        scene_duration = duration / len(scene_images)
+        logo_path = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
+        segment_paths = []
+
+        for index, image_bytes in enumerate(scene_images):
+            frame_path = temp_path / f"frame_{index:02d}.jpg"
+            segment_path = temp_path / f"segment_{index:02d}.mp4"
+            _render_vertical_frame(image_bytes, frame_path, logo_path)
+            frame_count = max(30, int(math.ceil(scene_duration * 30)))
+            fade_out = max(0.0, scene_duration - 0.25)
+            filter_value = (
+                "zoompan="
+                "z='min(zoom+0.0005,1.06)':"
+                "x='iw/2-(iw/zoom/2)':"
+                "y='ih/2-(ih/zoom/2)':"
+                f"d={frame_count}:s=1080x1920:fps=30,"
+                "fade=t=in:st=0:d=0.20,"
+                f"fade=t=out:st={fade_out:.3f}:d=0.20,"
+                "format=yuv420p"
+            )
+            result = subprocess.run(
+                [
+                    ffmpeg_path, "-y", "-loop", "1", "-i", str(frame_path),
+                    "-t", f"{scene_duration:.3f}", "-vf", filter_value,
+                    "-an", "-c:v", "libx264", "-preset", "veryfast",
+                    "-crf", "21", "-pix_fmt", "yuv420p", str(segment_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=240,
+                check=False,
+            )
+            if result.returncode != 0 or not segment_path.exists():
+                raise RuntimeError(
+                    "Не удалось собрать одну из сцен: "
+                    + result.stderr.decode("utf-8", errors="ignore")[-700:]
+                )
+            segment_paths.append(segment_path)
+
+        concat_path = temp_path / "segments.txt"
+        concat_path.write_text(
+            "\n".join(f"file '{path.as_posix()}'" for path in segment_paths) + "\n",
+            encoding="utf-8",
+        )
+        silent_path = temp_path / "silent.mp4"
+        concat_result = subprocess.run(
+            [
+                ffmpeg_path, "-y", "-f", "concat", "-safe", "0",
+                "-i", str(concat_path), "-c", "copy", str(silent_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            check=False,
+        )
+        if concat_result.returncode != 0 or not silent_path.exists():
+            raise RuntimeError("Не удалось соединить сцены Reels.")
+
+        subtitle_path = temp_path / "captions.ass"
+        _write_subtitles(subtitle_path, spoken_text, cta, duration)
+        final_path = temp_path / "ready_reel.mp4"
+        final_result = subprocess.run(
+            [
+                ffmpeg_path, "-y", "-i", str(silent_path),
+                "-i", str(narration_path),
+                "-vf", f"subtitles={subtitle_path.as_posix()}",
+                "-map", "0:v:0", "-map", "1:a:0", "-t", f"{duration:.3f}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart", "-shortest", str(final_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=300,
+            check=False,
+        )
+        if final_result.returncode != 0 or not final_path.exists():
+            raise RuntimeError(
+                "Не удалось наложить голос и субтитры: "
+                + final_result.stderr.decode("utf-8", errors="ignore")[-700:]
+            )
+        final_bytes = final_path.read_bytes()
+        if not final_bytes:
+            raise RuntimeError("Готовый Reels получился пустым.")
+        return final_bytes
 
 
 def _json_from_answer(answer):
@@ -278,6 +669,9 @@ def _build_generation_prompt(settings):
 
 Reels: вертикальный формат 9:16, длительность 20–45 секунд, сильный хук
 в первые две секунды, естественная устная речь, 4–7 коротких сцен.
+Поле script содержит ТОЛЬКО слова диктора. В нём запрещены номера сцен,
+ремарки, скобки и указания «в кадре», «на экране», «камера», «переход».
+Технические описания записывай исключительно в массив scenes.
 Не обещай доход и не используй давление.
 
 Пост: самостоятельная полезная мысль, живой текст, без канцелярита.
@@ -299,8 +693,8 @@ Reels: вертикальный формат 9:16, длительность 20�
       "title": "название",
       "goal": "задача материала",
       "hook": "хук — только для Reels",
-      "script": "текст речи — только для Reels",
-      "scenes": ["сцена 1", "сцена 2"],
+      "script": "только произносимая речь диктора — без описания кадров",
+      "scenes": ["техническое описание сцены 1", "техническое описание сцены 2"],
       "post_text": "текст поста",
       "slides": ["обложка", "слайд 2"],
       "caption": "подпись под публикацией",
@@ -362,6 +756,7 @@ def _render_item(
     package,
     item,
     owner_id,
+    ask_ai_fn,
     generate_illustration_fn,
     create_avatar_video_fn,
     get_avatar_video_fn,
@@ -471,41 +866,133 @@ def _render_item(
                 st.error(str(image_result["error"]))
 
         if item.get("format") == "reel":
-            st.markdown("#### 🎥 Видео с подключённым аватаром")
-            avatar_state_key = prefix + "_avatar_state"
-            avatar_state = st.session_state.get(avatar_state_key, {})
-            avatar_state = avatar_state if isinstance(avatar_state, dict) else {}
-            start_col, check_col = st.columns(2)
-            if start_col.button("🎬 Создать видео", key=prefix + "_video_start", use_container_width=True):
-                with st.spinner("Аватар записывает Reels..."):
-                    result = create_avatar_video_fn(item.get("script") or "")
-                if result.get("ok"):
-                    avatar_state = result
-                    st.session_state[avatar_state_key] = avatar_state
-                    st.success("Видео принято в работу.")
-                else:
-                    st.error(str(result.get("error") or "Не удалось создать видео."))
+            st.markdown("#### 🎬 Готовый Reels")
+            st.caption(
+                "Контент-завод сам отделяет речь от режиссёрского плана, создаёт "
+                "сцены, получает голос Неоны, добавляет субтитры и собирает MP4."
+            )
+            st.warning(
+                "Создание использует платные сервисы: до 6 изображений OpenAI и "
+                "одно видео HeyGen. Нажимайте один раз и дождитесь результата."
+            )
 
-            video_id = str(avatar_state.get("video_id") or "").strip()
-            if check_col.button(
-                "🔄 Проверить видео",
-                key=prefix + "_video_check",
-                disabled=not bool(video_id),
+            reel_state_key = prefix + "_ready_reel_state"
+            reel_state = st.session_state.get(reel_state_key, {})
+            reel_state = reel_state if isinstance(reel_state, dict) else {}
+            video_id = str(reel_state.get("video_id") or "").strip()
+            final_bytes = reel_state.get("final_video")
+            start_col, check_col = st.columns(2)
+
+            if start_col.button(
+                "🏭 Подготовить готовый Reels",
+                key=prefix + "_ready_reel_start",
+                disabled=bool(video_id) and not bool(final_bytes),
                 use_container_width=True,
             ):
-                with st.spinner("Проверяем готовность видео..."):
-                    result = get_avatar_video_fn(video_id)
-                if result.get("ok"):
-                    avatar_state.update(result)
-                    st.session_state[avatar_state_key] = avatar_state
+                with st.spinner("Редактор отделяет речь диктора от плана кадров..."):
+                    prepared = _prepare_reel_content(item, ask_ai_fn)
+                if not prepared.get("ok"):
+                    st.error(str(prepared.get("error") or "Не удалось подготовить речь."))
                 else:
-                    st.error(str(result.get("error") or "Не удалось проверить видео."))
+                    spoken_text = prepared["spoken_text"]
+                    prepared_scenes = prepared["scenes"]
+                    with st.spinner(
+                        f"Художник создаёт {len(prepared_scenes)} сцен. "
+                        "Это может занять несколько минут..."
+                    ):
+                        scene_result = _generate_reel_scenes(
+                            item,
+                            prepared_scenes,
+                            spoken_text,
+                            generate_illustration_fn,
+                        )
+                    if not scene_result.get("ok"):
+                        st.error(str(scene_result.get("error") or "Не удалось создать сцены."))
+                    else:
+                        reel_state = {
+                            "spoken_text": spoken_text,
+                            "scenes": prepared_scenes,
+                            "scene_images": scene_result["images"],
+                            "status": "scenes_ready",
+                        }
+                        st.session_state[reel_state_key] = reel_state
+                        with st.spinner("Неона записывает только чистую речь диктора..."):
+                            avatar_result = create_avatar_video_fn(spoken_text)
+                        if avatar_result.get("ok"):
+                            reel_state.update(avatar_result)
+                            st.session_state[reel_state_key] = reel_state
+                            st.success(
+                                "Сцены готовы, Неона записывает голос. Через несколько "
+                                "минут нажмите «Проверить и собрать»."
+                            )
+                        else:
+                            reel_state["status"] = "voice_error"
+                            reel_state["error"] = str(
+                                avatar_result.get("error") or "Не удалось запустить голос."
+                            )
+                            st.session_state[reel_state_key] = reel_state
+                            st.error(reel_state["error"])
 
-            video_url = str(avatar_state.get("video_url") or "").strip()
-            if video_url and str(avatar_state.get("status") or "").lower() == "completed":
-                st.video(video_url)
+            if check_col.button(
+                "🔄 Проверить и собрать",
+                key=prefix + "_ready_reel_check",
+                disabled=not bool(video_id) or bool(final_bytes),
+                use_container_width=True,
+            ):
+                with st.spinner("Проверяем голос Неоны..."):
+                    result = get_avatar_video_fn(video_id)
+                if not result.get("ok"):
+                    st.error(str(result.get("error") or "Не удалось проверить голос."))
+                else:
+                    reel_state.update(result)
+                    if str(result.get("status") or "").lower() == "completed" and result.get("video_url"):
+                        try:
+                            with st.spinner(
+                                "Голос готов. Собираем сцены, субтитры и знак W в один MP4..."
+                            ):
+                                narration_video = _download_video_bytes(result["video_url"])
+                                reel_state["final_video"] = _assemble_ready_reel(
+                                    reel_state.get("scene_images") or [],
+                                    narration_video,
+                                    reel_state.get("spoken_text") or "",
+                                    item.get("cta") or "",
+                                )
+                                reel_state["status"] = "ready"
+                            st.success("✅ Готовый Reels собран.")
+                        except (requests.exceptions.RequestException, RuntimeError, OSError) as exc:
+                            reel_state["status"] = "assembly_error"
+                            reel_state["error"] = str(exc)
+                            st.error("Не удалось собрать Reels: " + str(exc))
+                    elif str(result.get("status") or "").lower() == "failed":
+                        st.error(str(result.get("error") or "HeyGen не смог записать голос."))
+                    else:
+                        st.info(
+                            "Неона ещё записывает голос. Подождите немного и снова "
+                            "нажмите «Проверить и собрать»."
+                        )
+                    st.session_state[reel_state_key] = reel_state
+
+            if reel_state.get("spoken_text"):
+                with st.expander("🗣 Текст, который произносит Неона", expanded=False):
+                    st.write(reel_state["spoken_text"])
+
+            final_bytes = reel_state.get("final_video")
+            if final_bytes:
+                st.video(final_bytes)
+                st.download_button(
+                    "⬇️ Скачать готовый Reels MP4",
+                    data=final_bytes,
+                    file_name=f"{item_id}_ready_reel.mp4",
+                    mime="video/mp4",
+                    key=prefix + "_ready_reel_download",
+                    use_container_width=True,
+                )
+                st.success("Этот MP4 уже можно публиковать в Instagram Reels.")
             elif video_id:
-                st.info("Видео ещё создаётся. Через некоторое время нажмите «Проверить видео».")
+                st.info(
+                    "Сцены сохранены в текущем сеансе. Когда голос будет готов, "
+                    "нажмите «Проверить и собрать»."
+                )
 
 
 def render_content_factory(
@@ -663,6 +1150,7 @@ def render_content_factory(
             package,
             item,
             owner_id,
+            ask_ai_fn,
             generate_illustration_fn,
             create_avatar_video_fn,
             get_avatar_video_fn,
@@ -670,6 +1158,7 @@ def render_content_factory(
 
     st.divider()
     st.caption(
-        "Следующая очередь: автоматическая сборка ролика из сцен, озвучки и "
-        "субтитров, календарь публикаций и отправка в Instagram после утверждения."
+        "Готовый Reels собирается автоматически из сцен, чистой речи Неоны, "
+        "субтитров и фирменного знака. Публикация в Instagram остаётся только "
+        "после вашего утверждения."
     )

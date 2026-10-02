@@ -1418,6 +1418,7 @@ def generate_openai_illustration(
     change_request="",
     size="1024x1024",
     reference_images=None,
+    fast_mode=False,
 ):
     """
     Художник Агентства W, версия «Мастер шедевров».
@@ -1546,6 +1547,8 @@ premium editorial illustration, cinematic concept art, sophisticated visual meta
 
         # Один автоматический перезапуск только при смысловом промахе.
         if (
+            not fast_mode
+            and
             not review.get("pass")
             and str(review.get("fix") or "").strip()
         ):
