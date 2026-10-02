@@ -5,13 +5,14 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
 import requests
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 PROFESSIONAL_PORTRAITS = {
@@ -226,6 +227,234 @@ def _generate_reel_scenes(item, scenes, spoken_text, generate_illustration_fn):
             }
         generated.append(result["image_bytes"])
     return {"ok": True, "images": generated}
+
+
+def _font(size, bold=False):
+    """Шрифт с кириллицей для подписей на готовых слайдах."""
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return ImageFont.truetype(candidate, size=size)
+    return ImageFont.load_default()
+
+
+def _wrap_image_text(draw, text, font, max_width, max_lines=6):
+    """Переносит русский текст по фактической ширине, а не по числу букв."""
+    words = str(text or "").split()
+    lines = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and draw.textlength(candidate, font=font) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        while lines[-1] and draw.textlength(lines[-1] + "…", font=font) > max_width:
+            lines[-1] = lines[-1][:-1].rstrip()
+        lines[-1] += "…"
+    return lines
+
+
+def _carousel_slide_parts(slide_text, index):
+    """Отделяет служебную метку «Шаг 1» от текста, который увидит читатель."""
+    text = _clean_text(slide_text, 700)
+    match = re.match(
+        r"^\s*(обложка|шаг\s*\d+|слайд\s*\d+)\s*[:.\-—]\s*(.+)$",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        kicker = match.group(1).upper().replace("СЛАЙД", "ШАГ")
+        body = match.group(2).strip()
+    else:
+        kicker = "ОБЛОЖКА" if index == 0 else f"ШАГ {index}"
+        body = text
+    return kicker, body
+
+
+def _carousel_slide_names(item, slide_text, index):
+    """Берёт только нужных героев: так лица сохраняются заметно точнее."""
+    selected = [
+        name for name in (item.get("professionals") or []) if name in PROFESSIONAL_PORTRAITS
+    ]
+    named = _scene_professionals(slide_text, selected)
+    if named:
+        return named[:2]
+    if not selected:
+        return []
+    if index == 0:
+        return selected[:2]
+    return [selected[(index - 1) % len(selected)]]
+
+
+def _render_carousel_slide(image_bytes, slide_text, index, total):
+    """Создаёт готовый Instagram-слайд 1080x1350 с точным русским текстом."""
+    with Image.open(BytesIO(image_bytes)) as source:
+        source = ImageOps.exif_transpose(source).convert("RGB")
+        frame = ImageOps.fit(
+            source,
+            (1080, 1350),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.42),
+        ).convert("RGBA")
+
+    overlay = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    # Мягкое затемнение снизу оставляет иллюстрацию видимой и делает текст читаемым.
+    gradient_top = 690
+    for y in range(gradient_top, 1350):
+        ratio = (y - gradient_top) / (1350 - gradient_top)
+        alpha = int(25 + 210 * ratio)
+        overlay_draw.line((0, y, 1080, y), fill=(4, 15, 31, alpha), width=1)
+    overlay_draw.rounded_rectangle(
+        (52, 820, 1028, 1300),
+        radius=32,
+        fill=(5, 18, 36, 205),
+        outline=(202, 157, 54, 160),
+        width=2,
+    )
+    frame = Image.alpha_composite(frame, overlay)
+    draw = ImageDraw.Draw(frame)
+
+    gold = (238, 191, 79, 255)
+    white = (255, 255, 255, 255)
+    muted = (220, 228, 238, 255)
+    brand_font = _font(30, bold=True)
+    count_font = _font(28, bold=True)
+    kicker_font = _font(34, bold=True)
+
+    draw.ellipse((52, 45, 116, 109), fill=(8, 25, 48, 220), outline=gold, width=3)
+    w_font = _font(34, bold=True)
+    w_box = draw.textbbox((0, 0), "W", font=w_font)
+    draw.text(
+        (84 - (w_box[2] - w_box[0]) / 2, 77 - (w_box[3] - w_box[1]) / 2 - 3),
+        "W",
+        font=w_font,
+        fill=gold,
+    )
+    draw.text((134, 58), "АГЕНТСТВО W", font=brand_font, fill=white)
+    counter = f"{index + 1}/{total}"
+    counter_width = draw.textlength(counter, font=count_font)
+    draw.text((1028 - counter_width, 61), counter, font=count_font, fill=muted)
+
+    kicker, body = _carousel_slide_parts(slide_text, index)
+    draw.text((92, 865), kicker, font=kicker_font, fill=gold)
+
+    # Подбираем размер так, чтобы даже длинный тезис не вылезал за карточку.
+    title_font = None
+    title_lines = []
+    for size in (62, 58, 54, 50, 46, 42):
+        candidate_font = _font(size, bold=True)
+        candidate_lines = _wrap_image_text(draw, body, candidate_font, 896, max_lines=5)
+        line_height = int(size * 1.20)
+        if len(candidate_lines) * line_height <= 320:
+            title_font = candidate_font
+            title_lines = candidate_lines
+            break
+    if title_font is None:
+        title_font = _font(40, bold=True)
+        title_lines = _wrap_image_text(draw, body, title_font, 896, max_lines=6)
+
+    y = 925
+    line_height = int(getattr(title_font, "size", 40) * 1.20)
+    for line in title_lines:
+        draw.text((92, y), line, font=title_font, fill=white)
+        y += line_height
+
+    output = BytesIO()
+    frame.convert("RGB").save(output, "PNG", optimize=True)
+    return output.getvalue()
+
+
+def _carousel_zip(slide_images, caption):
+    """Один архив: слайды уже названы в правильном порядке публикации."""
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, image_bytes in enumerate(slide_images, start=1):
+            archive.writestr(f"{index:02d}_carousel_slide.png", image_bytes)
+        archive.writestr(
+            "caption.txt",
+            (str(caption or "").strip() + "\n").encode("utf-8"),
+        )
+        archive.writestr(
+            "README.txt",
+            (
+                "Instagram-карусель Агентства W\n\n"
+                "Загрузите все PNG одним постом по порядку: 01, 02, 03...\n"
+                "Текст публикации находится в caption.txt.\n"
+            ).encode("utf-8"),
+        )
+    return output.getvalue()
+
+
+def _generate_ready_carousel(item, generate_illustration_fn):
+    """Генерирует отдельную иллюстрацию и точную типографику для каждого тезиса."""
+    slides = [_clean_text(value, 700) for value in (item.get("slides") or [])]
+    slides = [value for value in slides if value][:8]
+    if len(slides) < 2:
+        return {
+            "ok": False,
+            "error": "Для карусели нужны минимум обложка и один отдельный слайд.",
+        }
+
+    completed = []
+    for index, slide_text in enumerate(slides):
+        names = _carousel_slide_names(item, slide_text, index)
+        references = _portrait_references(names)
+        kicker, body = _carousel_slide_parts(slide_text, index)
+        visual_task = (
+            f"Фоновая иллюстрация для слайда {index + 1} из {len(slides)} "
+            f"Instagram-карусели Агентства W. Смысл: {body}. "
+            "Премиальная деловая editorial-фотография, глубокий тёмно-синий фон, "
+            "золотые световые акценты, единый стиль всей серии. "
+            "Оставь визуально спокойное тёмное пространство в нижней трети для "
+            "последующего размещения текста. Не рисуй буквы, цифры, логотипы, "
+            "водяные знаки, интерфейсы и рамки."
+        )
+        result = generate_illustration_fn(
+            f"{item.get('title') or ''}. {kicker}. {body}",
+            change_request=visual_task,
+            size="1024x1536",
+            reference_images=references,
+            fast_mode=True,
+        )
+        if not isinstance(result, dict) or not result.get("ok") or not result.get("image_bytes"):
+            return {
+                "ok": False,
+                "error": (
+                    f"Не удалось создать слайд {index + 1}. "
+                    + str((result or {}).get("error") or "Неизвестная ошибка Художника.")
+                ),
+            }
+        try:
+            completed.append(
+                _render_carousel_slide(
+                    result["image_bytes"], slide_text, index, len(slides)
+                )
+            )
+        except (OSError, ValueError) as exc:
+            return {
+                "ok": False,
+                "error": f"Не удалось оформить слайд {index + 1}: {exc}",
+            }
+
+    return {
+        "ok": True,
+        "slides": completed,
+        "zip_bytes": _carousel_zip(completed, item.get("caption") or ""),
+    }
 
 
 def _download_video_bytes(video_url):
@@ -819,51 +1048,114 @@ def _render_item(
             package["updated_at"] = datetime.now(timezone.utc).isoformat()
             st.rerun()
 
-        image_state_key = prefix + "_image_result"
-        if image_col.button("🎨 Создать изображение", key=prefix + "_image", use_container_width=True):
-            source_text = _item_source_text(item)
-            portrait_references = _portrait_references(item.get("professionals") or [])
-            available_names = {
-                reference.get("name")
-                for reference in portrait_references
-                if reference.get("kind") == "portrait"
-            }
-            missing_names = [
-                name
-                for name in item.get("professionals", [])
-                if name not in available_names
-            ]
-            if missing_names:
-                st.error(
-                    "Не найдены эталонные портреты: "
-                    + ", ".join(missing_names)
-                    + ". "
-                    "Сначала загрузите пять файлов content_ref_*.webp в папку assets."
-                )
-                return
-            with st.spinner("Стагирит и Художник создают визуал..."):
-                result = generate_illustration_fn(
-                    source_text,
-                    change_request=item.get("visual_brief") or "",
-                    size="1024x1536",
-                    reference_images=portrait_references,
-                )
-            st.session_state[image_state_key] = result
+        if item.get("format") == "carousel":
+            carousel_state_key = prefix + "_ready_carousel_result"
+            st.caption(
+                "Завод создаст каждый пункт отдельным слайдом 1080×1350, "
+                "наложит точный русский текст и сложит всё в один ZIP."
+            )
+            st.warning(
+                "Создание использует платный Художник OpenAI: одно изображение "
+                "на каждый слайд. Нажмите кнопку один раз и дождитесь окончания."
+            )
+            if image_col.button(
+                "🏭 Создать готовую карусель",
+                key=prefix + "_carousel",
+                use_container_width=True,
+            ):
+                with st.spinner(
+                    f"Художник создаёт {len(item.get('slides') or [])} отдельных слайдов..."
+                ):
+                    carousel_result = _generate_ready_carousel(
+                        item, generate_illustration_fn
+                    )
+                st.session_state[carousel_state_key] = carousel_result
 
-        image_result = st.session_state.get(image_state_key)
-        if isinstance(image_result, dict):
-            if image_result.get("ok") and image_result.get("image_bytes"):
-                st.image(image_result["image_bytes"], caption="Визуал Контент-завода W")
-                st.download_button(
-                    "⬇️ Скачать изображение",
-                    data=image_result["image_bytes"],
-                    file_name=f"{item_id}.png",
-                    mime="image/png",
-                    key=prefix + "_image_download",
-                    use_container_width=True,
-                )
-            elif image_result.get("error"):
-                st.error(str(image_result["error"]))
+            carousel_result = st.session_state.get(carousel_state_key)
+            if isinstance(carousel_result, dict):
+                if carousel_result.get("ok") and carousel_result.get("slides"):
+                    st.success(
+                        f"✅ Готовая карусель: {len(carousel_result['slides'])} слайдов."
+                    )
+                    preview_columns = st.columns(2)
+                    for slide_index, slide_bytes in enumerate(
+                        carousel_result["slides"], start=1
+                    ):
+                        column = preview_columns[(slide_index - 1) % 2]
+                        with column:
+                            st.image(slide_bytes, caption=f"Слайд {slide_index}")
+                            st.download_button(
+                                f"⬇️ Скачать слайд {slide_index}",
+                                data=slide_bytes,
+                                file_name=f"{slide_index:02d}_carousel_slide.png",
+                                mime="image/png",
+                                key=prefix + f"_carousel_slide_{slide_index}",
+                                use_container_width=True,
+                            )
+                    st.download_button(
+                        "⬇️ Скачать всю карусель ZIP",
+                        data=carousel_result["zip_bytes"],
+                        file_name=f"{item_id}_ready_carousel.zip",
+                        mime="application/zip",
+                        key=prefix + "_carousel_zip",
+                        use_container_width=True,
+                    )
+                    st.success(
+                        "В ZIP слайды уже пронумерованы в правильном порядке "
+                        "для публикации в Instagram."
+                    )
+                elif carousel_result.get("error"):
+                    st.error(str(carousel_result["error"]))
+        else:
+            image_state_key = prefix + "_image_result"
+            if image_col.button(
+                "🎨 Создать изображение",
+                key=prefix + "_image",
+                use_container_width=True,
+            ):
+                source_text = _item_source_text(item)
+                portrait_references = _portrait_references(item.get("professionals") or [])
+                available_names = {
+                    reference.get("name")
+                    for reference in portrait_references
+                    if reference.get("kind") == "portrait"
+                }
+                missing_names = [
+                    name
+                    for name in item.get("professionals", [])
+                    if name not in available_names
+                ]
+                if missing_names:
+                    st.error(
+                        "Не найдены эталонные портреты: "
+                        + ", ".join(missing_names)
+                        + ". "
+                        "Сначала загрузите пять файлов content_ref_*.webp в папку assets."
+                    )
+                    return
+                with st.spinner("Стагирит и Художник создают визуал..."):
+                    result = generate_illustration_fn(
+                        source_text,
+                        change_request=item.get("visual_brief") or "",
+                        size="1024x1536",
+                        reference_images=portrait_references,
+                    )
+                st.session_state[image_state_key] = result
+
+            image_result = st.session_state.get(image_state_key)
+            if isinstance(image_result, dict):
+                if image_result.get("ok") and image_result.get("image_bytes"):
+                    st.image(image_result["image_bytes"], caption="Визуал Контент-завода W")
+                    st.download_button(
+                        "⬇️ Скачать изображение",
+                        data=image_result["image_bytes"],
+                        file_name=f"{item_id}.png",
+                        mime="image/png",
+                        key=prefix + "_image_download",
+                        use_container_width=True,
+                    )
+                elif image_result.get("error"):
+                    st.error(str(image_result["error"]))
 
         if item.get("format") == "reel":
             st.markdown("#### 🎬 Готовый Reels")
@@ -921,10 +1213,7 @@ def _render_item(
                         if avatar_result.get("ok"):
                             reel_state.update(avatar_result)
                             st.session_state[reel_state_key] = reel_state
-                            st.success(
-                                "Сцены готовы, Неона записывает голос. Через несколько "
-                                "минут нажмите «Проверить и собрать»."
-                            )
+                            st.rerun()
                         else:
                             reel_state["status"] = "voice_error"
                             reel_state["error"] = str(
