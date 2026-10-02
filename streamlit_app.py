@@ -111,6 +111,7 @@ from vk_scout_ui import render_vk_sources
 from vk_scout_oauth import handle_vk_scout_oauth_callback
 from telegram_stories_ui import render_telegram_stories_radar
 from instagram_radar_ui import render_instagram_radar
+from content_factory_ui import render_content_factory
 import asyncio
 import json
 import re
@@ -7403,6 +7404,7 @@ if telegram_login_valid or remembered_data:
             "📅 Календарь",
             "📖 Дневник",
             "🤖 Агенты",
+            "🏭 Контент",
             "👥 Команда",
             "🗺️ Развитие",
             "👤 Профиль",
@@ -7416,6 +7418,7 @@ if telegram_login_valid or remembered_data:
                 "📅 Календарь": "Календарь",
                 "📖 Дневник": "Дневник",
                 "🤖 Агенты": "Агенты",
+                "🏭 Контент": "Контент-завод",
                 "👥 Команда": "Команда",
                 "🗺️ Развитие": "Развитие",
                 "👤 Профиль": "Профиль",
@@ -12898,6 +12901,26 @@ if telegram_login_valid or remembered_data:
                             neola_ui_context,
                             ask_openai,
                         )
+
+        elif main_section == "🏭 Контент":
+            content_passport = st.session_state.get(
+                f"neonia_target_audience_passport_{telegram_id}",
+                {},
+            )
+            content_target_profile = (
+                content_passport.get("profile")
+                if isinstance(content_passport, dict)
+                else None
+            )
+            render_content_factory(
+                int(telegram_id),
+                str(first_name or "Партнёр"),
+                ask_openai,
+                generate_openai_illustration,
+                create_neona_heygen_video,
+                get_neona_heygen_video,
+                target_profile=content_target_profile,
+            )
 
         elif main_section == "👥 Команда":
             partner_center_tab, team_tools_tab = st.tabs(
