@@ -1,4 +1,5 @@
 import json
+import hashlib
 import math
 import re
 import shutil
@@ -1084,6 +1085,314 @@ Reels: вертикальный формат 9:16, длительность 20�
 """.strip()
 
 
+FORMAT_LABELS = {
+    "post": "Пост",
+    "carousel": "Карусель",
+    "reel": "Reels",
+}
+
+
+def _transcribe_content_audio(audio_bytes, filename="content-request.wav"):
+    """Распознаёт простое голосовое задание и не отправляет его повторно."""
+    api_key = _clean_text(st.secrets.get("OPENAI_API_KEY"), 5000)
+    if not api_key:
+        raise RuntimeError("Ключ OpenAI не найден в настройках приложения.")
+
+    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+    cache_key = f"content_factory_voice_transcript_{audio_hash}"
+    cached = st.session_state.get(cache_key)
+    if cached:
+        return str(cached)
+
+    response = requests.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        data={"model": "gpt-4o-mini-transcribe", "language": "ru"},
+        files={"file": (filename, audio_bytes, "audio/wav")},
+        timeout=120,
+    )
+    response.raise_for_status()
+    transcript = _clean_text(response.json().get("text"), 7000)
+    st.session_state[cache_key] = transcript
+    return transcript
+
+
+def _analyse_content_request(content_format, request_text, target_profile, ask_ai_fn):
+    """Превращает разговорное задание в короткое и проверяемое понимание."""
+    audience_context = _audience_text(target_profile)
+    format_label = FORMAT_LABELS.get(content_format, "Пост")
+    prompt = f"""
+Человек выбрал формат: {format_label}.
+Он объяснил задачу своими словами:
+{request_text}
+
+ИЗВЕСТНЫЙ КОНТЕКСТ ЦЕЛЕВОЙ АУДИТОРИИ (может быть пустым):
+{audience_context}
+
+Пойми замысел человека, даже если он говорил разговорно, с повторами или
+непрофессиональными словами. Не меняй выбранный формат и не придумывай факты.
+
+Верни только JSON:
+{{
+  "topic": "о чём материал — одним предложением",
+  "main_idea": "главная мысль, которую должен понять человек",
+  "audience": "кому адресован материал",
+  "desired_result": "какое изменение должно произойти после просмотра",
+  "cta": "одно простое и измеримое действие читателя или зрителя"
+}}
+""".strip()
+    system = (
+        "Ты — Стагирит, координатор Контент-завода Агентства W. "
+        "Ты переводишь обычную человеческую речь в ясную редакционную задачу. "
+        "Пиши конкретно и понятно. Верни только корректный JSON."
+    )
+    data = _json_from_answer(ask_ai_fn(system, prompt))
+    result = {
+        "format": content_format,
+        "topic": _clean_text(data.get("topic"), 500),
+        "main_idea": _clean_text(data.get("main_idea"), 900),
+        "audience": _clean_text(data.get("audience"), 1200),
+        "desired_result": _clean_text(data.get("desired_result"), 800),
+        "cta": _clean_text(data.get("cta"), 500),
+        "original_request": _clean_text(request_text, 7000),
+    }
+    if not result["topic"] or not result["main_idea"]:
+        raise ValueError("Не удалось выделить главную мысль. Скажите задачу ещё раз.")
+    if not result["audience"]:
+        result["audience"] = "Люди, которым может быть полезно Агентство W"
+    if not result["desired_result"]:
+        result["desired_result"] = "Человек понимает пользу и хочет узнать больше"
+    if not result["cta"]:
+        result["cta"] = "Написать в комментарии, какая задача забирает больше всего времени"
+    return result
+
+
+def _single_content_prompt(understanding):
+    content_format = understanding["format"]
+    format_label = FORMAT_LABELS.get(content_format, "Пост")
+    common = f"""
+Создай один законченный материал для Instagram Агентства W.
+
+ВЫБРАННЫЙ ЧЕЛОВЕКОМ ФОРМАТ: {format_label}
+ИСХОДНОЕ ЗАДАНИЕ: {understanding.get('original_request') or ''}
+ТЕМА: {understanding.get('topic') or ''}
+ГЛАВНАЯ МЫСЛЬ: {understanding.get('main_idea') or ''}
+ДЛЯ КОГО: {understanding.get('audience') or ''}
+ЖЕЛАЕМЫЙ РЕЗУЛЬТАТ: {understanding.get('desired_result') or ''}
+ДЕЙСТВИЕ ЧЕЛОВЕКА: {understanding.get('cta') or ''}
+
+Требования ко всем форматам:
+- сильный, честный заголовок, на котором останавливается взгляд;
+- одна ясная смысловая линия без воды, канцелярита и пустых обещаний;
+- простой русский язык, понятный человеку без знаний маркетинга и ИИ;
+- конкретная польза вместо общих слов;
+- не обещай доход и не выдумывай возможности Агентства W;
+- призыв должен быть один, естественный и измеримый;
+- если нужны герои, используй только: Стагирит, Неония, Неона, Тео, Неола;
+- Разведчик не является публичным героем.
+
+Верни только JSON с объектом item по схеме:
+{{
+  "item": {{
+    "id": "content_1",
+    "format": "{content_format}",
+    "title": "название",
+    "goal": "задача материала",
+    "hook": "хук для Reels или пустая строка",
+    "script": "только произносимая речь Reels или пустая строка",
+    "scenes": ["отдельные визуальные сцены только для Reels"],
+    "post_text": "готовый текст поста или пустая строка",
+    "slides": ["готовые тексты слайдов только для карусели"],
+    "caption": "готовая подпись для публикации",
+    "cta": "одно действие",
+    "visual_brief": "профессиональное задание Художнику без текста на изображении",
+    "professionals": ["имена только нужных профессионалов"]
+  }}
+}}
+""".strip()
+
+    if content_format == "post":
+        return common + """
+
+ДЛЯ ПОСТА:
+- post_text — полностью готовый текст публикации на 700–1300 знаков;
+- первая строка цепляет узнаваемой ситуацией, а не дешёвым кликбейтом;
+- текст раскрывает одну мысль, даёт полезный вывод и заканчивается CTA;
+- caption не повторяет весь пост: это короткий вариант подписи до 350 знаков;
+- visual_brief описывает одну сильную понятную обложку без надписей.
+"""
+    if content_format == "carousel":
+        return common + """
+
+ДЛЯ КАРУСЕЛИ:
+- ровно 6 слайдов;
+- слайд 1 — обложка, максимум 9 слов;
+- слайды 2–5 последовательно раскрывают проблему, причину, решение и механизм;
+- слайд 6 показывает результат и содержит один CTA;
+- один слайд — одна завершённая мысль, 35–170 знаков;
+- caption — самостоятельная полезная подпись на 450–750 знаков;
+- никаких слов «лагерь», Lodge, «видите вклад», NFT и непонятных сокращений.
+"""
+    return common + """
+
+ДЛЯ REELS:
+- длительность 25–45 секунд;
+- hook цепляет в первые две секунды;
+- script содержит 65–105 слов живой речи диктора;
+- script не содержит слов «сцена», «кадр», «камера», описаний изображения,
+  номеров сцен и ремарок в скобках;
+- scenes содержит 4–6 коротких визуальных сцен без текста диктора;
+- caption дополняет ролик, а не пересказывает его;
+- последняя фраза речи естественно ведёт к CTA.
+"""
+
+
+def _single_item_errors(item):
+    """Не пропускает бессмыслицу к платным изображениям и видео."""
+    errors = []
+    content_format = item.get("format")
+    if not _clean_text(item.get("title"), 500):
+        errors.append("Нет заголовка.")
+    if not _clean_text(item.get("cta"), 500):
+        errors.append("Нет одного понятного действия для человека.")
+
+    if content_format == "post":
+        text = _clean_text(item.get("post_text"), 8000)
+        if len(text) < 350:
+            errors.append("Текст поста слишком короткий и не раскрывает мысль.")
+    elif content_format == "carousel":
+        errors.extend(_carousel_copy_errors({"slides": item.get("slides") or []}))
+        if not _clean_text(item.get("caption"), 4000):
+            errors.append("Нет подписи к карусели.")
+    elif content_format == "reel":
+        script = _clean_text(item.get("script"), 7000)
+        word_count = len(re.findall(r"\b[\wЁёА-Яа-я-]+\b", script))
+        if word_count < 45:
+            errors.append("Речь для Reels слишком короткая.")
+        if _has_direction_markers(script):
+            errors.append("В речь диктора попали описания сцен или камеры.")
+        scenes = [value for value in (item.get("scenes") or []) if _clean_text(value)]
+        if len(scenes) < 4:
+            errors.append("Для Reels нужно не меньше четырёх визуальных сцен.")
+    else:
+        errors.append("Неизвестный формат материала.")
+    return errors
+
+
+def _generate_single_package(owner_id, understanding, ask_ai_fn):
+    prompt = _single_content_prompt(understanding)
+    last_errors = []
+    for _ in range(3):
+        answer = ask_ai_fn(FACTORY_SYSTEM_PROMPT, prompt)
+        data = _json_from_answer(answer)
+        item = _normalise_item(data.get("item") or data, 0)
+        item["format"] = understanding["format"]
+        last_errors = _single_item_errors(item)
+        if not last_errors:
+            now = datetime.now(timezone.utc).isoformat()
+            return {
+                "package_id": str(uuid.uuid4()),
+                "owner_telegram_id": int(owner_id),
+                "created_at": now,
+                "updated_at": now,
+                "status": "draft",
+                "workflow_version": "single_v2",
+                "week_title": item.get("title") or "Новый материал",
+                "strategy": understanding.get("main_idea") or "",
+                "understanding": understanding,
+                "settings": {
+                    "project_name": "Агентство W",
+                    "offer": "Пять ИИ-профессионалов возвращают предпринимателю время",
+                    "audience": understanding.get("audience") or "",
+                    "goal": understanding.get("desired_result") or "",
+                    "key_message": understanding.get("main_idea") or "",
+                },
+                "items": [item],
+            }
+        prompt += (
+            "\n\nПредыдущий материал забракован до платного производства. "
+            "Исправь все ошибки и верни полный JSON заново:\n- "
+            + "\n- ".join(last_errors)
+        )
+    raise ValueError("Материал не прошёл проверку: " + "; ".join(last_errors))
+
+
+def _stagirite_review(package, item, ask_ai_fn):
+    """Стагирит исправляет материал и допускает его к производству."""
+    prompt = f"""
+Проведи окончательную редакторскую проверку материала Агентства W.
+
+Подтверждённая задача:
+{json.dumps(package.get('understanding') or {{}}, ensure_ascii=False)}
+
+Материал:
+{json.dumps(item, ensure_ascii=False)}
+
+Проверь: соответствие задаче, ясность для незнакомого человека, сильный
+заголовок, логику, фактическую осторожность, отсутствие воды и один CTA.
+Сам исправь все найденные недостатки. Не меняй выбранный человеком формат.
+
+Верни только JSON:
+{{
+  "summary": "одним предложением — почему материал готов",
+  "item": {{полный исправленный объект материала по исходной схеме}}
+}}
+""".strip()
+    system = (
+        "Ты — Стагирит, координатор и финальный контролёр Контент-завода W. "
+        "Ты не пропускаешь красивую бессмыслицу и не перекладываешь исправления "
+        "на владельца. Верни только корректный JSON."
+    )
+    last_errors = []
+    for _ in range(3):
+        data = _json_from_answer(ask_ai_fn(system, prompt))
+        reviewed = _normalise_item(data.get("item") or {}, 0)
+        reviewed["format"] = item.get("format")
+        reviewed["professionals"] = [
+            name
+            for name in (
+                reviewed.get("professionals") or item.get("professionals") or []
+            )
+            if name in PROFESSIONAL_PORTRAITS
+        ]
+        last_errors = _single_item_errors(reviewed)
+        if not last_errors:
+            reviewed["status"] = "approved"
+            reviewed["review_summary"] = _clean_text(
+                data.get("summary"), 700
+            ) or "Смысл, структура и призыв проверены Стагиритом."
+            reviewed["revision"] = int(item.get("revision") or 0) + 1
+            return reviewed
+        prompt += (
+            "\n\nПроверка всё ещё нашла ошибки. Исправь их и верни весь объект:\n- "
+            + "\n- ".join(last_errors)
+        )
+    raise ValueError("Стагирит не утвердил материал: " + "; ".join(last_errors))
+
+
+def _item_as_text(item):
+    parts = [item.get("title") or "Материал"]
+    if item.get("hook"):
+        parts.extend(["", "Хук:", item["hook"]])
+    if item.get("script"):
+        parts.extend(["", "Текст речи:", item["script"]])
+    if item.get("scenes"):
+        parts.extend(["", "Сцены:", "\n".join(
+            f"{index}. {value}" for index, value in enumerate(item["scenes"], 1)
+        )])
+    if item.get("post_text"):
+        parts.extend(["", "Текст публикации:", item["post_text"]])
+    if item.get("slides"):
+        parts.extend(["", "Слайды:", "\n\n".join(
+            f"Слайд {index}\n{value}" for index, value in enumerate(item["slides"], 1)
+        )])
+    if item.get("caption"):
+        parts.extend(["", "Подпись:", item["caption"]])
+    if item.get("cta"):
+        parts.extend(["", "Призыв:", item["cta"]])
+    return "\n".join(parts).strip()
+
+
 def _item_label(item):
     labels = {"reel": "🎬 Reels", "post": "📝 Пост", "carousel": "🖼️ Карусель"}
     return labels.get(item.get("format"), "Материал")
@@ -1129,7 +1438,7 @@ def _package_as_text(package):
     return "\n".join(parts).strip()
 
 
-def _render_item(
+def _render_legacy_item(
     package,
     item,
     owner_id,
@@ -1483,7 +1792,7 @@ def _render_item(
                 )
 
 
-def render_content_factory(
+def _render_legacy_content_factory(
     owner_telegram_id,
     owner_name,
     ask_ai_fn,
@@ -1650,3 +1959,622 @@ def render_content_factory(
         "субтитров и фирменного знака. Публикация в Instagram остаётся только "
         "после вашего утверждения."
     )
+
+
+def _render_item(
+    package,
+    item,
+    owner_id,
+    ask_ai_fn,
+    generate_illustration_fn,
+    create_avatar_video_fn,
+    get_avatar_video_fn,
+):
+    """Показывает один материал: текст → Стагирит → платное производство."""
+    package_id = package["package_id"]
+    item_id = item.get("id") or "content_1"
+    prefix = f"cf2_{owner_id}_{package_id}_{item_id}"
+    revision = int(item.get("revision") or 0)
+    widget_prefix = f"{prefix}_r{revision}"
+    content_format = item.get("format") or "post"
+    format_label = FORMAT_LABELS.get(content_format, "Пост")
+    approved = item.get("status") == "approved"
+
+    st.markdown(f"### {format_label}: {item.get('title') or 'Новый материал'}")
+
+    if not approved:
+        st.info(
+            "Это текстовый черновик. Исправьте любые слова, если хотите. "
+            "Платные изображения и видео пока не создаются."
+        )
+        item["title"] = st.text_input(
+            "Заголовок",
+            value=item.get("title") or "",
+            key=widget_prefix + "_title",
+        )
+        item["goal"] = st.text_area(
+            "Задача материала",
+            value=item.get("goal") or "",
+            height=80,
+            key=widget_prefix + "_goal",
+        )
+
+        if content_format == "post":
+            item["post_text"] = st.text_area(
+                "Готовый текст публикации",
+                value=item.get("post_text") or "",
+                height=300,
+                key=widget_prefix + "_post",
+            )
+        elif content_format == "carousel":
+            slides_text = "\n\n".join(item.get("slides") or [])
+            slides_text = st.text_area(
+                "Шесть слайдов — разделены пустой строкой",
+                value=slides_text,
+                height=330,
+                key=widget_prefix + "_slides",
+            )
+            item["slides"] = [
+                value.strip() for value in slides_text.split("\n\n") if value.strip()
+            ]
+        else:
+            item["hook"] = st.text_area(
+                "Первые две секунды — сильный хук",
+                value=item.get("hook") or "",
+                height=80,
+                key=widget_prefix + "_hook",
+            )
+            item["script"] = st.text_area(
+                "Только слова, которые произносит Неона",
+                value=item.get("script") or "",
+                height=230,
+                key=widget_prefix + "_script",
+            )
+            scenes_text = "\n".join(item.get("scenes") or [])
+            scenes_text = st.text_area(
+                "Визуальные сцены — одна с новой строки",
+                value=scenes_text,
+                height=170,
+                key=widget_prefix + "_scenes",
+            )
+            item["scenes"] = [
+                value.strip() for value in scenes_text.splitlines() if value.strip()
+            ]
+
+        item["caption"] = st.text_area(
+            "Подпись к публикации",
+            value=item.get("caption") or "",
+            height=150,
+            key=widget_prefix + "_caption",
+        )
+        item["cta"] = st.text_area(
+            "Одно действие для читателя или зрителя",
+            value=item.get("cta") or "",
+            height=80,
+            key=widget_prefix + "_cta",
+        )
+        item["visual_brief"] = st.text_area(
+            "Задание для изображения или видеосцен",
+            value=item.get("visual_brief") or "",
+            height=110,
+            key=widget_prefix + "_visual",
+        )
+        selected_professionals = [
+            name
+            for name in (item.get("professionals") or _guess_professionals(item))
+            if name in PROFESSIONAL_PORTRAITS
+        ]
+        item["professionals"] = st.multiselect(
+            "Кого из пяти профессионалов показать",
+            options=list(PROFESSIONAL_PORTRAITS),
+            default=selected_professionals,
+            help="Будут использованы только официальные портреты Агентства W.",
+            key=widget_prefix + "_professionals",
+        )
+
+        st.caption(
+            "Следующий шаг проверяет смысл и качество. Платные изображения и видео "
+            "останутся заблокированы."
+        )
+        if st.button(
+            "✅ Стагирит: проверить и утвердить",
+            key=prefix + "_review",
+            type="primary",
+            use_container_width=True,
+        ):
+            errors = _single_item_errors(item)
+            if errors:
+                st.warning(
+                    "Стагирит сначала исправит замечания:\n- " + "\n- ".join(errors)
+                )
+            try:
+                with st.spinner("Стагирит проверяет смысл, заголовок и призыв..."):
+                    reviewed = _stagirite_review(package, item, ask_ai_fn)
+                item.clear()
+                item.update(reviewed)
+                package["status"] = "approved"
+                package["week_title"] = item.get("title") or package.get("week_title")
+                package["updated_at"] = datetime.now(timezone.utc).isoformat()
+                _save_package(package)
+                st.rerun()
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                st.error(str(exc))
+        return
+
+    st.success(
+        "✅ Стагирит утвердил материал. "
+        + str(item.get("review_summary") or "Смысл и качество проверены.")
+    )
+    with st.container(border=True):
+        st.markdown(f"**{item.get('title') or 'Без названия'}**")
+        if content_format == "post":
+            st.write(item.get("post_text") or "")
+        elif content_format == "carousel":
+            for index, slide in enumerate(item.get("slides") or [], start=1):
+                st.markdown(f"**Слайд {index}**")
+                st.write(slide)
+        else:
+            st.markdown("**Хук**")
+            st.write(item.get("hook") or "")
+            st.markdown("**Речь Неоны**")
+            st.write(item.get("script") or "")
+            with st.expander("Посмотреть план видеосцен"):
+                for index, scene in enumerate(item.get("scenes") or [], start=1):
+                    st.write(f"{index}. {scene}")
+        if item.get("caption"):
+            st.markdown("**Подпись к публикации**")
+            st.write(item["caption"])
+        st.markdown("**Действие человека**")
+        st.write(item.get("cta") or "")
+
+    edit_col, download_col = st.columns(2)
+    if edit_col.button(
+        "✏️ Исправить текст",
+        key=prefix + "_edit",
+        use_container_width=True,
+    ):
+        item["status"] = "draft"
+        item["revision"] = revision + 1
+        package["status"] = "draft"
+        package["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_package(package)
+        st.rerun()
+    download_col.download_button(
+        "⬇️ Скачать текст",
+        data=(_item_as_text(item) + "\n").encode("utf-8"),
+        file_name=f"{content_format}_agency_w.txt",
+        mime="text/plain",
+        key=prefix + "_text_download",
+        use_container_width=True,
+    )
+
+    st.markdown("### Производство готового материала")
+    if content_format == "post":
+        image_state_key = prefix + "_image_result"
+        st.warning(
+            "Следующая кнопка использует платного Художника OpenAI. "
+            "Нажмите её один раз."
+        )
+        if st.button(
+            "🎨 Создать готовое изображение",
+            key=prefix + "_make_image",
+            use_container_width=True,
+        ):
+            references = _portrait_references(item.get("professionals") or [])
+            available = {
+                value.get("name")
+                for value in references
+                if value.get("kind") == "portrait"
+            }
+            missing = [
+                name for name in (item.get("professionals") or []) if name not in available
+            ]
+            if missing:
+                st.error("Не найдены официальные портреты: " + ", ".join(missing))
+            else:
+                with st.spinner("Художник создаёт изображение..."):
+                    result = generate_illustration_fn(
+                        _item_source_text(item),
+                        change_request=item.get("visual_brief") or "",
+                        size="1024x1536",
+                        reference_images=references,
+                    )
+                st.session_state[image_state_key] = result
+
+        image_result = st.session_state.get(image_state_key)
+        if isinstance(image_result, dict):
+            if image_result.get("ok") and image_result.get("image_bytes"):
+                st.image(image_result["image_bytes"], caption="Готовое изображение")
+                st.download_button(
+                    "⬇️ Скачать изображение PNG",
+                    data=image_result["image_bytes"],
+                    file_name="agency_w_post.png",
+                    mime="image/png",
+                    key=prefix + "_image_download",
+                    use_container_width=True,
+                )
+            elif image_result.get("error"):
+                st.error(str(image_result["error"]))
+
+    elif content_format == "carousel":
+        carousel_state_key = prefix + "_carousel_result"
+        current_errors = _carousel_copy_errors({"slides": item.get("slides") or []})
+        st.warning(
+            "Следующая кнопка создаст шесть платных изображений — по одному на слайд."
+        )
+        if st.button(
+            "🖼️ Создать готовую карусель",
+            key=prefix + "_make_carousel",
+            disabled=bool(current_errors),
+            use_container_width=True,
+        ):
+            with st.spinner("Художник создаёт шесть связанных слайдов..."):
+                result = _generate_ready_carousel(item, generate_illustration_fn)
+            st.session_state[carousel_state_key] = result
+
+        carousel_result = st.session_state.get(carousel_state_key)
+        if isinstance(carousel_result, dict):
+            if carousel_result.get("ok") and carousel_result.get("slides"):
+                preview_columns = st.columns(2)
+                for index, slide_bytes in enumerate(carousel_result["slides"], start=1):
+                    with preview_columns[(index - 1) % 2]:
+                        st.image(slide_bytes, caption=f"Слайд {index}")
+                st.download_button(
+                    "⬇️ Скачать готовую карусель ZIP",
+                    data=carousel_result["zip_bytes"],
+                    file_name="agency_w_carousel.zip",
+                    mime="application/zip",
+                    key=prefix + "_carousel_download",
+                    use_container_width=True,
+                )
+                st.success("Слайды уже пронумерованы в порядке публикации.")
+            elif carousel_result.get("error"):
+                st.error(str(carousel_result["error"]))
+
+    else:
+        reel_state_key = prefix + "_reel_state"
+        reel_state = st.session_state.get(reel_state_key)
+        reel_state = reel_state if isinstance(reel_state, dict) else {}
+        video_id = _clean_text(reel_state.get("video_id"), 300)
+        final_video = reel_state.get("final_video")
+
+        if not video_id and not final_video:
+            st.warning(
+                "Следующая кнопка использует платные изображения OpenAI и озвучку HeyGen. "
+                "Нажмите её один раз."
+            )
+            if st.button(
+                "🎬 Создать готовый Reels",
+                key=prefix + "_make_reel",
+                use_container_width=True,
+            ):
+                with st.spinner("Художник создаёт видеосцены..."):
+                    scene_result = _generate_reel_scenes(
+                        item,
+                        item.get("scenes") or [],
+                        item.get("script") or "",
+                        generate_illustration_fn,
+                    )
+                if not scene_result.get("ok"):
+                    st.error(str(scene_result.get("error") or "Не созданы сцены."))
+                else:
+                    reel_state = {
+                        "spoken_text": item.get("script") or "",
+                        "scenes": item.get("scenes") or [],
+                        "scene_images": scene_result["images"],
+                        "status": "scenes_ready",
+                    }
+                    with st.spinner("Неона записывает утверждённый текст..."):
+                        avatar_result = create_avatar_video_fn(item.get("script") or "")
+                    if avatar_result.get("ok"):
+                        reel_state.update(avatar_result)
+                    else:
+                        reel_state["status"] = "voice_error"
+                        reel_state["error"] = str(
+                            avatar_result.get("error") or "Не удалось запустить озвучку."
+                        )
+                    st.session_state[reel_state_key] = reel_state
+                    st.rerun()
+
+        video_id = _clean_text(reel_state.get("video_id"), 300)
+        final_video = reel_state.get("final_video")
+        if video_id and not final_video:
+            st.info(
+                "Неона записывает голос. Можно заниматься другими делами и вернуться "
+                "сюда позже — сцены и номер видео сохранены на этом экране."
+            )
+            if st.button(
+                "🔄 Видео готово? Проверить и собрать",
+                key=prefix + "_check_reel",
+                use_container_width=True,
+            ):
+                with st.spinner("Проверяем озвучку..."):
+                    result = get_avatar_video_fn(video_id)
+                if not result.get("ok"):
+                    st.error(str(result.get("error") or "Не удалось проверить видео."))
+                else:
+                    reel_state.update(result)
+                    status = str(result.get("status") or "").lower()
+                    if status == "completed" and result.get("video_url"):
+                        try:
+                            with st.spinner("Собираем сцены, голос и субтитры в MP4..."):
+                                narration = _download_video_bytes(result["video_url"])
+                                reel_state["final_video"] = _assemble_ready_reel(
+                                    reel_state.get("scene_images") or [],
+                                    narration,
+                                    reel_state.get("spoken_text") or "",
+                                    item.get("cta") or "",
+                                )
+                                reel_state["status"] = "ready"
+                        except (requests.RequestException, RuntimeError, OSError) as exc:
+                            reel_state["status"] = "assembly_error"
+                            reel_state["error"] = str(exc)
+                    elif status == "failed":
+                        reel_state["error"] = str(
+                            result.get("error") or "HeyGen не создал озвучку."
+                        )
+                    st.session_state[reel_state_key] = reel_state
+                    st.rerun()
+
+        if reel_state.get("error"):
+            st.error(str(reel_state["error"]))
+            if st.button(
+                "Начать создание Reels заново",
+                key=prefix + "_reset_reel",
+                use_container_width=True,
+            ):
+                st.session_state.pop(reel_state_key, None)
+                st.rerun()
+
+        final_video = reel_state.get("final_video")
+        if final_video:
+            st.video(final_video)
+            st.download_button(
+                "⬇️ Скачать готовый Reels MP4",
+                data=final_video,
+                file_name="agency_w_reels.mp4",
+                mime="video/mp4",
+                key=prefix + "_reel_download",
+                use_container_width=True,
+            )
+            st.success("Этот MP4 можно публиковать в Instagram Reels.")
+
+
+def render_content_factory(
+    owner_telegram_id,
+    owner_name,
+    ask_ai_fn,
+    generate_illustration_fn,
+    create_avatar_video_fn,
+    get_avatar_video_fn,
+    target_profile=None,
+):
+    """Контент-завод: одно человеческое задание превращается в готовый материал."""
+    owner_id = int(owner_telegram_id)
+    state_key = f"content_factory_package_{owner_id}"
+    stage_key = f"content_factory_stage_{owner_id}"
+    understanding_key = f"content_factory_understanding_{owner_id}"
+    request_key = f"content_factory_request_{owner_id}"
+    load_marker = f"content_factory_v2_loaded_{owner_id}"
+
+    st.markdown("## 🏭 Контент-завод W")
+    st.caption(
+        "Скажите задачу обычными словами. Завод подготовит профессиональный текст, "
+        "Стагирит проверит его, а платные инструменты включатся только после утверждения."
+    )
+
+    if not st.session_state.get(load_marker):
+        latest = _load_latest_package(owner_id)
+        if isinstance(latest, dict) and latest.get("workflow_version") == "single_v2":
+            st.session_state[state_key] = latest
+            st.session_state[stage_key] = "result"
+        st.session_state[load_marker] = True
+
+    stage = st.session_state.get(stage_key) or "start"
+    package = st.session_state.get(state_key)
+
+    if stage == "start":
+        st.write(
+            f"{owner_name}, вам не нужно знать, как писать промты. Выберите формат и "
+            "расскажите, что хотите получить."
+        )
+        if st.button(
+            "✨ Создать контент",
+            key=f"cf2_start_{owner_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            st.session_state[stage_key] = "input"
+            st.session_state.pop(state_key, None)
+            st.session_state.pop(understanding_key, None)
+            st.rerun()
+        with st.expander("📚 Готовые материалы"):
+            st.caption("Здесь будут храниться утверждённые и созданные материалы.")
+        return
+
+    if stage == "input":
+        st.markdown("### 1. Что вы хотите создать?")
+        format_choice = st.radio(
+            "Формат",
+            options=["post", "carousel", "reel"],
+            format_func=lambda value: FORMAT_LABELS[value],
+            horizontal=True,
+            key=f"cf2_format_{owner_id}",
+            label_visibility="collapsed",
+        )
+
+        st.markdown("### 2. Расскажите задачу")
+        st.caption(
+            "Можно говорить как в обычном разговоре. Например: «Хочу Reels о том, "
+            "как предпринимателю перестать тратить вечер на переписку»."
+        )
+        if hasattr(st, "audio_input"):
+            audio = st.audio_input(
+                "🎙 Нажмите микрофон и скажите задачу",
+                key=f"cf2_audio_{owner_id}",
+            )
+            if audio is not None:
+                audio_bytes = audio.getvalue()
+                audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+                processed_key = f"cf2_audio_processed_{owner_id}"
+                if st.session_state.get(processed_key) != audio_hash:
+                    try:
+                        with st.spinner("Контент-завод слушает..."):
+                            transcript = _transcribe_content_audio(
+                                audio_bytes,
+                                getattr(audio, "name", "content-request.wav"),
+                            )
+                        st.session_state[processed_key] = audio_hash
+                        if transcript:
+                            st.session_state[request_key] = transcript
+                            st.rerun()
+                    except (requests.RequestException, RuntimeError, ValueError):
+                        st.error("Не удалось разобрать голос. Напишите задачу в поле ниже.")
+
+        request_text = st.text_area(
+            "Или напишите задачу",
+            placeholder=(
+                "Например: Создай карусель для предпринимателей. Покажи, как пять "
+                "ИИ-профессионалов забирают повторяющиеся задачи и возвращают время."
+            ),
+            height=170,
+            key=request_key,
+        )
+        action_col, back_col = st.columns([2, 1])
+        if action_col.button(
+            "Передать задачу заводу",
+            key=f"cf2_analyse_{owner_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            if not _clean_text(request_text, 7000):
+                st.warning("Сначала скажите или напишите, какой материал вам нужен.")
+            else:
+                try:
+                    with st.spinner("Стагирит выделяет главную мысль..."):
+                        understanding = _analyse_content_request(
+                            format_choice,
+                            request_text,
+                            target_profile,
+                            ask_ai_fn,
+                        )
+                    for suffix in ("topic", "idea", "audience", "result", "cta"):
+                        st.session_state.pop(f"cf2_u_{suffix}_{owner_id}", None)
+                    st.session_state[understanding_key] = understanding
+                    st.session_state[stage_key] = "understanding"
+                    st.rerun()
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    st.error(str(exc))
+        if back_col.button(
+            "Отмена",
+            key=f"cf2_cancel_{owner_id}",
+            use_container_width=True,
+        ):
+            st.session_state[stage_key] = "start"
+            st.rerun()
+        return
+
+    if stage == "understanding":
+        understanding = st.session_state.get(understanding_key)
+        if not isinstance(understanding, dict):
+            st.session_state[stage_key] = "input"
+            st.rerun()
+
+        st.markdown("### Я понял вашу задачу так")
+        st.caption("Проверьте только смысл. Красивый профессиональный текст завод напишет сам.")
+        with st.container(border=True):
+            st.write("**Формат:** " + FORMAT_LABELS.get(understanding["format"], "Пост"))
+            understanding["topic"] = st.text_area(
+                "Тема",
+                value=understanding.get("topic") or "",
+                height=75,
+                key=f"cf2_u_topic_{owner_id}",
+            )
+            understanding["main_idea"] = st.text_area(
+                "Главная мысль",
+                value=understanding.get("main_idea") or "",
+                height=90,
+                key=f"cf2_u_idea_{owner_id}",
+            )
+            understanding["audience"] = st.text_area(
+                "Для кого",
+                value=understanding.get("audience") or "",
+                height=90,
+                key=f"cf2_u_audience_{owner_id}",
+            )
+            understanding["desired_result"] = st.text_area(
+                "Что должно измениться после просмотра",
+                value=understanding.get("desired_result") or "",
+                height=80,
+                key=f"cf2_u_result_{owner_id}",
+            )
+            understanding["cta"] = st.text_area(
+                "Какое одно действие должен сделать человек",
+                value=understanding.get("cta") or "",
+                height=80,
+                key=f"cf2_u_cta_{owner_id}",
+            )
+
+        confirm_col, change_col = st.columns([2, 1])
+        if confirm_col.button(
+            "✅ Всё верно — подготовить материал",
+            key=f"cf2_generate_{owner_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                with st.spinner("Пять профессионалов готовят качественный материал..."):
+                    package = _generate_single_package(owner_id, understanding, ask_ai_fn)
+                st.session_state[state_key] = package
+                st.session_state[stage_key] = "result"
+                saved, error = _save_package(package)
+                if not saved:
+                    st.session_state[f"cf2_save_warning_{owner_id}"] = error
+                st.rerun()
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                st.error(str(exc))
+        if change_col.button(
+            "← Изменить задачу",
+            key=f"cf2_change_{owner_id}",
+            use_container_width=True,
+        ):
+            for suffix in ("topic", "idea", "audience", "result", "cta"):
+                st.session_state.pop(f"cf2_u_{suffix}_{owner_id}", None)
+            st.session_state[stage_key] = "input"
+            st.rerun()
+        return
+
+    if not isinstance(package, dict) or not package.get("items"):
+        st.session_state[stage_key] = "start"
+        st.rerun()
+
+    save_warning = st.session_state.pop(f"cf2_save_warning_{owner_id}", "")
+    if save_warning:
+        st.caption("Материал создан. История пока не сохранена: " + str(save_warning))
+
+    _render_item(
+        package,
+        package["items"][0],
+        owner_id,
+        ask_ai_fn,
+        generate_illustration_fn,
+        create_avatar_video_fn,
+        get_avatar_video_fn,
+    )
+
+    st.divider()
+    if st.button(
+        "✨ Создать контент",
+        key=f"cf2_next_{owner_id}",
+        use_container_width=True,
+    ):
+        st.session_state.pop(state_key, None)
+        st.session_state.pop(understanding_key, None)
+        st.session_state.pop(request_key, None)
+        st.session_state[stage_key] = "input"
+        st.rerun()
+
+    with st.expander("📚 Готовые материалы"):
+        current = package["items"][0]
+        status = "Готово к производству" if current.get("status") == "approved" else "На согласовании"
+        st.write(f"**{current.get('title') or 'Материал'}** — {status}")
