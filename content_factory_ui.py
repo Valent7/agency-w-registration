@@ -2,9 +2,70 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 import streamlit as st
+
+
+PROFESSIONAL_PORTRAITS = {
+    "Стагирит": "content_ref_stagirite.webp",
+    "Неония": "content_ref_neonia.webp",
+    "Неона": "content_ref_neona.webp",
+    "Тео": "content_ref_theo.webp",
+    "Неола": "content_ref_neola.webp",
+}
+
+
+def _guess_professionals(item):
+    """Определяет героев по смыслу старых и новых пакетов контента."""
+    source = " ".join(
+        str(value or "")
+        for value in (
+            item.get("title"),
+            item.get("goal"),
+            item.get("hook"),
+            item.get("script"),
+            item.get("post_text"),
+            " ".join(item.get("slides") or []),
+            item.get("caption"),
+            item.get("visual_brief"),
+        )
+    ).lower()
+    if any(marker in source for marker in ("пять ии", "пять профессионал", "вся команда")):
+        return list(PROFESSIONAL_PORTRAITS)
+    return [name for name in PROFESSIONAL_PORTRAITS if name.lower() in source]
+
+
+def _portrait_references(names):
+    """Загружает только выбранные эталонные портреты в момент генерации."""
+    assets_dir = Path(__file__).resolve().parent / "assets"
+    references = []
+    for name in names or []:
+        filename = PROFESSIONAL_PORTRAITS.get(name)
+        if not filename:
+            continue
+        path = assets_dir / filename
+        if path.exists():
+            references.append(
+                {
+                    "name": name,
+                    "kind": "portrait",
+                    "image_bytes": path.read_bytes(),
+                    "mime_type": "image/webp",
+                }
+            )
+    logo_path = assets_dir / "agency_w_icon.png"
+    if references and logo_path.exists():
+        references.append(
+            {
+                "name": "Официальный знак Агентства W",
+                "kind": "logo",
+                "image_bytes": logo_path.read_bytes(),
+                "mime_type": "image/png",
+            }
+        )
+    return references
 
 
 FACTORY_SYSTEM_PROMPT = """
@@ -58,6 +119,7 @@ def _normalise_item(item, index):
     item_id = _clean_text(item.get("id"), 80) or f"{fmt}_{index + 1}"
     scenes = item.get("scenes") if isinstance(item.get("scenes"), list) else []
     slides = item.get("slides") if isinstance(item.get("slides"), list) else []
+    professionals = item.get("professionals") if isinstance(item.get("professionals"), list) else []
     return {
         "id": item_id,
         "format": fmt,
@@ -72,6 +134,9 @@ def _normalise_item(item, index):
         "caption": _clean_text(item.get("caption"), 4000),
         "cta": _clean_text(item.get("cta"), 800),
         "visual_brief": _clean_text(item.get("visual_brief"), 2500),
+        "professionals": [
+            name for name in PROFESSIONAL_PORTRAITS if name in professionals
+        ],
         "status": "draft",
     }
 
@@ -240,7 +305,8 @@ Reels: вертикальный формат 9:16, длительность 20�
       "slides": ["обложка", "слайд 2"],
       "caption": "подпись под публикацией",
       "cta": "одно естественное действие",
-      "visual_brief": "что должно быть в кадре или на иллюстрации"
+      "visual_brief": "что должно быть в кадре или на иллюстрации",
+      "professionals": ["имена только тех профессионалов Агентства W, которые должны быть в кадре"]
     }}
   ]
 }}
@@ -330,6 +396,23 @@ def _render_item(
         item["caption"] = st.text_area("Подпись в Instagram", value=item.get("caption", ""), height=150, key=prefix + "_caption")
         item["cta"] = st.text_area("Призыв к действию", value=item.get("cta", ""), height=80, key=prefix + "_cta")
         item["visual_brief"] = st.text_area("Задание для визуала", value=item.get("visual_brief", ""), height=120, key=prefix + "_visual")
+        saved_professionals = [
+            name
+            for name in item.get("professionals", [])
+            if name in PROFESSIONAL_PORTRAITS
+        ]
+        if not saved_professionals:
+            saved_professionals = _guess_professionals(item)
+        item["professionals"] = st.multiselect(
+            "Профессионалы в кадре",
+            options=list(PROFESSIONAL_PORTRAITS),
+            default=saved_professionals,
+            help=(
+                "Выбранные герои будут созданы по их эталонным портретам, "
+                "в фирменных пиджаках со знаком Агентства W."
+            ),
+            key=prefix + "_professionals",
+        )
 
         approve_col, image_col = st.columns(2)
         if approve_col.button(
@@ -344,11 +427,31 @@ def _render_item(
         image_state_key = prefix + "_image_result"
         if image_col.button("🎨 Создать изображение", key=prefix + "_image", use_container_width=True):
             source_text = _item_source_text(item)
+            portrait_references = _portrait_references(item.get("professionals") or [])
+            available_names = {
+                reference.get("name")
+                for reference in portrait_references
+                if reference.get("kind") == "portrait"
+            }
+            missing_names = [
+                name
+                for name in item.get("professionals", [])
+                if name not in available_names
+            ]
+            if missing_names:
+                st.error(
+                    "Не найдены эталонные портреты: "
+                    + ", ".join(missing_names)
+                    + ". "
+                    "Сначала загрузите пять файлов content_ref_*.webp в папку assets."
+                )
+                return
             with st.spinner("Стагирит и Художник создают визуал..."):
                 result = generate_illustration_fn(
                     source_text,
                     change_request=item.get("visual_brief") or "",
                     size="1024x1536",
+                    reference_images=portrait_references,
                 )
             st.session_state[image_state_key] = result
 

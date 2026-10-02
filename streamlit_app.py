@@ -1189,6 +1189,7 @@ def _review_stagirite_illustration(
     image_bytes,
     visual_brief,
     post_text,
+    reference_images=None,
 ):
     """Стагирит проверяет готовую картинку как главный арт-директор."""
     image_data_url = (
@@ -1216,7 +1217,8 @@ PASS только если одновременно выполнено всё г
 - нет бессмысленных офисов, интерфейсов, панелей и карточек;
 - Агентство W и его агенты НЕ навязаны сцене, если они не нужны смыслу;
 - научный/философский текст не превращён в банальную корпоративную сцену;
-- нет читаемого текста, логотипов, псевдотекста и водяных знаков;
+- нет читаемого текста, посторонних логотипов, псевдотекста и водяных знаков;
+- если даны эталонные герои, допустим только их золотой знак W на лацкане;
 - если изображены люди, они естественны, взрослые и нужны композиции;
 - работа выглядит как премиальная журнальная/редакционная иллюстрация.
 
@@ -1234,6 +1236,59 @@ VERDICT: REDO
 FIX: <одно конкретное и достаточно подробное указание, как вернуть смысл и метафору>
 """.strip()
 
+    reference_images = reference_images or []
+    reference_names = ", ".join(
+        str(item.get("name") or "")
+        for item in reference_images
+        if item.get("name") and item.get("kind") != "logo"
+    )
+    if reference_names:
+        review_prompt += f"""
+
+ЭТАЛОННЫЕ ГЕРОИ В КАДРЕ: {reference_names}.
+Дополнительно проверь, что лица узнаваемо соответствуют приложенным эталонным
+портретам, герои не перепутаны, одеты в фирменные тёмно-синие пиджаки, а на
+лацкане сохранён золотой знак Агентства W. Если личность заметно изменилась,
+верни REDO и точно укажи, чьё лицо нужно восстановить.
+"""
+
+    review_content = [
+        {"type": "input_text", "text": review_prompt},
+        {
+            "type": "input_image",
+            "image_url": image_data_url,
+            "detail": "high",
+        },
+    ]
+    for reference in reference_images:
+        reference_bytes = reference.get("image_bytes")
+        if not reference_bytes:
+            continue
+        mime_type = str(reference.get("mime_type") or "image/webp")
+        reference_url = (
+            f"data:{mime_type};base64,"
+            + base64.b64encode(reference_bytes).decode("ascii")
+        )
+        is_logo = reference.get("kind") == "logo"
+        reference_label = (
+            "Эталон официального золотого знака W — использовать только на лацкане"
+            if is_logo
+            else "Эталон лица и одежды: " + str(reference.get("name") or "герой")
+        )
+        review_content.extend(
+            [
+                {
+                    "type": "input_text",
+                    "text": reference_label,
+                },
+                {
+                    "type": "input_image",
+                    "image_url": reference_url,
+                    "detail": "low",
+                },
+            ]
+        )
+
     try:
         response = requests.post(
             "https://api.openai.com/v1/responses",
@@ -1246,14 +1301,7 @@ FIX: <одно конкретное и достаточно подробное �
                 "input": [
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": review_prompt},
-                            {
-                                "type": "input_image",
-                                "image_url": image_data_url,
-                                "detail": "high",
-                            },
-                        ],
+                        "content": review_content,
                     }
                 ],
                 "store": False,
@@ -1284,8 +1332,45 @@ def _call_artist_image(
     api_key,
     prompt,
     size,
+    reference_images=None,
 ):
     """Один вызов нового Художника на GPT Image 2.5 Flare."""
+    reference_images = reference_images or []
+    input_content = [{"type": "input_text", "text": prompt}]
+    for reference in reference_images:
+        reference_bytes = reference.get("image_bytes")
+        if not reference_bytes:
+            continue
+        mime_type = str(reference.get("mime_type") or "image/webp")
+        reference_url = (
+            f"data:{mime_type};base64,"
+            + base64.b64encode(reference_bytes).decode("ascii")
+        )
+        is_logo = reference.get("kind") == "logo"
+        reference_instruction = (
+            "ОФИЦИАЛЬНЫЙ ЗОЛОТОЙ ЗНАК АГЕНТСТВА W. Если в кадре виден "
+            "лацкан профессионала, сохрани именно этот знак как фирменную брошь. "
+            "Не помещай его в другие части изображения."
+            if is_logo
+            else (
+                "ЭТАЛОННЫЙ ПОРТРЕТ — "
+                + str(reference.get("name") or "герой")
+                + ". Сохрани это лицо и фирменную одежду узнаваемыми."
+            )
+        )
+        input_content.extend(
+            [
+                {
+                    "type": "input_text",
+                    "text": reference_instruction,
+                },
+                {
+                    "type": "input_image",
+                    "image_url": reference_url,
+                    "detail": "high",
+                },
+            ]
+        )
     response = requests.post(
         "https://api.openai.com/v1/responses",
         headers={
@@ -1294,7 +1379,7 @@ def _call_artist_image(
         },
         json={
             "model": "gpt-5-mini",
-            "input": prompt,
+            "input": [{"role": "user", "content": input_content}],
             "tools": [
                 {
                     "type": "image_generation",
@@ -1332,6 +1417,7 @@ def generate_openai_illustration(
     *,
     change_request="",
     size="1024x1024",
+    reference_images=None,
 ):
     """
     Художник Агентства W, версия «Мастер шедевров».
@@ -1354,6 +1440,22 @@ def generate_openai_illustration(
         }
 
     clean_change = str(change_request or "").strip()
+    reference_images = reference_images or []
+    reference_names = ", ".join(
+        str(item.get("name") or "")
+        for item in reference_images
+        if item.get("name") and item.get("kind") != "logo"
+    )
+    if reference_names:
+        clean_change = (
+            clean_change
+            + "\n\nФИРМЕННЫЕ ГЕРОИ В КАДРЕ: "
+            + reference_names
+            + ". Используй приложенные портреты как обязательные эталоны личности. "
+            + "Сохрани узнаваемые лица, причёски, возраст и общий характер. "
+            + "Одежда — фирменные тёмно-синие пиджаки; на лацкане золотой знак "
+            + "Агентства W, как на эталонах. Не добавляй имена, буквы или подписи."
+        ).strip()
 
     visual_brief = _build_stagirite_visual_brief(
         api_key,
@@ -1394,6 +1496,12 @@ premium editorial illustration, cinematic concept art, sophisticated visual meta
 - перегруженный коллаж без центра;
 - читаемый текст, логотипы, подписи, водяные знаки и псевдотекст.
 
+ИСКЛЮЧЕНИЕ ДЛЯ ФИРМЕННЫХ ГЕРОЕВ:
+Если приложены эталонные портреты, лица, причёски, возраст и фирменные
+тёмно-синие пиджаки должны оставаться узнаваемыми. Разрешён только золотой
+знак Агентства W на лацкане, уже показанный на эталонной одежде. Не рисуй
+никаких других логотипов, имён, букв или подписей.
+
 Если в брифе есть сильная метафора, подчиняй ей всё изображение.
 Не добавляй брендовые элементы только потому, что работа создаётся для Агентства W.
 Картинка должна быть понятной и впечатляющей даже человеку,
@@ -1415,7 +1523,12 @@ premium editorial illustration, cinematic concept art, sophisticated visual meta
     )
 
     try:
-        image_bytes = _call_artist_image(api_key, prompt, size)
+        image_bytes = _call_artist_image(
+            api_key,
+            prompt,
+            size,
+            reference_images=reference_images,
+        )
         if not image_bytes:
             return {
                 "ok": False,
@@ -1427,6 +1540,7 @@ premium editorial illustration, cinematic concept art, sophisticated visual meta
             image_bytes,
             visual_brief,
             clean_text,
+            reference_images=reference_images,
         )
         auto_redrawn = False
 
@@ -1452,6 +1566,7 @@ premium editorial illustration, cinematic concept art, sophisticated visual meta
                 api_key,
                 corrected_prompt,
                 size,
+                reference_images=reference_images,
             )
             if second_image:
                 image_bytes = second_image
@@ -1461,6 +1576,7 @@ premium editorial illustration, cinematic concept art, sophisticated visual meta
                     image_bytes,
                     visual_brief,
                     clean_text,
+                    reference_images=reference_images,
                 )
 
         return {
