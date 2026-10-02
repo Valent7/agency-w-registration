@@ -229,6 +229,148 @@ def _generate_reel_scenes(item, scenes, spoken_text, generate_illustration_fn):
     return {"ok": True, "images": generated}
 
 
+_CAROUSEL_BAD_PHRASES = (
+    "лагерь",
+    "lodge",
+    "видите вклад",
+    "гарантия привилегий",
+    "реферальная схема",
+    "nft-привилегии",
+    "уникальная возможность",
+    "новый уровень успеха",
+)
+
+
+def _carousel_copy_errors(data):
+    """Останавливает бессмыслицу до запуска платного Художника."""
+    slides = data.get("slides") if isinstance(data, dict) else None
+    errors = []
+    if not isinstance(slides, list) or len(slides) != 6:
+        return ["Нужно ровно 6 слайдов: обложка и пять последовательных мыслей."]
+
+    cleaned = [_clean_text(value, 500) for value in slides]
+    if any(not value for value in cleaned):
+        errors.append("Один из слайдов пустой.")
+    if len(cleaned[0]) > 100:
+        errors.append("Заголовок обложки длиннее 100 знаков.")
+    for index, value in enumerate(cleaned[1:], start=2):
+        if len(value) < 25:
+            errors.append(f"На слайде {index} мысль не раскрыта.")
+        if len(value) > 190:
+            errors.append(f"Слайд {index} перегружен текстом.")
+
+    combined = " ".join(cleaned).lower()
+    bad = [phrase for phrase in _CAROUSEL_BAD_PHRASES if phrase in combined]
+    if bad:
+        errors.append("Запрещённые или бессмысленные выражения: " + ", ".join(bad))
+    if "/" in combined:
+        errors.append("Нельзя соединять непонятные варианты слов через косую черту.")
+    if not any(
+        marker in combined
+        for marker in ("время", "задач", "работ", "диалог", "партнёр", "клиент")
+    ):
+        errors.append("Не показана конкретная польза для предпринимателя.")
+
+    normalised = [re.sub(r"[^а-яёa-z0-9]+", " ", value.lower()).strip() for value in cleaned]
+    if len(set(normalised)) != len(normalised):
+        errors.append("В карусели повторяются одинаковые мысли.")
+    return errors
+
+
+def _prepare_carousel_copy(package, item, ask_ai_fn):
+    """Сначала создаёт и проверяет продающий текст — без платных изображений."""
+    settings = package.get("settings") if isinstance(package.get("settings"), dict) else {}
+    project_name = _clean_text(settings.get("project_name") or "Агентство W", 240)
+    offer = _clean_text(settings.get("offer"), 4000)
+    audience = _clean_text(settings.get("audience"), 5000)
+    goal = _clean_text(settings.get("goal"), 1000)
+    key_message = _clean_text(settings.get("key_message"), 1500)
+    item_goal = _clean_text(item.get("goal"), 700)
+
+    prompt = f"""
+Создай профессиональный текст Instagram-карусели для незнакомого читателя.
+
+ПРОЕКТ: {project_name}
+ЧТО МЫ ПРЕДЛАГАЕМ: {offer}
+ДЛЯ КОГО: {audience}
+ЦЕЛЬ: {goal}
+ГЛАВНАЯ МЫСЛЬ: {key_message}
+ТЕМА ЭТОГО МАТЕРИАЛА: {item_goal}
+
+Карусель должна вести человека по одной ясной логической линии:
+узнаваемая проблема → почему она возникает → понятное решение → как работают
+профессионалы Агентства W → конкретный результат → спокойный призыв узнать больше.
+
+Верни только JSON:
+{{
+  "title": "рабочее название материала",
+  "slides": [
+    "Обложка: короткий сильный заголовок",
+    "Шаг 1: короткий подзаголовок — одно ясное пояснение",
+    "Шаг 2: короткий подзаголовок — одно ясное пояснение",
+    "Шаг 3: короткий подзаголовок — одно ясное пояснение",
+    "Шаг 4: короткий подзаголовок — одно ясное пояснение",
+    "Шаг 5: короткий подзаголовок — конкретный призыв к действию"
+  ],
+  "caption": "полезная подпись к публикации из 450–750 знаков",
+  "cta": "одно простое действие"
+}}
+
+ЖЁСТКИЕ ТРЕБОВАНИЯ:
+- ровно 6 слайдов;
+- заголовок обложки — максимум 9 слов, он должен останавливать взгляд за счёт
+  узнаваемой боли, важного результата или честного любопытства, но без кликбейта;
+- каждый следующий слайд понятен человеку, который впервые слышит о проекте;
+- один слайд — одна мысль; никакой воды и канцелярита;
+- объясняй конкретно: какая рутина забирает время и кто именно её принимает;
+- используй только понятные русские слова;
+- запрещены непояснённые термины, аббревиатуры, англицизмы, NFT, Lodge,
+  «лагерь», «реферальная схема», «видите вклад», «гарантия привилегий»;
+- не смешивай Агентство W с другими проектами, криптовалютой и инвестициями;
+- не обещай доход и не выдумывай факты;
+- текст должен звучать как работа сильного редактора, а не рекламного бота.
+""".strip()
+    system = (
+        "Ты — главный редактор делового медиа и direct-response копирайтер. "
+        "Твоя задача — ясность, смысл, сильный заголовок и логическое движение. "
+        "Любая непонятная фраза считается браком. Возвращай только JSON."
+    )
+
+    last_errors = []
+    for _ in range(3):
+        try:
+            answer = ask_ai_fn(system, prompt)
+            data = _json_from_answer(answer)
+            result = {
+                "title": _clean_text(data.get("title"), 240),
+                "slides": [
+                    _clean_text(value, 500)
+                    for value in (data.get("slides") or [])
+                    if _clean_text(value, 500)
+                ],
+                "caption": _clean_text(data.get("caption"), 1800),
+                "cta": _clean_text(data.get("cta"), 300),
+            }
+            last_errors = _carousel_copy_errors(result)
+            if not last_errors and result["caption"] and result["cta"]:
+                result["ok"] = True
+                return result
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            last_errors = [str(exc)]
+        prompt += (
+            "\n\nПредыдущий вариант забракован редактором. Исправь ВСЕ замечания:\n- "
+            + "\n- ".join(last_errors or ["Не заполнены подпись или призыв."])
+        )
+
+    return {
+        "ok": False,
+        "error": (
+            "Редактор не пропустил текст. Платные изображения не запускались. "
+            + "; ".join(last_errors or ["Текст не прошёл проверку смысла."])
+        ),
+    }
+
+
 def _font(size, bold=False):
     """Шрифт с кириллицей для подписей на готовых слайдах."""
     candidates = [
@@ -905,7 +1047,13 @@ Reels: вертикальный формат 9:16, длительность 20�
 
 Пост: самостоятельная полезная мысль, живой текст, без канцелярита.
 
-Карусель: обложка плюс 5–7 коротких слайдов, один тезис на слайд.
+Карусель: ровно 6 слайдов — обложка плюс 5 последовательных мыслей.
+Заголовок обложки — максимум 9 слов: узнаваемая боль, важный результат или
+честное любопытство без кликбейта. Каждый следующий слайд должен быть понятен
+человеку, который впервые слышит о проекте. Один слайд — одна конкретная мысль.
+Запрещены вода, канцелярит, непояснённые термины, англицизмы и смешение разных
+проектов. Карусель должна вести по логике: проблема → причина → решение →
+механизм → результат → одно действие.
 
 Используй разные смысловые углы: польза, история, объяснение, возражение,
 пример, человеческая ситуация. Не повторяй одну мысль разными словами.
@@ -1001,6 +1149,21 @@ def _render_item(
         expanded=False,
     ):
         prefix = f"cf_{owner_id}_{package_id}_{item_id}"
+        pending_copy_key = prefix + "_pending_carousel_copy"
+        pending_copy = st.session_state.pop(pending_copy_key, None)
+        if isinstance(pending_copy, dict) and pending_copy.get("ok"):
+            item["title"] = pending_copy.get("title") or item.get("title", "")
+            item["slides"] = pending_copy.get("slides") or []
+            item["caption"] = pending_copy.get("caption") or ""
+            item["cta"] = pending_copy.get("cta") or ""
+            # Ключи виджетов меняются до их создания — Streamlit покажет новый текст.
+            st.session_state[prefix + "_title"] = item["title"]
+            st.session_state[prefix + "_slides"] = "\n\n".join(item["slides"])
+            st.session_state[prefix + "_caption"] = item["caption"]
+            st.session_state[prefix + "_cta"] = item["cta"]
+            package["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _save_package(package)
+
         item["title"] = st.text_input("Название", value=item.get("title", ""), key=prefix + "_title")
         item["goal"] = st.text_area("Задача материала", value=item.get("goal", ""), height=80, key=prefix + "_goal")
 
@@ -1050,26 +1213,62 @@ def _render_item(
 
         if item.get("format") == "carousel":
             carousel_state_key = prefix + "_ready_carousel_result"
+            copy_state_key = prefix + "_carousel_copy_result"
             st.caption(
-                "Завод создаст каждый пункт отдельным слайдом 1080×1350, "
-                "наложит точный русский текст и сложит всё в один ZIP."
-            )
-            st.warning(
-                "Создание использует платный Художник OpenAI: одно изображение "
-                "на каждый слайд. Нажмите кнопку один раз и дождитесь окончания."
+                "Сначала главный редактор перепишет и проверит смысл всей карусели. "
+                "На этом этапе платные изображения не создаются."
             )
             if image_col.button(
-                "🏭 Создать готовую карусель",
-                key=prefix + "_carousel",
+                "✍️ Подготовить сильный текст",
+                key=prefix + "_carousel_copy",
                 use_container_width=True,
             ):
-                with st.spinner(
-                    f"Художник создаёт {len(item.get('slides') or [])} отдельных слайдов..."
-                ):
-                    carousel_result = _generate_ready_carousel(
-                        item, generate_illustration_fn
+                with st.spinner("Главный редактор создаёт и проверяет 6 связанных слайдов..."):
+                    copy_result = _prepare_carousel_copy(package, item, ask_ai_fn)
+                st.session_state[copy_state_key] = copy_result
+                if copy_result.get("ok"):
+                    st.session_state[pending_copy_key] = copy_result
+                    st.session_state.pop(carousel_state_key, None)
+                    st.rerun()
+                else:
+                    st.error(str(copy_result.get("error") or "Текст не прошёл проверку."))
+
+            copy_result = st.session_state.get(copy_state_key)
+            if isinstance(copy_result, dict) and copy_result.get("ok"):
+                st.success("✅ Текст прошёл автоматическую проверку смысла и ясности.")
+                st.info(
+                    "Прочитайте шесть тезисов в поле «Слайды» выше. Только если "
+                    "они вам понятны и нравятся, запускайте платные изображения."
+                )
+                current_copy = {"slides": item.get("slides") or []}
+                current_errors = _carousel_copy_errors(current_copy)
+                if current_errors:
+                    st.error(
+                        "Платная генерация заблокирована:\n- "
+                        + "\n- ".join(current_errors)
                     )
-                st.session_state[carousel_state_key] = carousel_result
+                st.warning(
+                    "Следующая кнопка использует платный Художник OpenAI: одно "
+                    "изображение на каждый слайд. Нажимайте её только после проверки текста."
+                )
+                if st.button(
+                    f"🎨 Текст подходит — создать {len(item.get('slides') or [])} слайдов",
+                    key=prefix + "_carousel_images",
+                    disabled=bool(current_errors),
+                    use_container_width=True,
+                ):
+                    with st.spinner(
+                        f"Художник создаёт {len(item.get('slides') or [])} отдельных слайдов..."
+                    ):
+                        carousel_result = _generate_ready_carousel(
+                            item, generate_illustration_fn
+                        )
+                    st.session_state[carousel_state_key] = carousel_result
+            else:
+                st.info(
+                    "Платный Художник заблокирован. Сначала нажмите "
+                    "«Подготовить сильный текст»."
+                )
 
             carousel_result = st.session_state.get(carousel_state_key)
             if isinstance(carousel_result, dict):
