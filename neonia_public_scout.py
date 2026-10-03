@@ -19,6 +19,7 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse, parse_qs
 
 import requests
 
@@ -119,6 +120,76 @@ def _parse_iso_date(value: Any):
         return None
 
 
+
+def _youtube_video_id(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return ""
+    host = (parsed.netloc or "").lower().replace("www.", "")
+    if host == "youtu.be":
+        return parsed.path.strip("/").split("/", 1)[0][:32]
+    if "youtube.com" in host:
+        if parsed.path == "/watch":
+            return (parse_qs(parsed.query).get("v") or [""])[0][:32]
+        for prefix in ("/shorts/", "/live/", "/embed/"):
+            if parsed.path.startswith(prefix):
+                return parsed.path[len(prefix):].split("/", 1)[0][:32]
+    return ""
+
+
+def _probe_youtube_comments(url: str) -> str:
+    """
+    Best-effort probe:
+    open / closed / unknown.
+    Web-search itself cannot reliably see YouTube's dynamic comments,
+    so we verify the watch page separately when possible.
+    """
+    video_id = _youtube_video_id(url)
+    if not video_id:
+        return "unknown"
+    try:
+        response = requests.get(
+            f"https://www.youtube.com/watch?v={video_id}&hl=en",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 Chrome/154 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=20,
+        )
+        if not response.ok:
+            return "unknown"
+        html = response.text or ""
+        low = html.lower()
+
+        closed_markers = (
+            "comments are turned off",
+            "comments are disabled",
+            "commentsdisabled",
+            "comments_disabled",
+        )
+        if any(marker in low for marker in closed_markers):
+            return "closed"
+
+        open_markers = (
+            "commentsentrypointheaderrenderer",
+            "commentthreadrenderer",
+            "\"commentcount\"",
+            "continuationitemrenderer",
+        )
+        if any(marker in low for marker in open_markers):
+            return "open"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def _language_matches(candidate_language: str, allowed_languages: list[str]) -> bool:
     if not allowed_languages:
         return True
@@ -167,17 +238,25 @@ def discover_public_candidates(
     if mode == "youtube":
         youtube_rules = rf"""
 ДОПОЛНИТЕЛЬНО ДЛЯ YOUTUBE:
-- YouTube здесь — ПЛОЩАДКА ДЛЯ ВИДИМОСТИ, а не автоматический список партнёров.
-- Ищи только видео не старше {max_age_days} дней.
-- Язык видео/автора/обсуждения должен входить в: {", ".join(allowed_languages)}.
-- ОБЯЗАТЕЛЬНО исключай ролик, если комментарии отключены, закрыты или это нельзя подтвердить.
-- ОБЯЗАТЕЛЬНО исключай старые каналы без свежей активности.
-- Не выдавай автора видео за потенциального партнёра только потому, что он говорит о MLM.
-- Тренер/коуч/продавец курсов по рекрутингу — это обычно ПЛОЩАДКА/ЭКСПЕРТ, а не кандидат.
+- YouTube здесь — ПЛОЩАДКА ДЛЯ ВИДИМОСТИ, а НЕ список "готовых партнёров".
+- Ищи видео не старше {max_age_days} дней.
+- Язык видео/обсуждения должен входить в: {", ".join(allowed_languages)}.
+- Не требуй, чтобы автор видео сам искал наш продукт. Важнее, чтобы АУДИТОРИЯ
+  ролика была нашей целевой аудиторией: сетевики, лидеры команд, предприниматели,
+  люди, обсуждающие рекрутинг, построение структуры, поиск партнёров, автоматизацию.
+- Тренер/коуч/продавец курса МОЖЕТ быть хорошей ПЛОЩАДКОЙ, если его аудитория релевантна.
+- comments_status верни как open / closed / unknown. Не выдумывай "open",
+  если веб-поиск не показывает это уверенно — для этого приложение сделает отдельную проверку.
+- result_kind всегда "venue".
+- contact_route для YouTube = "комментарии под видео", если обсуждение потенциально доступно.
 - comment_draft — содержательный комментарий к КОНКРЕТНОМУ видео, до 450 знаков:
   без ссылки, без "приходите ко мне", без массового рекламного шаблона,
   с одной полезной мыслью и, если естественно, одним вопросом.
 - комментарий является ЧЕРНОВИКОМ и НЕ публикуется автоматически.
+
+ПРИМЕРЫ ТЕМ ПОИСКА НА РУССКОМ, если выбран русский:
+"сетевой маркетинг поиск партнёров", "MLM рекрутинг", "как строить команду в сетевом",
+"где находить партнёров", "автоматизация рекрутинга", "лиды для сетевого бизнеса".
 """
 
     system_prompt = f"""
@@ -227,6 +306,7 @@ def discover_public_candidates(
   "intent_type": "seeking_partners|seeking_solution|complaining_about_problem|promoting_own_team|selling_own_solution|educational_content|unknown",
   "contactable": true,
   "comments_open": true,
+  "comments_status": "open|closed|unknown",
   "result_kind": "person|venue",
   "pain_signal": "что конкретно публично показывает потребность",
   "why_fit": "почему совпадает с портретом ЦА",
@@ -281,7 +361,22 @@ def discover_public_candidates(
     for item in parsed:
         dimensions = item.get("dimensions") if isinstance(item.get("dimensions"), dict) else {}
         score = _score_dimensions(dimensions)
-        score, _, evidence, gate_reason = apply_business_gate(item, score)
+
+        if mode == "youtube":
+            # Для YouTube оцениваем качество ПЛОЩАДКИ и релевантность аудитории.
+            # Жёсткий фильтр кандидата здесь неприменим: автор видео не обязан быть лидом.
+            evidence = [
+                str(value).strip()
+                for value in (item.get("business_evidence") or [])
+                if str(value).strip()
+            ][:3]
+            gate_reason = str(
+                item.get("business_gate_reason")
+                or item.get("why_fit")
+                or "Релевантность аудитории YouTube."
+            ).strip()
+        else:
+            score, _, evidence, gate_reason = apply_business_gate(item, score)
 
         source_url = str(item.get("source_url") or "").strip()
         entity_url = str(item.get("entity_url") or "").strip()
@@ -295,9 +390,19 @@ def discover_public_candidates(
             if "youtube.com/" not in low and "youtu.be/" not in low:
                 continue
 
-        business_relevant = bool(item.get("business_relevant") is True and evidence)
-        if not business_relevant or score < 50:
-            continue
+        if mode == "youtube":
+            # Для площадки достаточно сильной тематической релевантности.
+            business_relevant = bool(
+                item.get("business_relevant") is True
+                or evidence
+                or str(item.get("why_fit") or "").strip()
+            )
+            if not business_relevant or score < 45:
+                continue
+        else:
+            business_relevant = bool(item.get("business_relevant") is True and evidence)
+            if not business_relevant or score < 50:
+                continue
 
         candidate_language = str(item.get("candidate_language") or "").strip().lower()
         if not _language_matches(candidate_language, allowed_languages):
@@ -318,20 +423,39 @@ def discover_public_candidates(
 
         contactable = bool(item.get("contactable") is True)
         contact_route = str(item.get("contact_route") or "").strip()
-        if require_contactable and (not contactable or not contact_route):
-            continue
 
         role_type = str(item.get("role_type") or "unknown").strip().lower()
         intent_type = str(item.get("intent_type") or "unknown").strip().lower()
         result_kind = str(item.get("result_kind") or ("venue" if mode == "youtube" else "person")).strip().lower()
 
+        comments_status = "unknown"
+
         if mode == "youtube":
-            # YouTube-режим выдаёт площадки для участия в разговоре, а не "готовых партнёров".
+            # Сам URL ролика уже является путём взаимодействия; не ждём от модели отдельного contact_route.
+            contactable = True
+            contact_route = contact_route or "Комментарии под видео"
             if result_kind != "venue":
                 continue
-            if item.get("comments_open") is not True:
+
+            model_comments = str(item.get("comments_status") or "").strip().lower()
+            if not model_comments:
+                if item.get("comments_open") is True:
+                    model_comments = "open"
+                elif item.get("comments_open") is False:
+                    model_comments = "unknown"
+
+            probed_comments = _probe_youtube_comments(source_url)
+            comments_status = (
+                probed_comments
+                if probed_comments in {"open", "closed"}
+                else (model_comments if model_comments in {"open", "closed"} else "unknown")
+            )
+
+            if comments_status == "closed":
                 continue
         else:
+            if require_contactable and (not contactable or not contact_route):
+                continue
             # В web-режиме нужны люди, а не контент-продавцы или страницы компаний.
             if result_kind != "person":
                 continue
@@ -351,7 +475,8 @@ def discover_public_candidates(
             "role_type": role_type,
             "intent_type": intent_type,
             "contactable": contactable,
-            "comments_open": bool(item.get("comments_open") is True),
+            "comments_open": comments_status == "open" if mode == "youtube" else bool(item.get("comments_open") is True),
+            "comments_status": comments_status if mode == "youtube" else "",
             "result_kind": result_kind,
             "age_days": age_days,
             "pain_signal": str(item.get("pain_signal") or "")[:1000],
@@ -375,9 +500,24 @@ def discover_public_candidates(
         })
 
     results.sort(key=lambda x: int(x.get("score") or 0), reverse=True)
+
+    if mode == "youtube":
+        confirmed = [
+            item for item in results
+            if str(item.get("comments_status") or "") == "open"
+        ][:max_results]
+        verification_needed = [
+            item for item in results
+            if str(item.get("comments_status") or "") == "unknown"
+        ][:max_results]
+    else:
+        confirmed = results[:max_results]
+        verification_needed = []
+
     return {
         "mode": mode,
-        "candidates": results[:max_results],
+        "candidates": confirmed,
+        "verification_needed": verification_needed,
         "web_citations": cited_sources,
         "checked_at": datetime.now(UTC).isoformat(),
         "note": "Черновики комментариев/контактов не отправлены автоматически.",

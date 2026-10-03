@@ -117,6 +117,12 @@ def _render_candidate(
         if item.get("caution"):
             st.caption("Проверить: " + str(item["caution"]))
 
+        if youtube and str(item.get("comments_status") or "") == "unknown":
+            st.warning(
+                "Статус комментариев YouTube не удалось подтвердить автоматически. "
+                "Откройте ролик и проверьте, есть ли поле «Введите комментарий»."
+            )
+
         existing_draft = str(
             st.session_state.get(draft_state_key)
             or item.get("comment_draft")
@@ -140,11 +146,22 @@ def _render_candidate(
                 use_container_width=True,
             )
 
+        comment_status = str(item.get("comments_status") or "")
+        comment_label = (
+            "✅ Комментарии открыты — подготовить"
+            if youtube and comment_status == "unknown"
+            else "💬 Подготовить комментарий"
+        )
         if c2.button(
-            "💬 Подготовить комментарий",
+            comment_label,
             key=f"public_comment_{owner_id}_{card_id}",
             use_container_width=True,
         ):
+            # Если статус был unknown, нажатие означает, что Директор уже открыл ролик
+            # и вручную подтвердил наличие поля комментария.
+            if youtube and comment_status == "unknown":
+                item["comments_status"] = "open"
+                item["comments_open"] = True
             with st.spinner("Неона пишет комментарий именно к этой публикации..."):
                 try:
                     existing_draft = draft_engagement_comment(item, target_profile)
@@ -302,17 +319,38 @@ def render_neonia_public_scout(target_profile: dict, owner_id: int) -> None:
         result = st.session_state.get(f"neonia_youtube_scout_result_{owner_id}")
         if isinstance(result, dict):
             venues = result.get("candidates") or []
-            if not venues:
+            verification_needed = result.get("verification_needed") or []
+
+            if not venues and not verification_needed:
                 st.info(
-                    "Подходящих свежих YouTube-площадок с открытыми комментариями не найдено."
+                    "Неония не нашла даже свежих релевантных YouTube-разговоров "
+                    "по выбранному языку и сроку."
                 )
-            for item in venues:
-                _render_candidate(
-                    item,
-                    target_profile=target_profile,
-                    owner_id=owner_id,
-                    youtube=True,
+
+            if venues:
+                st.markdown("#### ✅ Комментарии подтверждены")
+                for item in venues:
+                    _render_candidate(
+                        item,
+                        target_profile=target_profile,
+                        owner_id=owner_id,
+                        youtube=True,
+                    )
+
+            if verification_needed:
+                st.markdown("#### 🔎 Свежие ролики — нужно проверить комментарии")
+                st.caption(
+                    "Поиск нашёл релевантные свежие ролики, но YouTube не дал надёжно "
+                    "прочитать динамический статус комментариев. Это не повод выбрасывать "
+                    "ролик: откройте его одной кнопкой и подтвердите поле комментария."
                 )
+                for item in verification_needed:
+                    _render_candidate(
+                        item,
+                        target_profile=target_profile,
+                        owner_id=owner_id,
+                        youtube=True,
+                    )
 
 def render_neona_public_leads(
     owner_id: int,
