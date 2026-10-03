@@ -22,11 +22,6 @@ from typing import Any
 
 import requests
 
-try:
-    import streamlit as st
-except Exception:
-    st = None
-
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 
 UTC = timezone.utc
@@ -41,13 +36,6 @@ WEIGHTS = {
 
 
 def _env(name: str, default: str = "") -> str:
-    if st is not None:
-        try:
-            value = st.secrets.get(name)
-            if value is not None and str(value).strip():
-                return str(value).strip()
-        except Exception:
-            pass
     return str(os.getenv(name, default) or default).strip()
 
 
@@ -298,3 +286,125 @@ def discover_public_candidates(
         "checked_at": datetime.now(UTC).isoformat(),
         "note": "Черновики комментариев/контактов не отправлены автоматически.",
     }
+
+
+def _call_text_model(system_prompt: str, user_prompt: str) -> str:
+    api_key = _required_env("OPENAI_API_KEY")
+    model = _env("NEONIA_PUBLIC_SCOUT_MODEL", "gpt-5-mini") or "gpt-5-mini"
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "instructions": str(system_prompt or ""),
+            "input": str(user_prompt or ""),
+            "store": False,
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    text, _ = _extract_text_and_sources(response.json())
+    return text.strip()
+
+
+def draft_engagement_comment(
+    candidate: dict[str, Any],
+    target_profile: dict[str, Any] | str,
+) -> str:
+    """Готовит естественный публичный комментарий. Ничего не публикует."""
+    source_type = str(candidate.get("source_type") or "web").lower()
+    system_prompt = """
+Ты — Неона, секретарь-референт Агентства W.
+Подготовь ОДИН естественный публичный комментарий к найденной публикации.
+
+Цель комментария — не продать и не рекламировать, а:
+- показать, что автор действительно прочитан;
+- добавить одну содержательную мысль;
+- вызвать нормальный профессиональный разговор.
+
+Правила:
+- 1–3 коротких предложения;
+- без ссылок, без спама, без обещаний дохода;
+- не критиковать проект человека и не переманивать его напрямую;
+- не притворяться знакомым;
+- не выдумывать детали, которых нет в карточке;
+- если уместно — закончить одним содержательным вопросом;
+- не писать слова «ИИ-бот», «автоматический бот»;
+- комментарий должен быть уникальным для данного публичного сигнала.
+Верни только готовый комментарий без пояснений и кавычек.
+""".strip()
+
+    if source_type == "youtube":
+        system_prompt += (
+            "\nДля YouTube комментарий должен относиться именно к теме конкретного видео "
+            "и быть не длиннее примерно 450 знаков."
+        )
+    else:
+        system_prompt += (
+            "\nДля LinkedIn/публичного поста тон профессиональный, человеческий, "
+            "без канцелярита и без рекламного призыва."
+        )
+
+    request = {
+        "target_profile": target_profile,
+        "candidate": {
+            "name": candidate.get("name"),
+            "source_title": candidate.get("source_title"),
+            "pain_signal": candidate.get("pain_signal"),
+            "why_fit": candidate.get("why_fit"),
+            "why_now": candidate.get("why_now"),
+            "business_evidence": candidate.get("business_evidence"),
+            "source_type": source_type,
+        },
+    }
+    return _call_text_model(
+        system_prompt,
+        json.dumps(request, ensure_ascii=False, default=str),
+    )[:650].strip()
+
+
+def draft_first_message_for_public_lead(
+    candidate: dict[str, Any],
+    target_profile: dict[str, Any] | str,
+    owner_name: str = "",
+) -> str:
+    """Готовит первое личное сообщение для найденного во внешнем источнике лида."""
+    system_prompt = """
+Ты — Неона, секретарь-референт владельца Агентства W.
+Подготовь ОДНО первое личное сообщение человеку, найденному Неонией по публичному сигналу.
+
+Правила:
+- 2–4 коротких предложения;
+- обращаться только по имени, если оно уверенно известно;
+- честно опираться на конкретный публичный пост/сигнал;
+- не утверждать, что человек заинтересован;
+- не обещать доход, результат или лёгкие деньги;
+- не критиковать его текущий проект;
+- не писать массовую рекламную заготовку;
+- цель первого сообщения — начать разговор и задать один лёгкий вопрос;
+- если имя неясно, начать с «Здравствуйте!».
+Верни только готовый текст без пояснений и кавычек.
+""".strip()
+
+    request = {
+        "owner_name": owner_name,
+        "target_profile": target_profile,
+        "candidate": {
+            "name": candidate.get("name"),
+            "source_title": candidate.get("source_title"),
+            "pain_signal": candidate.get("pain_signal"),
+            "why_fit": candidate.get("why_fit"),
+            "why_now": candidate.get("why_now"),
+            "business_evidence": candidate.get("business_evidence"),
+            "contact_route": candidate.get("contact_route"),
+            "source_url": candidate.get("source_url"),
+            "source_type": candidate.get("source_type"),
+        },
+    }
+    return _call_text_model(
+        system_prompt,
+        json.dumps(request, ensure_ascii=False, default=str),
+    )[:1200].strip()

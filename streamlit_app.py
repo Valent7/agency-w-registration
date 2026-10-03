@@ -111,7 +111,7 @@ from vk_scout_ui import render_vk_sources
 from vk_scout_oauth import handle_vk_scout_oauth_callback
 from telegram_stories_ui import render_telegram_stories_radar
 from instagram_radar_ui import render_instagram_radar
-from neonia_public_scout_ui import render_neonia_public_scout
+from neonia_public_scout_ui import render_neonia_public_scout, render_neona_public_leads
 from content_factory_ui import render_content_factory
 import asyncio
 import json
@@ -8051,7 +8051,7 @@ if telegram_login_valid or remembered_data:
                                     "искать людей вслепую."
                                 )
                             else:
-                                render_neonia_public_scout(scout_profile)
+                                render_neonia_public_scout(scout_profile, owner_id=int(telegram_id))
 
                         elif neonia_mode == "💙 Источники поиска VK":
                             render_vk_sources(
@@ -9764,6 +9764,22 @@ if telegram_login_valid or remembered_data:
                         "к осознанной встрече с владельцем. Первое сообщение не "
                         "отправляется без утверждения владельца."
                     )
+
+                    public_passport_key = (
+                        f"neonia_target_audience_passport_{telegram_id}"
+                    )
+                    public_passport = st.session_state.get(public_passport_key)
+                    public_profile = (
+                        public_passport.get("profile")
+                        if isinstance(public_passport, dict)
+                        else None
+                    )
+                    render_neona_public_leads(
+                        int(telegram_id),
+                        target_profile=public_profile,
+                        owner_name=str(first_name or ""),
+                    )
+
 
                     # Служебные инструменты Неоны (HeyGen-тест, внутренний регламент,
                     # ручной тест входящих и диагностика) намеренно не показываем
