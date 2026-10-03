@@ -1,6 +1,8 @@
+import base64
 import json
 import hashlib
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -64,7 +66,10 @@ def _portrait_references(names):
                 }
             )
     logo_path = assets_dir / "agency_w_icon.png"
-    if references and logo_path.exists():
+    # Логотип нужен даже в сценах без названного героя (например, пиджаки
+    # крупным планом). Иначе художник видит только слово W в задании и
+    # подменяет официальный знак обычной буквой.
+    if logo_path.exists():
         references.append(
             {
                 "name": "Официальный знак Агентства W",
@@ -207,8 +212,11 @@ def _generate_reel_scenes(item, scenes, spoken_text, generate_illustration_fn):
             f"Вертикальный кадр {index} из {len(scenes[:6])} для одного Reels. "
             f"Содержание сцены: {scene}. "
             "Фотореалистичная кинематографичная сцена, единый премиальный стиль "
-            "Агентства W, тёмно-синие фирменные пиджаки у профессионалов, "
-            "золотой знак W на лацкане. Без букв, подписей, интерфейсного мусора, "
+            "Агентства W, тёмно-синие фирменные пиджаки у профессионалов. "
+            "Если виден лацкан или фирменный пиджак, используй только полный "
+            "официальный золотой знак из приложенного эталона: щит с двойной "
+            "W и светящейся точкой. Обычная одиночная буква W запрещена. "
+            "Без других букв, подписей, интерфейсного мусора, "
             "рамок и белых полей. Не добавляй людей, которых нет в описании."
         )
         result = generate_illustration_fn(
@@ -608,6 +616,166 @@ def _download_video_bytes(video_url):
     return response.content
 
 
+def _runway_api_secret():
+    """Возвращает ключ Runway из Streamlit Secrets, не показывая его в интерфейсе."""
+    try:
+        secret = str(st.secrets.get("RUNWAYML_API_SECRET") or "").strip()
+    except (FileNotFoundError, KeyError, TypeError):
+        secret = ""
+    return secret or str(os.getenv("RUNWAYML_API_SECRET") or "").strip()
+
+
+def _runway_error(response):
+    """Преобразует ответ Runway в короткое понятное сообщение без секретов."""
+    try:
+        payload = response.json()
+    except (ValueError, requests.JSONDecodeError):
+        payload = {}
+    if isinstance(payload, dict):
+        detail = (
+            payload.get("error")
+            or payload.get("message")
+            or payload.get("detail")
+        )
+        if isinstance(detail, dict):
+            detail = detail.get("message") or detail.get("reason")
+        if detail:
+            return _clean_text(detail, 700)
+    return f"Runway вернул ошибку {response.status_code}."
+
+
+def _image_data_uri(image_bytes):
+    mime_type = "image/png"
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            mime_type = Image.MIME.get(image.format, mime_type)
+    except OSError:
+        pass
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _runway_motion_prompt(scene, index, total):
+    """Задание только на естественное движение, без перерисовки героев и знака."""
+    return _clean_text(
+        f"""
+Live-action cinematic motion for vertical scene {index} of {total}.
+Scene: {scene}
+Animate the existing image naturally: subtle human gestures, breathing, blinking,
+realistic fabric and hair movement, gentle environmental motion and a slow stable
+camera move. Preserve every person's face, age, clothing and body proportions.
+Preserve the official Agency W gold emblem exactly as it appears in the source
+image: shield, double W and glowing dot. Do not replace it with a plain letter W.
+No morphing, no new people, no extra fingers, no captions, no letters, no logos
+other than the existing Agency W emblem. Premium realistic commercial video.
+""",
+        1000,
+    )
+
+
+def _start_runway_scene(image_bytes, scene, index, total):
+    secret = _runway_api_secret()
+    if not secret:
+        raise RuntimeError(
+            "Ключ Runway не найден. В Streamlit → Settings → Secrets добавьте "
+            "RUNWAYML_API_SECRET и нажмите Save."
+        )
+    response = requests.post(
+        "https://api.dev.runwayml.com/v1/image_to_video",
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-Runway-Version": "2024-11-06",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "gen4_turbo",
+            "promptImage": _image_data_uri(image_bytes),
+            "promptText": _runway_motion_prompt(scene, index, total),
+            "ratio": "720:1280",
+            "duration": 5,
+        },
+        timeout=120,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_runway_error(response))
+    try:
+        payload = response.json()
+    except (ValueError, requests.JSONDecodeError) as exc:
+        raise RuntimeError("Runway вернул непонятный ответ при запуске сцены.") from exc
+    task_id = str(payload.get("id") or "").strip()
+    if not task_id:
+        raise RuntimeError("Runway не вернул номер задачи для сцены.")
+    return task_id
+
+
+def _start_runway_scenes(scene_images, scenes):
+    if not scene_images:
+        raise RuntimeError("Нет изображений, которые можно оживить.")
+    task_ids = []
+    total = len(scene_images)
+    for index, image_bytes in enumerate(scene_images, start=1):
+        scene = scenes[index - 1] if index <= len(scenes) else f"Сцена {index}"
+        task_ids.append(_start_runway_scene(image_bytes, scene, index, total))
+    return task_ids
+
+
+def _runway_output_url(payload):
+    output = payload.get("output") if isinstance(payload, dict) else None
+    if isinstance(output, list) and output:
+        first = output[0]
+        if isinstance(first, str):
+            return first.strip()
+        if isinstance(first, dict):
+            return str(first.get("url") or first.get("uri") or "").strip()
+    if isinstance(output, str):
+        return output.strip()
+    return ""
+
+
+def _check_runway_scenes(task_ids):
+    secret = _runway_api_secret()
+    if not secret:
+        raise RuntimeError("Ключ Runway не найден в Streamlit Secrets.")
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "X-Runway-Version": "2024-11-06",
+    }
+    urls = []
+    pending = 0
+    for task_id in task_ids:
+        response = requests.get(
+            f"https://api.dev.runwayml.com/v1/tasks/{task_id}",
+            headers=headers,
+            timeout=60,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(_runway_error(response))
+        try:
+            payload = response.json()
+        except (ValueError, requests.JSONDecodeError) as exc:
+            raise RuntimeError("Runway вернул непонятный статус сцены.") from exc
+        status = str(payload.get("status") or "").upper()
+        if status in {"FAILED", "CANCELLED"}:
+            reason = (
+                payload.get("failure")
+                or payload.get("failureCode")
+                or payload.get("error")
+                or "Runway не смог оживить одну из сцен."
+            )
+            raise RuntimeError(_clean_text(reason, 700))
+        url = _runway_output_url(payload)
+        if status == "SUCCEEDED" and url:
+            urls.append(url)
+        else:
+            pending += 1
+    return {
+        "ready": len(urls),
+        "total": len(task_ids),
+        "pending": pending,
+        "video_urls": urls if pending == 0 else [],
+    }
+
+
 def _probe_video_duration(video_path):
     ffprobe_path = shutil.which("ffprobe")
     if not ffprobe_path:
@@ -857,6 +1025,163 @@ def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta):
         final_bytes = final_path.read_bytes()
         if not final_bytes:
             raise RuntimeError("Готовый Reels получился пустым.")
+        return final_bytes
+
+
+def _download_runway_videos(video_urls):
+    clips = []
+    for index, video_url in enumerate(video_urls, start=1):
+        response = requests.get(str(video_url or "").strip(), timeout=240)
+        response.raise_for_status()
+        if not response.content:
+            raise RuntimeError(f"Runway вернул пустую сцену {index}.")
+        clips.append(response.content)
+    return clips
+
+
+def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
+    """Собирает живые сцены Runway, голос, субтитры, знак и доступную музыку."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "На сервере не найден ffmpeg. Добавьте packages.txt со строкой ffmpeg."
+        )
+    if not scene_videos:
+        raise RuntimeError("Runway ещё не вернул живые сцены.")
+
+    with tempfile.TemporaryDirectory(prefix="agency_w_live_reel_") as temp_dir:
+        temp_path = Path(temp_dir)
+        narration_path = temp_path / "narration.mp4"
+        narration_path.write_bytes(narration_video)
+        duration = _probe_video_duration(narration_path)
+        scene_duration = duration / len(scene_videos)
+        segment_paths = []
+
+        for index, video_bytes in enumerate(scene_videos):
+            source_path = temp_path / f"runway_{index:02d}.mp4"
+            source_path.write_bytes(video_bytes)
+            source_duration = _probe_video_duration(source_path)
+            stretch = scene_duration / source_duration
+            fade_out = max(0.0, scene_duration - 0.22)
+            segment_path = temp_path / f"live_segment_{index:02d}.mp4"
+            filter_value = (
+                "scale=1080:1920:force_original_aspect_ratio=increase,"
+                "crop=1080:1920,fps=30,"
+                f"setpts={stretch:.8f}*PTS,"
+                "fade=t=in:st=0:d=0.18,"
+                f"fade=t=out:st={fade_out:.3f}:d=0.18,"
+                "format=yuv420p"
+            )
+            result = subprocess.run(
+                [
+                    ffmpeg_path, "-y", "-i", str(source_path),
+                    "-t", f"{scene_duration:.3f}", "-vf", filter_value,
+                    "-an", "-c:v", "libx264", "-preset", "veryfast",
+                    "-crf", "21", "-pix_fmt", "yuv420p", str(segment_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=300,
+                check=False,
+            )
+            if result.returncode != 0 or not segment_path.exists():
+                raise RuntimeError(
+                    "Не удалось подготовить живую сцену: "
+                    + result.stderr.decode("utf-8", errors="ignore")[-700:]
+                )
+            segment_paths.append(segment_path)
+
+        concat_path = temp_path / "live_segments.txt"
+        concat_path.write_text(
+            "\n".join(f"file '{path.as_posix()}'" for path in segment_paths) + "\n",
+            encoding="utf-8",
+        )
+        silent_path = temp_path / "live_silent.mp4"
+        concat_result = subprocess.run(
+            [
+                ffmpeg_path, "-y", "-f", "concat", "-safe", "0",
+                "-i", str(concat_path), "-c", "copy", str(silent_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            check=False,
+        )
+        if concat_result.returncode != 0 or not silent_path.exists():
+            raise RuntimeError("Не удалось соединить живые сцены Reels.")
+
+        subtitle_path = temp_path / "captions.ass"
+        _write_subtitles(subtitle_path, spoken_text, cta, duration)
+        assets_dir = Path(__file__).resolve().parent / "assets"
+        logo_path = assets_dir / "agency_w_icon.png"
+        music_path = assets_dir / "reel_music.mp3"
+        final_path = temp_path / "agency_w_live_reel.mp4"
+
+        command = [
+            ffmpeg_path, "-y", "-i", str(silent_path), "-i", str(narration_path)
+        ]
+        logo_index = None
+        music_index = None
+        next_index = 2
+        if logo_path.exists():
+            command.extend(["-loop", "1", "-i", str(logo_path)])
+            logo_index = next_index
+            next_index += 1
+        if music_path.exists():
+            command.extend(["-stream_loop", "-1", "-i", str(music_path)])
+            music_index = next_index
+
+        filters = []
+        current_video = "0:v"
+        if logo_index is not None:
+            filters.extend(
+                [
+                    f"[{logo_index}:v]scale=120:-1[agencylogo]",
+                    f"[{current_video}][agencylogo]overlay=W-w-55:55:shortest=1[withlogo]",
+                ]
+            )
+            current_video = "withlogo"
+        filters.append(
+            f"[{current_video}]subtitles={subtitle_path.as_posix()}[finalvideo]"
+        )
+
+        if music_index is not None:
+            filters.extend(
+                [
+                    "[1:a]volume=1.0[voice]",
+                    f"[{music_index}:a]volume=0.09[music]",
+                    "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[finalaudio]",
+                ]
+            )
+
+        command.extend(["-filter_complex", ";".join(filters), "-map", "[finalvideo]"])
+        if music_index is not None:
+            command.extend(["-map", "[finalaudio]"])
+        else:
+            command.extend(["-map", "1:a:0"])
+        command.extend(
+            [
+                "-t", f"{duration:.3f}", "-c:v", "libx264", "-preset", "veryfast",
+                "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-b:a", "192k", "-movflags", "+faststart", "-shortest",
+                str(final_path),
+            ]
+        )
+        final_result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=420,
+            check=False,
+        )
+        if final_result.returncode != 0 or not final_path.exists():
+            raise RuntimeError(
+                "Не удалось собрать живой Reels: "
+                + final_result.stderr.decode("utf-8", errors="ignore")[-900:]
+            )
+        final_bytes = final_path.read_bytes()
+        if not final_bytes:
+            raise RuntimeError("Готовый живой Reels получился пустым.")
         return final_bytes
 
 
@@ -2237,15 +2562,24 @@ def _render_item(
         reel_state = reel_state if isinstance(reel_state, dict) else {}
         video_id = _clean_text(reel_state.get("video_id"), 300)
         final_video = reel_state.get("final_video")
+        runway_available = bool(_runway_api_secret())
 
         if not video_id and not final_video:
             st.warning(
-                "Следующая кнопка использует платные изображения OpenAI и озвучку HeyGen. "
-                "Нажмите её один раз."
+                "Следующая кнопка использует изображения OpenAI, голос HeyGen и "
+                "оживление сцен Runway. Нажмите её один раз."
             )
+            if runway_available:
+                st.success("Runway подключён. Сцены будут действительно двигаться.")
+            else:
+                st.error(
+                    "Runway пока не подключён. Сохраните RUNWAYML_API_SECRET в "
+                    "Streamlit Secrets, иначе живой ролик создать нельзя."
+                )
             if st.button(
-                "🎬 Создать готовый Reels",
+                "🎬 Создать живой Reels",
                 key=prefix + "_make_reel",
+                disabled=not runway_available,
                 use_container_width=True,
             ):
                 with st.spinner("Художник создаёт видеосцены..."):
@@ -2278,14 +2612,17 @@ def _render_item(
 
         video_id = _clean_text(reel_state.get("video_id"), 300)
         final_video = reel_state.get("final_video")
-        if video_id and not final_video:
+        narration_video = reel_state.get("narration_video")
+        runway_tasks = reel_state.get("runway_tasks") or []
+
+        if video_id and not narration_video and not final_video:
             st.info(
                 "Неона записывает голос. Можно заниматься другими делами и вернуться "
-                "сюда позже — сцены и номер видео сохранены на этом экране."
+                "сюда позже. Кнопка ниже не блокируется: нажмите её для проверки."
             )
             if st.button(
-                "🔄 Видео готово? Проверить и собрать",
-                key=prefix + "_check_reel",
+                "🔄 Проверить голос и оживить сцены",
+                key=prefix + "_check_voice",
                 use_container_width=True,
             ):
                 with st.spinner("Проверяем озвучку..."):
@@ -2297,17 +2634,17 @@ def _render_item(
                     status = str(result.get("status") or "").lower()
                     if status == "completed" and result.get("video_url"):
                         try:
-                            with st.spinner("Собираем сцены, голос и субтитры в MP4..."):
+                            with st.spinner("Голос готов. Передаём сцены в Runway..."):
                                 narration = _download_video_bytes(result["video_url"])
-                                reel_state["final_video"] = _assemble_ready_reel(
+                                reel_state["narration_video"] = narration
+                                reel_state["runway_tasks"] = _start_runway_scenes(
                                     reel_state.get("scene_images") or [],
-                                    narration,
-                                    reel_state.get("spoken_text") or "",
-                                    item.get("cta") or "",
+                                    reel_state.get("scenes") or [],
                                 )
-                                reel_state["status"] = "ready"
+                                reel_state["status"] = "animating"
+                                reel_state.pop("error", None)
                         except (requests.RequestException, RuntimeError, OSError) as exc:
-                            reel_state["status"] = "assembly_error"
+                            reel_state["status"] = "animation_error"
                             reel_state["error"] = str(exc)
                     elif status == "failed":
                         reel_state["error"] = str(
@@ -2316,10 +2653,88 @@ def _render_item(
                     st.session_state[reel_state_key] = reel_state
                     st.rerun()
 
+        narration_video = reel_state.get("narration_video")
+        runway_tasks = reel_state.get("runway_tasks") or []
+        final_video = reel_state.get("final_video")
+
+        if narration_video and not runway_tasks and not final_video:
+            st.info("Голос и изображения сохранены. Осталось оживить сцены.")
+            if st.button(
+                "🎞 Оживить сцены в Runway",
+                key=prefix + "_start_runway",
+                disabled=not runway_available,
+                use_container_width=True,
+            ):
+                try:
+                    with st.spinner("Runway запускает живые сцены..."):
+                        reel_state["runway_tasks"] = _start_runway_scenes(
+                            reel_state.get("scene_images") or [],
+                            reel_state.get("scenes") or [],
+                        )
+                    reel_state["status"] = "animating"
+                    reel_state.pop("error", None)
+                except (requests.RequestException, RuntimeError, OSError) as exc:
+                    reel_state["status"] = "animation_error"
+                    reel_state["error"] = str(exc)
+                st.session_state[reel_state_key] = reel_state
+                st.rerun()
+
+        runway_tasks = reel_state.get("runway_tasks") or []
+        if runway_tasks and not final_video:
+            ready_count = int(reel_state.get("runway_ready_count") or 0)
+            total_count = len(runway_tasks)
+            st.info(
+                f"Runway оживляет сцены: готово {ready_count} из {total_count}. "
+                "Обычно это занимает несколько минут. Можно уйти со страницы и вернуться."
+            )
+            if st.button(
+                "🔄 Проверить живые сцены и собрать Reels",
+                key=prefix + "_check_runway",
+                use_container_width=True,
+            ):
+                try:
+                    with st.spinner("Проверяем готовность живых сцен..."):
+                        runway_result = _check_runway_scenes(runway_tasks)
+                    reel_state["runway_ready_count"] = runway_result["ready"]
+                    if runway_result["pending"]:
+                        reel_state["status"] = "animating"
+                    else:
+                        with st.spinner(
+                            "Сцены готовы. Добавляем голос, субтитры и фирменный знак..."
+                        ):
+                            live_clips = _download_runway_videos(
+                                runway_result["video_urls"]
+                            )
+                            reel_state["final_video"] = _assemble_animated_reel(
+                                live_clips,
+                                narration_video,
+                                reel_state.get("spoken_text") or "",
+                                item.get("cta") or "",
+                            )
+                        reel_state["status"] = "ready"
+                        reel_state.pop("error", None)
+                except (requests.RequestException, RuntimeError, OSError) as exc:
+                    reel_state["status"] = "assembly_error"
+                    reel_state["error"] = str(exc)
+                st.session_state[reel_state_key] = reel_state
+                st.rerun()
+
         if reel_state.get("error"):
             st.error(str(reel_state["error"]))
-            if st.button(
-                "Начать создание Reels заново",
+            retry_col, reset_col = st.columns(2)
+            if narration_video and retry_col.button(
+                "Повторить только оживление",
+                key=prefix + "_retry_animation",
+                use_container_width=True,
+            ):
+                reel_state.pop("runway_tasks", None)
+                reel_state.pop("runway_ready_count", None)
+                reel_state.pop("error", None)
+                reel_state["status"] = "voice_ready"
+                st.session_state[reel_state_key] = reel_state
+                st.rerun()
+            if reset_col.button(
+                "Начать Reels заново",
                 key=prefix + "_reset_reel",
                 use_container_width=True,
             ):
@@ -2337,7 +2752,21 @@ def _render_item(
                 key=prefix + "_reel_download",
                 use_container_width=True,
             )
-            st.success("Этот MP4 можно публиковать в Instagram Reels.")
+            music_path = Path(__file__).resolve().parent / "assets" / "reel_music.mp3"
+            if music_path.exists():
+                st.success(
+                    "Готово: живые сцены, голос, субтитры, музыка и официальный "
+                    "знак. Этот MP4 можно публиковать в Instagram Reels."
+                )
+            else:
+                st.success(
+                    "Готово: живые сцены, голос, субтитры и официальный знак. "
+                    "Этот MP4 можно публиковать в Instagram Reels."
+                )
+                st.caption(
+                    "Музыка добавится автоматически, когда в assets появится "
+                    "лицензированный файл reel_music.mp3."
+                )
 
 
 def render_content_factory(
