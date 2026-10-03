@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
+from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -682,8 +683,13 @@ def _build_no_data_candidate(source: dict[str, Any]) -> dict[str, Any]:
         "activity_precision": str(source.get("activity_precision") or "unknown"),
         "work_state": str(source.get("work_state") or "available"),
         "work_state_label": str(source.get("work_state_label") or "Можно начинать новый разговор"),
-        "selection_blocked": bool(source.get("selection_blocked", False)),
-        "block_reason": str(source.get("block_reason") or ""),
+        # Единая политика Неонии: без подтверждённого бизнес-сигнала
+        # контакт не попадает в рекомендованную холодную пятёрку.
+        "selection_blocked": True,
+        "block_reason": "нет подтверждённой бизнес-релевантности",
+        "business_relevant": False,
+        "business_evidence": [],
+        "business_gate_reason": "Недостаточно данных для подтверждения бизнес-релевантности.",
         "last_owner_outreach_at": str(source.get("last_owner_outreach_at") or ""),
         "cooldown_until": str(source.get("cooldown_until") or ""),
         "potential_interest": "неясно",
@@ -769,10 +775,12 @@ def _analyze_candidates(passport_analysis: Any, contexts: list[dict[str, Any]]) 
     if not contexts:
         return []
 
-    system_prompt = """
+    system_prompt = f"""
 Ты — Неония, аналитик людей Агентства W.
 У тебя есть сохранённый портрет целевой аудитории проекта владельца и данные контактов Telegram.
 Оценивай только по имеющимся данным, ничего не выдумывай и не решай за владельца.
+
+{BUSINESS_GATE_RULES}
 
 Для каждого контакта верни JSON-объект с полями:
 telegram_id;
@@ -783,7 +791,10 @@ obstacles — 0–3 реальных препятствия;
 short_portrait — 1–2 предложения;
 owner_hint — короткая спокойная рекомендация;
 message_angle — с какой человеческой стороны начать разговор;
-project_name, project_url, project_evidence — только если явно есть в данных.
+project_name, project_url, project_evidence — только если явно есть в данных;
+business_relevant — true/false;
+business_evidence — 1–3 конкретных свидетельства из переданных данных;
+business_gate_reason — короткая причина решения.
 
 Важно: старый интерес к ИИ/криптовалюте/MLM сам по себе не делает человека приоритетным; другой действующий проект обязательно отражай в obstacles; если данных мало, прямо говори об этом; не оценивай по имени, полу, возрасту, национальности или фотографии.
 Верни ТОЛЬКО JSON-массив без Markdown.
@@ -829,6 +840,18 @@ project_name, project_url, project_evidence — только если явно �
         obstacles = [str(value).strip()[:250] for value in obstacles[:3] if str(value).strip()]
         score = {"высокий": 75, "средний": 50, "низкий": 25}[interest]
 
+        score, recommendation, business_evidence, business_gate_reason = apply_business_gate(
+            item,
+            score,
+            pass_recommendation="Решает владелец",
+            reject_recommendation=None,
+        )
+        business_relevant = bool(item.get("business_relevant") is True and business_evidence)
+        gate_blocked = not business_relevant
+        if gate_blocked:
+            # Даже высокий "потенциальный интерес" не может обойти бизнес-фильтр.
+            interest = "низкий"
+
         normalized.append(
             {
                 "telegram_id": cid,
@@ -841,8 +864,15 @@ project_name, project_url, project_evidence — только если явно �
                 "activity_precision": str(source.get("activity_precision") or "unknown"),
                 "work_state": str(source.get("work_state") or "available"),
                 "work_state_label": str(source.get("work_state_label") or "Можно начинать новый разговор"),
-                "selection_blocked": bool(source.get("selection_blocked", False)),
-                "block_reason": str(source.get("block_reason") or ""),
+                "selection_blocked": bool(source.get("selection_blocked", False)) or gate_blocked,
+                "block_reason": (
+                    str(source.get("block_reason") or "")
+                    if not gate_blocked
+                    else (business_gate_reason or "нет подтверждённой бизнес-релевантности")
+                ),
+                "business_relevant": business_relevant,
+                "business_evidence": business_evidence,
+                "business_gate_reason": business_gate_reason,
                 "last_owner_outreach_at": str(source.get("last_owner_outreach_at") or ""),
                 "cooldown_until": str(source.get("cooldown_until") or ""),
                 "potential_interest": interest,
@@ -859,7 +889,7 @@ project_name, project_url, project_evidence — только если явно �
                 "score": score,
                 "confidence": "аналитическая оценка",
                 "reasons": [str(item.get("short_portrait") or "Данных пока немного.")[:300]],
-                "recommendation": "Решает владелец",
+                "recommendation": recommendation,
                 "status": "Проанализирован",
                 "analysis_cost_mode": "openai",
                 "analyzed_at": datetime.now(BERLIN).isoformat(),

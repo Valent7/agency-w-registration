@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+"""
+Agency W — Neonia Public Scout.
+
+Назначение:
+- искать потенциальных партнёров по ПУБЛИЧНЫМ сигналам потребности;
+- режимы: open web и YouTube discovery;
+- не обходить логины/закрытые группы/ограничения;
+- не отправлять сообщения и не публиковать комментарии автоматически;
+- выдавать доказательства, URL первоисточника и черновик следующего шага.
+
+Этот модуль не заменяет VK/Telegram Scout. Он добавляет новые "глаза"
+к единому мозгу Неонии.
+"""
+
+import json
+import os
+import re
+from datetime import datetime, timezone
+from typing import Any
+
+import requests
+
+try:
+    import streamlit as st
+except Exception:
+    st = None
+
+from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
+
+UTC = timezone.utc
+
+WEIGHTS = {
+    "pain_strength": 25,
+    "product_fit": 25,
+    "timing": 20,
+    "reachability": 15,
+    "evidence_quality": 15,
+}
+
+
+def _env(name: str, default: str = "") -> str:
+    if st is not None:
+        try:
+            value = st.secrets.get(name)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        except Exception:
+            pass
+    return str(os.getenv(name, default) or default).strip()
+
+
+def _required_env(name: str) -> str:
+    value = _env(name)
+    if not value:
+        raise RuntimeError(f"Не найдена переменная окружения {name}")
+    return value
+
+
+def _extract_text_and_sources(data: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+    text_parts: list[str] = []
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for item in data.get("output", []) if isinstance(data, dict) else []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict) or content.get("type") != "output_text":
+                continue
+            text_parts.append(str(content.get("text") or ""))
+            for ann in content.get("annotations", []) or []:
+                if not isinstance(ann, dict) or ann.get("type") != "url_citation":
+                    continue
+                url = str(ann.get("url") or "").strip()
+                if url and url not in seen:
+                    seen.add(url)
+                    sources.append({
+                        "url": url,
+                        "title": str(ann.get("title") or url).strip(),
+                    })
+
+    text = "\n".join(text_parts).strip()
+    if not text:
+        raise RuntimeError("Неония-разведчик не вернула результат.")
+    return text, sources
+
+
+def _extract_json_array(text: str) -> list[dict[str, Any]]:
+    cleaned = str(text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", cleaned, flags=re.I | re.S)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    start, end = cleaned.find("["), cleaned.rfind("]")
+    if start < 0 or end <= start:
+        return []
+    try:
+        value = json.loads(cleaned[start:end + 1])
+    except json.JSONDecodeError:
+        return []
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
+def _score_dimensions(dimensions: dict[str, Any]) -> int:
+    total = 0.0
+    for key, weight in WEIGHTS.items():
+        try:
+            value = float(dimensions.get(key, 0))
+        except (TypeError, ValueError):
+            value = 0.0
+        value = max(0.0, min(5.0, value))
+        total += value / 5.0 * weight
+    return int(round(total))
+
+
+def _public_profile_text(target_profile: dict[str, Any] | str) -> str:
+    if isinstance(target_profile, dict):
+        return json.dumps(target_profile, ensure_ascii=False, indent=2)
+    return str(target_profile or "").strip()
+
+
+def discover_public_candidates(
+    target_profile: dict[str, Any] | str,
+    *,
+    mode: str = "web",
+    max_results: int = 8,
+    language: str = "ru",
+) -> dict[str, Any]:
+    """
+    mode:
+      - web: открытый интернет;
+      - youtube: только публичные YouTube-видео/каналы/обсуждения.
+
+    Возвращает evidence-backed кандидатов. Ничего не отправляет наружу.
+    """
+    mode = str(mode or "web").strip().lower()
+    if mode not in {"web", "youtube"}:
+        raise ValueError("mode должен быть web или youtube")
+
+    max_results = max(1, min(12, int(max_results)))
+    api_key = _required_env("OPENAI_API_KEY")
+    model = _env("NEONIA_PUBLIC_SCOUT_MODEL", "gpt-5-mini") or "gpt-5-mini"
+    profile_text = _public_profile_text(target_profile)
+    today = datetime.now(UTC).date().isoformat()
+
+    youtube_rules = ""
+    if mode == "youtube":
+        youtube_rules = r"""
+ДОПОЛНИТЕЛЬНО ДЛЯ YOUTUBE:
+- ищи только реальные публичные страницы youtube.com/watch, youtu.be или публичные каналы;
+- приоритет свежим видео, где обсуждаются набор команды, партнёры, рекрутинг,
+  развитие структуры, автоматизация рутины или другая боль из портрета ЦА;
+- не считай автора/комментатора потенциальным партнёром только из-за слова MLM/ИИ/крипто;
+- comment_draft — содержательный комментарий к КОНКРЕТНОМУ видео, до 450 знаков:
+  без ссылки, без "приходите ко мне", без массового рекламного шаблона,
+  с одной полезной мыслью и, если естественно, одним вопросом;
+- комментарий является ЧЕРНОВИКОМ и НЕ публикуется автоматически.
+"""
+
+    system_prompt = f"""
+Ты — Неония-разведчик Агентства W.
+Твоя задача — находить потенциальных партнёров не по внешнему сходству с ЦА,
+а по конкретным ПУБЛИЧНЫМ сигналам актуальной деловой потребности.
+
+Дата проверки: {today}
+
+{BUSINESS_GATE_RULES}
+
+ПРАВИЛА ИССЛЕДОВАНИЯ:
+1. Используй только открытые публичные профессиональные/деловые сведения.
+2. Не обходи логины, paywall, robots, закрытые группы и ограничения платформ.
+3. Не используй чувствительные признаки и не делай выводы по фото, полу, возрасту,
+   национальности, здоровью, религии, политике или личной жизни.
+4. Поисковая выдача — только способ найти источник. Для TOP нужен открытый первоисточник.
+5. Ищи прежде всего сигналы:
+   - человек прямо ищет партнёров/лидеров/команду/клиентов;
+   - жалуется на ручной рекрутинг, нехватку времени, слабый отклик;
+   - описывает обходной ручной процесс;
+   - ищет альтернативу инструменту/подходу;
+   - есть свежий деловой триггер: запуск, расширение, набор команды.
+6. Старое/не датированное свидетельство снижай по timing.
+7. Если проблема уже решена, человек только продаёт похожий продукт или есть
+   противоречащие факты — исключай либо явно указывай caution.
+8. Не называй человека заинтересованным/готовым купить. Только:
+   "потенциальный партнёр по публичным сигналам".
+9. Лучше 3 сильных кандидата, чем 10 слабых.
+{youtube_rules}
+
+ВЕРНИ ТОЛЬКО JSON-Массив. Для каждого:
+{{
+  "name": "...",
+  "entity_url": "публичный профиль/сайт/канал",
+  "source_url": "КОНКРЕТНЫЙ первоисточник сигнала",
+  "source_title": "...",
+  "signal_date": "YYYY-MM-DD или пусто",
+  "pain_signal": "что конкретно публично показывает потребность",
+  "why_fit": "почему совпадает с портретом ЦА",
+  "why_now": "почему актуально сейчас",
+  "business_relevant": true,
+  "business_evidence": ["1-3 конкретных свидетельства"],
+  "business_gate_reason": "...",
+  "dimensions": {{
+     "pain_strength": 0,
+     "product_fit": 0,
+     "timing": 0,
+     "reachability": 0,
+     "evidence_quality": 0
+  }},
+  "contact_route": "публичный релевантный путь контакта или пусто",
+  "next_step": "один конкретный следующий шаг",
+  "caution": "что проверить/не переоценить",
+  "comment_draft": "для youtube — черновик комментария; для web пусто"
+}}
+""".strip()
+
+    user_prompt = (
+        "ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ:\n"
+        + profile_text
+        + f"\n\nРежим поиска: {mode}. "
+        + f"Найди не более {max_results} сильных кандидатов. "
+        + "Каждый результат должен иметь открываемый первоисточник."
+    )
+
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "instructions": system_prompt,
+            "input": user_prompt,
+            "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "store": False,
+        },
+        timeout=240,
+    )
+    response.raise_for_status()
+    raw_text, cited_sources = _extract_text_and_sources(response.json())
+    parsed = _extract_json_array(raw_text)
+
+    results: list[dict[str, Any]] = []
+    for item in parsed:
+        dimensions = item.get("dimensions") if isinstance(item.get("dimensions"), dict) else {}
+        score = _score_dimensions(dimensions)
+        score, _, evidence, gate_reason = apply_business_gate(item, score)
+
+        source_url = str(item.get("source_url") or "").strip()
+        entity_url = str(item.get("entity_url") or "").strip()
+        if not source_url.startswith(("http://", "https://")):
+            continue
+        if not entity_url.startswith(("http://", "https://")):
+            entity_url = source_url
+
+        if mode == "youtube":
+            low = source_url.lower()
+            if "youtube.com/" not in low and "youtu.be/" not in low:
+                continue
+
+        business_relevant = bool(item.get("business_relevant") is True and evidence)
+        if not business_relevant or score < 50:
+            # Не выдаём слабых/недоказанных в основной shortlist.
+            continue
+
+        results.append({
+            "name": str(item.get("name") or "Без имени/названия")[:220],
+            "entity_url": entity_url,
+            "source_url": source_url,
+            "source_title": str(item.get("source_title") or "")[:400],
+            "signal_date": str(item.get("signal_date") or "")[:10],
+            "pain_signal": str(item.get("pain_signal") or "")[:1000],
+            "why_fit": str(item.get("why_fit") or "")[:1000],
+            "why_now": str(item.get("why_now") or "")[:800],
+            "business_relevant": business_relevant,
+            "business_evidence": evidence,
+            "business_gate_reason": gate_reason,
+            "dimensions": dimensions,
+            "score": score,
+            "contact_route": str(item.get("contact_route") or "")[:1200],
+            "next_step": str(item.get("next_step") or "")[:700],
+            "caution": str(item.get("caution") or "")[:700],
+            "comment_draft": (
+                str(item.get("comment_draft") or "")[:650]
+                if mode == "youtube"
+                else ""
+            ),
+            "source_type": mode,
+            "checked_at": datetime.now(UTC).isoformat(),
+        })
+
+    results.sort(key=lambda x: int(x.get("score") or 0), reverse=True)
+    return {
+        "mode": mode,
+        "candidates": results[:max_results],
+        "web_citations": cited_sources,
+        "checked_at": datetime.now(UTC).isoformat(),
+        "note": "Черновики комментариев/контактов не отправлены автоматически.",
+    }

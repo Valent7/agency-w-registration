@@ -111,6 +111,7 @@ from vk_scout_ui import render_vk_sources
 from vk_scout_oauth import handle_vk_scout_oauth_callback
 from telegram_stories_ui import render_telegram_stories_radar
 from instagram_radar_ui import render_instagram_radar
+from neonia_public_scout_ui import render_neonia_public_scout
 from content_factory_ui import render_content_factory
 import asyncio
 import json
@@ -7941,12 +7942,14 @@ if telegram_login_valid or remembered_data:
 
                 elif selected_agent == "Неония":
                     st.caption(
-                "Неония анализирует проект, формирует портрет ЦА и затем "
-                "помогает владельцу разбирать контакты партиями по 10."
+                "Неония анализирует проект, формирует портрет ЦА, ищет подтверждённые "
+                "сигналы потребности в подключённых источниках и помогает "
+                "Директору выбрать людей для дальнейшей работы."
             )
 
                     neonia_options = [
                         "🎯 Определить мою целевую аудиторию",
+                        "🌐 Неония-разведчик: Интернет + YouTube",
                         "💙 Источники поиска VK",
                         "🌿 Stories Telegram",
                         "📸 Instagram Radar",
@@ -7958,6 +7961,7 @@ if telegram_login_valid or remembered_data:
                     if talkback_mode:
                         accessible_neonia_labels = {
                             "🎯 Определить мою целевую аудиторию": "Определить мою целевую аудиторию",
+                            "🌐 Неония-разведчик: Интернет + YouTube": "Неония-разведчик. Интернет и YouTube",
                             "💙 Источники поиска VK": "Источники поиска VK",
                             "🌿 Stories Telegram": "Stories Telegram",
                             "📸 Instagram Radar": "Instagram Radar",
@@ -7982,6 +7986,13 @@ if telegram_login_valid or remembered_data:
                         )
                     if neonia_mode != "🎯 Определить мою целевую аудиторию":
                         mode_messages = {
+                        "🌐 Неония-разведчик: Интернет + YouTube": (
+                            "Неония ищет не просто профили, а свежие публичные сигналы "
+                            "реальной потребности в открытом интернете и на YouTube. "
+                            "Каждый кандидат должен иметь первоисточник и объяснение, "
+                            "почему он соответствует вашей ЦА. Комментарии YouTube пока "
+                            "готовятся только как черновики для вашего утверждения."
+                        ),
                         "💙 Источники поиска VK": (
                             "Здесь вы задаёте тематические VK-сообщества. "
                             "Фоновый VK Scout будет брать оттуда публичные профили "
@@ -8014,7 +8025,35 @@ if telegram_login_valid or remembered_data:
                         ),
                         }
                         st.info(mode_messages[neonia_mode])
-                        if neonia_mode == "💙 Источники поиска VK":
+                        if neonia_mode == "🌐 Неония-разведчик: Интернет + YouTube":
+                            passport_key = (
+                                f"neonia_target_audience_passport_{telegram_id}"
+                            )
+                            scout_passport = st.session_state.get(passport_key)
+                            scout_profile = (
+                                scout_passport.get("profile")
+                                if isinstance(scout_passport, dict)
+                                else None
+                            )
+                            scout_profile_ready = bool(
+                                isinstance(scout_profile, dict)
+                                and scout_profile.get("portrait")
+                                and (
+                                    scout_profile.get("who_is_this")
+                                    or scout_profile.get("current_situation")
+                                )
+                            )
+
+                            if not scout_profile_ready:
+                                st.warning(
+                                    "Сначала откройте «Определить мою целевую аудиторию» "
+                                    "и сохраните живой портрет ЦА. Без него Неония не будет "
+                                    "искать людей вслепую."
+                                )
+                            else:
+                                render_neonia_public_scout(scout_profile)
+
+                        elif neonia_mode == "💙 Источники поиска VK":
                             render_vk_sources(
                                 int(telegram_id),
                                 member_code=str(member_code or ""),
@@ -9627,7 +9666,7 @@ if telegram_login_valid or remembered_data:
                         render_target_profile(saved_profile)
                         st.caption(
                             "Неония использует именно этот живой портрет "
-                            "при следующем анализе Telegram-контактов."
+                            "для Telegram, VK, Instagram, открытого интернета и YouTube."
                         )
                         st.divider()
                     elif isinstance(saved_profile, dict):
@@ -9712,8 +9751,9 @@ if telegram_login_valid or remembered_data:
                                     st.success("✅ Портрет ЦА сохранён")
                                     render_target_profile(profile)
                                     st.info(
-                                        "Следующий шаг: открыть поиск контактов. "
-                                        "Неония будет сравнивать людей именно с этим портретом."
+                                        "Следующий шаг: можно открыть «Неония-разведчик: Интернет + YouTube» "
+                                        "или любой подключённый канал. Неония будет сравнивать "
+                                        "людей именно с этим портретом."
                                     )
 
                 elif selected_agent == "Неона":

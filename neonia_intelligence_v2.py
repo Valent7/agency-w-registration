@@ -80,7 +80,16 @@ def normalize_target_profile(raw: dict) -> dict:
         "pains": _clean_items(raw.get("pains"), 8),
         "fears": _clean_items(raw.get("fears"), 8),
         "motivators": _clean_items(raw.get("motivators"), 8),
-        "telegram_signals": _clean_items(raw.get("telegram_signals"), 12),
+        # Универсальные публичные сигналы для Telegram / VK / Instagram / Web / YouTube.
+        # Старое поле telegram_signals сохраняем как совместимый канал-специфичный срез.
+        "public_signals": _clean_items(
+            raw.get("public_signals") or raw.get("telegram_signals"),
+            16,
+        ),
+        "telegram_signals": _clean_items(
+            raw.get("telegram_signals") or raw.get("public_signals"),
+            12,
+        ),
         "weak_fit": _clean_items(raw.get("weak_fit"), 8),
         "do_not_assume": [
             str(x).strip()[:260]
@@ -125,7 +134,8 @@ def analyze_owner_project_target_profile(
 - что его раздражает или тормозит;
 - чего он опасается;
 - какие слова, выгоды и возможности способны привлечь его внимание;
-- какие ПОВЕДЕНЧЕСКИЕ признаки можно реально увидеть в Telegram.
+- какие ПОВЕДЕНЧЕСКИЕ признаки можно реально увидеть в открытых источниках:
+  Telegram, VK, Instagram, YouTube, публичных сайтах, форумах и сообществах.
 
 Портрет должен быть настолько конкретным и образным, чтобы владелец мог
 представить этого человека: чем он живёт, чего хочет, что его беспокоит,
@@ -141,7 +151,9 @@ def analyze_owner_project_target_profile(
 - разработчик ботов, криптокошельков или программист НЕ становится ЦА только
   из-за технологической тематики;
 - отличай интерес к теме от реальной потребности в предложении проекта;
-- признаки для Telegram должны быть наблюдаемыми, а не фантазиями о человеке.
+- признаки должны быть наблюдаемыми в конкретном публичном источнике, а не фантазиями о человеке;
+- сильный кандидат должен иметь не только совпадение с портретом ЦА, но и публичный сигнал
+  актуальной потребности/деловой задачи, связанной с предложением проекта.
 
 Верни ТОЛЬКО JSON без Markdown:
 {{
@@ -161,8 +173,11 @@ def analyze_owner_project_target_profile(
   "motivators": [
     {{"text": "что способно зацепить внимание", "reason": "почему"}}
   ],
+  "public_signals": [
+    {{"text": "наблюдаемый публичный сигнал", "reason": "почему он указывает на реальную потребность/соответствие ЦА"}}
+  ],
   "telegram_signals": [
-    {{"text": "наблюдаемый сигнал в Telegram", "reason": "почему он указывает на соответствие ЦА"}}
+    {{"text": "наблюдаемый сигнал именно в Telegram", "reason": "почему он указывает на соответствие ЦА"}}
   ],
   "weak_fit": [
     {{"text": "кому проект скорее не подходит", "reason": "почему"}}
@@ -202,6 +217,13 @@ def target_profile_for_analysis(profile: dict) -> str:
         "goals": [x.get("text") for x in profile.get("goals", [])],
         "pains": [x.get("text") for x in profile.get("pains", [])],
         "motivators": [x.get("text") for x in profile.get("motivators", [])],
+        "observable_public_signals": [
+            x.get("text") for x in (
+                profile.get("public_signals")
+                or profile.get("telegram_signals")
+                or []
+            )
+        ],
         "observable_telegram_signals": [
             x.get("text") for x in profile.get("telegram_signals", [])
         ],
@@ -246,9 +268,9 @@ def render_target_profile(profile: dict):
             if reason:
                 st.caption(reason)
 
-    signals = profile.get("telegram_signals") or []
+    signals = profile.get("public_signals") or profile.get("telegram_signals") or []
     if signals:
-        with st.expander("🔍 Как Неония узнает такого человека в Telegram"):
+        with st.expander("🔍 Как Неония узнает такого человека в открытых источниках"):
             for item in signals:
                 st.write(f"• **{item.get('text', '')}**")
                 if item.get("reason"):
@@ -267,7 +289,10 @@ def render_target_profile(profile: dict):
             for item in profile["do_not_assume"]:
                 st.write(f"• {item}")
 
-    st.info("💡 Вот такого человека Неония будет искать среди ваших контактов.")
+    st.info(
+        "💡 Вот такого человека Неония будет искать не только среди контактов, "
+        "но и по подтверждённым публичным сигналам в подключённых источниках."
+    )
 
 
 
