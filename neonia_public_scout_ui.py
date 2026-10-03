@@ -98,6 +98,16 @@ def _render_candidate(
         if item.get("why_now"):
             st.write("**Почему сейчас:**", item["why_now"])
 
+        meta = []
+        if item.get("candidate_language"):
+            meta.append("язык: " + str(item.get("candidate_language")))
+        if item.get("age_days") is not None:
+            meta.append("свежесть: " + str(item.get("age_days")) + " дн.")
+        if item.get("contact_route"):
+            meta.append("связь подтверждена")
+        if meta:
+            st.caption(" · ".join(meta))
+
         evidence = item.get("business_evidence") or []
         if evidence:
             st.write("**Подтверждения:**")
@@ -142,7 +152,15 @@ def _render_candidate(
                 except Exception as exc:
                     st.error(f"Комментарий не подготовлен: {exc}")
 
-        if c3.button(
+        if youtube:
+            c3.button(
+                "➡️ Передать Неоне",
+                disabled=True,
+                key=f"public_to_neona_disabled_{owner_id}_{card_id}",
+                use_container_width=True,
+            )
+            c3.caption("Сначала это только площадка для комментария.")
+        elif c3.button(
             "➡️ Передать Неоне",
             key=f"public_to_neona_{owner_id}_{card_id}",
             use_container_width=True,
@@ -183,28 +201,55 @@ def render_neonia_public_scout(target_profile: dict, owner_id: int) -> None:
 
     st.markdown("### 🌐 Неония-разведчик")
     st.caption(
-        "Ищет не просто людей, а подтверждённые публичные сигналы потребности. "
-        "Каждая находка должна иметь первоисточник."
+        "Ищет только свежие и реально доступные публичные сигналы. "
+        "Старые аккаунты, неподходящий язык и закрытые комментарии должны отсекаться."
     )
 
-    web_tab, youtube_tab = st.tabs(["🌐 Интернет", "▶️ YouTube"])
+    with st.container(border=True):
+        st.markdown("#### 🎛️ Фильтр поиска")
+        allowed_languages = st.multiselect(
+            "На каких языках искать людей и разговоры",
+            ["Русский", "Немецкий", "Английский"],
+            default=["Русский"],
+            key=f"neonia_public_languages_{owner_id}",
+        )
+        freshness_label = st.selectbox(
+            "Насколько свежей должна быть активность",
+            ["7 дней", "30 дней", "90 дней"],
+            index=1,
+            key=f"neonia_public_freshness_{owner_id}",
+        )
+        max_age_days = {"7 дней": 7, "30 дней": 30, "90 дней": 90}[freshness_label]
+        st.caption(
+            "По умолчанию: русский язык и активность не старше 30 дней. "
+            "Если свежесть или возможность связаться не подтверждены — результат отбрасывается."
+        )
+
+    if not allowed_languages:
+        st.warning("Выберите хотя бы один язык.")
+        return
+
+    web_tab, youtube_tab = st.tabs(["🌐 Потенциальные партнёры", "▶️ YouTube-площадки"])
 
     with web_tab:
         st.write(
-            "Неония ищет открытые публикации, профили, сайты и обсуждения, "
-            "где видна актуальная потребность, совпадающая с портретом ЦА."
+            "Здесь Неония должна находить именно ЛЮДЕЙ: сетевиков, лидеров и предпринимателей "
+            "с подтверждённой свежей потребностью — а не продавцов курсов и не случайные статьи."
         )
         if st.button(
-            "🔎 Найти потенциальных партнёров в интернете",
+            "🔎 Найти потенциальных партнёров",
             type="primary",
             key=f"neonia_web_scout_run_{owner_id}",
         ):
-            with st.spinner("Неония проверяет открытые источники..."):
+            with st.spinner("Неония ищет свежих и доступных людей..."):
                 try:
                     result = discover_public_candidates(
                         target_profile,
                         mode="web",
                         max_results=8,
+                        allowed_languages=allowed_languages,
+                        max_age_days=max_age_days,
+                        require_contactable=True,
                     )
                     st.session_state[f"neonia_web_scout_result_{owner_id}"] = result
                 except Exception as exc:
@@ -214,7 +259,10 @@ def render_neonia_public_scout(target_profile: dict, owner_id: int) -> None:
         if isinstance(result, dict):
             candidates = result.get("candidates") or []
             if not candidates:
-                st.info("Сильных подтверждённых кандидатов в этом проходе не найдено.")
+                st.info(
+                    "Сильных свежих кандидатов по этим условиям не найдено. "
+                    "Это лучше, чем заполнять список старыми или случайными людьми."
+                )
             for item in candidates:
                 _render_candidate(
                     item,
@@ -225,23 +273,27 @@ def render_neonia_public_scout(target_profile: dict, owner_id: int) -> None:
 
     with youtube_tab:
         st.write(
-            "Неония ищет релевантные публичные видео/каналы и готовит "
-            "уникальный комментарий по содержанию конкретного видео."
+            "YouTube здесь используется как место для умного участия в разговоре. "
+            "Автор ролика НЕ считается потенциальным партнёром автоматически."
         )
-        st.warning(
-            "Комментарии пока только готовятся. Автоматической публикации нет."
+        st.caption(
+            "Неония должна показывать только свежие ролики на выбранном языке, "
+            "где комментарии открыты и можно реально оставить содержательный комментарий."
         )
         if st.button(
-            "▶️ Найти разговоры на YouTube",
+            "▶️ Найти свежие YouTube-разговоры",
             type="primary",
             key=f"neonia_youtube_scout_run_{owner_id}",
         ):
-            with st.spinner("Неония ищет подходящие YouTube-разговоры..."):
+            with st.spinner("Неония проверяет свежесть, язык и открытые комментарии..."):
                 try:
                     result = discover_public_candidates(
                         target_profile,
                         mode="youtube",
                         max_results=6,
+                        allowed_languages=allowed_languages,
+                        max_age_days=max_age_days,
+                        require_contactable=True,
                     )
                     st.session_state[f"neonia_youtube_scout_result_{owner_id}"] = result
                 except Exception as exc:
@@ -249,17 +301,18 @@ def render_neonia_public_scout(target_profile: dict, owner_id: int) -> None:
 
         result = st.session_state.get(f"neonia_youtube_scout_result_{owner_id}")
         if isinstance(result, dict):
-            candidates = result.get("candidates") or []
-            if not candidates:
-                st.info("Подходящих YouTube-сигналов в этом проходе не найдено.")
-            for item in candidates:
+            venues = result.get("candidates") or []
+            if not venues:
+                st.info(
+                    "Подходящих свежих YouTube-площадок с открытыми комментариями не найдено."
+                )
+            for item in venues:
                 _render_candidate(
                     item,
                     target_profile=target_profile,
                     owner_id=owner_id,
                     youtube=True,
                 )
-
 
 def render_neona_public_leads(
     owner_id: int,

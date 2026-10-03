@@ -108,12 +108,41 @@ def _public_profile_text(target_profile: dict[str, Any] | str) -> str:
     return str(target_profile or "").strip()
 
 
+def _parse_iso_date(value: Any):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    raw = raw[:10]
+    try:
+        return datetime.fromisoformat(raw).date()
+    except Exception:
+        return None
+
+
+def _language_matches(candidate_language: str, allowed_languages: list[str]) -> bool:
+    if not allowed_languages:
+        return True
+    value = str(candidate_language or "").strip().lower()
+    aliases = {
+        "русский": {"ru", "rus", "russian", "русский"},
+        "немецкий": {"de", "deu", "german", "deutsch", "немецкий"},
+        "английский": {"en", "eng", "english", "английский"},
+    }
+    allowed = set()
+    for language in allowed_languages:
+        allowed.update(aliases.get(str(language).strip().lower(), {str(language).strip().lower()}))
+    return value in allowed
+
+
 def discover_public_candidates(
     target_profile: dict[str, Any] | str,
     *,
     mode: str = "web",
     max_results: int = 8,
     language: str = "ru",
+    allowed_languages: list[str] | None = None,
+    max_age_days: int = 30,
+    require_contactable: bool = True,
 ) -> dict[str, Any]:
     """
     mode:
@@ -127,6 +156,8 @@ def discover_public_candidates(
         raise ValueError("mode должен быть web или youtube")
 
     max_results = max(1, min(12, int(max_results)))
+    max_age_days = max(1, min(365, int(max_age_days)))
+    allowed_languages = allowed_languages or ["Русский"]
     api_key = _required_env("OPENAI_API_KEY")
     model = _env("NEONIA_PUBLIC_SCOUT_MODEL", "gpt-5-mini") or "gpt-5-mini"
     profile_text = _public_profile_text(target_profile)
@@ -134,15 +165,18 @@ def discover_public_candidates(
 
     youtube_rules = ""
     if mode == "youtube":
-        youtube_rules = r"""
+        youtube_rules = rf"""
 ДОПОЛНИТЕЛЬНО ДЛЯ YOUTUBE:
-- ищи только реальные публичные страницы youtube.com/watch, youtu.be или публичные каналы;
-- приоритет свежим видео, где обсуждаются набор команды, партнёры, рекрутинг,
-  развитие структуры, автоматизация рутины или другая боль из портрета ЦА;
-- не считай автора/комментатора потенциальным партнёром только из-за слова MLM/ИИ/крипто;
+- YouTube здесь — ПЛОЩАДКА ДЛЯ ВИДИМОСТИ, а не автоматический список партнёров.
+- Ищи только видео не старше {max_age_days} дней.
+- Язык видео/автора/обсуждения должен входить в: {", ".join(allowed_languages)}.
+- ОБЯЗАТЕЛЬНО исключай ролик, если комментарии отключены, закрыты или это нельзя подтвердить.
+- ОБЯЗАТЕЛЬНО исключай старые каналы без свежей активности.
+- Не выдавай автора видео за потенциального партнёра только потому, что он говорит о MLM.
+- Тренер/коуч/продавец курсов по рекрутингу — это обычно ПЛОЩАДКА/ЭКСПЕРТ, а не кандидат.
 - comment_draft — содержательный комментарий к КОНКРЕТНОМУ видео, до 450 знаков:
   без ссылки, без "приходите ко мне", без массового рекламного шаблона,
-  с одной полезной мыслью и, если естественно, одним вопросом;
+  с одной полезной мыслью и, если естественно, одним вопросом.
 - комментарий является ЧЕРНОВИКОМ и НЕ публикуется автоматически.
 """
 
@@ -173,6 +207,11 @@ def discover_public_candidates(
 8. Не называй человека заинтересованным/готовым купить. Только:
    "потенциальный партнёр по публичным сигналам".
 9. Лучше 3 сильных кандидата, чем 10 слабых.
+10. ЖЁСТКИЙ ФИЛЬТР ЯЗЫКА: допустимы только {", ".join(allowed_languages)}.
+11. ЖЁСТКИЙ ФИЛЬТР СВЕЖЕСТИ: публичный сигнал/активность не старше {max_age_days} дней.
+12. ЖЁСТКИЙ ФИЛЬТР ДОСТУПНОСТИ: человек/площадка должны иметь реальный публичный путь взаимодействия.
+13. Не путай "продаёт своё решение" с "ищет решение". Рекламный CTA автора сам по себе НЕ является болью.
+14. Исключай тренеров, агентства, продавцов курсов и сервисов, если они только продают рекрутинг/лидогенерацию.
 {youtube_rules}
 
 ВЕРНИ ТОЛЬКО JSON-Массив. Для каждого:
@@ -181,7 +220,14 @@ def discover_public_candidates(
   "entity_url": "публичный профиль/сайт/канал",
   "source_url": "КОНКРЕТНЫЙ первоисточник сигнала",
   "source_title": "...",
-  "signal_date": "YYYY-MM-DD или пусто",
+  "signal_date": "YYYY-MM-DD",
+  "activity_date": "YYYY-MM-DD",
+  "candidate_language": "ru/de/en/другой код",
+  "role_type": "network_marketer|mlm_leader|entrepreneur|trainer_vendor|content_creator|company_page|unknown",
+  "intent_type": "seeking_partners|seeking_solution|complaining_about_problem|promoting_own_team|selling_own_solution|educational_content|unknown",
+  "contactable": true,
+  "comments_open": true,
+  "result_kind": "person|venue",
   "pain_signal": "что конкретно публично показывает потребность",
   "why_fit": "почему совпадает с портретом ЦА",
   "why_now": "почему актуально сейчас",
@@ -206,8 +252,10 @@ def discover_public_candidates(
         "ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ:\n"
         + profile_text
         + f"\n\nРежим поиска: {mode}. "
-        + f"Найди не более {max_results} сильных кандидатов. "
-        + "Каждый результат должен иметь открываемый первоисточник."
+        + f"Найди не более {max_results} сильных результатов. "
+        + f"Только языки: {', '.join(allowed_languages)}. "
+        + f"Только активность/сигнал за последние {max_age_days} дней. "
+        + "Каждый результат должен иметь открываемый первоисточник и реальный путь взаимодействия."
     )
 
     response = requests.post(
@@ -249,8 +297,48 @@ def discover_public_candidates(
 
         business_relevant = bool(item.get("business_relevant") is True and evidence)
         if not business_relevant or score < 50:
-            # Не выдаём слабых/недоказанных в основной shortlist.
             continue
+
+        candidate_language = str(item.get("candidate_language") or "").strip().lower()
+        if not _language_matches(candidate_language, allowed_languages):
+            continue
+
+        signal_date = _parse_iso_date(item.get("signal_date"))
+        activity_date = _parse_iso_date(item.get("activity_date"))
+        freshest_date = max(
+            [d for d in (signal_date, activity_date) if d is not None],
+            default=None,
+        )
+        if freshest_date is None:
+            # Если Неония не может подтвердить свежесть — не выдаём в рабочий shortlist.
+            continue
+        age_days = (datetime.now(UTC).date() - freshest_date).days
+        if age_days < 0 or age_days > max_age_days:
+            continue
+
+        contactable = bool(item.get("contactable") is True)
+        contact_route = str(item.get("contact_route") or "").strip()
+        if require_contactable and (not contactable or not contact_route):
+            continue
+
+        role_type = str(item.get("role_type") or "unknown").strip().lower()
+        intent_type = str(item.get("intent_type") or "unknown").strip().lower()
+        result_kind = str(item.get("result_kind") or ("venue" if mode == "youtube" else "person")).strip().lower()
+
+        if mode == "youtube":
+            # YouTube-режим выдаёт площадки для участия в разговоре, а не "готовых партнёров".
+            if result_kind != "venue":
+                continue
+            if item.get("comments_open") is not True:
+                continue
+        else:
+            # В web-режиме нужны люди, а не контент-продавцы или страницы компаний.
+            if result_kind != "person":
+                continue
+            if role_type in {"trainer_vendor", "content_creator", "company_page"}:
+                continue
+            if intent_type in {"selling_own_solution", "educational_content", "unknown"}:
+                continue
 
         results.append({
             "name": str(item.get("name") or "Без имени/названия")[:220],
@@ -258,6 +346,14 @@ def discover_public_candidates(
             "source_url": source_url,
             "source_title": str(item.get("source_title") or "")[:400],
             "signal_date": str(item.get("signal_date") or "")[:10],
+            "activity_date": str(item.get("activity_date") or "")[:10],
+            "candidate_language": candidate_language,
+            "role_type": role_type,
+            "intent_type": intent_type,
+            "contactable": contactable,
+            "comments_open": bool(item.get("comments_open") is True),
+            "result_kind": result_kind,
+            "age_days": age_days,
             "pain_signal": str(item.get("pain_signal") or "")[:1000],
             "why_fit": str(item.get("why_fit") or "")[:1000],
             "why_now": str(item.get("why_now") or "")[:800],
@@ -266,7 +362,7 @@ def discover_public_candidates(
             "business_gate_reason": gate_reason,
             "dimensions": dimensions,
             "score": score,
-            "contact_route": str(item.get("contact_route") or "")[:1200],
+            "contact_route": contact_route[:1200],
             "next_step": str(item.get("next_step") or "")[:700],
             "caution": str(item.get("caution") or "")[:700],
             "comment_draft": (
