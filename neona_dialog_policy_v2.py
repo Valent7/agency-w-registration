@@ -193,6 +193,39 @@ def _callback(text):
     ))
 
 
+def _explicit_valentina_meeting_request(text):
+    """Прямой запрос человека на разговор/встречу/звонок с Валентиной."""
+    v = _norm(text)
+    patterns = (
+        r"\bхочу\s+(?:поговорить|встретиться|созвониться)\s+(?:с\s+)?валентин\w*\b",
+        r"\bможно\s+(?:поговорить|встретиться|созвониться)\s+(?:с\s+)?валентин\w*\b",
+        r"\bсоедините\s+(?:меня\s+)?(?:с\s+)?валентин\w*\b",
+        r"\bпусть\s+валентин\w*\s+(?:позвонит|напишет)\b",
+        r"\bпозвоните\s+мне\b",
+        r"\bперезвоните\s+мне\b",
+        r"\bназнач(?:ьте|ить)\s+встреч\w*\b",
+        r"\bдавайте\s+(?:встретимся|созвонимся)\b",
+    )
+    return any(re.search(p, v) for p in patterns)
+
+
+def _meeting_consent_bridge(reason):
+    """Интерес к теме ещё не равен согласию на встречу."""
+    lead = {
+        "price": (
+            "По стоимости я не уполномочена давать точную информацию. "
+            "Этот вопрос лучше обсудить с Валентиной."
+        ),
+        "technical": (
+            "По технической части я не уполномочена консультировать. "
+            "Эти вопросы лучше задать Валентине."
+        ),
+        "cases": "Кейсы, примеры и результаты лучше покажет Валентина.",
+        "interest": "Рада, что тема вам интересна.",
+    }.get(reason, "Этот вопрос лучше обсудить с Валентиной.")
+    return lead + " Хотите, я организую вам встречу с Валентиной?"
+
+
 def _meeting_reason(text, context):
     if _wants_human(text):
         return "callback" if _callback(text) else "human"
@@ -502,8 +535,10 @@ def _general_reply_v2(config, owner_name, first_name, text, greet, context=None)
 Если человек хочет сначала посмотреть сам — сначала личная встреча.
 
 ГРАНИЦЫ:
-- Никаких медицинских, юридических, финансовых, криптовалютных, рекламных и иных
+- Неона не даёт юридических, финансовых, криптовалютных, рекламных и иных
   посторонних консультаций.
+- МЕДИЦИНСКУЮ ТЕМУ ЗДЕСЬ ВООБЩЕ НЕ УПОМИНАЙ. Отдельная программная проверка
+  сама включит медицинскую границу только если текущее сообщение действительно о здоровье.
 - Цена, техника, кейсы/результаты — вопросы к Валентине.
 - Не обещай доход, количество партнёров/клиентов или гарантированный результат.
 - Не придумывай чек-листы, планы, файлы и помощь «от себя».
@@ -558,9 +593,44 @@ def _process_v2(
         context["contact_boundary_at"] = datetime.now(core.UTC).isoformat()
         return prefix + "Поняла. Больше писать вам не буду. Всего доброго.", "opted_out", True, context
 
+    # Неона уже предложила встречу: сначала ждём явного согласия.
+    if stage == "awaiting_meeting_consent":
+        if _yes(text):
+            reply, new_stage, context = _schedule_reply_v2(
+                config, owner_id, owner_name, contact_id, first_name, username,
+                text, message_dt, "invited_to_meeting", context, greet
+            )
+            return reply, new_stage, True, context
+
+        if _decline(text) or any(x in _norm(text) for x in ("не сейчас", "позже", "пока нет")):
+            return prefix + _open_door_close(), "opted_out", True, context
+
+        # Нет ясного «да» — календарь НЕ показываем.
+        reply = _general_reply_v2(config, owner_name, first_name, text, greet, context)
+        return reply, "awaiting_meeting_consent", True, context
+
     reason = _meeting_reason(text, context)
     if reason:
         context["meeting_reason"] = reason
+
+        # Только прямой запрос на Валентину уже сам является согласием.
+        if _explicit_valentina_meeting_request(text):
+            reply, new_stage, context = _schedule_reply_v2(
+                config, owner_id, owner_name, contact_id, first_name, username,
+                text, message_dt, "invited_to_meeting", context, greet
+            )
+            return reply, new_stage, True, context
+
+        # Интерес / цена / техника / кейсы — сначала спросить согласие на встречу.
+        if reason in {"interest", "price", "technical", "cases"}:
+            return (
+                prefix + _meeting_consent_bridge(reason),
+                "awaiting_meeting_consent",
+                True,
+                context,
+            )
+
+        # Просьба именно поговорить с человеком/получить звонок — явный запрос контакта.
         reply, new_stage, context = _schedule_reply_v2(
             config, owner_id, owner_name, contact_id, first_name, username,
             text, message_dt, "invited_to_meeting", context, greet
