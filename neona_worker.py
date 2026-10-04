@@ -1,7 +1,7 @@
 import os
 import threading
 
-from neona_dialog_policy import worker_forever as neona_worker_forever
+from neona_dialog_policy_v2 import worker_forever as neona_worker_forever
 from vk_scout_worker import worker_forever as vk_scout_worker_forever
 
 try:
@@ -12,7 +12,6 @@ except Exception as exc:
 
 
 def _run_vk_scout():
-    """VK Scout живёт в отдельном потоке и не блокирует Неону."""
     try:
         vk_scout_worker_forever()
     except Exception as exc:
@@ -20,7 +19,6 @@ def _run_vk_scout():
 
 
 def _run_telegram_scout():
-    """Telegram Scout заранее готовит резерв и дневную пятёрку Стагирита."""
     if telegram_scout_worker_forever is None:
         return
     try:
@@ -32,12 +30,7 @@ def _run_telegram_scout():
 
 
 if __name__ == "__main__":
-    # Фоновые разведчики не должны блокировать основной цикл Неоны.
-    threading.Thread(
-        target=_run_vk_scout,
-        name="vk-scout-worker",
-        daemon=True,
-    ).start()
+    threading.Thread(target=_run_vk_scout, name="vk-scout-worker", daemon=True).start()
 
     if telegram_scout_worker_forever is not None:
         threading.Thread(
@@ -46,7 +39,4 @@ if __name__ == "__main__":
             daemon=True,
         ).start()
 
-    # Основной процесс Render остаётся Неоной — как и раньше.
-    neona_worker_forever(
-        int(os.getenv("NEONA_POLL_SECONDS", "30"))
-    )
+    neona_worker_forever(int(os.getenv("NEONA_POLL_SECONDS", "30")))

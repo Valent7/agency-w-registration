@@ -1718,7 +1718,7 @@ def _neona_config(core, connection: dict | None = None):
 
 def _build_neona_draft(event: dict) -> None:
     """Run the existing Neona policy and save channel-separated dialog memory."""
-    import neona_dialog_policy as policy
+    import neona_dialog_policy_v2 as policy
 
     policy.apply_policy()
     core = policy.core
