@@ -1,7 +1,7 @@
 import os
 import threading
 
-from neona_dialog_policy_v2 import worker_forever as neona_worker_forever
+from neona_dialog_policy_v3 import worker_forever as neona_worker_forever
 from vk_scout_worker import worker_forever as vk_scout_worker_forever
 
 try:

@@ -95,7 +95,7 @@ from neonia_intelligence_v2 import (
 )
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 
-from neona_dialog_policy_v2 import (
+from neona_dialog_policy_v3 import (
     DialogError as NeonaDialogError,
     initialize_dialog_after_first_message,
     run_sync_owner_once,
