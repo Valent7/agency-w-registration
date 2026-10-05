@@ -1605,11 +1605,30 @@ def _single_item_errors(item):
 
 
 def _generate_single_package(owner_id, understanding, ask_ai_fn):
+    """Создаёт один материал и сам повторяет запрос при повреждённом JSON."""
     prompt = _single_content_prompt(understanding)
     last_errors = []
-    for _ in range(3):
-        answer = ask_ai_fn(FACTORY_SYSTEM_PROMPT, prompt)
-        data = _json_from_answer(answer)
+
+    for attempt in range(1, 4):
+        try:
+            answer = ask_ai_fn(FACTORY_SYSTEM_PROMPT, prompt)
+            data = _json_from_answer(answer)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            # Технический JSON-брак не должен попадать на экран пользователю.
+            # Просим модель собрать ответ заново и продолжаем в пределах тех же
+            # трёх бесплатных по отношению к изображениям/видео текстовых попыток.
+            last_errors = ["Ответ ИИ пришёл в повреждённом JSON-формате."]
+            if attempt < 3:
+                prompt += (
+                    "\n\nТехническая проверка не смогла прочитать предыдущий JSON. "
+                    "Сформируй ответ ЗАНОВО по исходной схеме. Не копируй "
+                    "повреждённый JSON. Проверь все кавычки, запятые, фигурные "
+                    "и квадратные скобки. Верни ТОЛЬКО один корректный JSON-объект "
+                    "без Markdown и без пояснений."
+                )
+                continue
+            break
+
         item = _normalise_item(data.get("item") or data, 0)
         item["format"] = understanding["format"]
         last_errors = _single_item_errors(item)
@@ -1634,12 +1653,19 @@ def _generate_single_package(owner_id, understanding, ask_ai_fn):
                 },
                 "items": [item],
             }
-        prompt += (
-            "\n\nПредыдущий материал забракован до платного производства. "
-            "Исправь все ошибки и верни полный JSON заново:\n- "
-            + "\n- ".join(last_errors)
-        )
-    raise ValueError("Материал не прошёл проверку: " + "; ".join(last_errors))
+
+        if attempt < 3:
+            prompt += (
+                "\n\nПредыдущий материал забракован до платного производства. "
+                "Исправь все ошибки и верни полный JSON заново:\n- "
+                + "\n- ".join(last_errors)
+            )
+
+    raise ValueError(
+        "Материал не удалось подготовить автоматически после нескольких попыток. "
+        "Нажмите «Всё верно — подготовить материал» ещё раз. "
+        "Платные изображения и видео не запускались."
+    )
 
 
 def _stagirite_review(package, item, ask_ai_fn):
@@ -2423,7 +2449,19 @@ def _render_item(
                 _save_package(package)
                 st.rerun()
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                st.error(str(exc))
+                # Не показываем человеку внутренние JSON-ошибки вроде
+                # "Expecting ',' delimiter: line ...". Это кухня Контент-завода.
+                message = str(exc).strip()
+                if (
+                    isinstance(exc, json.JSONDecodeError)
+                    or "delimiter" in message.lower()
+                    or "json" in message.lower() and "формат" not in message.lower()
+                ):
+                    message = (
+                        "Материал не удалось подготовить с этой попытки. "
+                        "Попробуйте ещё раз — Контент-завод сам пересоберёт ответ."
+                    )
+                st.error(message or "Материал не удалось подготовить. Попробуйте ещё раз.")
         return
 
     st.success(
