@@ -2687,14 +2687,24 @@ def _render_item(
                     status = str(result.get("status") or "").lower()
                     if status == "completed" and result.get("video_url"):
                         try:
-                            with st.spinner("Голос готов. Передаём сцены в Runway..."):
+                            with st.spinner("Озвучка готова. Готовим Reels..."):
                                 narration = _download_video_bytes(result["video_url"])
                                 reel_state["narration_video"] = narration
-                                reel_state["runway_tasks"] = _start_runway_scenes(
-                                    reel_state.get("scene_images") or [],
-                                    reel_state.get("scenes") or [],
+
+                                # Если это перезапись голоса для уже готового Reels,
+                                # старые Runway-сцены сохраняем и НЕ запускаем их заново.
+                                existing_runway_tasks = (
+                                    reel_state.get("runway_tasks") or []
                                 )
-                                reel_state["status"] = "animating"
+                                if existing_runway_tasks:
+                                    reel_state["status"] = "voice_ready"
+                                else:
+                                    reel_state["runway_tasks"] = _start_runway_scenes(
+                                        reel_state.get("scene_images") or [],
+                                        reel_state.get("scenes") or [],
+                                    )
+                                    reel_state["status"] = "animating"
+
                                 reel_state.pop("error", None)
                         except (requests.RequestException, RuntimeError, OSError) as exc:
                             reel_state["status"] = "animation_error"
@@ -2765,12 +2775,23 @@ def _render_item(
         if runway_tasks and not final_video:
             ready_count = int(reel_state.get("runway_ready_count") or 0)
             total_count = len(runway_tasks)
-            st.info(
-                f"Runway оживляет сцены: готово {ready_count} из {total_count}. "
-                "Обычно это занимает несколько минут. Можно уйти со страницы и вернуться."
-            )
+            rebuilding_voice_only = bool(reel_state.get("rebuild_voice_only"))
+
+            if rebuilding_voice_only and narration_video:
+                st.info(
+                    "Новая озвучка готова. Уже созданные живые сцены Runway "
+                    "сохранены — повторно оплачивать их не нужно."
+                )
+                runway_button_label = "🔄 Собрать Reels с новой озвучкой"
+            else:
+                st.info(
+                    f"Runway оживляет сцены: готово {ready_count} из {total_count}. "
+                    "Обычно это занимает несколько минут. Можно уйти со страницы и вернуться."
+                )
+                runway_button_label = "🔄 Проверить живые сцены и собрать Reels"
+
             if st.button(
-                "🔄 Проверить живые сцены и собрать Reels",
+                runway_button_label,
                 key=prefix + "_check_runway",
                 use_container_width=True,
             ):
@@ -2795,6 +2816,7 @@ def _render_item(
                             )
                         reel_state["status"] = "ready"
                         reel_state.pop("error", None)
+                        reel_state.pop("rebuild_voice_only", None)
                 except (requests.RequestException, RuntimeError, OSError) as exc:
                     reel_state["status"] = "assembly_error"
                     reel_state["error"] = str(exc)
@@ -2862,6 +2884,46 @@ def _render_item(
                 key=prefix + "_reel_download",
                 use_container_width=True,
             )
+
+            st.caption(
+                "Если озвучка обрезалась или вы хотите перезаписать голос, "
+                "сцены OpenAI и Runway останутся прежними."
+            )
+            if st.button(
+                "🔊 Перезаписать голос и пересобрать Reels",
+                key=prefix + "_rebuild_voice_only",
+                use_container_width=True,
+            ):
+                spoken_text = (
+                    reel_state.get("spoken_text")
+                    or item.get("script")
+                    or ""
+                )
+                with st.spinner(
+                    "HeyGen создаёт новую озвучку. Изображения и Runway-сцены "
+                    "не пересоздаются..."
+                ):
+                    avatar_result = create_avatar_video_fn(spoken_text)
+
+                if avatar_result.get("ok"):
+                    # Удаляем только старую озвучку и готовую сборку.
+                    # Уже оплаченные изображения и Runway-задачи сохраняются.
+                    reel_state.pop("final_video", None)
+                    reel_state.pop("narration_video", None)
+                    reel_state.pop("video_url", None)
+                    reel_state.pop("error", None)
+                    reel_state.update(avatar_result)
+                    reel_state["rebuild_voice_only"] = True
+                    reel_state["status"] = "voice_started"
+                else:
+                    reel_state["status"] = "voice_error"
+                    reel_state["error"] = str(
+                        avatar_result.get("error")
+                        or "Не удалось запустить новую озвучку."
+                    )
+
+                st.session_state[reel_state_key] = reel_state
+                st.rerun()
             music_path = Path(__file__).resolve().parent / "assets" / "reel_music.mp3"
             if music_path.exists():
                 st.success(
