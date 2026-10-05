@@ -2600,9 +2600,12 @@ def _render_item(
         reel_state = reel_state if isinstance(reel_state, dict) else {}
         video_id = _clean_text(reel_state.get("video_id"), 300)
         final_video = reel_state.get("final_video")
+        scene_images = reel_state.get("scene_images") or []
         runway_available = bool(_runway_api_secret())
 
-        if not video_id and not final_video:
+        # Если сцены уже созданы, не запускаем их платную генерацию повторно
+        # только из-за проблемы с HeyGen.
+        if not video_id and not final_video and not scene_images:
             st.warning(
                 "Следующая кнопка использует изображения OpenAI, голос HeyGen и "
                 "оживление сцен Runway. Нажмите её один раз."
@@ -2666,7 +2669,19 @@ def _render_item(
                 with st.spinner("Проверяем озвучку..."):
                     result = get_avatar_video_fn(video_id)
                 if not result.get("ok"):
-                    st.error(str(result.get("error") or "Не удалось проверить видео."))
+                    error_text = str(
+                        result.get("error") or "Не удалось проверить видео."
+                    )
+                    reel_state["status"] = "voice_error"
+                    reel_state["error"] = error_text
+
+                    # Если HeyGen потерял старый video_id, сохраняем уже готовые сцены
+                    # и сбрасываем только ссылку на озвучку.
+                    if "not found" in error_text.lower():
+                        reel_state.pop("video_id", None)
+                        reel_state.pop("video_url", None)
+                    st.session_state[reel_state_key] = reel_state
+                    st.rerun()
                 else:
                     reel_state.update(result)
                     status = str(result.get("status") or "").lower()
@@ -2694,6 +2709,35 @@ def _render_item(
         narration_video = reel_state.get("narration_video")
         runway_tasks = reel_state.get("runway_tasks") or []
         final_video = reel_state.get("final_video")
+        video_id = _clean_text(reel_state.get("video_id"), 300)
+        scene_images = reel_state.get("scene_images") or []
+
+        # Если HeyGen потерял video_id, изображения не создаём заново.
+        # Пользователь повторяет только озвучку.
+        if scene_images and not video_id and not narration_video and not final_video:
+            st.info(
+                "Изображения сцен уже сохранены. Повторно оплачивать их создание не нужно."
+            )
+            if st.button(
+                "🔊 Повторить только озвучку",
+                key=prefix + "_retry_voice",
+                use_container_width=True,
+            ):
+                with st.spinner("Повторно создаём только озвучку в HeyGen..."):
+                    avatar_result = create_avatar_video_fn(
+                        reel_state.get("spoken_text") or item.get("script") or ""
+                    )
+                if avatar_result.get("ok"):
+                    reel_state.update(avatar_result)
+                    reel_state["status"] = "voice_started"
+                    reel_state.pop("error", None)
+                else:
+                    reel_state["status"] = "voice_error"
+                    reel_state["error"] = str(
+                        avatar_result.get("error") or "Не удалось повторить озвучку."
+                    )
+                st.session_state[reel_state_key] = reel_state
+                st.rerun()
 
         if narration_video and not runway_tasks and not final_video:
             st.info("Голос и изображения сохранены. Осталось оживить сцены.")
@@ -2760,6 +2804,34 @@ def _render_item(
         if reel_state.get("error"):
             st.error(str(reel_state["error"]))
             retry_col, reset_col = st.columns(2)
+
+            if (
+                scene_images
+                and not narration_video
+                and retry_col.button(
+                    "🔊 Повторить только озвучку",
+                    key=prefix + "_retry_voice_error",
+                    use_container_width=True,
+                )
+            ):
+                with st.spinner("Повторно создаём только озвучку в HeyGen..."):
+                    avatar_result = create_avatar_video_fn(
+                        reel_state.get("spoken_text") or item.get("script") or ""
+                    )
+                if avatar_result.get("ok"):
+                    reel_state.pop("video_id", None)
+                    reel_state.pop("video_url", None)
+                    reel_state.update(avatar_result)
+                    reel_state["status"] = "voice_started"
+                    reel_state.pop("error", None)
+                else:
+                    reel_state["status"] = "voice_error"
+                    reel_state["error"] = str(
+                        avatar_result.get("error") or "Не удалось повторить озвучку."
+                    )
+                st.session_state[reel_state_key] = reel_state
+                st.rerun()
+
             if narration_video and retry_col.button(
                 "Повторить только оживление",
                 key=prefix + "_retry_animation",
