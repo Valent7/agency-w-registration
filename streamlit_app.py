@@ -2263,6 +2263,168 @@ async def fetch_telegram_chat_members(
         await client.disconnect()
 
 
+async def fetch_telegram_chat_members_page(
+    telegram_id,
+    chat,
+    offset=0,
+    limit=200,
+):
+    """Читает участников чата последовательно, сохраняя позицию очереди.
+
+    offset — сколько сырых позиций участников уже пройдено в этом чате.
+    Возвращает только доступных людей, но вместе с _queue_offset каждого
+    человека, чтобы после дневной пятёрки не потерять остальных из страницы.
+    """
+    session_string = load_telegram_session_from_supabase(telegram_id)
+    if not session_string:
+        return {
+            "members": [],
+            "next_offset": int(offset or 0),
+            "scanned": 0,
+            "exhausted": True,
+        }
+
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = max(10, min(500, int(limit or 200)))
+    except (TypeError, ValueError):
+        limit = 200
+
+    api_id, api_hash = get_telegram_api_credentials()
+    client = TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+    )
+    await client.connect()
+
+    try:
+        if not await client.is_user_authorized():
+            return {
+                "members": [],
+                "next_offset": offset,
+                "scanned": 0,
+                "exhausted": True,
+            }
+
+        chat_entity = await resolve_telegram_chat_entity(client, chat)
+        current_user = await client.get_me()
+        owner_telegram_id = int(current_user.id)
+
+        members = []
+        raw_position = 0
+        page_scanned = 0
+        exhausted = True
+
+        async for user in client.iter_participants(
+            chat_entity,
+            limit=None,
+        ):
+            if raw_position < offset:
+                raw_position += 1
+                continue
+
+            raw_position += 1
+            page_scanned += 1
+
+            if getattr(user, "deleted", False):
+                if page_scanned >= limit:
+                    exhausted = False
+                    break
+                continue
+            if getattr(user, "bot", False):
+                if page_scanned >= limit:
+                    exhausted = False
+                    break
+                continue
+            if int(user.id) == owner_telegram_id:
+                if page_scanned >= limit:
+                    exhausted = False
+                    break
+                continue
+
+            first_name = str(
+                getattr(user, "first_name", "") or ""
+            ).strip()
+            last_name = str(
+                getattr(user, "last_name", "") or ""
+            ).strip()
+            full_name = " ".join(
+                part
+                for part in (first_name, last_name)
+                if part
+            ).strip()
+
+            access_hash = getattr(user, "access_hash", None)
+            try:
+                access_hash = (
+                    int(access_hash)
+                    if access_hash is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                access_hash = None
+
+            members.append(
+                {
+                    "telegram_id": int(user.id),
+                    "access_hash": access_hash,
+                    "name": full_name or "Без имени",
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": str(
+                        getattr(user, "username", "") or ""
+                    ).strip(),
+                    "mutual_contact": bool(
+                        getattr(user, "mutual_contact", False)
+                    ),
+                    "verified": bool(
+                        getattr(user, "verified", False)
+                    ),
+                    "telegram_warning": bool(
+                        getattr(user, "scam", False)
+                        or getattr(user, "fake", False)
+                    ),
+                    "source_chat_id": int(chat["chat_id"]),
+                    "source_chat_title": str(
+                        chat.get("title") or "Без названия"
+                    ),
+                    "_queue_offset": raw_position,
+                }
+            )
+
+            if page_scanned >= limit:
+                exhausted = False
+                break
+
+        return {
+            "members": members,
+            "next_offset": raw_position,
+            "scanned": page_scanned,
+            "exhausted": exhausted,
+        }
+
+    except ChatAdminRequiredError as exc:
+        raise RuntimeError(
+            "Telegram не разрешил получить список участников этого чата. "
+            "Возможно, список скрыт или доступен только администраторам."
+        ) from exc
+    except ChannelPrivateError as exc:
+        raise RuntimeError(
+            "Этот чат закрыт или больше недоступен подключённому аккаунту."
+        ) from exc
+    except FloodWaitError as exc:
+        raise RuntimeError(
+            "Telegram временно ограничил запросы. Повторите попытку через "
+            f"{getattr(exc, 'seconds', 60)} секунд."
+        ) from exc
+    finally:
+        await client.disconnect()
+
+
 def build_chat_member_peer(member):
     """Создаёт InputPeerUser из сохранённого ID и access_hash."""
 
@@ -4811,43 +4973,33 @@ def prepare_candidates_for_stagirite(
 ):
     """Последовательная очередь Неонии без повторов и без фильтра ЦА.
 
-    Правила:
-    - сначала полностью отрабатываем личные Telegram-контакты;
-    - показанный человеку кандидат сразу становится отработанным, даже если
-      владелец ему не написал;
-    - повторов в первом проходе нет;
-    - после исчерпания личных контактов очередь сможет продолжиться чатами.
+    Первый проход:
+    1) личные Telegram-контакты;
+    2) затем Telegram-группы/супергруппы по одной до конца;
+    3) один Telegram ID показывается владельцу только один раз.
     """
     owner_id = int(owner_id)
     desired_count = max(1, min(10, int(desired_count or 5)))
     reserve_target = max(desired_count, min(100, int(reserve_target or 50)))
 
     contacts_key = f"neonia_telegram_contacts_{owner_id}"
+    chats_key = f"neonia_telegram_chats_{owner_id}"
+    chat_offsets_key = f"neonia_chat_offsets_{owner_id}"
     processed_key = f"neonia_processed_candidates_{owner_id}"
     progress_key = f"neonia_source_progress_{owner_id}"
     selected_key = f"neonia_selected_candidates_{owner_id}"
     candidates_key = f"neonia_candidates_{owner_id}"
-    offset_key = f"neonia_selection_offset_{owner_id}"
 
-    berlin_today = datetime.now(
-        ZoneInfo("Europe/Berlin")
-    ).date().isoformat()
-
-    # Обновляем личные контакты не чаще одного раза в день.
-    contacts_refresh_key = f"neonia_contacts_refresh_date_{owner_id}"
+    # Личный список фиксируется как рабочая база первого прохода.
+    # Автоматически каждый день его не пересобираем: обновить список можно
+    # отдельно через «Поиск контактов», если владелец этого захочет.
     contacts = st.session_state.get(contacts_key, [])
-    if (
-        not isinstance(contacts, list)
-        or not contacts
-        or st.session_state.get(contacts_refresh_key) != berlin_today
-    ):
+    if not isinstance(contacts, list) or not contacts:
         try:
             contacts = run_telegram_async(fetch_telegram_contacts(owner_id))
             st.session_state[contacts_key] = contacts
-            st.session_state[contacts_refresh_key] = berlin_today
         except Exception:
             contacts = st.session_state.get(contacts_key, [])
-
     if not isinstance(contacts, list):
         contacts = []
 
@@ -4872,65 +5024,251 @@ def prepare_candidates_for_stagirite(
         except (TypeError, ValueError):
             continue
 
-    # Одноразовая миграция старой истории. Старый selection_offset отражал
-    # уже пройденную часть сохранённого списка; эти люди не должны появиться
-    # повторно после перехода на новую очередь.
-    if not processed_ids:
-        legacy_offset = int(st.session_state.get(offset_key, 0) or 0)
-        for contact in normalized_contacts[:max(0, legacy_offset)]:
-            processed_ids.add(int(contact["telegram_id"]))
-
-        for value in st.session_state.get(selected_key, []) or []:
-            try:
-                processed_ids.add(int(value))
-            except (TypeError, ValueError):
-                continue
-
-        sent_log = st.session_state.get(
-            f"neona_first_message_sent_log_{owner_id}",
-            [],
-        )
-        if isinstance(sent_log, list):
-            for event in sent_log:
-                if not isinstance(event, dict):
-                    continue
-                try:
-                    processed_ids.add(int(event.get("telegram_id")))
-                except (TypeError, ValueError):
-                    continue
-
-        blocked = st.session_state.get(
-            f"neona_first_message_blocked_{owner_id}",
-            [],
-        )
-        if isinstance(blocked, list):
-            for event in blocked:
-                if not isinstance(event, dict):
-                    continue
-                try:
-                    processed_ids.add(int(event.get("telegram_id")))
-                except (TypeError, ValueError):
-                    continue
-
     for value in exclude_ids or []:
         try:
             processed_ids.add(int(value))
         except (TypeError, ValueError):
             continue
 
+    selected_today = []
+    today_contact_count = 0
+    today_chat_count = 0
+
+    # --------------------------------------------------------------
+    # 1. Сначала добираем из личных контактов строго по очереди.
+    # --------------------------------------------------------------
     contact_ids = [int(item["telegram_id"]) for item in normalized_contacts]
     remaining_contacts = [
-        item for item in normalized_contacts
+        item
+        for item in normalized_contacts
         if int(item["telegram_id"]) not in processed_ids
     ]
 
-    selected_today = remaining_contacts[:desired_count]
-
-    # ВАЖНО: "показан = отработан". Записываем сразу, а не после отправки.
-    for item in selected_today:
+    for item in remaining_contacts[:desired_count]:
+        candidate = {
+            **item,
+            "_queue_source_type": "telegram_contacts",
+            "_queue_source_name": "Личные контакты Telegram",
+        }
+        selected_today.append(candidate)
         processed_ids.add(int(item["telegram_id"]))
+        today_contact_count += 1
 
+    need = max(0, desired_count - len(selected_today))
+
+    # --------------------------------------------------------------
+    # 2. Когда личные контакты закончились (или осталось <5), добираем
+    #    из чатов. Один чат идёт до конца, потом следующий.
+    # --------------------------------------------------------------
+    progress_state = st.session_state.get(progress_key, {})
+    if not isinstance(progress_state, dict):
+        progress_state = {}
+
+    chat_offsets = st.session_state.get(chat_offsets_key, {})
+    if not isinstance(chat_offsets, dict):
+        chat_offsets = {}
+
+    completed_chat_ids = set()
+    for value in progress_state.get("completed_chat_ids", []) or []:
+        try:
+            completed_chat_ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    chat_stats = progress_state.get("chat_stats", {})
+    if not isinstance(chat_stats, dict):
+        chat_stats = {}
+
+    current_chat_id = progress_state.get("current_chat_id")
+    try:
+        current_chat_id = (
+            int(current_chat_id)
+            if current_chat_id not in (None, "")
+            else None
+        )
+    except (TypeError, ValueError):
+        current_chat_id = None
+
+    chats = st.session_state.get(chats_key, [])
+    if need > 0 and (not isinstance(chats, list) or not chats):
+        try:
+            chats = run_telegram_async(fetch_telegram_chats(owner_id))
+            st.session_state[chats_key] = chats
+        except Exception:
+            chats = st.session_state.get(chats_key, [])
+    if not isinstance(chats, list):
+        chats = []
+
+    eligible_chats = []
+    seen_chat_ids = set()
+    for chat in chats:
+        if not isinstance(chat, dict):
+            continue
+        if chat.get("type") not in {"Группа", "Супергруппа"}:
+            continue
+        try:
+            chat_id = int(chat.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+        if chat_id in seen_chat_ids:
+            continue
+        seen_chat_ids.add(chat_id)
+        eligible_chats.append({**chat, "chat_id": chat_id})
+
+    chat_by_id = {
+        int(chat["chat_id"]): chat
+        for chat in eligible_chats
+    }
+
+    def next_chat_after(current_id=None):
+        if (
+            current_id in chat_by_id
+            and int(current_id) not in completed_chat_ids
+        ):
+            return chat_by_id[int(current_id)]
+        for chat in eligible_chats:
+            cid = int(chat["chat_id"])
+            if cid not in completed_chat_ids:
+                return chat
+        return None
+
+    active_chat = next_chat_after(current_chat_id)
+    safety_pages = 0
+
+    while need > 0 and active_chat is not None and safety_pages < 100:
+        safety_pages += 1
+        chat_id = int(active_chat["chat_id"])
+        chat_key = str(chat_id)
+        stats = chat_stats.get(chat_key, {})
+        if not isinstance(stats, dict):
+            stats = {}
+
+        try:
+            offset = max(0, int(chat_offsets.get(chat_key, 0) or 0))
+        except (TypeError, ValueError):
+            offset = 0
+
+        total_reported = int(
+            active_chat.get("participants_count") or stats.get("total") or 0
+        )
+        stats["title"] = str(
+            active_chat.get("title") or "Без названия"
+        )
+        stats["total"] = total_reported
+        stats["shown"] = int(stats.get("shown") or 0)
+        stats["duplicates_skipped"] = int(
+            stats.get("duplicates_skipped") or 0
+        )
+        stats["technical_skipped"] = int(
+            stats.get("technical_skipped") or 0
+        )
+
+        try:
+            page = run_telegram_async(
+                fetch_telegram_chat_members_page(
+                    owner_id,
+                    active_chat,
+                    offset=offset,
+                    limit=200,
+                )
+            )
+        except Exception as exc:
+            stats["completed"] = True
+            stats["error"] = str(exc)[:500]
+            chat_stats[chat_key] = stats
+            completed_chat_ids.add(chat_id)
+            if current_chat_id == chat_id:
+                current_chat_id = None
+            active_chat = next_chat_after(None)
+            continue
+
+        members = page.get("members") or []
+        next_offset = int(page.get("next_offset") or offset)
+        scanned = int(page.get("scanned") or 0)
+        exhausted_page = bool(page.get("exhausted"))
+
+        # Технически пропущенные позиции: боты, удалённые, сам владелец.
+        stats["technical_skipped"] += max(
+            0,
+            scanned - len(members),
+        )
+
+        chosen_from_page = 0
+        page_last_consumed_offset = offset
+
+        for member in members:
+            try:
+                cid = int(member.get("telegram_id"))
+            except (TypeError, ValueError):
+                continue
+
+            member_offset = int(
+                member.get("_queue_offset") or page_last_consumed_offset
+            )
+            page_last_consumed_offset = max(
+                page_last_consumed_offset,
+                member_offset,
+            )
+
+            if cid in processed_ids:
+                stats["duplicates_skipped"] += 1
+                continue
+
+            candidate = {
+                **member,
+                "_queue_source_type": "telegram_chat",
+                "_queue_source_name": str(
+                    active_chat.get("title") or "Telegram-чат"
+                ),
+            }
+            selected_today.append(candidate)
+            processed_ids.add(cid)
+            stats["shown"] += 1
+            today_chat_count += 1
+            chosen_from_page += 1
+            need -= 1
+
+            # Останавливаемся ровно на пятом человеке и сохраняем позицию
+            # сразу после него — остальные участники страницы не теряются.
+            if need <= 0:
+                chat_offsets[chat_key] = member_offset
+                break
+
+        if need <= 0:
+            current_chat_id = chat_id
+            chat_stats[chat_key] = stats
+            break
+
+        # Страница пройдена полностью: можно двигать offset к её концу.
+        if next_offset > offset:
+            chat_offsets[chat_key] = next_offset
+        else:
+            chat_offsets[chat_key] = page_last_consumed_offset
+
+        # Если Telegram реально дошёл до конца или позиция не сдвинулась,
+        # этот чат считается завершённым и переходим к следующему.
+        no_progress = int(chat_offsets[chat_key] or 0) <= offset
+        if exhausted_page or no_progress or scanned == 0:
+            stats["completed"] = True
+            stats["completed_at"] = datetime.now(
+                ZoneInfo("Europe/Berlin")
+            ).isoformat()
+            chat_stats[chat_key] = stats
+            completed_chat_ids.add(chat_id)
+            current_chat_id = None
+            active_chat = next_chat_after(None)
+            continue
+
+        current_chat_id = chat_id
+        chat_stats[chat_key] = stats
+        # В том же чате продолжаем следующую страницу, пока не наберём 5.
+        active_chat = chat_by_id.get(chat_id)
+
+    # --------------------------------------------------------------
+    # Общая память Telegram: показан = отработан.
+    # --------------------------------------------------------------
     st.session_state[processed_key] = sorted(processed_ids)
+    st.session_state[chat_offsets_key] = chat_offsets
 
     old_selected = []
     for value in st.session_state.get(selected_key, []) or []:
@@ -4946,13 +5284,26 @@ def prepare_candidates_for_stagirite(
             old_selected.append(cid)
     st.session_state[selected_key] = old_selected
 
-    # Минимальные карточки нужны только для отображения сегодняшней пятёрки.
+    # Карточки сегодняшней пятёрки нужны только для отображения и передачи
+    # следующему этапу. ЦА/интерес здесь намеренно не оцениваются.
     queue_cards = []
     for item in selected_today:
+        source_type = str(
+            item.get("_queue_source_type") or "telegram_contacts"
+        )
+        source_name = str(
+            item.get("_queue_source_name") or "Личные контакты Telegram"
+        )
+        clean_item = {
+            key: value
+            for key, value in item.items()
+            if not str(key).startswith("_queue_")
+        }
         queue_cards.append(
             {
-                **item,
-                "source": "Личные контакты Telegram",
+                **clean_item,
+                "source": source_name,
+                "source_type": source_type,
                 "segment": "Последовательная очередь",
                 "potential_interest": "не оценивается",
                 "actuality": "не оценивается",
@@ -4963,7 +5314,7 @@ def prepare_candidates_for_stagirite(
                     "Кандидат выдан по очереди. ЦА и интерес на этом этапе "
                     "не оцениваются."
                 ),
-                "reasons": ["Следующий новый контакт в очереди"],
+                "reasons": ["Следующий новый человек в очереди"],
             }
         )
 
@@ -4975,53 +5326,128 @@ def prepare_candidates_for_stagirite(
         queue_cards,
     )
 
+    # --------------------------------------------------------------
+    # Отчёт очереди.
+    # --------------------------------------------------------------
     processed_in_contacts = sum(
         1 for cid in contact_ids if cid in processed_ids
     )
-    remaining_count = max(0, len(contact_ids) - processed_in_contacts)
+    contacts_remaining = max(
+        0,
+        len(contact_ids) - processed_in_contacts,
+    )
 
-    progress = {
-        "source_type": "telegram_contacts",
-        "source_name": "Личные контакты Telegram",
-        "total": len(contact_ids),
-        "processed": processed_in_contacts,
-        "remaining": remaining_count,
-        "today": len(selected_today),
-        "updated_at": datetime.now(
-            ZoneInfo("Europe/Berlin")
-        ).isoformat(),
-    }
+    all_chats_completed = bool(eligible_chats) and all(
+        int(chat["chat_id"]) in completed_chat_ids
+        for chat in eligible_chats
+    )
 
-    # Если личные контакты закончились, фиксируем переход к чатам.
-    # Сам механизм последовательной очереди чатов подключается следующим
-    # этапом, но старые контакты при этом уже никогда не вернутся.
-    if not remaining_contacts and not selected_today:
-        progress["source_type"] = "telegram_chats"
-        progress["source_name"] = "Telegram-чаты"
-        progress["contacts_exhausted"] = True
+    if contacts_remaining > 0:
+        progress = {
+            "source_type": "telegram_contacts",
+            "source_name": "Личные контакты Telegram",
+            "total": len(contact_ids),
+            "processed": processed_in_contacts,
+            "remaining": contacts_remaining,
+            "today": len(selected_today),
+        }
+    else:
+        active_chat = next_chat_after(current_chat_id)
+        if active_chat is not None:
+            cid = int(active_chat["chat_id"])
+            stats = chat_stats.get(str(cid), {})
+            if not isinstance(stats, dict):
+                stats = {}
+            total = int(
+                active_chat.get("participants_count")
+                or stats.get("total")
+                or 0
+            )
+            shown = int(stats.get("shown") or 0)
+            dupes = int(stats.get("duplicates_skipped") or 0)
+            technical = int(stats.get("technical_skipped") or 0)
+            remaining = max(0, total - shown - dupes - technical)
+            progress = {
+                "source_type": "telegram_chat",
+                "source_name": (
+                    "Telegram-чат: "
+                    + str(active_chat.get("title") or "Без названия")
+                ),
+                "current_chat_id": cid,
+                "total": total,
+                "processed": shown,
+                "remaining": remaining,
+                "today": today_chat_count,
+                "duplicates_skipped": dupes,
+                "technical_skipped": technical,
+            }
+        else:
+            progress = {
+                "source_type": "telegram_complete",
+                "source_name": "Telegram — первый проход завершён",
+                "total": len(contact_ids),
+                "processed": len(processed_ids),
+                "remaining": 0,
+                "today": len(selected_today),
+            }
 
+    progress.update(
+        {
+            "contacts_total": len(contact_ids),
+            "contacts_processed": processed_in_contacts,
+            "contacts_remaining": contacts_remaining,
+            "contacts_exhausted": contacts_remaining == 0,
+            "current_chat_id": current_chat_id,
+            "completed_chat_ids": sorted(completed_chat_ids),
+            "chat_stats": chat_stats,
+            "all_chats_completed": all_chats_completed,
+            "updated_at": datetime.now(
+                ZoneInfo("Europe/Berlin")
+            ).isoformat(),
+        }
+    )
     st.session_state[progress_key] = progress
 
-    reserve_ids = [
-        int(item["telegram_id"])
-        for item in remaining_contacts[desired_count:desired_count + reserve_target]
-    ]
+    reserve_ids = []
+    if contacts_remaining > 0:
+        remaining_after_today = [
+            int(item["telegram_id"])
+            for item in normalized_contacts
+            if int(item["telegram_id"]) not in processed_ids
+        ]
+        reserve_ids = remaining_after_today[:reserve_target]
 
     persist_workspace_if_changed(owner_id, force=True)
 
     if selected_today:
+        if today_chat_count and today_contact_count:
+            message = (
+                f"Сегодня выданы {today_contact_count} из личных контактов "
+                f"и {today_chat_count} из Telegram-чата. Всего: "
+                f"{len(selected_today)}."
+            )
+        elif today_chat_count:
+            message = (
+                f"Сегодня выданы следующие {today_chat_count} новых участников "
+                "Telegram-чатов."
+            )
+        else:
+            message = (
+                f"Сегодня выданы следующие {today_contact_count} новых личных "
+                "Telegram-контактов."
+            )
+    elif contacts_remaining == 0 and all_chats_completed:
         message = (
-            f"Сегодня выданы следующие {len(selected_today)} новых контактов. "
-            f"Отработано: {processed_in_contacts} из {len(contact_ids)}. "
-            f"Осталось: {remaining_count}."
+            "Первый проход Telegram завершён: личные контакты и доступные "
+            "участники всех Telegram-чатов отработаны."
         )
-    elif normalized_contacts:
+    elif contacts_remaining == 0 and not eligible_chats:
         message = (
-            "Личные Telegram-контакты первого прохода закончились. "
-            "Следующий источник — Telegram-чаты."
+            "Личные Telegram-контакты закончились. Доступных групп для "
+            "следующего этапа пока нет."
         )
     else:
-        message = "Telegram не вернул доступных личных контактов."
+        message = "Сегодня новых доступных людей в очереди не найдено."
 
     return {
         "ok": True,
@@ -5032,7 +5458,10 @@ def prepare_candidates_for_stagirite(
         "reserve_ids": reserve_ids,
         "available_reserve": len(reserve_ids),
         "checked_detail": len(selected_today),
-        "exhausted": not bool(remaining_contacts),
+        "exhausted": (
+            contacts_remaining == 0
+            and (all_chats_completed or not eligible_chats)
+        ),
         "message": message,
         "progress": progress,
     }
@@ -7863,8 +8292,9 @@ if telegram_login_valid or remembered_data:
 
                 elif selected_agent == "Неония":
                     st.caption(
-                "Неония анализирует проект, формирует портрет ЦА и затем "
-                "помогает владельцу разбирать контакты партиями по 10."
+                "Неония ведёт последовательную очередь Telegram: сначала "
+                "личные контакты, затем доступные участники чатов. "
+                "Каждый человек показывается один раз."
             )
 
                     neonia_options = [
@@ -7873,9 +8303,7 @@ if telegram_login_valid or remembered_data:
                         "🌿 Stories Telegram",
                         "📸 Instagram Radar",
                         "🔎 Поиск чатов",
-                        "🎯 Поиск контактов в чатах по ЦА",
                         "👥 Поиск контактов",
-                        "🧠 Анализ 10 контактов",
                     ]
                     if talkback_mode:
                         accessible_neonia_labels = {
@@ -7884,9 +8312,7 @@ if telegram_login_valid or remembered_data:
                             "🌿 Stories Telegram": "Stories Telegram",
                             "📸 Instagram Radar": "Instagram Radar",
                             "🔎 Поиск чатов": "Поиск чатов",
-                            "🎯 Поиск контактов в чатах по ЦА": "Поиск контактов в чатах по целевой аудитории",
                             "👥 Поиск контактов": "Поиск контактов",
-                            "🧠 Анализ 10 контактов": "Анализ 10 контактов",
                         }
                         neonia_mode = st.radio(
                             "Выберите задачу Неонии",
@@ -7919,16 +8345,19 @@ if telegram_login_valid or remembered_data:
                             "естественных комментариев для ручной отправки."
                         ),
                         "🔎 Поиск чатов": (
-                            "Здесь Неония загружает доступные Telegram-группы "
-                            "и каналы. Затем выберите «Поиск контактов в чатах "
-                            "по ЦА»."
+                            "Здесь можно посмотреть доступные Telegram-группы. "
+                            "Когда личные контакты закончатся, Неония будет "
+                            "отрабатывать доступных участников этих чатов "
+                            "последовательно, по 5 новых человек в день."
                         ),
                         "🎯 Поиск контактов в чатах по ЦА": (
                             "Здесь Неония выбирает найденную группу, получает "
                             "доступных участников и сравнивает их с паспортом ЦА."
                         ),
                         "👥 Поиск контактов": (
-                            "Здесь Неония работает с личной адресной книгой Telegram."
+                            "Здесь можно получить или вручную обновить исходный "
+                            "список личных Telegram-контактов. Ежедневная пятёрка "
+                            "формируется автоматически и без повторов."
                         ),
                         "🧠 Анализ 10 контактов": (
                             "Неония берёт следующие 10 ещё не проанализированных контактов, "
