@@ -7402,12 +7402,93 @@ if telegram_login_valid or remembered_data:
     
             st.info(f"Настрой дня: {mood_of_the_day}")
 
+            # Одноразовая миграция старой истории Неонии.
+            # Старый selection_offset считал ПРОСМОТРЕННЫЕ позиции при поиске
+            # активности, а не реально выданных кандидатов. Поэтому его нельзя
+            # использовать как число "отработано". Историю восстанавливаем по
+            # фактически сохранённым карточкам кандидатов.
+            queue_progress_key = f"neonia_source_progress_{telegram_id}"
+            queue_processed_key = f"neonia_processed_candidates_{telegram_id}"
+            queue_progress = st.session_state.get(queue_progress_key, {})
+            if not isinstance(queue_progress, dict):
+                queue_progress = {}
+
+            if str(queue_progress.get("migration_version") or "") != "candidate_history_v2":
+                legacy_cards = st.session_state.get(
+                    f"neonia_candidates_{telegram_id}",
+                    [],
+                )
+                if not isinstance(legacy_cards, list):
+                    legacy_cards = []
+
+                historical_ids = []
+                today_queue_ids = []
+                for item in legacy_cards:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        cid = int(item.get("telegram_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    is_new_queue_card = (
+                        str(item.get("segment") or "") == "Последовательная очередь"
+                        or str(item.get("recommendation") or "")
+                        == "Выдан в ежедневной пятёрке"
+                    )
+                    target = today_queue_ids if is_new_queue_card else historical_ids
+                    if cid not in target:
+                        target.append(cid)
+
+                restored_ids = []
+                for cid in historical_ids + today_queue_ids:
+                    if cid not in restored_ids:
+                        restored_ids.append(cid)
+
+                st.session_state[queue_processed_key] = restored_ids
+
+                queue_contacts = st.session_state.get(
+                    f"neonia_telegram_contacts_{telegram_id}",
+                    [],
+                )
+                if not isinstance(queue_contacts, list):
+                    queue_contacts = []
+                queue_contact_ids = []
+                for contact in queue_contacts:
+                    if not isinstance(contact, dict):
+                        continue
+                    try:
+                        cid = int(contact.get("telegram_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    if cid not in queue_contact_ids:
+                        queue_contact_ids.append(cid)
+
+                restored_in_contacts = sum(
+                    1 for cid in queue_contact_ids if cid in set(restored_ids)
+                )
+                queue_progress = {
+                    **queue_progress,
+                    "source_type": "telegram_contacts",
+                    "source_name": "Личные контакты Telegram",
+                    "total": len(queue_contact_ids),
+                    "processed": restored_in_contacts,
+                    "remaining": max(
+                        0,
+                        len(queue_contact_ids) - restored_in_contacts,
+                    ),
+                    "today": len(today_queue_ids),
+                    "legacy_history_count": len(historical_ids),
+                    "migration_version": "candidate_history_v2",
+                    "updated_at": datetime.now(
+                        ZoneInfo("Europe/Berlin")
+                    ).isoformat(),
+                }
+                st.session_state[queue_progress_key] = queue_progress
+                persist_workspace_if_changed(telegram_id, force=True)
+
             # Ежедневная рабочая пятёрка Стагирита готовится уже на «Моём дне».
             # После того как Неония однажды получила/обновила общий пул людей,
             # владельцу не нужно ежедневно заходить к Неонии.
-            # «Мой день» должен открываться мгновенно.
-            # Здесь только читаем уже подготовленную подборку и никогда
-            # не запускаем тяжёлый Telegram/ИИ-поиск.
             daily_stagirite_candidates = ensure_weekly_candidates_for_neona(
                 telegram_id,
                 prepare_candidates_fn=prepare_candidates_for_stagirite,
