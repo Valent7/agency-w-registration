@@ -206,6 +206,20 @@ def upsert_vk_source(
     resolved = resolve_vk_community(community)
     cid = int(resolved["community_id"])
     screen_name = str(resolved.get("screen_name") or "")
+    existing_rows = _sb_get(
+        "agency_vk_sources",
+        {
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "community_id": f"eq.{cid}",
+            "select": "id,note",
+            "limit": 1,
+        },
+    )
+    existing_note = (
+        str(existing_rows[0].get("note") or "")
+        if existing_rows
+        else ""
+    )
     payload = {
         "owner_telegram_id": int(owner_id),
         "community_id": cid,
@@ -213,7 +227,9 @@ def upsert_vk_source(
         "community_url": f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/club{cid}",
         "active": True,
         "priority": max(0, min(100, int(priority))),
-        "note": note.strip() or None,
+        # Очередь VK хранит технический курсор в note. Повторное добавление
+        # того же источника не должно обнулять уже пройденную часть сообщества.
+        "note": note.strip() or existing_note or None,
         "updated_at": datetime.now(UTC).isoformat(),
     }
     rows = _sb_post("agency_vk_sources", payload, on_conflict="owner_telegram_id,community_id")
@@ -230,6 +246,220 @@ def load_vk_sources(owner_id: int) -> list[dict[str, Any]]:
             "order": "priority.desc,created_at.asc",
         },
     )
+
+
+VK_QUEUE_ASSIGNMENT_PREFIX = "__VK_QUEUE__:"
+VK_SOURCE_QUEUE_PREFIX = "__VK_SOURCE_QUEUE__:"
+
+
+def vk_queue_assignment_meta(value: dict[str, Any] | str | None) -> dict[str, Any]:
+    """Читает техническую метку последовательной VK-очереди."""
+    if isinstance(value, dict):
+        text = str(value.get("fit_summary") or "").strip()
+    else:
+        text = str(value or "").strip()
+    if not text.startswith(VK_QUEUE_ASSIGNMENT_PREFIX):
+        return {}
+    raw = text[len(VK_QUEUE_ASSIGNMENT_PREFIX):].strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _encode_vk_queue_assignment_meta(
+    source: dict[str, Any],
+    *,
+    member_offset: int,
+    total: int,
+) -> str:
+    data = {
+        "community_id": int(source.get("community_id") or 0),
+        "community_name": str(
+            source.get("community_name")
+            or source.get("community_url")
+            or f"VK-сообщество {source.get('community_id') or ''}"
+        ).strip(),
+        "member_offset": max(0, int(member_offset or 0)),
+        "total": max(0, int(total or 0)),
+    }
+    return VK_QUEUE_ASSIGNMENT_PREFIX + json.dumps(
+        data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _source_queue_state(source: dict[str, Any]) -> dict[str, Any]:
+    note = str(source.get("note") or "")
+    first_line = note.splitlines()[0].strip() if note else ""
+    if not first_line.startswith(VK_SOURCE_QUEUE_PREFIX):
+        return {}
+    try:
+        data = json.loads(first_line[len(VK_SOURCE_QUEUE_PREFIX):].strip())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _source_human_note(source: dict[str, Any]) -> str:
+    note = str(source.get("note") or "")
+    lines = note.splitlines()
+    if lines and lines[0].strip().startswith(VK_SOURCE_QUEUE_PREFIX):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _save_source_queue_state(
+    owner_id: int,
+    source: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    source_id = source.get("id")
+    if source_id is None:
+        return
+    human_note = _source_human_note(source)
+    technical = VK_SOURCE_QUEUE_PREFIX + json.dumps(
+        state,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    combined = technical + (("\n" + human_note) if human_note else "")
+    _sb_patch(
+        "agency_vk_sources",
+        {
+            "id": f"eq.{int(source_id)}",
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+        },
+        {
+            "note": combined,
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    source["note"] = combined
+
+
+def _owner_vk_assignment_rows(owner_id: int) -> list[dict[str, Any]]:
+    """Вся история ежедневных VK-карточек владельца, постранично."""
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    page_size = 1000
+    for _ in range(100):
+        page = _sb_get(
+            "agency_vk_assignments",
+            {
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "daily_position": "not.is.null",
+                "select": "id,vk_user_id,assignment_date,daily_position,status,fit_summary,created_at",
+                "order": "id.asc",
+                "limit": page_size,
+                "offset": offset,
+            },
+        )
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
+def _owner_processed_vk_ids(owner_id: int) -> set[int]:
+    """Любой уже показанный владельцу VK ID больше не возвращается."""
+    result: set[int] = set()
+    for row in _owner_vk_assignment_rows(owner_id):
+        # released может быть техническим проигрышем гонки до показа карточки.
+        if str(row.get("status") or "").strip() == "released":
+            continue
+        try:
+            uid = int(row.get("vk_user_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0:
+            result.add(uid)
+    return result
+
+
+def _today_vk_assignment_rows_all(owner_id: int) -> list[dict[str, Any]]:
+    today = date.today().isoformat()
+    return _sb_get(
+        "agency_vk_assignments",
+        {
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "assignment_date": f"eq.{today}",
+            "daily_position": "not.is.null",
+            "select": "*",
+            "order": "daily_position.asc,id.asc",
+            "limit": 100,
+        },
+    )
+
+
+def load_vk_queue_progress(owner_id: int) -> dict[str, Any]:
+    """Счётчик текущего VK-сообщества для интерфейса Неонии."""
+    owner_id = int(owner_id)
+    sources = load_vk_sources(owner_id)
+    current = None
+    completed_count = 0
+
+    for source in sources:
+        state = _source_queue_state(source)
+        if bool(state.get("completed")):
+            completed_count += 1
+            continue
+        current = source
+        break
+
+    today_rows = _today_vk_assignment_rows_all(owner_id)
+    today_count = len(today_rows)
+
+    if current is None:
+        return {
+            "source_name": "VK — активных сообществ для очереди нет",
+            "community_id": None,
+            "total": 0,
+            "processed": 0,
+            "remaining": 0,
+            "today": today_count,
+            "completed_sources": completed_count,
+            "sources_total": len(sources),
+            "complete": bool(sources),
+        }
+
+    state = _source_queue_state(current)
+    total = int(state.get("total") or 0)
+    if total <= 0:
+        page = fetch_vk_members(current, offset=0, count=1)
+        total = int(page.get("total") or 0)
+        state = {
+            **state,
+            "total": total,
+            "offset": max(0, int(state.get("offset") or 0)),
+            "completed": bool(state.get("completed")),
+        }
+        _save_source_queue_state(owner_id, current, state)
+
+    processed = min(
+        total,
+        max(0, int(state.get("offset") or 0)),
+    )
+    name = str(
+        current.get("community_name")
+        or current.get("community_url")
+        or f"VK-сообщество {current.get('community_id') or ''}"
+    ).strip()
+
+    return {
+        "source_name": name,
+        "community_id": int(current.get("community_id") or 0),
+        "total": total,
+        "processed": processed,
+        "remaining": max(0, total - processed),
+        "today": today_count,
+        "completed_sources": completed_count,
+        "sources_total": len(sources),
+        "complete": False,
+    }
 
 
 def _normalize_vk_user(row: dict[str, Any], source_community_id: int | None = None) -> dict[str, Any] | None:
@@ -269,23 +499,30 @@ def _normalize_vk_user(row: dict[str, Any], source_community_id: int | None = No
 
 def fetch_vk_members(source: dict[str, Any] | int, *, offset: int = 0, count: int = 200) -> dict[str, Any]:
     cid = int(source.get("community_id")) if isinstance(source, dict) else abs(int(source))
+    offset = max(0, int(offset))
+    count = max(1, min(1000, int(count)))
     response = _vk_api(
         "groups.getMembers",
         group_id=cid,
-        offset=max(0, int(offset)),
-        count=max(1, min(1000, int(count))),
+        offset=offset,
+        count=count,
         fields=",".join(VK_PROFILE_FIELDS),
     )
     response = response if isinstance(response, dict) else {}
+    raw_items = response.get("items") or []
     members = []
-    for row in response.get("items") or []:
+    for index, row in enumerate(raw_items):
         if isinstance(row, dict):
             item = _normalize_vk_user(row, cid)
             if item:
+                # Позиция в исходной очереди сообщества. Она нужна, чтобы
+                # завтра продолжить строго со следующего участника.
+                item["_source_offset"] = offset + index + 1
                 members.append(item)
     return {
         "community_id": cid,
         "total": int(response.get("count") or 0),
+        "returned_count": len(raw_items),
         "members": members,
     }
 
@@ -1051,1047 +1288,278 @@ def ensure_daily_vk_assignments(
     member_code: str,
     *,
     limit: int = 5,
-    min_score: int = 60,
+    min_score: int = 0,
     reservation_days: int = 7,
 ) -> dict[str, Any]:
+    """Последовательная VK-очередь: одно сообщество -> 5 новых -> следующее.
+
+    ЦА и score больше не решают, кого показывать. Исключаем только технически
+    непригодные профили, уже показанных этому владельцу, партнёров Агентства W
+    и людей, которые сейчас закреплены за другим партнёром.
+    """
     owner_id = int(owner_id)
     limit = max(1, min(5, int(limit)))
-    min_score = max(0, min(100, int(min_score)))
-    today = date.today().isoformat()
-    release_expired_vk_assignments()
 
-    existing = _sb_get(
-        "agency_vk_assignments",
-        {
-            "owner_telegram_id": f"eq.{owner_id}",
-            "assignment_date": f"eq.{today}",
-            "daily_position": "not.is.null",
-            "status": "not.in.(released,skipped,blocked,not_fit)",
-            "select": "*",
-            "order": "daily_position.asc",
-        },
-    )
-
-    # Старые назначения могли быть сформированы до введения правила
-    # «только тем, кому можно написать». Автоматически убираем такие карточки
-    # из сегодняшней пятёрки и освобождаем место для замены.
-    existing_vk_ids = [x.get("vk_user_id") for x in existing if x.get("vk_user_id") is not None]
-    messageable_existing = _messageable_vk_ids(existing_vk_ids)
-    if existing_vk_ids:
-        now_iso = datetime.now(UTC).isoformat()
-        for row in existing:
-            try:
-                uid = int(row.get("vk_user_id"))
-            except (TypeError, ValueError):
-                continue
-            if uid in messageable_existing:
-                continue
-            assignment_id = row.get("id")
-            if assignment_id is None:
-                continue
-            _sb_patch(
-                "agency_vk_assignments",
-                {"id": f"eq.{int(assignment_id)}"},
-                {
-                    "status": "blocked",
-                    "released_at": now_iso,
-                    "updated_at": now_iso,
-                },
-            )
-
-        existing = _sb_get(
-            "agency_vk_assignments",
-            {
-                "owner_telegram_id": f"eq.{owner_id}",
-                "assignment_date": f"eq.{today}",
-                "status": "not.in.(released,skipped,blocked,not_fit)",
-                "select": "*",
-                "order": "daily_position.asc",
-            },
-        )
-
-    # Диагностика нужна даже когда пятёрка уже готова: по ней видно,
-    # сколько профилей реально прошло порог Неонии.
-    all_owner_scores = _sb_get(
-        "agency_vk_candidate_scores",
-        {
-            "owner_telegram_id": f"eq.{owner_id}",
-            "select": "vk_user_id,score,fit_summary,analyzed_at",
-            "order": "score.desc,analyzed_at.desc",
-            "limit": 5000,
-        },
-    )
-    best_score = None
-    for item in all_owner_scores:
-        try:
-            value = int(item.get("score"))
-        except (TypeError, ValueError):
-            continue
-        best_score = value if best_score is None else max(best_score, value)
-
-    if len(existing) >= limit:
+    today_rows = _today_vk_assignment_rows_all(owner_id)
+    # Один раз показан сегодня = место дневной пятёрки занято, даже если
+    # владелец позже нажал «Пропустить».
+    if len(today_rows) >= limit:
         return {
             "ok": True,
-            "assignments": existing[:limit],
+            "assignments": load_today_vk_assignments(owner_id),
             "complete": True,
-            "analyzed_total": len(all_owner_scores),
-            "best_score": best_score,
-            "message": f"VK-пятёрка готова: {limit}/{limit}; всего оценено: {len(all_owner_scores)}; лучший балл: {best_score if best_score is not None else '—'}.",
+            "created": 0,
+            "progress": load_vk_queue_progress(owner_id),
+            "message": f"VK-пятёрка на сегодня уже выдана: {limit}/{limit}.",
         }
 
-    used = _used_vk_ids() - {int(x["vk_user_id"]) for x in existing if x.get("vk_user_id") is not None}
-    scores = [
-        item
-        for item in all_owner_scores
-        if str(item.get("score") if item.get("score") is not None else "").lstrip("-").isdigit()
-        and int(item.get("score")) >= min_score
+    used_positions = {
+        int(row.get("daily_position") or 0)
+        for row in today_rows
+        if str(row.get("daily_position") or "").isdigit()
+    }
+    free_positions = [
+        pos for pos in range(1, limit + 1)
+        if pos not in used_positions
     ]
-    score_vk_ids = [x.get("vk_user_id") for x in scores if x.get("vk_user_id") is not None]
-    messageable_score_ids = _messageable_vk_ids(score_vk_ids)
 
-    existing_ids = {int(x["vk_user_id"]) for x in existing if x.get("vk_user_id") is not None}
-    available_ids: list[int] = []
-    for item in scores:
-        try:
-            uid = int(item.get("vk_user_id"))
-        except (TypeError, ValueError):
-            continue
-        if uid in used or uid in existing_ids or uid not in messageable_score_ids:
-            continue
-        if uid not in available_ids:
-            available_ids.append(uid)
+    processed_ids = _owner_processed_vk_ids(owner_id)
+    processed_ids.update(
+        int(row.get("vk_user_id"))
+        for row in today_rows
+        if str(row.get("vk_user_id") or "").isdigit()
+    )
+    global_used = _used_vk_ids()
+    partner_ids = _partner_vk_ids()
 
-    positions = {int(x["daily_position"]) for x in existing if x.get("daily_position") is not None}
-    free_positions = [x for x in range(1, limit + 1) if x not in positions]
+    sources = load_vk_sources(owner_id)
     created = 0
-    now = datetime.now(UTC)
+    checked_sources = 0
+    errors: list[str] = []
 
-    for item in scores:
+    for source in sources:
         if not free_positions:
             break
-        try:
-            uid = int(item.get("vk_user_id"))
-        except (TypeError, ValueError):
-            continue
-        if uid in used or uid in existing_ids:
-            continue
-        if uid not in messageable_score_ids:
-            continue
-        payload = {
-            "vk_user_id": uid,
-            "owner_telegram_id": owner_id,
-            "owner_member_code": str(member_code or "").strip() or None,
-            "assignment_date": today,
-            "daily_position": free_positions[0],
-            "status": "reserved",
-            "score": int(item.get("score") or 0),
-            "fit_summary": str(item.get("fit_summary") or "").strip() or None,
-            "reserved_at": now.isoformat(),
-            # Эксклюзивное закрепление: освобождение только явным действием партнёра.
-            "reservation_until": None,
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-        }
-        try:
-            created_rows = _sb_post("agency_vk_assignments", payload)
-        except VKScoutError:
+
+        state = _source_queue_state(source)
+        if bool(state.get("completed")):
             continue
 
-        # Финальная глобальная проверка: даже если два кабинета запросили
-        # пятёрку почти одновременно, один VK-профиль остаётся только у одного.
-        created_row = created_rows[0] if created_rows else payload
-        active_after = _sb_get(
-            "agency_vk_assignments",
-            {
-                "vk_user_id": f"eq.{uid}",
-                "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
-                "select": "id,owner_telegram_id",
-                "order": "id.asc",
-                "limit": 20,
-            },
-        )
-        winner = active_after[0] if active_after else created_row
+        checked_sources += 1
+        source_name = str(
+            source.get("community_name")
+            or source.get("community_url")
+            or f"VK-сообщество {source.get('community_id') or ''}"
+        ).strip()
         try:
-            winner_owner = int(winner.get("owner_telegram_id") or 0)
+            source_offset = max(0, int(state.get("offset") or 0))
         except (TypeError, ValueError):
-            winner_owner = 0
-        if winner_owner != owner_id:
+            source_offset = 0
+        total = max(0, int(state.get("total") or 0))
+
+        # Идём страницами внутри ОДНОГО сообщества. На следующий источник
+        # переходим только если текущий действительно закончился.
+        for _ in range(200):
+            if not free_positions:
+                break
             try:
-                created_id = int(created_row.get("id") or 0)
-            except (TypeError, ValueError):
-                created_id = 0
-            if created_id > 0:
-                now_release = datetime.now(UTC).isoformat()
+                page = fetch_vk_members(
+                    source,
+                    offset=source_offset,
+                    count=1000,
+                )
+            except Exception as exc:
+                errors.append(f"{source_name}: {exc}")
+                # Ошибка доступа не должна навечно блокировать следующие
+                # сообщества. Помечаем этот источник законченным для очереди.
+                state = {
+                    **state,
+                    "offset": source_offset,
+                    "total": total,
+                    "completed": True,
+                    "error": str(exc)[:500],
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+                _save_source_queue_state(owner_id, source, state)
+                break
+
+            total = max(total, int(page.get("total") or 0))
+            raw_count = int(page.get("returned_count") or 0)
+            members = page.get("members") or []
+            if members:
+                save_vk_candidates(members)
+
+            page_end_offset = source_offset + raw_count
+            consumed_offset = source_offset
+
+            for candidate in members:
                 try:
-                    _sb_patch(
-                        "agency_vk_assignments",
-                        {"id": f"eq.{created_id}"},
-                        {"status": "released", "released_at": now_release, "updated_at": now_release},
+                    uid = int(candidate.get("vk_user_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    candidate_offset = int(
+                        candidate.get("_source_offset") or consumed_offset
                     )
-                except Exception:
-                    pass
-            continue
+                except (TypeError, ValueError):
+                    candidate_offset = consumed_offset
 
-        created += 1
-        existing_ids.add(uid)
-        free_positions.pop(0)
+                consumed_offset = max(consumed_offset, candidate_offset)
 
-    final_rows = _sb_get(
-        "agency_vk_assignments",
-        {
-            "owner_telegram_id": f"eq.{owner_id}",
-            "assignment_date": f"eq.{today}",
-            "daily_position": "not.is.null",
-            "status": "not.in.(released,skipped,blocked,not_fit)",
-            "select": "*",
-            "order": "daily_position.asc",
-        },
-    )[:limit]
+                # Технические исключения, а не фильтр ЦА.
+                if uid <= 0:
+                    continue
+                if candidate.get("can_write_private_message") is not True:
+                    continue
+                if uid in processed_ids or uid in partner_ids:
+                    continue
+                if uid in global_used:
+                    continue
 
-    diagnostic = (
-        f"всего оценено: {len(all_owner_scores)}; "
-        f">={min_score}: {len(scores)}; "
-        f"можно написать: {len(messageable_score_ids)}; "
-        f"свободных: {len(available_ids)}; "
-        f"лучший балл: {best_score if best_score is not None else '—'}"
-    )
+                position = free_positions[0]
+                now = datetime.now(UTC)
+                fit_summary = _encode_vk_queue_assignment_meta(
+                    source,
+                    member_offset=candidate_offset,
+                    total=total,
+                )
+                payload = {
+                    "vk_user_id": uid,
+                    "owner_telegram_id": owner_id,
+                    "owner_member_code": str(member_code or "").strip() or None,
+                    "assignment_date": date.today().isoformat(),
+                    "daily_position": position,
+                    "status": "reserved",
+                    "score": 0,
+                    "fit_summary": fit_summary,
+                    "reserved_at": now.isoformat(),
+                    "reservation_until": None,
+                    "created_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                }
+
+                try:
+                    created_rows = _sb_post(
+                        "agency_vk_assignments",
+                        payload,
+                    )
+                except VKScoutError:
+                    continue
+
+                created_row = created_rows[0] if created_rows else payload
+
+                # Сохраняем прежнюю защиту команды: один человек не должен
+                # одновременно попасть двум партнёрам Агентства W.
+                active_after = _sb_get(
+                    "agency_vk_assignments",
+                    {
+                        "vk_user_id": f"eq.{uid}",
+                        "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+                        "select": "id,owner_telegram_id",
+                        "order": "id.asc",
+                        "limit": 20,
+                    },
+                )
+                winner = active_after[0] if active_after else created_row
+                try:
+                    winner_owner = int(winner.get("owner_telegram_id") or 0)
+                except (TypeError, ValueError):
+                    winner_owner = 0
+                if winner_owner != owner_id:
+                    try:
+                        created_id = int(created_row.get("id") or 0)
+                    except (TypeError, ValueError):
+                        created_id = 0
+                    if created_id > 0:
+                        try:
+                            _sb_patch(
+                                "agency_vk_assignments",
+                                {"id": f"eq.{created_id}"},
+                                {
+                                    "status": "released",
+                                    "released_at": datetime.now(UTC).isoformat(),
+                                    "updated_at": datetime.now(UTC).isoformat(),
+                                },
+                            )
+                        except Exception:
+                            pass
+                    global_used.add(uid)
+                    continue
+
+                created += 1
+                processed_ids.add(uid)
+                global_used.add(uid)
+                free_positions.pop(0)
+
+                # Курсор двигается сразу после показанного человека.
+                source_offset = candidate_offset
+                state = {
+                    **state,
+                    "offset": source_offset,
+                    "total": total,
+                    "completed": bool(total and source_offset >= total),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+                _save_source_queue_state(owner_id, source, state)
+
+                if not free_positions:
+                    break
+
+            if not free_positions:
+                break
+
+            # Страница полностью пройдена, включая дубли, закрытые сообщения,
+            # удалённые и другие технические исключения.
+            source_offset = max(source_offset, page_end_offset)
+            completed = (
+                raw_count == 0
+                or (total > 0 and source_offset >= total)
+                or raw_count < 1000
+            )
+            state = {
+                **state,
+                "offset": source_offset,
+                "total": total,
+                "completed": completed,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+            _save_source_queue_state(owner_id, source, state)
+
+            if completed:
+                break
+
+        # Следующий source берём только если текущий реально закончился.
+        if free_positions and not bool(_source_queue_state(source).get("completed")):
+            break
+
+    progress = load_vk_queue_progress(owner_id)
+    final_today_rows = _today_vk_assignment_rows_all(owner_id)
+    complete = len(final_today_rows) >= limit
+
+    if complete:
+        message = (
+            f"VK-пятёрка собрана: {min(len(final_today_rows), limit)}/{limit}. "
+            "Кандидаты идут последовательно из текущего сообщества без отбора по ЦА."
+        )
+    elif not sources:
+        message = (
+            "Нет активных VK-сообществ. Добавьте ссылку или ID первого источника."
+        )
+    else:
+        message = (
+            f"Сегодня выдано {len(final_today_rows)} из {limit}. "
+            "В доступных сообществах пока не удалось добрать полную пятёрку."
+        )
+
     return {
         "ok": True,
-        "assignments": final_rows,
+        "assignments": load_today_vk_assignments(owner_id),
         "created": created,
-        "complete": len(final_rows) >= limit,
-        "analyzed_total": len(all_owner_scores),
-        "qualified": len(scores),
-        "messageable_qualified": len(messageable_score_ids),
-        "available": len(available_ids),
-        "best_score": best_score,
-        "message": f"VK-кандидаты на сегодня: {len(final_rows)}/{limit}; {diagnostic}.",
-    }
-
-
-def _vk_post_material(post: dict[str, Any]) -> str:
-    """Текстовое содержание публичного VK-поста без домыслов о медиа."""
-    parts: list[str] = []
-    text = re.sub(r"\s+", " ", str(post.get("text") or "")).strip()
-    if text:
-        parts.append(text)
-
-    for attachment in post.get("attachments") or []:
-        if not isinstance(attachment, dict):
-            continue
-        kind = str(attachment.get("type") or "").strip()
-        obj = attachment.get(kind) if kind and isinstance(attachment.get(kind), dict) else {}
-        if kind == "photo":
-            caption = re.sub(r"\s+", " ", str(obj.get("text") or "")).strip()
-            parts.append(f"Фото. Подпись: {caption}" if caption else "Фото без подписи.")
-        elif kind == "video":
-            title = re.sub(r"\s+", " ", str(obj.get("title") or "")).strip()
-            description = re.sub(r"\s+", " ", str(obj.get("description") or "")).strip()
-            details = ". ".join(x for x in (title, description) if x)
-            parts.append(f"Видео: {details}" if details else "Видео без описания.")
-        elif kind == "link":
-            title = re.sub(r"\s+", " ", str(obj.get("title") or "")).strip()
-            description = re.sub(r"\s+", " ", str(obj.get("description") or "")).strip()
-            details = ". ".join(x for x in (title, description) if x)
-            parts.append(f"Ссылка: {details}" if details else "Публикация со ссылкой.")
-        elif kind == "poll":
-            question = re.sub(r"\s+", " ", str(obj.get("question") or "")).strip()
-            parts.append(f"Опрос: {question}" if question else "Опрос.")
-        elif kind:
-            parts.append(f"Вложение: {kind}.")
-
-    for copied in post.get("copy_history") or []:
-        if not isinstance(copied, dict):
-            continue
-        copied_text = re.sub(r"\s+", " ", str(copied.get("text") or "")).strip()
-        if copied_text:
-            parts.append(f"Репост: {copied_text}")
-            break
-
-    return " ".join(parts).strip()
-
-
-def _vk_user_api(account_owner_id: int, method: str, **params: Any) -> Any:
-    """Вызывает VK API именно пользовательским VK ID токеном владельца кабинета.
-
-    Для wall.get групповой токен не подходит: VK API 5.199 допускает user/service.
-    Токен берём из уже существующего VK Scout OAuth и при необходимости обновляем.
-    """
-    from vk_scout_oauth import (
-        force_refresh_vk_scout_access_token,
-        get_valid_vk_scout_access_token,
-    )
-
-    cfg = _config()
-
-    def request_with(token: str) -> tuple[Any, int | None]:
-        response = requests.post(
-            f"{VK_API_URL}/{method}",
-            data={
-                **params,
-                "access_token": token,
-                "v": cfg["vk_api_version"],
-            },
-            timeout=45,
-        )
-        if not response.ok:
-            raise VKScoutError(
-                f"VK API {method}: HTTP {response.status_code}: {response.text[:800]}"
-            )
-        data = response.json() if response.text.strip() else {}
-        if not isinstance(data, dict):
-            raise VKScoutError(f"VK API {method}: неожиданный ответ")
-        if data.get("error"):
-            err = data.get("error") or {}
-            code = int(err.get("error_code") or 0) or None
-            return err, code
-        return data.get("response"), None
-
-    token = get_valid_vk_scout_access_token(int(account_owner_id))
-    result, error_code = request_with(token)
-    if error_code == 5:
-        # VK иногда привязывает свежий access token к IP выдачи. Наш OAuth-модуль
-        # уже умеет безопасно обновлять rotating refresh token с IP текущего worker.
-        token = force_refresh_vk_scout_access_token(int(account_owner_id))
-        result, error_code = request_with(token)
-
-    if error_code is not None:
-        err = result if isinstance(result, dict) else {}
-        raise VKScoutError(
-            f"VK API {method}: {error_code} — {err.get('error_msg') or 'ошибка VK'}"
-        )
-    return result
-
-
-def fetch_public_vk_posts(
-    owner_id: int,
-    vk_user_id: int,
-    *,
-    count: int = 5,
-    max_age_days: int = 180,
-) -> list[dict[str, Any]]:
-    """Читает свежие публичные записи, под которыми владелец кабинета реально может комментировать.
-
-    Для утепления мало просто увидеть пост: у него должны быть открыты комментарии.
-    Также не используем очень старые публикации — комментарий к записи многолетней давности
-    выглядит не как естественное знакомство.
-    """
-    wanted = max(1, min(10, int(count)))
-    # Берём запас, потому что часть записей может быть закреплена, слишком стара
-    # или иметь закрытые комментарии.
-    raw_count = max(20, wanted * 4)
-    response = _vk_user_api(
-        int(owner_id),
-        "wall.get",
-        owner_id=int(vk_user_id),
-        count=min(50, raw_count),
-        filter="owner",
-        extended=0,
-    )
-    if not isinstance(response, dict):
-        return []
-
-    now_ts = int(datetime.now(UTC).timestamp())
-    max_age_seconds = max(1, int(max_age_days)) * 24 * 60 * 60
-
-    result: list[dict[str, Any]] = []
-    for post in response.get("items") or []:
-        if not isinstance(post, dict) or not post.get("id"):
-            continue
-
-        post_date = int(post.get("date") or 0)
-        if not post_date or now_ts - post_date > max_age_seconds:
-            continue
-
-        comments = post.get("comments") if isinstance(post.get("comments"), dict) else {}
-        try:
-            can_post_comment = int(comments.get("can_post") or 0) == 1
-        except (TypeError, ValueError):
-            can_post_comment = False
-        if not can_post_comment:
-            continue
-
-        post_id = int(post["id"])
-        material = _vk_post_material(post)
-        result.append({
-            "post_id": post_id,
-            "owner_id": int(post.get("owner_id") or vk_user_id),
-            "date": post_date,
-            "material": material,
-            "url": f"https://vk.com/wall{int(post.get('owner_id') or vk_user_id)}_{post_id}",
-            "can_comment": True,
-        })
-        if len(result) >= wanted:
-            break
-    return result
-
-
-def _extract_json_object(answer: Any) -> dict[str, Any]:
-    if isinstance(answer, dict):
-        return answer
-    text = str(answer or "").strip()
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.I | re.S)
-    if fenced:
-        text = fenced.group(1).strip()
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                parsed = json.loads(text[start:end + 1])
-                return parsed if isinstance(parsed, dict) else {}
-            except Exception:
-                pass
-    return {}
-
-
-def prepare_vk_warmup_comment(
-    assignment_id: int,
-    *,
-    ask_openai_fn: Callable[..., Any] | None = None,
-    posts_limit: int = 5,
-) -> dict[str, Any]:
-    """Выбирает свежий публичный пост и готовит мягкий человеческий комментарий."""
-    rows = _sb_get(
-        "agency_vk_assignments",
-        {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1},
-    )
-    if not rows:
-        raise VKScoutError("VK-назначение не найдено")
-    assignment = rows[0]
-    vk_user_id = int(assignment["vk_user_id"])
-
-    candidates = _sb_get(
-        "agency_vk_candidates",
-        {"vk_user_id": f"eq.{vk_user_id}", "select": "*", "limit": 1},
-    )
-    if not candidates:
-        raise VKScoutError("VK-кандидат не найден")
-    candidate = candidates[0]
-    first_name = str(candidate.get("first_name") or "").strip()
-
-    try:
-        posts = fetch_public_vk_posts(
-            int(assignment.get("owner_telegram_id") or 0),
-            vk_user_id,
-            count=posts_limit,
-        )
-    except VKScoutError as exc:
-        raise VKScoutError(f"Не удалось прочитать публичную ленту VK: {exc}") from exc
-    if not posts:
-        raise VKScoutError("У этого профиля сейчас нет свежих публичных постов с открытыми комментариями. Для утепления выберем другого кандидата.")
-
-    # Неона получает до пяти последних публикаций и сама выбирает лучшую точку касания.
-    public_posts = [
-        {
-            "post_id": item["post_id"],
-            "date": item["date"],
-            "content": item["material"] or "Публикация без текста; доступно только само наличие публикации.",
-        }
-        for item in posts
-    ]
-
-    parsed: dict[str, Any] = {}
-    if ask_openai_fn is not None:
-        system = """
-Ты — Неона. Сейчас ты не продаёшь и не предлагаешь Агентство W.
-Твоя задача — мягко познакомить владельца кабинета с человеком через его публичный контент VK.
-
-Из нескольких свежих публикаций выбери ОДНУ, к которой естественнее всего оставить доброжелательный комментарий.
-Комментарий должен дать человеку маленькую приятность: показать, что его публикацию действительно заметили и прочитали.
-
-Правила:
-- 1–2 естественных предложения;
-- комментарий пишется от лица обычного человека, НЕ от имени Неоны;
-- не упоминать Агентство W, ИИ, бизнес-предложение, партнёрство, доход или встречу;
-- не льстить чрезмерно и не писать шаблонное «Отличный пост!»;
-- опираться только на реально предоставленное содержание;
-- если пост простой или бытовой — всё равно можно тепло откликнуться на реальную мысль, подпись или сам факт, что человек делится моментом;
-- если указано «фото/видео без описания», НЕ придумывать, что именно изображено или сказано;
-- вопрос НЕ обязателен. Добавляй один короткий вопрос только если он звучит совершенно естественно и помогает разговору;
-- не использовать фамилию человека.
-
-Верни ТОЛЬКО JSON:
-{"post_id":123,"comment":"..."}
-""".strip()
-        request = (
-            f"Имя человека: {first_name or 'неизвестно'}\n"
-            "Свежие публичные публикации:\n"
-            + json.dumps(public_posts, ensure_ascii=False, indent=2)
-        )
-        parsed = _extract_json_object(ask_openai_fn(system, request))
-
-    available_by_id = {int(item["post_id"]): item for item in posts}
-    try:
-        chosen_id = int(parsed.get("post_id"))
-    except (TypeError, ValueError):
-        chosen_id = int(posts[0]["post_id"])
-    chosen = available_by_id.get(chosen_id) or posts[0]
-
-    comment = re.sub(r"\s+", " ", str(parsed.get("comment") or "")).strip()
-    if not comment:
-        if chosen.get("material"):
-            comment = "Спасибо, что поделились — приятно встретить в ленте живую мысль, а не просто очередную публикацию."
-        else:
-            comment = "Спасибо, что делитесь такими моментами — иногда даже небольшая публикация делает ленту чуточку теплее."
-
-    return {
-        "assignment_id": int(assignment_id),
-        "vk_user_id": vk_user_id,
-        "first_name": first_name,
-        "post_id": int(chosen["post_id"]),
-        "post_url": str(chosen["url"]),
-        "post_preview": str(chosen.get("material") or "").strip(),
-        "comment": comment,
-    }
-
-
-
-def fetch_vk_candidate_feed(
-    owner_id: int,
-    *,
-    count: int = 10,
-    pool_limit: int = 30,
-    min_score: int = 60,
-    max_age_days: int = 30,
-) -> dict[str, Any]:
-    """Собирает нашу собственную «ленту» из свежих постов подходящих кандидатов.
-
-    Домашний newsfeed.get для текущего типа VK-профиля недоступен, поэтому Радар
-    не зависит от него. Берём людей, которых Неония уже оценила по ЦА, читаем их
-    доступные публичные стены и собираем самые свежие посты с открытыми комментариями.
-    Для разнообразия в один проход берём не более одного свежего поста от человека.
-    """
-    owner_id = int(owner_id)
-    wanted = max(1, min(20, int(count)))
-    pool_limit = max(wanted, min(60, int(pool_limit)))
-    min_score = max(0, min(100, int(min_score)))
-
-    scores = _sb_get(
-        "agency_vk_candidate_scores",
-        {
-            "owner_telegram_id": f"eq.{owner_id}",
-            "score": f"gte.{min_score}",
-            "select": "vk_user_id,score,fit_summary,analyzed_at",
-            "order": "score.desc,analyzed_at.desc",
-            "limit": pool_limit,
-        },
-    )
-    if not scores:
-        return {
-            "items": [],
-            "checked": 0,
-            "checked_candidates": 0,
-            "pool_size": 0,
-            "people": 0,
-            "commentable": 0,
-            "errors": [],
-        }
-
-    partner_vk_ids = _partner_vk_ids()
-    globally_used_vk_ids = _used_vk_ids()
-    owner_active_vk_ids = _active_vk_ids_for_owner(owner_id)
-    ids: list[int] = []
-    score_by_id: dict[int, dict[str, Any]] = {}
-    for row in scores:
-        try:
-            uid = int(row.get("vk_user_id") or 0)
-        except (TypeError, ValueError):
-            continue
-        if uid <= 0 or uid in score_by_id or uid in partner_vk_ids:
-            continue
-        # Кандидат, занятый в другом кабинете Агентства W, в Радар этого
-        # владельца вообще не попадает. Своё активное назначение видеть можно.
-        if uid in globally_used_vk_ids and uid not in owner_active_vk_ids:
-            continue
-        ids.append(uid)
-        score_by_id[uid] = row
-
-    candidates = _sb_get(
-        "agency_vk_candidates",
-        {
-            "vk_user_id": "in.(" + ",".join(str(x) for x in ids) + ")",
-            "select": "*",
-            "limit": max(1, len(ids)),
-        },
-    ) if ids else []
-    candidate_by_id = {
-        int(row["vk_user_id"]): row
-        for row in candidates
-        if row.get("vk_user_id") is not None
-    }
-
-    items: list[dict[str, Any]] = []
-    errors: list[str] = []
-    checked_candidates = 0
-
-    # Не показываем повторно посты, под которыми уже было касание через
-    # Агентство W. Проверка глобальная для всех партнёров, а не только владельца.
-    commented_rows = _sb_get(
-        "agency_vk_comment_threads",
-        {
-            "select": "post_owner_id,post_id",
-            "limit": 5000,
-        },
-    )
-    commented_post_keys: set[tuple[int, int]] = set()
-    for row in commented_rows:
-        try:
-            commented_post_keys.add((int(row.get("post_owner_id")), int(row.get("post_id"))))
-        except (TypeError, ValueError):
-            continue
-
-    for uid in ids:
-        candidate = candidate_by_id.get(uid)
-        if not candidate:
-            continue
-        checked_candidates += 1
-        try:
-            posts = fetch_public_vk_posts(
-                owner_id,
-                uid,
-                count=1,
-                max_age_days=max_age_days,
-            )
-        except Exception as exc:
-            # Закрытая стена или отдельная ошибка одного профиля не должна ломать весь радар.
-            errors.append(f"{uid}: {exc}")
-            continue
-        if not posts:
-            continue
-
-        post = posts[0]
-        post_key = (uid, int(post.get("post_id") or 0))
-        if post_key in commented_post_keys:
-            # Этот конкретный пост уже был точкой касания. Не крутим его по кругу.
-            continue
-
-        first_name = str(candidate.get("first_name") or "").strip()
-        last_name = str(candidate.get("last_name") or "").strip()
-        author_name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {uid}"
-        domain = str(candidate.get("domain") or "").strip()
-        score_row = score_by_id.get(uid, {})
-
-        items.append({
-            "post_id": int(post["post_id"]),
-            "owner_id": uid,
-            "date": int(post.get("date") or 0),
-            "is_person": True,
-            "can_comment": True,
-            "author_name": author_name,
-            "first_name": first_name,
-            "profile_status": str(candidate.get("status_text") or "").strip(),
-            "profile_url": f"https://vk.com/{domain}" if domain else f"https://vk.com/id{uid}",
-            "post_url": str(post.get("url") or ""),
-            "material": str(post.get("material") or "").strip(),
-            "score": int(score_row.get("score") or 0),
-            "fit_summary": str(score_row.get("fit_summary") or "").strip(),
-        })
-
-    # Это и есть наша «верхняя десятка»: не по баллу, а по свежести публикации.
-    items.sort(key=lambda item: int(item.get("date") or 0), reverse=True)
-    items = items[:wanted]
-
-    return {
-        "items": items,
-        "checked": len(items),
-        "checked_candidates": checked_candidates,
-        "pool_size": len(ids),
-        "people": len(items),
-        "commentable": len(items),
-        "already_commented_posts": len(commented_post_keys),
+        "complete": complete,
+        "checked_sources": checked_sources,
+        "progress": progress,
         "errors": errors,
-    }
-
-
-def prepare_vk_feed_radar(
-    owner_id: int,
-    *,
-    ask_openai_fn: Callable[..., Any] | None = None,
-    count: int = 10,
-) -> dict[str, Any]:
-    """Собирает свежую десятку из пула Неонии и выбирает естественные касания.
-
-    Это тестовый ручной режим: Неона читает, оценивает и готовит комментарии,
-    но сама ничего в VK не публикует.
-    """
-    feed = fetch_vk_candidate_feed(int(owner_id), count=count)
-    items = list(feed.get("items") or [])
-    eligible = [
-        item for item in items
-        if item.get("is_person") and item.get("can_comment") and int(item.get("post_id") or 0) > 0
-    ]
-
-    if not items:
-        return {
-            **feed,
-            "recommendations": [],
-            "message": (
-                "Среди подходящих кандидатов сейчас не найдено свежих публичных постов "
-                "с открытыми комментариями."
-            ),
-        }
-
-    public_view = [
-        {
-            "post_id": int(item["post_id"]),
-            "owner_id": int(item["owner_id"]),
-            "author_name": item.get("author_name") or "",
-            "first_name": item.get("first_name") or "",
-            "profile_status": item.get("profile_status") or "",
-            "score": int(item.get("score") or 0),
-            "fit_summary": item.get("fit_summary") or "",
-            "date": int(item.get("date") or 0),
-            "content": item.get("material") or "Публикация без доступного текста.",
-        }
-        for item in eligible
-    ]
-
-    parsed: list[dict[str, Any]] = []
-    if ask_openai_fn is not None:
-        system = """
-Ты — Неона, социальный радар Агентства W. Сейчас ты НЕ продаёшь и НЕ предлагаешь бизнес.
-Перед тобой до 10 самых свежих публичных постов людей, которых Неония УЖЕ отобрала
-как подходящих по целевой аудитории. Не нужно заново требовать от каждого поста бизнес-тему:
-человек может сегодня писать о семье, прогулке, мысли дня, путешествии или обычной жизни.
-
-Твоя задача — выбрать только те публикации, где можно естественно и доброжелательно откликнуться,
-чтобы человеку было приятно, что его действительно заметили и прочитали.
-
-Правила:
-- 10 просмотренных постов НЕ означают 10 комментариев;
-- выбери от 0 до 3 публикаций за один проход;
-- комментарий 1–2 естественных предложения;
-- он пишется от лица владельца кабинета, не от имени Неоны;
-- не упоминать Агентство W, ИИ, партнёрство, доход, встречу или бизнес-предложение;
-- не льстить чрезмерно и не писать шаблонное «Отличный пост!»;
-- опираться на конкретную мысль или деталь, реально присутствующую в тексте/описании;
-- бытовой или простой пост — нормальный повод для тёплого касания;
-- вопрос НЕ обязателен; задавай его только если человеку естественно захочется ответить;
-- если у публикации нет достаточного доступного содержания и пришлось бы фантазировать — пропусти её;
-- не использовать фамилию человека в комментарии.
-
-Верни ТОЛЬКО JSON-массив, максимум 3 объекта:
-[{"post_id":123,"owner_id":456,"reason":"...","comment":"..."}]
-Если естественных касаний нет, верни [].
-""".strip()
-        request = "10 САМЫХ СВЕЖИХ ПОСТОВ ИЗ ПУЛА НЕОНИИ:\n" + json.dumps(
-            public_view,
-            ensure_ascii=False,
-            indent=2,
-        )
-        parsed = _extract_json_array(ask_openai_fn(system, request))
-
-    by_key = {
-        (int(item["owner_id"]), int(item["post_id"])): item
-        for item in eligible
-    }
-    recommendations: list[dict[str, Any]] = []
-    used: set[tuple[int, int]] = set()
-
-    for choice in parsed:
-        try:
-            key = (int(choice.get("owner_id") or 0), int(choice.get("post_id") or 0))
-        except (TypeError, ValueError):
-            continue
-        source = by_key.get(key)
-        if not source or key in used:
-            continue
-        comment = re.sub(r"\s+", " ", str(choice.get("comment") or "")).strip()
-        if not comment:
-            continue
-        assignment = _reserve_vk_radar_candidate(int(owner_id), source)
-        if not assignment:
-            # Пока Неона готовила комментарий, кандидат мог уже закрепиться
-            # за другим партнёром. В таком случае просто не показываем дубль.
-            continue
-        recommendations.append({
-            **source,
-            "assignment_id": int(assignment.get("id") or 0),
-            "business_signal": str(source.get("fit_summary") or "").strip(),
-            "reason": re.sub(r"\s+", " ", str(choice.get("reason") or "")).strip(),
-            "comment": comment,
-        })
-        used.add(key)
-        if len(recommendations) >= 3:
-            break
-
-    return {
-        **feed,
-        "eligible": len(eligible),
-        "recommendations": recommendations,
-        "message": (
-            f"Проверено кандидатов: {int(feed.get('checked_candidates') or 0)}; "
-            f"свежих постов в верхней десятке: {len(items)}; "
-            f"Неона выбрала: {len(recommendations)}."
-        ),
-    }
-
-def personal_vk_invitation_link(member_code: str) -> str:
-    group_id = _config().get("vk_group_id") or ""
-    if not group_id:
-        raise VKScoutError("Не найден VK_GROUP_ID")
-    code = str(member_code or "").strip()
-    if not code:
-        raise VKScoutError("Не указан member_code")
-    return f"https://vk.me/club{group_id}?ref={code}&ref_source=agency_w"
-
-
-def vk_profile_url(candidate: dict[str, Any]) -> str:
-    domain = str(candidate.get("domain") or "").strip()
-    return f"https://vk.com/{domain}" if domain else f"https://vk.com/id{int(candidate['vk_user_id'])}"
-
-
-
-def _clean_vk_context_value(value: Any, *, max_len: int = 700) -> str:
-    """Нормализует короткий публичный фрагмент для смыслового контекста Неоны."""
-    cleaned = re.sub(r"\s+", " ", str(value or "")).strip()
-    return cleaned[:max_len]
-
-
-def _vk_invitation_semantic_context(
-    assignment: dict[str, Any],
-    candidate: dict[str, Any],
-    *,
-    posts_limit: int = 5,
-) -> dict[str, Any]:
-    """
-    Собирает только доступный публичный контекст VK перед первым сообщением.
-
-    Важно: это не скрытое профилирование и не повод додумывать профессию.
-    Неоне передаются публичные поля профиля, заметка/сигнал Неонии и несколько
-    последних публичных записей, если VK разрешает их прочитать.
-    """
-    vk_user_id = int(candidate.get("vk_user_id") or assignment.get("vk_user_id") or 0)
-    owner_id = int(assignment.get("owner_telegram_id") or 0)
-    fit = _clean_vk_context_value(assignment.get("fit_summary"), max_len=1200)
-    known_contact = assignment.get("daily_position") is None or fit.startswith(KNOWN_CONTACT_LABEL)
-
-    owner_note = ""
-    if known_contact and fit.startswith(KNOWN_CONTACT_LABEL):
-        owner_note = fit[len(KNOWN_CONTACT_LABEL):].lstrip(" :—-").strip()
-
-    profile: dict[str, Any] = {
-        "status": _clean_vk_context_value(candidate.get("status_text")),
-        "city": _clean_vk_context_value(candidate.get("city_name"), max_len=160),
-        "country": _clean_vk_context_value(candidate.get("country_name"), max_len=160),
-    }
-
-    # Берём более содержательные, но всё равно публичные поля прямо перед
-    # подготовкой сообщения. Если VK их не отдаёт, просто остаёмся на том,
-    # что уже сохранено в карточке кандидата.
-    if owner_id > 0 and vk_user_id > 0:
-        try:
-            rows = _vk_user_api(
-                owner_id,
-                "users.get",
-                user_ids=vk_user_id,
-                fields="status,about,activities,interests,occupation,career,site,city,country",
-            )
-            row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
-            if row:
-                city = row.get("city") if isinstance(row.get("city"), dict) else {}
-                country = row.get("country") if isinstance(row.get("country"), dict) else {}
-                occupation = row.get("occupation") if isinstance(row.get("occupation"), dict) else {}
-                career = row.get("career") if isinstance(row.get("career"), list) else []
-                career_items = []
-                for item in career[:4]:
-                    if not isinstance(item, dict):
-                        continue
-                    piece = " · ".join(
-                        value for value in (
-                            _clean_vk_context_value(item.get("company"), max_len=180),
-                            _clean_vk_context_value(item.get("position"), max_len=180),
-                        )
-                        if value
-                    )
-                    if piece:
-                        career_items.append(piece)
-
-                profile.update({
-                    "status": _clean_vk_context_value(row.get("status")) or profile.get("status", ""),
-                    "about": _clean_vk_context_value(row.get("about"), max_len=1200),
-                    "activities": _clean_vk_context_value(row.get("activities"), max_len=1200),
-                    "interests": _clean_vk_context_value(row.get("interests"), max_len=1200),
-                    "occupation": _clean_vk_context_value(occupation.get("name"), max_len=500),
-                    "occupation_type": _clean_vk_context_value(occupation.get("type"), max_len=120),
-                    "career": career_items,
-                    "site": _clean_vk_context_value(row.get("site"), max_len=500),
-                    "city": _clean_vk_context_value(city.get("title"), max_len=160) or profile.get("city", ""),
-                    "country": _clean_vk_context_value(country.get("title"), max_len=160) or profile.get("country", ""),
-                })
-        except Exception:
-            # Нехватка отдельных публичных полей не должна блокировать сообщение.
-            pass
-
-    recent_posts: list[dict[str, Any]] = []
-    if owner_id > 0 and vk_user_id > 0:
-        try:
-            response = _vk_user_api(
-                owner_id,
-                "wall.get",
-                owner_id=vk_user_id,
-                count=max(1, min(10, int(posts_limit))),
-                filter="owner",
-                extended=0,
-            )
-            if isinstance(response, dict):
-                for post in response.get("items") or []:
-                    if not isinstance(post, dict):
-                        continue
-                    material = _clean_vk_context_value(_vk_post_material(post), max_len=1800)
-                    if not material:
-                        continue
-                    recent_posts.append({
-                        "date": int(post.get("date") or 0),
-                        "content": material,
-                    })
-                    if len(recent_posts) >= max(1, min(5, int(posts_limit))):
-                        break
-        except Exception:
-            pass
-
-    # Удаляем пустые значения, чтобы модель не принимала отсутствие данных
-    # за содержательный сигнал.
-    profile = {
-        key: value
-        for key, value in profile.items()
-        if value not in (None, "", [], {})
-    }
-
-    return {
-        "known_contact": bool(known_contact),
-        "owner_note": owner_note or None,
-        "neonia_fit_summary": fit or None,
-        "public_profile": profile,
-        "recent_public_posts": recent_posts,
-    }
-
-
-def prepare_vk_invitation(
-    assignment_id: int,
-    member_code: str,
-    *,
-    ask_openai_fn: Callable[..., Any] | None = None,
-) -> dict[str, Any]:
-    rows = _sb_get(
-        "agency_vk_assignments",
-        {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1},
-    )
-    if not rows:
-        raise VKScoutError("VK-назначение не найдено")
-    assignment = rows[0]
-    candidates = _sb_get(
-        "agency_vk_candidates",
-        {
-            "vk_user_id": f"eq.{int(assignment['vk_user_id'])}",
-            "select": "*",
-            "limit": 1,
-        },
-    )
-    if not candidates:
-        raise VKScoutError("VK-кандидат не найден")
-
-    candidate = candidates[0]
-    first_name = str(candidate.get("first_name") or "").strip()
-    fit = str(assignment.get("fit_summary") or "").strip()
-    known_contact = assignment.get("daily_position") is None or fit.startswith(KNOWN_CONTACT_LABEL)
-    semantic_context = _vk_invitation_semantic_context(assignment, candidate)
-
-    if ask_openai_fn:
-        system = """
-Ты — Неона, секретарь-референт Агентства W.
-Подготовь короткое первое сообщение человеку в VK.
-Текст сначала увидит и при необходимости поправит владелец кабинета.
-
-ПЕРЕД ТЕКСТОМ МОЛЧА СДЕЛАЙ СМЫСЛОВОЙ РАЗБОР КОНТЕКСТА:
-1. Чем человек действительно занимается или что для него важно — только если это
-   прямо подтверждается публичным профилем, свежими постами или заметкой владельца.
-2. Какие темы повторяются в его публичных материалах.
-3. Какая ОДНА польза Агентства W может естественно связаться с этим контекстом.
-
-ЖЁСТКИЕ ПРАВИЛА ПЕРСОНАЛИЗАЦИИ:
-- не придумывай профессию, нишу, задачи, боли, клиентов, подрядчиков, команду, продажи
-  или бизнес-модель, если этого нет в переданном контексте;
-- слова вроде «подрядчики», «клиенты», «лиды», «сетевой бизнес», «коучинг», «здоровье»,
-  «инвестиции» и любые другие отраслевые термины разрешены ТОЛЬКО когда они прямо
-  подтверждены контекстом;
-- не цепляйся за случайную деталь профиля: ищи главную деятельность и повторяющиеся темы;
-- если данных мало или они неоднозначны, пиши нейтрально и НЕ маскируй догадку под факт;
-- если в публичных материалах явно названы проекты/направления, учитывай их смысл,
-  но не демонстрируй человеку, что его «изучали»;
-- не говори и не намекай, что человека анализировали, оценивали или отбирали;
-- не используй формулировку «по его/её просьбе», если личность владельца не дана
-  в контексте. Представляйся нейтрально: «Я — Неона, секретарь-референт Агентства W»;
-- обращаться только по имени, без фамилии;
-- 1–3 коротких естественных предложения;
-- одна понятная польза Агентства W, без списка функций;
-- ровно один простой вопрос, и он должен быть последним предложением;
-- не давать ссылку в первом сообщении;
-- без давления, срочности, обещаний дохода, результата или гарантированных партнёров.
-
-ЕСЛИ ЭТО ЗНАКОМЫЙ ВЛАДЕЛЬЦА:
-- учитывай заметку владельца, если она есть;
-- не выдумывай степень близости и не делай сообщение искусственно холодным.
-
-ЦЕЛЬ: сообщение должно ощущаться написанным именно этому человеку, но без эффекта
-«досье» и без вымышленных деталей.
-
-Верни только готовый текст первого сообщения.
-""".strip()
-        request = (
-            f"Имя: {first_name or 'неизвестно'}\n"
-            f"Режим: {'знакомый владельца' if known_contact else 'холодный контакт'}\n"
-            "ДОСТУПНЫЙ КОНТЕКСТ VK:\n"
-            + json.dumps(semantic_context, ensure_ascii=False, indent=2)
-        )
-        message = str(ask_openai_fn(system, request) or "").strip()
-    else:
-        greeting = f"{first_name}, здравствуйте!" if first_name else "Здравствуйте!"
-        message = (
-            f"{greeting} Я — Неона, секретарь-референт Агентства W. "
-            "Мы помогаем освобождать время от повторяющихся рабочих задач с помощью ИИ-команды. "
-            "Вам было бы интересно коротко посмотреть, что из этого могло бы пригодиться именно вам?"
-        )
-
-    now = datetime.now(UTC).isoformat()
-    _sb_patch(
-        "agency_vk_assignments",
-        {"id": f"eq.{int(assignment_id)}"},
-        {
-            "status": "prepared",
-            "invitation_text": message,
-            # Первое сообщение больше не заставляет человека идти в сообщество.
-            "invitation_link": None,
-            "prepared_at": now,
-            "updated_at": now,
-        },
-    )
-    return {
-        "assignment_id": int(assignment_id),
-        "vk_user_id": int(candidate["vk_user_id"]),
-        "name": " ".join(
-            x
-            for x in [
-                str(candidate.get("first_name") or "").strip(),
-                str(candidate.get("last_name") or "").strip(),
-            ]
-            if x
-        ),
-        "profile_url": vk_profile_url(candidate),
-        "invitation_text": message,
-        "invitation_link": None,
-        "known_contact": known_contact,
-        # Для диагностики в коде/тестах; в пользовательский интерфейс это поле
-        # выводить не нужно.
-        "context_available": bool(
-            semantic_context.get("public_profile")
-            or semantic_context.get("recent_public_posts")
-            or semantic_context.get("owner_note")
-            or semantic_context.get("neonia_fit_summary")
-        ),
+        "message": message,
     }
 
 
