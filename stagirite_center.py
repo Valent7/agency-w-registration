@@ -5360,7 +5360,11 @@ def ensure_weekly_candidates_for_neona(
     # Уже найденные 1–5 человек сразу доступны для работы. Тяжёлый добор
     # запускается только по явному force_prepare=True (позже его вынесем
     # в фоновый worker и уберём ручную кнопку).
-    if candidate_ids and not force_prepare:
+    sequential_source = (
+        str(today_info.get("source") or "") == "neonia_sequential_queue"
+    )
+
+    if candidate_ids and sequential_source and not force_prepare:
         complete = len(candidate_ids) >= daily_target
         return {
             "ok": True,
@@ -5411,8 +5415,13 @@ def ensure_weekly_candidates_for_neona(
         result.get("selected_candidate_ids", [])
     )
 
-    # Вчерашние/уже выбранные не повторяем; сегодняшних 1–4 сохраняем,
-    # но также исключаем из повторного подбора, чтобы добрать только новых.
+    # После перехода на последовательную очередь старая сегодняшняя партия,
+    # собранная по активности/ЦА, один раз заменяется новой очередью. Дальше
+    # source=neonia_sequential_queue фиксирует пятёрку до следующего дня.
+    if not sequential_source:
+        candidate_ids = []
+        approved_ids = []
+
     excluded_for_today = set(selected_all)
     excluded_for_today.update(previously_shown)
     excluded_for_today.update(candidate_ids)
@@ -5480,7 +5489,7 @@ def ensure_weekly_candidates_for_neona(
         "approved_ids": approved_ids,
         "prepared_at": str(today_info.get("prepared_at") or now_iso),
         "last_topup_attempt_at": now_iso,
-        "source": "stagirite_daily_bridge",
+        "source": "neonia_sequential_queue",
         "complete": len(merged_candidate_ids) >= daily_target,
     }
     if len(merged_candidate_ids) >= daily_target:
