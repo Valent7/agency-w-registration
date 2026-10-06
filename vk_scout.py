@@ -1369,15 +1369,23 @@ def ensure_daily_vk_assignments(
                     count=1000,
                 )
             except Exception as exc:
-                errors.append(f"{source_name}: {exc}")
-                # Ошибка доступа не должна навечно блокировать следующие
-                # сообщества. Помечаем этот источник законченным для очереди.
+                error_text = str(exc)
+                # Привязанный к IP access token должен обновить worker,
+                # поэтому такую ошибку передаём наверх для штатного retry.
+                if (
+                    "another ip address" in error_text.lower()
+                    or "другому ip" in error_text.lower()
+                ):
+                    raise
+                errors.append(f"{source_name}: {error_text}")
+                # Временная ошибка VK НЕ означает, что сообщество закончено.
+                # Курсор сохраняем, но completed оставляем False.
                 state = {
                     **state,
                     "offset": source_offset,
                     "total": total,
-                    "completed": True,
-                    "error": str(exc)[:500],
+                    "completed": False,
+                    "error": error_text[:500],
                     "updated_at": datetime.now(UTC).isoformat(),
                 }
                 _save_source_queue_state(owner_id, source, state)
