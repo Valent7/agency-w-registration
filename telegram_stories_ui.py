@@ -12,7 +12,7 @@ import io
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -27,8 +27,10 @@ from neona_telegram_dialogs import initialize_dialog_after_story_reply
 from workspace_persistence import persist_workspace_if_changed
 
 UTC = timezone.utc
-MAX_STORIES = 10
-MAX_RECOMMENDATIONS = 10
+DAILY_STORY_TARGET = 5
+STORY_ANALYSIS_BATCH = 10
+AUTHOR_COOLDOWN_DAYS = 30
+MAX_RECOMMENDATIONS = 5
 
 
 class TelegramStoriesError(RuntimeError):
@@ -175,13 +177,126 @@ async def _download_story_preview(client: TelegramClient, story: Any) -> tuple[s
     return preview_b64, mime, label
 
 
-async def fetch_telegram_story_feed(owner_id: int, *, limit: int = MAX_STORIES) -> dict[str, Any]:
-    """Fetch up to N active user stories from the owner's Telegram story bar.
+def _story_rotation_key(owner_id: int) -> str:
+    return f"telegram_story_rotation_history_{int(owner_id)}"
 
-    Telegram's stories.getAllStories is a user-only MTProto method and returns
-    active stories shown in the home action bar. We intentionally ignore channel
-    stories in this first warm-up test: the goal is person-to-person acquaintance.
-    """
+
+def _story_key(telegram_id: int, story_id: int) -> str:
+    return f"{int(telegram_id)}:{int(story_id)}"
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _story_rotation_history(owner_id: int) -> list[dict[str, Any]]:
+    history = st.session_state.get(_story_rotation_key(owner_id), [])
+    return history if isinstance(history, list) else []
+
+
+def _append_story_rotation_event(
+    owner_id: int,
+    item: dict[str, Any],
+    action: str,
+) -> None:
+    try:
+        contact_id = int(item.get("telegram_id") or 0)
+        story_id = int(item.get("story_id") or 0)
+    except (TypeError, ValueError):
+        return
+    if contact_id <= 0 or story_id <= 0:
+        return
+
+    history = _story_rotation_history(owner_id)
+    action = str(action or "scanned").strip() or "scanned"
+
+    already = any(
+        isinstance(event, dict)
+        and int(event.get("telegram_id") or 0) == contact_id
+        and int(event.get("story_id") or 0) == story_id
+        and str(event.get("action") or "") == action
+        for event in history
+    )
+    if not already:
+        history.append(
+            {
+                "telegram_id": contact_id,
+                "story_id": story_id,
+                "name": str(item.get("name") or "").strip(),
+                "action": action,
+                "at": datetime.now(UTC).isoformat(),
+            }
+        )
+        st.session_state[_story_rotation_key(owner_id)] = history[-2000:]
+
+
+def _story_rotation_exclusions(owner_id: int) -> tuple[set[str], set[int]]:
+    """Exact Story never repeats; shown/replied author gets a 30-day cooldown."""
+    story_keys: set[str] = set()
+    cooldown_authors: set[int] = set()
+    cooldown_since = datetime.now(UTC) - timedelta(days=AUTHOR_COOLDOWN_DAYS)
+
+    for event in _story_rotation_history(owner_id):
+        if not isinstance(event, dict):
+            continue
+        try:
+            contact_id = int(event.get("telegram_id") or 0)
+            story_id = int(event.get("story_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if contact_id <= 0 or story_id <= 0:
+            continue
+        story_keys.add(_story_key(contact_id, story_id))
+
+        if str(event.get("action") or "") in {"shown", "replied"}:
+            when = _parse_iso_datetime(event.get("at"))
+            if when is not None and when.astimezone(UTC) >= cooldown_since:
+                cooldown_authors.add(contact_id)
+
+    # Старая история реальных ответов на Story тоже участвует в cooldown.
+    sent_log = st.session_state.get(
+        f"neona_first_message_sent_log_{int(owner_id)}",
+        [],
+    )
+    if isinstance(sent_log, list):
+        for event in sent_log:
+            if not isinstance(event, dict):
+                continue
+            if str(event.get("kind") or "") != "story_reply":
+                continue
+            try:
+                contact_id = int(event.get("telegram_id") or 0)
+                story_id = int(event.get("story_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if contact_id <= 0:
+                continue
+            if story_id > 0:
+                story_keys.add(_story_key(contact_id, story_id))
+            when = _parse_iso_datetime(
+                event.get("story_sent_at") or event.get("sent_at")
+            )
+            if when is None or when.astimezone(UTC) >= cooldown_since:
+                cooldown_authors.add(contact_id)
+
+    return story_keys, cooldown_authors
+
+
+async def fetch_telegram_story_feed(
+    owner_id: int,
+    *,
+    limit: int = STORY_ANALYSIS_BATCH,
+    excluded_story_keys: set[str] | None = None,
+    excluded_author_ids: set[int] | None = None,
+) -> dict[str, Any]:
+    """Берёт следующую партию НОВЫХ активных Stories из всей Telegram-ленты."""
     session_string = _load_session(int(owner_id))
     api_id, api_hash = _api_credentials()
     client = TelegramClient(StringSession(session_string), api_id, api_hash)
@@ -190,8 +305,9 @@ async def fetch_telegram_story_feed(owner_id: int, *, limit: int = MAX_STORIES) 
         if not await client.is_user_authorized():
             raise TelegramStoriesError("Telegram-сессия больше не авторизована")
 
-        # Telethon 1.44 exposes the current raw Telegram stories API.
-        result = await client(GetAllStoriesRequest(next=False, hidden=False, state=None))
+        result = await client(
+            GetAllStoriesRequest(next=False, hidden=False, state=None)
+        )
 
         users = {
             int(getattr(user, "id")): user
@@ -199,46 +315,93 @@ async def fetch_telegram_story_feed(owner_id: int, *, limit: int = MAX_STORIES) 
             if getattr(user, "id", None) is not None
         }
 
+        excluded_story_keys = set(excluded_story_keys or set())
+        excluded_author_ids = {
+            int(value)
+            for value in (excluded_author_ids or set())
+            if str(value).isdigit()
+        }
+
         feed: list[dict[str, Any]] = []
         now = datetime.now(UTC)
+        peer_stories = list(
+            getattr(result, "peer_stories", None) or []
+        )
 
-        # Keep Telegram's peer order (the same order used for the story action bar),
-        # but take at most one newest active story per person in one scan.
-        peer_stories = list(getattr(result, "peer_stories", None) or [])
+        active_people = 0
+        skipped_repeats = 0
+
+        # Идём по ВСЕЙ ленте Telegram в её естественном порядке. Не останавливаемся
+        # на верхних 10: верхние повторы пропускаются, пока не наберётся новая партия.
         for group in peer_stories:
             uid = _peer_user_id(getattr(group, "peer", None))
             if not uid:
-                # Channel/supergroup story: not part of this person-to-person test.
                 continue
             user = users.get(uid)
-            if user is None or bool(getattr(user, "bot", False)) or bool(getattr(user, "deleted", False)):
+            if (
+                user is None
+                or bool(getattr(user, "bot", False))
+                or bool(getattr(user, "deleted", False))
+            ):
                 continue
 
-            stories = []
+            active_stories = []
             for story in (getattr(group, "stories", None) or []):
                 sid = getattr(story, "id", None)
                 if sid is None:
                     continue
                 expire_at = _story_expire_date(story)
-                if expire_at is not None and expire_at.astimezone(UTC) <= now:
+                if (
+                    expire_at is not None
+                    and expire_at.astimezone(UTC) <= now
+                ):
                     continue
-                stories.append(story)
-            if not stories:
+                active_stories.append(story)
+
+            if not active_stories:
                 continue
 
-            stories.sort(key=lambda item: _story_date(item) or datetime.min.replace(tzinfo=UTC), reverse=True)
-            story = stories[0]
+            active_people += 1
+            active_stories.sort(
+                key=lambda item: (
+                    _story_date(item)
+                    or datetime.min.replace(tzinfo=UTC)
+                ),
+                reverse=True,
+            )
+
+            # Работаем только с самой свежей Story автора. Если именно она уже
+            # просмотрена, автора пропускаем до появления новой Story.
+            story = active_stories[0]
             sid = int(getattr(story, "id"))
-            caption = str(getattr(story, "caption", "") or "").strip()
-            preview_b64, preview_mime, media_kind = await _download_story_preview(client, story)
-            username = str(getattr(user, "username", "") or "").strip()
-            story_url = f"https://t.me/{username}/s/{sid}" if username else ""
+            key = _story_key(uid, sid)
+
+            if uid in excluded_author_ids or key in excluded_story_keys:
+                skipped_repeats += 1
+                continue
+
+            caption = str(
+                getattr(story, "caption", "") or ""
+            ).strip()
+            preview_b64, preview_mime, media_kind = (
+                await _download_story_preview(client, story)
+            )
+            username = str(
+                getattr(user, "username", "") or ""
+            ).strip()
+            story_url = (
+                f"https://t.me/{username}/s/{sid}"
+                if username
+                else ""
+            )
 
             feed.append(
                 {
                     "telegram_id": uid,
                     "name": _user_name(user),
-                    "first_name": str(getattr(user, "first_name", "") or "").strip(),
+                    "first_name": str(
+                        getattr(user, "first_name", "") or ""
+                    ).strip(),
                     "username": username,
                     "story_id": sid,
                     "story_url": story_url,
@@ -246,19 +409,30 @@ async def fetch_telegram_story_feed(owner_id: int, *, limit: int = MAX_STORIES) 
                     "media_kind": media_kind,
                     "preview_b64": preview_b64,
                     "preview_mime": preview_mime,
-                    "date": (_story_date(story) or now).astimezone(UTC).isoformat(),
-                    "expire_date": (_story_expire_date(story).astimezone(UTC).isoformat() if _story_expire_date(story) else ""),
-                    "contact": bool(getattr(user, "contact", False)),
-                    "mutual_contact": bool(getattr(user, "mutual_contact", False)),
+                    "date": (
+                        _story_date(story) or now
+                    ).astimezone(UTC).isoformat(),
+                    "expire_date": (
+                        _story_expire_date(story).astimezone(UTC).isoformat()
+                        if _story_expire_date(story)
+                        else ""
+                    ),
+                    "contact": bool(
+                        getattr(user, "contact", False)
+                    ),
+                    "mutual_contact": bool(
+                        getattr(user, "mutual_contact", False)
+                    ),
                 }
             )
-            if len(feed) >= max(1, min(30, int(limit))):
+            if len(feed) >= max(1, int(limit)):
                 break
 
         return {
             "stories": feed,
             "checked": len(feed),
-            "available_people": len(peer_stories),
+            "available_people": active_people,
+            "skipped_repeats": skipped_repeats,
         }
     finally:
         await client.disconnect()
@@ -332,8 +506,10 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     system_prompt = """
 Ты — Неона, помощница по мягкому человеческому знакомству в Агентстве W.
 Перед тобой до 10 свежих Telegram Stories реальных людей из ленты владельца кабинета.
-Твоя задача — НЕ написать ответ любой ценой, а выбрать только те Stories, где есть
-естественный смысловой повод для живого разговора. Качество важнее количества.
+Твоя задача — подготовить живые ответы для максимально возможного числа Stories,
+если кадр или подпись дают хоть один естественный человеческий повод для разговора.
+Пропускай Story только когда контекста действительно недостаточно или ответ пришлось
+бы выдумывать.
 
 Главный принцип:
 СМЫСЛ STORY → ЖИВОЙ ОТКЛИК → КОРОТКАЯ СОБСТВЕННАЯ МЫСЛЬ → ЕСТЕСТВЕННЫЙ ВОПРОС,
@@ -349,7 +525,7 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
 - не пиши дежурные фразы вроде «Спасибо, что поделились», «Классная сторис», «Приятно было увидеть» как самостоятельный ответ;
 - опирайся только на реально видимый кадр/превью и подпись; ничего не выдумывай;
 - если контекста недостаточно для содержательного и естественного отклика — ПРОПУСТИ Story;
-- лучше вернуть 2 сильных ответа из 10, чем 10 пустых;
+- старайся дать полезный естественный ответ на каждую понятную Story; пустой шаблон хуже пропуска;
 - ответ 1–2 коротких предложения, живой, конкретный, без лести и без канцелярита;
 - вопрос не обязателен. Если без вопроса отклик звучит естественнее — не добавляй его;
 - никакого Агентства W, ИИ, партнёрства, заработка, предложения, ссылки или рекламы;
@@ -362,7 +538,7 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
 3. У автора есть естественный повод ответить?
 Если хотя бы на один вопрос ответ «нет» — пропусти эту Story.
 
-Верни ТОЛЬКО JSON-массив. Можно вернуть меньше объектов, чем передано Stories.
+Верни ТОЛЬКО JSON-массив. Верни до 5 лучших ответов из переданной партии.
 Включай только Stories, прошедшие самопроверку:
 [{"story_index":1,"reason":"какой смысл Story уловлен и почему ответ способен открыть разговор","reply":"готовый ответ"}]
 """.strip()
@@ -514,15 +690,126 @@ def _register_story_reply_for_neona(
             }
         )
         st.session_state[sent_log_key] = sent_log
-        persist_workspace_if_changed(int(owner_id), force=True)
+
+    _append_story_rotation_event(
+        int(owner_id),
+        item,
+        "replied",
+    )
+    persist_workspace_if_changed(int(owner_id), force=True)
 
 
-def prepare_telegram_stories_radar(owner_id: int, *, limit: int = MAX_STORIES) -> dict[str, Any]:
-    feed = _run(fetch_telegram_story_feed(int(owner_id), limit=limit))
-    stories = list(feed.get("stories") or [])
+def prepare_telegram_stories_radar(
+    owner_id: int,
+    *,
+    target: int = DAILY_STORY_TARGET,
+) -> dict[str, Any]:
+    """Идёт по ленте партиями, пока не найдёт 5 новых авторов для ответа."""
+    owner_id = int(owner_id)
+    target = max(1, min(10, int(target or DAILY_STORY_TARGET)))
+
+    permanent_story_keys, cooldown_authors = (
+        _story_rotation_exclusions(owner_id)
+    )
+    local_story_keys: set[str] = set()
+    recommendations: list[dict[str, Any]] = []
+    scanned_stories: list[dict[str, Any]] = []
+
+    available_people = 0
+    skipped_repeats = 0
+    batches = 0
+
+    while len(recommendations) < target:
+        excluded_keys = permanent_story_keys | local_story_keys
+        feed = _run(
+            fetch_telegram_story_feed(
+                owner_id,
+                limit=STORY_ANALYSIS_BATCH,
+                excluded_story_keys=excluded_keys,
+                excluded_author_ids=cooldown_authors,
+            )
+        )
+        batch = list(feed.get("stories") or [])
+        available_people = max(
+            available_people,
+            int(feed.get("available_people") or 0),
+        )
+        skipped_repeats = max(
+            skipped_repeats,
+            int(feed.get("skipped_repeats") or 0),
+        )
+
+        if not batch:
+            break
+
+        batches += 1
+        scanned_stories.extend(batch)
+
+        for item in batch:
+            try:
+                key = _story_key(
+                    int(item.get("telegram_id") or 0),
+                    int(item.get("story_id") or 0),
+                )
+            except (TypeError, ValueError):
+                continue
+            local_story_keys.add(key)
+            _append_story_rotation_event(
+                owner_id,
+                item,
+                "scanned",
+            )
+
+        batch_recommendations = _analyze_story_feed(batch)
+        for item in batch_recommendations:
+            if len(recommendations) >= target:
+                break
+            try:
+                contact_id = int(item.get("telegram_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if contact_id <= 0:
+                continue
+            if any(
+                int(existing.get("telegram_id") or 0) == contact_id
+                for existing in recommendations
+            ):
+                continue
+            recommendations.append(item)
+            cooldown_authors.add(contact_id)
+            _append_story_rotation_event(
+                owner_id,
+                item,
+                "shown",
+            )
+
+        # Если в Telegram осталось меньше полной партии, после неё новых людей
+        # в текущей ленте уже нет.
+        if len(batch) < STORY_ANALYSIS_BATCH:
+            break
+
+        # Страховка от бесконечного цикла при неожиданном ответе Telegram.
+        if batches >= 100:
+            break
+
+    # Уникальные ключи для UI, независимо от номера внутренней партии.
+    for index, item in enumerate(recommendations, start=1):
+        item["story_index"] = index
+
+    st.session_state[_story_rotation_key(owner_id)] = (
+        _story_rotation_history(owner_id)[-2000:]
+    )
+    persist_workspace_if_changed(owner_id, force=True)
+
     return {
-        **feed,
-        "recommendations": _analyze_story_feed(stories),
+        "stories": scanned_stories,
+        "recommendations": recommendations,
+        "checked": len(scanned_stories),
+        "available_people": available_people,
+        "skipped_repeats": skipped_repeats,
+        "target": target,
+        "complete": len(recommendations) >= target,
+        "batches": batches,
     }
 
 
@@ -533,8 +820,9 @@ def render_telegram_stories_radar(owner_id: int) -> None:
 
     st.markdown("### 🌿 Радар Stories Telegram")
     st.caption(
-        "Неона смотрит до 10 верхних активных Stories людей из вашей Telegram-ленты и выбирает только те, где есть естественный повод для живого разговора. "
-        "Качество важнее количества: если смыслового повода нет, Неона Story пропускает."
+        "Неона идёт дальше по всей доступной Telegram-ленте, пропускает уже просмотренные Stories "
+        "и недавних авторов, которым уже предлагался ответ, пока не соберёт 5 новых людей. "
+        "Верхние Stories больше не должны зацикливать радар."
     )
     st.info(
         "В Telegram ответ на Story — это личное сообщение автору, а не публичный комментарий. "
@@ -544,18 +832,21 @@ def render_telegram_stories_radar(owner_id: int) -> None:
     cols = st.columns([2.2, 1])
     with cols[0]:
         if st.button(
-            "🔎 Проверить 10 Stories Telegram",
+            "🔎 Найти 5 новых Stories Telegram",
             key=f"telegram_stories_run_{owner_id}",
             type="primary",
             use_container_width=True,
         ):
             try:
                 with st.spinner("Неона смотрит свежие Stories и выбирает только сильные поводы для живого разговора..."):
-                    result = prepare_telegram_stories_radar(owner_id, limit=10)
+                    result = prepare_telegram_stories_radar(owner_id, target=5)
                 st.session_state[state_key] = result
                 for item in result.get("recommendations") or []:
-                    idx = int(item.get("story_index") or 0)
-                    st.session_state[f"telegram_story_reply_{owner_id}_{idx}"] = str(item.get("reply") or "")
+                    contact_id = int(item.get("telegram_id") or 0)
+                    story_id = int(item.get("story_id") or 0)
+                    st.session_state[
+                        f"telegram_story_reply_{owner_id}_{contact_id}_{story_id}"
+                    ] = str(item.get("reply") or "")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Не удалось прочитать Stories Telegram: {exc}")
@@ -577,9 +868,14 @@ def render_telegram_stories_radar(owner_id: int) -> None:
 
     stories = list(result.get("stories") or [])
     recommendations = list(result.get("recommendations") or [])
+    available_people = int(result.get("available_people") or 0)
+    skipped_repeats = int(result.get("skipped_repeats") or 0)
+    target = int(result.get("target") or DAILY_STORY_TARGET)
     st.caption(
-        f"Просмотрено Stories людей: {len(stories)} · "
-        f"Неона выбрала для тёплого ответа: {len(recommendations)}"
+        f"Активных авторов в ленте: {available_people} · "
+        f"новых Stories просмотрено: {len(stories)} · "
+        f"повторов пропущено: {skipped_repeats} · "
+        f"сегодня выбрано: {len(recommendations)}/{target}"
     )
 
     if not stories:
@@ -591,8 +887,9 @@ def render_telegram_stories_radar(owner_id: int) -> None:
 
     if not recommendations:
         st.info(
-            "Неона посмотрела текущие Stories, но не стала придумывать ответ там, "
-            "где не увидела достаточно понятного контекста."
+            "Неона прошла доступные новые Stories, но сейчас не нашла достаточно "
+            "понятного контекста для нового живого ответа. Уже просмотренные Stories "
+            "повторно не показываются."
         )
         return
 
@@ -600,7 +897,11 @@ def render_telegram_stories_radar(owner_id: int) -> None:
         idx = int(item.get("story_index") or 0)
         name = str(item.get("name") or "Telegram-контакт")
         username = str(item.get("username") or "").strip()
-        reply_key = f"telegram_story_reply_{owner_id}_{idx}"
+        contact_id = int(item.get("telegram_id") or 0)
+        story_id = int(item.get("story_id") or 0)
+        reply_key = (
+            f"telegram_story_reply_{owner_id}_{contact_id}_{story_id}"
+        )
 
         with st.container(border=True):
             st.markdown(f"#### {name}")
@@ -633,8 +934,6 @@ def render_telegram_stories_radar(owner_id: int) -> None:
                 label_visibility="collapsed",
             )
 
-            contact_id = int(item.get("telegram_id") or 0)
-            story_id = int(item.get("story_id") or 0)
             registered_key = (
                 f"telegram_story_registered_{owner_id}_{contact_id}_{story_id}"
             )
