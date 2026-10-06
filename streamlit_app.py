@@ -4804,56 +4804,31 @@ def prepare_candidates_for_stagirite(
     reserve_target=50,
     exclude_ids=None,
 ):
-    """
-    Ежедневная рабочая пятёрка Стагирита:
-    1) сначала использует уже сохранённый пул кандидатов Неонии из контактов и чатов;
-    2) не требует ежедневного захода пользователя к Неонии;
-    3) если готового пула пока мало, мягко дополняет его доступными Telegram-контактами;
-    4) возвращает reserve_ids + candidate_ids.
+    """Последовательная очередь Неонии без повторов и без фильтра ЦА.
+
+    Правила:
+    - сначала полностью отрабатываем личные Telegram-контакты;
+    - показанный человеку кандидат сразу становится отработанным, даже если
+      владелец ему не написал;
+    - повторов в первом проходе нет;
+    - после исчерпания личных контактов очередь сможет продолжиться чатами.
     """
     owner_id = int(owner_id)
     desired_count = max(1, min(10, int(desired_count or 5)))
     reserve_target = max(desired_count, min(100, int(reserve_target or 50)))
-    excluded = set()
-    for value in exclude_ids or []:
-        try:
-            excluded.add(int(value))
-        except (TypeError, ValueError):
-            continue
 
-    blocked_queue = st.session_state.get(
-        f"neona_first_message_blocked_{owner_id}",
-        [],
-    )
-    if isinstance(blocked_queue, list):
-        for item in blocked_queue:
-            if not isinstance(item, dict):
-                continue
-            try:
-                excluded.add(
-                    int(item.get("telegram_id"))
-                )
-            except (TypeError, ValueError):
-                continue
-
-    passport_key = f"neonia_target_audience_passport_{owner_id}"
     contacts_key = f"neonia_telegram_contacts_{owner_id}"
+    processed_key = f"neonia_processed_candidates_{owner_id}"
+    progress_key = f"neonia_source_progress_{owner_id}"
+    selected_key = f"neonia_selected_candidates_{owner_id}"
     candidates_key = f"neonia_candidates_{owner_id}"
-
-    passport = st.session_state.get(passport_key)
-    if not passport:
-        return {
-            "ok": False,
-            "candidate_ids": [],
-            "reserve_ids": [],
-            "message": "Сначала нужен сохранённый портрет целевой аудитории.",
-        }
+    offset_key = f"neonia_selection_offset_{owner_id}"
 
     berlin_today = datetime.now(
         ZoneInfo("Europe/Berlin")
     ).date().isoformat()
 
-    # Реальные Telegram-контакты обновляем один раз в день.
+    # Обновляем личные контакты не чаще одного раза в день.
     contacts_refresh_key = f"neonia_contacts_refresh_date_{owner_id}"
     contacts = st.session_state.get(contacts_key, [])
     if (
@@ -4862,9 +4837,7 @@ def prepare_candidates_for_stagirite(
         or st.session_state.get(contacts_refresh_key) != berlin_today
     ):
         try:
-            contacts = run_telegram_async(
-                fetch_telegram_contacts(owner_id)
-            )
+            contacts = run_telegram_async(fetch_telegram_contacts(owner_id))
             st.session_state[contacts_key] = contacts
             st.session_state[contacts_refresh_key] = berlin_today
         except Exception:
@@ -4873,75 +4846,8 @@ def prepare_candidates_for_stagirite(
     if not isinstance(contacts, list):
         contacts = []
 
-    owner_contact_ids = {
-        int(contact["telegram_id"])
-        for contact in contacts
-        if isinstance(contact, dict)
-        and contact.get("telegram_id") is not None
-    }
-
-    # Один Telegram-запрос статусов в день, без OpenAI.
-    activity_key = f"neonia_activity_cache_{owner_id}"
-    activity_date_key = f"neonia_activity_cache_date_{owner_id}"
-    activity_by_id = st.session_state.get(activity_key, {})
-    if (
-        not isinstance(activity_by_id, dict)
-        or st.session_state.get(activity_date_key) != berlin_today
-    ):
-        activity_by_id = run_telegram_async(
-            fetch_telegram_contact_activity(owner_id)
-        )
-        st.session_state[activity_key] = activity_by_id
-        st.session_state[activity_date_key] = berlin_today
-
-    def _stagirite_activity_tier(activity):
-        """
-        Приоритет активности только для ежедневной пятёрки Стагирита.
-
-        0 — онлайн / сегодня / вчера;
-        1 — Telegram показывает «был недавно»;
-        2 — точная активность за последние 7 дней;
-        3 — Telegram показывает «был на прошлой неделе».
-
-        Более старые и неизвестные статусы в холодную пятёрку не берём.
-        """
-        activity = activity if isinstance(activity, dict) else {}
-        if activity.get("activity_eligible") is True:
-            return 0
-
-        precision = str(
-            activity.get("activity_precision") or ""
-        ).strip().lower()
-
-        if precision == "approx_recently":
-            return 1
-
-        if precision == "exact":
-            raw_seen = str(activity.get("last_seen_at") or "").strip()
-            if raw_seen:
-                try:
-                    seen_at = datetime.fromisoformat(
-                        raw_seen.replace("Z", "+00:00")
-                    )
-                    if seen_at.tzinfo is None:
-                        seen_at = seen_at.replace(tzinfo=timezone.utc)
-                    if (
-                        datetime.now(timezone.utc)
-                        - seen_at.astimezone(timezone.utc)
-                        <= timedelta(days=7)
-                    ):
-                        return 2
-                except Exception:
-                    pass
-
-        if precision == "approx_week":
-            return 3
-
-        return None
-
-    # Недельный резерв: сначала сегодня/вчера, а если людей мало —
-    # аккуратно добираем реальными контактами с недавней активностью.
-    reserve_contacts = []
+    normalized_contacts = []
+    seen_contact_ids = set()
     for contact in contacts:
         if not isinstance(contact, dict):
             continue
@@ -4949,376 +4855,185 @@ def prepare_candidates_for_stagirite(
             cid = int(contact.get("telegram_id"))
         except (TypeError, ValueError):
             continue
-        activity = activity_by_id.get(cid) or {}
-        activity_tier = _stagirite_activity_tier(activity)
-        if activity_tier is None:
+        if cid <= 0 or cid in seen_contact_ids:
             continue
-        reserve_contacts.append(
-            {
-                **contact,
-                **activity,
-                "is_owner_contact": True,
-                "_stagirite_activity_tier": activity_tier,
-            }
-        )
+        seen_contact_ids.add(cid)
+        normalized_contacts.append({**contact, "telegram_id": cid})
 
-    # Уже отправленным первым сообщениям не нужно снова попадать в новый день.
-    sent_events = st.session_state.get(
-        f"neona_first_message_sent_log_{owner_id}",
-        [],
-    )
-    if not isinstance(sent_events, list):
-        sent_events = []
-    already_sent_ids = set()
-    for event in sent_events:
-        if not isinstance(event, dict):
-            continue
+    processed_ids = set()
+    for value in st.session_state.get(processed_key, []) or []:
         try:
-            already_sent_ids.add(int(event.get("telegram_id")))
+            processed_ids.add(int(value))
         except (TypeError, ValueError):
             continue
 
-    # ----------------------------------------------------------
-    # ПЕРВЫЙ И ОСНОВНОЙ ИСТОЧНИК СТАГИРИТА — уже сохранённый пул
-    # кандидатов Неонии. Он может быть получен как из личных
-    # Telegram-контактов, так и из Telegram-чатов. Пользователю
-    # не нужно ежедневно возвращаться к Неонии.
-    # ----------------------------------------------------------
-    saved_candidates = list(
-        st.session_state.get(candidates_key, [])
-        or []
-    )
-    saved_pool = []
-    for item in saved_candidates:
-        if not isinstance(item, dict):
-            continue
+    # Одноразовая миграция старой истории. Старый selection_offset отражал
+    # уже пройденную часть сохранённого списка; эти люди не должны появиться
+    # повторно после перехода на новую очередь.
+    if not processed_ids:
+        legacy_offset = int(st.session_state.get(offset_key, 0) or 0)
+        for contact in normalized_contacts[:max(0, legacy_offset)]:
+            processed_ids.add(int(contact["telegram_id"]))
+
+        for value in st.session_state.get(selected_key, []) or []:
+            try:
+                processed_ids.add(int(value))
+            except (TypeError, ValueError):
+                continue
+
+        sent_log = st.session_state.get(
+            f"neona_first_message_sent_log_{owner_id}",
+            [],
+        )
+        if isinstance(sent_log, list):
+            for event in sent_log:
+                if not isinstance(event, dict):
+                    continue
+                try:
+                    processed_ids.add(int(event.get("telegram_id")))
+                except (TypeError, ValueError):
+                    continue
+
+        blocked = st.session_state.get(
+            f"neona_first_message_blocked_{owner_id}",
+            [],
+        )
+        if isinstance(blocked, list):
+            for event in blocked:
+                if not isinstance(event, dict):
+                    continue
+                try:
+                    processed_ids.add(int(event.get("telegram_id")))
+                except (TypeError, ValueError):
+                    continue
+
+    for value in exclude_ids or []:
         try:
-            cid = int(item.get("telegram_id"))
+            processed_ids.add(int(value))
         except (TypeError, ValueError):
             continue
-        if cid in excluded or cid in already_sent_ids:
-            continue
-        # Для первого сообщения Telegram берём только реальный контакт
-        # владельца. Кандидат из чата без добавления в контакты не должен
-        # занимать место в ежедневной пятёрке, потому что сообщение не уйдёт.
-        if cid not in owner_contact_ids:
-            continue
-        fresh_activity = activity_by_id.get(cid) or {}
-        activity_tier = _stagirite_activity_tier(fresh_activity)
-        if activity_tier is None:
-            continue
-        if bool(item.get("selection_blocked")):
-            continue
-        if bool(item.get("telegram_warning")):
-            continue
-        if str(item.get("status") or "") == "Отправлено":
-            continue
 
-        # В ежедневную пятёрку попадают только кандидаты, которых Неония
-        # действительно рекомендует передать Неоне. Контакты без данных,
-        # с низким интересом или с вердиктом «Пока не подходит» не должны
-        # занимать рабочее место только ради красивой цифры 5/5.
-        recommendation = str(item.get("recommendation") or "").strip()
-        potential_interest = str(
-            item.get("potential_interest") or ""
-        ).strip().lower()
-        if recommendation != "Передать Неоне":
-            continue
-        if potential_interest not in {"высокий", "средний"}:
-            continue
-
-        saved_pool.append(
-            {
-                **item,
-                **fresh_activity,
-                "is_owner_contact": True,
-                "_stagirite_activity_tier": activity_tier,
-            }
-        )
-
-    def _stagirite_saved_priority(item):
-        recommendation = str(item.get("recommendation") or "").strip()
-        recommendation_rank = {
-            "Передать Неоне": 0,
-            "Решает владелец": 1,
-            "Нужно больше данных": 2,
-            "Пока не подходит": 3,
-        }.get(recommendation, 1)
-        interest = str(item.get("potential_interest") or "").strip().lower()
-        interest_rank = {
-            "высокий": 0,
-            "средний": 1,
-            "неясно": 2,
-            "низкий": 3,
-        }.get(interest, 2)
-        try:
-            score_rank = -int(item.get("score") or 0)
-        except (TypeError, ValueError):
-            score_rank = 0
-        warmth_rank = {
-            "знакомый": 0,
-            "поверхностно знакомый": 1,
-            "холодный": 2,
-            "неясно": 3,
-        }.get(str(item.get("warmth") or "").strip().lower(), 3)
-
-        # Более свежая Telegram-активность выше. В старой версии сравнивалась
-        # длина ISO-строки, а она почти у всех одинакова и реально не ранжировала.
-        raw_activity = str(item.get("last_seen_at") or "").strip()
-        try:
-            activity_rank = -datetime.fromisoformat(
-                raw_activity.replace("Z", "+00:00")
-            ).timestamp()
-        except Exception:
-            activity_rank = 0.0
-
-        return (
-            recommendation_rank,
-            interest_rank,
-            score_rank,
-            warmth_rank,
-            int(item.get("_stagirite_activity_tier") or 0),
-            activity_rank,
-            str(item.get("name") or "").lower(),
-        )
-
-    saved_pool.sort(key=_stagirite_saved_priority)
-    saved_ids = [int(item["telegram_id"]) for item in saved_pool]
-    if len(saved_ids) >= desired_count:
-        return {
-            "ok": True,
-            "candidate_ids": saved_ids[:desired_count],
-            "reserve_ids": saved_ids[:reserve_target],
-            "available_reserve": len(saved_ids[:reserve_target]),
-            "checked_detail": 0,
-            "exhausted": False,
-            "message": "Рабочая пятёрка: лучшие новые пригодные контакты из сохранённого пула Неонии.",
-        }
-
-    # Если в готовом пуле пока меньше пяти, сохраняем найденных и только
-    # недостающее количество добираем из личных Telegram-контактов.
-    excluded.update(saved_ids)
-
-    reserve_contacts = [
-        item
-        for item in reserve_contacts
-        if int(item["telegram_id"]) not in already_sent_ids
+    contact_ids = [int(item["telegram_id"]) for item in normalized_contacts]
+    remaining_contacts = [
+        item for item in normalized_contacts
+        if int(item["telegram_id"]) not in processed_ids
     ]
 
-    # Стабильный порядок:
-    # сначала онлайн/сегодня/вчера, затем «недавно» и только потом
-    # более широкий недельный резерв.
-    def activity_sort(item):
-        tier = int(item.get("_stagirite_activity_tier") or 0)
-        raw = str(item.get("last_seen_at") or "").strip()
-        try:
-            timestamp = datetime.fromisoformat(
-                raw.replace("Z", "+00:00")
-            ).timestamp()
-        except Exception:
-            timestamp = 0.0
-        return (tier, -timestamp)
+    selected_today = remaining_contacts[:desired_count]
 
-    reserve_contacts.sort(key=activity_sort)
-    reserve_contacts = reserve_contacts[:reserve_target]
-    reserve_ids = [int(item["telegram_id"]) for item in reserve_contacts]
+    # ВАЖНО: "показан = отработан". Записываем сразу, а не после отправки.
+    for item in selected_today:
+        processed_ids.add(int(item["telegram_id"]))
 
-    known_contacts = st.session_state.get(
-        f"neonia_owner_known_contacts_{owner_id}",
-        {},
-    )
-    if not isinstance(known_contacts, dict):
-        known_contacts = {}
-    known_contact_ids = set()
-    for raw_id in known_contacts.keys():
+    st.session_state[processed_key] = sorted(processed_ids)
+
+    old_selected = []
+    for value in st.session_state.get(selected_key, []) or []:
         try:
-            known_contact_ids.add(int(raw_id))
+            value = int(value)
         except (TypeError, ValueError):
             continue
+        if value not in old_selected:
+            old_selected.append(value)
+    for item in selected_today:
+        cid = int(item["telegram_id"])
+        if cid not in old_selected:
+            old_selected.append(cid)
+    st.session_state[selected_key] = old_selected
 
-    candidates = list(
-        st.session_state.get(candidates_key, [])
-        or []
+    # Минимальные карточки нужны только для отображения сегодняшней пятёрки.
+    queue_cards = []
+    for item in selected_today:
+        queue_cards.append(
+            {
+                **item,
+                "source": "Личные контакты Telegram",
+                "segment": "Последовательная очередь",
+                "potential_interest": "не оценивается",
+                "actuality": "не оценивается",
+                "warmth": "не оценивается",
+                "recommendation": "Выдан в ежедневной пятёрке",
+                "status": "Выдан Неонией",
+                "owner_hint": (
+                    "Кандидат выдан по очереди. ЦА и интерес на этом этапе "
+                    "не оцениваются."
+                ),
+                "reasons": ["Следующий новый контакт в очереди"],
+            }
+        )
+
+    existing_cards = st.session_state.get(candidates_key, [])
+    if not isinstance(existing_cards, list):
+        existing_cards = []
+    st.session_state[candidates_key] = merge_candidate_results(
+        existing_cards,
+        queue_cards,
     )
-    existing_by_id = {}
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        try:
-            existing_by_id[int(item.get("telegram_id"))] = item
-        except (TypeError, ValueError):
-            continue
 
-    # Подробно проверяем кандидатов партиями, пока не соберём сегодняшних 5.
-    detailed_usable = []
-    checked = 0
+    processed_in_contacts = sum(
+        1 for cid in contact_ids if cid in processed_ids
+    )
+    remaining_count = max(0, len(contact_ids) - processed_in_contacts)
 
-    for start_idx in range(0, len(reserve_contacts), 10):
-        if len(detailed_usable) >= desired_count:
-            break
+    progress = {
+        "source_type": "telegram_contacts",
+        "source_name": "Личные контакты Telegram",
+        "total": len(contact_ids),
+        "processed": processed_in_contacts,
+        "remaining": remaining_count,
+        "today": len(selected_today),
+        "updated_at": datetime.now(
+            ZoneInfo("Europe/Berlin")
+        ).isoformat(),
+    }
 
-        raw_batch = [
-            item
-            for item in reserve_contacts[start_idx:start_idx + 10]
-            if int(item["telegram_id"]) not in excluded
-        ]
-        if not raw_batch:
-            continue
+    # Если личные контакты закончились, фиксируем переход к чатам.
+    # Сам механизм последовательной очереди чатов подключается следующим
+    # этапом, но старые контакты при этом уже никогда не вернутся.
+    if not remaining_contacts and not selected_today:
+        progress["source_type"] = "telegram_chats"
+        progress["source_name"] = "Telegram-чаты"
+        progress["contacts_exhausted"] = True
 
-        checked += len(raw_batch)
-        contexts = run_telegram_async(
-            fetch_telegram_contact_contexts(
-                owner_id,
-                raw_batch,
-            )
-        )
-        enriched = enrich_contact_workability(
-            contexts,
-            already_sent_ids=already_sent_ids,
-            known_contact_ids=known_contact_ids,
-        )
-        workable = [
-            item
-            for item in enriched
-            if item.get("is_owner_contact") is True
-            and not bool(item.get("selection_blocked"))
-            and item.get("work_state") == "available"
-        ]
+    st.session_state[progress_key] = progress
 
-        # Повторно OpenAI не вызываем для уже проанализированного контакта.
-        reused = []
-        need_analysis = []
-        for item in workable:
-            cid = int(item["telegram_id"])
-            old = existing_by_id.get(cid)
-            old_recommendation = (
-                str(old.get("recommendation") or "").strip()
-                if isinstance(old, dict)
-                else ""
-            )
-            if (
-                isinstance(old, dict)
-                and old.get("analysis_cost_mode") == "openai"
-                and old_recommendation in {
-                    "Передать Неоне",
-                    "Нужно больше данных",
-                    "Пока не подходит",
-                }
-            ):
-                reused.append(
-                    {
-                        **old,
-                        **item,
-                        "is_owner_contact": True,
-                    }
-                )
-            else:
-                # Старые локальные заглушки «данных мало» не считаем
-                # вечным приговором: контекст мог измениться, поэтому
-                # сегодня проверяем контакт заново.
-                need_analysis.append(item)
-
-        informative, empty_contexts = split_contacts_by_analysis_value(
-            need_analysis
-        )
-        batch_results = list(reused)
-        batch_results.extend(
-            build_no_data_candidate(item)
-            for item in empty_contexts
-        )
-
-        if informative:
-            ai_results = analyze_contacts_for_target_audience(
-                passport["analysis"],
-                informative,
-            )
-            for item in ai_results:
-                item["analysis_cost_mode"] = "openai"
-                item["is_owner_contact"] = True
-            batch_results.extend(ai_results)
-
-        batch_results = [
-            item for item in batch_results
-            if int(item.get("telegram_id")) in owner_contact_ids
-            and _stagirite_activity_tier(item) is not None
-            and item.get("work_state") == "available"
-            and not bool(item.get("selection_blocked"))
-        ]
-        batch_results.sort(key=candidate_priority_key)
-
-        # Историю анализа сохраняем полностью, но в сегодняшнюю рабочую
-        # пятёрку передаём только тех, кто прошёл бизнес-фильтр Неонии
-        # и имеет как минимум средний потенциальный интерес.
-        eligible_batch_results = [
-            item
-            for item in batch_results
-            if str(item.get("recommendation") or "").strip()
-            == "Передать Неоне"
-            and str(item.get("potential_interest") or "").strip().lower()
-            in {"высокий", "средний"}
-            and item.get("analysis_cost_mode") != "local_no_ai"
-        ]
-
-        candidates = merge_candidate_results(
-            candidates,
-            batch_results,
-        )
-        st.session_state[candidates_key] = candidates
-        st.session_state[
-            f"neonia_current_workable_batch_{owner_id}"
-        ] = batch_results
-
-        for item in eligible_batch_results:
-            cid = int(item["telegram_id"])
-            if cid in excluded or cid in detailed_usable:
-                continue
-            detailed_usable.append(cid)
-            if len(detailed_usable) >= desired_count:
-                break
+    reserve_ids = [
+        int(item["telegram_id"])
+        for item in remaining_contacts[desired_count:desired_count + reserve_target]
+    ]
 
     persist_workspace_if_changed(owner_id, force=True)
 
-    combined_candidate_ids = []
-    for cid in saved_ids + detailed_usable:
-        if cid not in combined_candidate_ids:
-            combined_candidate_ids.append(cid)
-
-    combined_reserve_ids = []
-    for cid in saved_ids + reserve_ids:
-        if cid not in combined_reserve_ids:
-            combined_reserve_ids.append(cid)
-        if len(combined_reserve_ids) >= reserve_target:
-            break
-
-    if not combined_candidate_ids:
+    if selected_today:
         message = (
-            "Общий пул людей пока пуст. Один раз откройте Неонию и получите "
-            "или обновите список из Telegram-контактов либо чатов."
+            f"Сегодня выданы следующие {len(selected_today)} новых контактов. "
+            f"Отработано: {processed_in_contacts} из {len(contact_ids)}. "
+            f"Осталось: {remaining_count}."
         )
-    elif len(combined_candidate_ids) < desired_count:
+    elif normalized_contacts:
         message = (
-            f"Стагирит подготовил {len(combined_candidate_ids)} кандидат(а/ов). "
-            "В сохранённом пуле сейчас недостаточно новых людей для полной пятёрки."
+            "Личные Telegram-контакты первого прохода закончились. "
+            "Следующий источник — Telegram-чаты."
         )
     else:
-        message = (
-            "Рабочая пятёрка собрана. Приоритет — активные сегодня/вчера; "
-            "если их не хватило, Стагирит добрал недавние реальные Telegram-контакты."
-        )
+        message = "Telegram не вернул доступных личных контактов."
 
     return {
         "ok": True,
-        "candidate_ids": combined_candidate_ids[:desired_count],
-        "reserve_ids": combined_reserve_ids,
-        "available_reserve": len(combined_reserve_ids),
-        "checked_detail": checked,
-        "exhausted": len(combined_candidate_ids) < desired_count,
+        "candidate_ids": [
+            int(item["telegram_id"])
+            for item in selected_today
+        ],
+        "reserve_ids": reserve_ids,
+        "available_reserve": len(reserve_ids),
+        "checked_detail": len(selected_today),
+        "exhausted": not bool(remaining_contacts),
         "message": message,
+        "progress": progress,
     }
 
 
 NEONA_FIRST_MESSAGE_FORBIDDEN = NEONA_FORBIDDEN_CLAIMS
-
 
 def candidate_first_name(contact):
     """Возвращает безопасное человеческое имя без эмодзи и @username."""
