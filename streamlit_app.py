@@ -63,6 +63,11 @@ get_recent_daily_candidates_for_stagirite = getattr(
     "get_recent_daily_candidates_for_stagirite",
     lambda *args, **kwargs: [],
 )
+get_all_shown_candidate_ids_for_stagirite = getattr(
+    _stagirite_center,
+    "get_all_shown_candidate_ids_for_stagirite",
+    lambda *args, **kwargs: [],
+)
 get_first_message_failures_for_stagirite = getattr(
     _stagirite_center,
     "get_first_message_failures_for_stagirite",
@@ -7413,7 +7418,7 @@ if telegram_login_valid or remembered_data:
             if not isinstance(queue_progress, dict):
                 queue_progress = {}
 
-            if str(queue_progress.get("migration_version") or "") != "candidate_history_v2":
+            if str(queue_progress.get("migration_version") or "") != "candidate_history_v3":
                 legacy_cards = st.session_state.get(
                     f"neonia_candidates_{telegram_id}",
                     [],
@@ -7439,8 +7444,24 @@ if telegram_login_valid or remembered_data:
                     if cid not in target:
                         target.append(cid)
 
+                stagirite_history_ids = []
+                try:
+                    stagirite_history_ids = [
+                        int(value)
+                        for value in get_all_shown_candidate_ids_for_stagirite(
+                            int(telegram_id)
+                        )
+                        if str(value).lstrip("-").isdigit()
+                    ]
+                except Exception:
+                    stagirite_history_ids = []
+
                 restored_ids = []
-                for cid in historical_ids + today_queue_ids:
+                for cid in (
+                    stagirite_history_ids
+                    + historical_ids
+                    + today_queue_ids
+                ):
                     if cid not in restored_ids:
                         restored_ids.append(cid)
 
@@ -7478,7 +7499,8 @@ if telegram_login_valid or remembered_data:
                     ),
                     "today": len(today_queue_ids),
                     "legacy_history_count": len(historical_ids),
-                    "migration_version": "candidate_history_v2",
+                    "stagirite_history_count": len(stagirite_history_ids),
+                    "migration_version": "candidate_history_v3",
                     "updated_at": datetime.now(
                         ZoneInfo("Europe/Berlin")
                     ).isoformat(),
