@@ -5013,6 +5013,20 @@ def prepare_candidates_for_stagirite(
             continue
         if str(item.get("status") or "") == "Отправлено":
             continue
+
+        # В ежедневную пятёрку попадают только кандидаты, которых Неония
+        # действительно рекомендует передать Неоне. Контакты без данных,
+        # с низким интересом или с вердиктом «Пока не подходит» не должны
+        # занимать рабочее место только ради красивой цифры 5/5.
+        recommendation = str(item.get("recommendation") or "").strip()
+        potential_interest = str(
+            item.get("potential_interest") or ""
+        ).strip().lower()
+        if recommendation != "Передать Неоне":
+            continue
+        if potential_interest not in {"высокий", "средний"}:
+            continue
+
         saved_pool.append(
             {
                 **item,
@@ -5177,13 +5191,19 @@ def prepare_candidates_for_stagirite(
         for item in workable:
             cid = int(item["telegram_id"])
             old = existing_by_id.get(cid)
+            old_recommendation = (
+                str(old.get("recommendation") or "").strip()
+                if isinstance(old, dict)
+                else ""
+            )
             if (
                 isinstance(old, dict)
-                and (
-                    old.get("potential_interest")
-                    or old.get("short_portrait")
-                    or old.get("analysis_cost_mode")
-                )
+                and old.get("analysis_cost_mode") == "openai"
+                and old_recommendation in {
+                    "Передать Неоне",
+                    "Нужно больше данных",
+                    "Пока не подходит",
+                }
             ):
                 reused.append(
                     {
@@ -5193,6 +5213,9 @@ def prepare_candidates_for_stagirite(
                     }
                 )
             else:
+                # Старые локальные заглушки «данных мало» не считаем
+                # вечным приговором: контекст мог измениться, поэтому
+                # сегодня проверяем контакт заново.
                 need_analysis.append(item)
 
         informative, empty_contexts = split_contacts_by_analysis_value(
@@ -5223,6 +5246,19 @@ def prepare_candidates_for_stagirite(
         ]
         batch_results.sort(key=candidate_priority_key)
 
+        # Историю анализа сохраняем полностью, но в сегодняшнюю рабочую
+        # пятёрку передаём только тех, кто прошёл бизнес-фильтр Неонии
+        # и имеет как минимум средний потенциальный интерес.
+        eligible_batch_results = [
+            item
+            for item in batch_results
+            if str(item.get("recommendation") or "").strip()
+            == "Передать Неоне"
+            and str(item.get("potential_interest") or "").strip().lower()
+            in {"высокий", "средний"}
+            and item.get("analysis_cost_mode") != "local_no_ai"
+        ]
+
         candidates = merge_candidate_results(
             candidates,
             batch_results,
@@ -5232,7 +5268,7 @@ def prepare_candidates_for_stagirite(
             f"neonia_current_workable_batch_{owner_id}"
         ] = batch_results
 
-        for item in batch_results:
+        for item in eligible_batch_results:
             cid = int(item["telegram_id"])
             if cid in excluded or cid in detailed_usable:
                 continue
@@ -7659,7 +7695,7 @@ if telegram_login_valid or remembered_data:
             # не запускаем тяжёлый Telegram/ИИ-поиск.
             daily_stagirite_candidates = ensure_weekly_candidates_for_neona(
                 telegram_id,
-                prepare_candidates_fn=None,
+                prepare_candidates_fn=prepare_candidates_for_stagirite,
             )
             if (
                 isinstance(daily_stagirite_candidates, dict)
@@ -7785,9 +7821,17 @@ if telegram_login_valid or remembered_data:
                 }
                 with st.expander(label, expanded=expanded):
                     if not ids:
+                        day_message = str(
+                            daily_stagirite_candidates.get("message")
+                            if isinstance(daily_stagirite_candidates, dict)
+                            else ""
+                        ).strip()
                         st.caption(
-                            "Список пока пуст. Если общий пул людей уже загружен, "
-                            "Стагирит подготовит следующую рабочую пятёрку автоматически."
+                            day_message
+                            or (
+                                "Список пока пуст: среди доступных контактов пока "
+                                "не найдено кандидатов, прошедших фильтр целевой аудитории."
+                            )
                         )
                         return
                     for number, cid in enumerate(ids[:5], start=1):
@@ -9775,7 +9819,7 @@ if telegram_login_valid or remembered_data:
                     # На обычном rerun только читаем уже найденных людей.
                     weekly_neona_day = ensure_weekly_candidates_for_neona(
                         telegram_id,
-                        prepare_candidates_fn=None,
+                        prepare_candidates_fn=prepare_candidates_for_stagirite,
                     )
 
                     candidate_results = st.session_state.get(
