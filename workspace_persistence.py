@@ -62,6 +62,9 @@ def get_workspace_state_keys(telegram_id):
         "source_progress": (
             f"neonia_source_progress_{telegram_id}"
         ),
+        "story_rotation_history": (
+            f"telegram_story_rotation_history_{telegram_id}"
+        ),
         "owner_known_contacts": (
             f"neonia_owner_known_contacts_{telegram_id}"
         ),
@@ -107,6 +110,12 @@ def collect_workspace_state(telegram_id):
     )
     if not isinstance(source_progress, dict):
         source_progress = {}
+    story_rotation_history = st.session_state.get(
+        keys["story_rotation_history"],
+        [],
+    )
+    if not isinstance(story_rotation_history, list):
+        story_rotation_history = []
     blocked_first_messages = st.session_state.get(
         keys["blocked_first_messages"],
         [],
@@ -115,7 +124,7 @@ def collect_workspace_state(telegram_id):
         blocked_first_messages = []
 
     return {
-        "schema_version": 7,
+        "schema_version": 8,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -178,6 +187,11 @@ def collect_workspace_state(telegram_id):
             if str(contact_id).lstrip("-").isdigit()
         ],
         "source_progress": source_progress,
+        "story_rotation_history": [
+            item
+            for item in story_rotation_history
+            if isinstance(item, dict)
+        ][-2000:],
         "owner_known_contacts": [
             contact
             for contact in owner_contacts.values()
@@ -413,6 +427,28 @@ def _normalize_workspace_state(state):
     if not isinstance(source_progress, dict):
         source_progress = {}
 
+    story_rotation_raw = state.get("story_rotation_history", [])
+    if not isinstance(story_rotation_raw, list):
+        story_rotation_raw = []
+    story_rotation_history = []
+    for item in story_rotation_raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            story_owner_id = int(item.get("telegram_id") or 0)
+            story_id = int(item.get("story_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if story_owner_id <= 0 or story_id <= 0:
+            continue
+        story_rotation_history.append(
+            {
+                **item,
+                "telegram_id": story_owner_id,
+                "story_id": story_id,
+            }
+        )
+
     try:
         selection_offset = int(
             state.get("selection_offset", 0) or 0
@@ -477,6 +513,7 @@ def _normalize_workspace_state(state):
         "selected_candidates": selected_candidates,
         "processed_candidates": processed_candidates,
         "source_progress": source_progress,
+        "story_rotation_history": story_rotation_history[-2000:],
         "owner_known_contacts": owner_contacts,
         "neona_drafts": drafts,
         "sent_log": sent_log,
@@ -652,6 +689,9 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["source_progress"]
         ] = state["source_progress"]
+        st.session_state[
+            keys["story_rotation_history"]
+        ] = state["story_rotation_history"]
         st.session_state[
             keys["owner_known_contacts"]
         ] = state["owner_known_contacts"]
