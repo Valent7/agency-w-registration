@@ -264,7 +264,13 @@ def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def run_once() -> dict[str, int]:
-    """Один безопасный проход VK Scout."""
+    """Один проход последовательной VK-очереди.
+
+    Неония больше не оценивает участников сообществ по ЦА и не сканирует
+    все источники одновременно. Для каждого партнёра берётся текущий источник,
+    выдаются следующие 5 новых людей, затем очередь продолжается с сохранённого
+    места. Закончилось сообщество — функция сама переходит к следующему.
+    """
     members = _load_members()
     member_ids: list[int] = []
     member_by_id: dict[int, dict[str, Any]] = {}
@@ -281,28 +287,27 @@ def run_once() -> dict[str, int]:
         member_by_id[owner_id] = member
 
     confirmed_ids = _load_confirmed_ids(member_ids)
-    # Корневой владелец (без referrer_code) считается активным даже если
-    # историческая запись partner_activations ещё не была создана.
     confirmed_ids.update(
         owner_id
         for owner_id, member in member_by_id.items()
         if not str(member.get("referrer_code") or "").strip()
     )
-    target_profiles = _load_target_profiles(member_ids)
 
-    # One VK user authorization is enough for the shared background scanner.
-    # Use the root Agency W owner (member without referrer_code).
-    root_owner_id = next((
-        owner_id for owner_id, member in member_by_id.items()
-        if not str(member.get("referrer_code") or "").strip()
-    ), None)
+    root_owner_id = next(
+        (
+            owner_id
+            for owner_id, member in member_by_id.items()
+            if not str(member.get("referrer_code") or "").strip()
+        ),
+        None,
+    )
     if root_owner_id is None:
-        raise RuntimeError("Не найден корневой владелец Агентства W для VK Scout OAuth")
+        raise RuntimeError(
+            "Не найден корневой владелец Агентства W для VK Scout OAuth"
+        )
 
     try:
         scout_access_token = get_valid_vk_scout_access_token(root_owner_id)
-        # vk_scout._config() prefers VK_SCOUT_ACCESS_TOKEN. This process-local
-        # value is refreshed from encrypted Supabase storage when needed.
         os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
     except VKScoutOAuthError as exc:
         _log(f"VK Scout OAuth: {exc}")
@@ -311,132 +316,84 @@ def run_once() -> dict[str, int]:
     stats = {
         "members": len(member_ids),
         "active": 0,
-        "profiles": len(target_profiles),
         "source_owners": 0,
-        "sources_scanned": 0,
-        "candidates_saved": 0,
-        "owners_scored": 0,
         "assignments_ready": 0,
         "errors": 0,
     }
 
-    # Сначала обновляем общий пул VK-кандидатов. Источники могут быть настроены
-    # у одного или нескольких владельцев; найденные публичные профили сохраняются
-    # в общий пул, а оценка ЦА затем делается отдельно для каждого партнёра.
-    per_source = _int_env("VK_SCOUT_PER_SOURCE", 200, 1, 1000)
-    max_sources = _int_env("VK_SCOUT_MAX_SOURCES", 10, 1, 50)
-
-    for owner_id in member_ids:
-        if owner_id not in confirmed_ids:
-            continue
-        if not scout_access_token:
-            continue
-        try:
-            sources = load_vk_sources(owner_id)
-        except Exception as exc:
-            stats["errors"] += 1
-            _log(f"{owner_id}: не удалось прочитать источники VK: {exc}")
-            continue
-        if not sources:
-            continue
-
-        stats["source_owners"] += 1
-        try:
-            scan = scan_vk_sources(
-                owner_id,
-                per_source=per_source,
-                max_sources=max_sources,
-            )
-
-            # VK ID can bind the freshly issued user access token to the IP
-            # that completed OAuth (Streamlit). If the scanner runs on Render,
-            # VK may answer with error 5: "access_token was given to another
-            # ip address". In that case refresh the rotating pair FROM Render
-            # and retry the source scan once.
-            scan_errors = [str(item or "") for item in (scan.get("errors") or [])]
-            ip_bound_error = any(
-                "another ip address" in item.lower()
-                or "другому ip" in item.lower()
-                for item in scan_errors
-            )
-            if ip_bound_error:
-                _log(
-                    f"{owner_id}: VK привязал access token к другому IP; "
-                    "обновляю токен из Render и повторяю сканирование один раз"
-                )
-                scout_access_token = force_refresh_vk_scout_access_token(root_owner_id)
-                os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
-                scan = scan_vk_sources(
-                    owner_id,
-                    per_source=per_source,
-                    max_sources=max_sources,
-                )
-
-            stats["sources_scanned"] += int(scan.get("sources_checked") or 0)
-            stats["candidates_saved"] += int(scan.get("candidates_saved") or 0)
-            for error in scan.get("errors") or []:
-                _log(f"{owner_id}: источник VK: {error}")
-        except Exception as exc:
-            stats["errors"] += 1
-            _log(f"{owner_id}: ошибка сканирования VK: {exc}")
-
-    try:
-        release_expired_vk_assignments()
-    except Exception as exc:
-        stats["errors"] += 1
-        _log(f"Не удалось освободить просроченные резервы: {exc}")
-
-    analyze_limit = _int_env("VK_SCOUT_ANALYZE_LIMIT", 30, 1, 100)
     daily_limit = _int_env("VK_SCOUT_DAILY_LIMIT", 5, 1, 5)
-    min_score = _int_env("VK_SCOUT_MIN_SCORE", 60, 0, 100)
 
     for owner_id in member_ids:
         if owner_id not in confirmed_ids:
             continue
         stats["active"] += 1
 
-        profile = target_profiles.get(owner_id)
-        if not profile:
+        if not scout_access_token:
             continue
 
         member = member_by_id[owner_id]
         member_code = str(member.get("member_code") or "").strip()
 
         try:
-            existing = load_today_vk_assignments(owner_id)
-            if len(existing) >= daily_limit:
-                stats["assignments_ready"] += 1
-                continue
+            sources = load_vk_sources(owner_id)
+        except Exception as exc:
+            stats["errors"] += 1
+            _log(f"{owner_id}: не удалось прочитать источники VK: {exc}")
+            continue
 
-            scored = score_vk_candidates(
-                owner_id,
-                profile,
-                ask_openai_fn=_ask_openai,
-                limit=analyze_limit,
-            )
-            if scored.get("ok"):
-                stats["owners_scored"] += 1
+        if not sources:
+            continue
+        stats["source_owners"] += 1
 
+        try:
             prepared = ensure_daily_vk_assignments(
                 owner_id,
                 member_code,
                 limit=daily_limit,
-                min_score=min_score,
+                min_score=0,
             )
-            if prepared.get("complete"):
-                stats["assignments_ready"] += 1
-
-            name = str(member.get("first_name") or owner_id).strip()
-            _log(
-                f"{name} ({owner_id}): {prepared.get('message') or 'VK-пятёрка обновлена'}"
-            )
-
-        except (VKScoutError, requests.RequestException, RuntimeError) as exc:
+        except VKScoutError as exc:
+            text_error = str(exc).lower()
+            if (
+                "another ip address" in text_error
+                or "другому ip" in text_error
+            ):
+                try:
+                    scout_access_token = force_refresh_vk_scout_access_token(
+                        root_owner_id
+                    )
+                    os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
+                    prepared = ensure_daily_vk_assignments(
+                        owner_id,
+                        member_code,
+                        limit=daily_limit,
+                        min_score=0,
+                    )
+                except Exception as retry_exc:
+                    stats["errors"] += 1
+                    _log(f"{owner_id}: VK очередь после обновления токена: {retry_exc}")
+                    continue
+            else:
+                stats["errors"] += 1
+                _log(f"{owner_id}: {exc}")
+                continue
+        except (requests.RequestException, RuntimeError) as exc:
             stats["errors"] += 1
             _log(f"{owner_id}: {exc}")
+            continue
         except Exception as exc:
             stats["errors"] += 1
             _log(f"{owner_id}: непредвиденная ошибка: {exc}")
+            continue
+
+        if prepared.get("complete"):
+            stats["assignments_ready"] += 1
+
+        name = str(member.get("first_name") or owner_id).strip()
+        _log(
+            f"{name} ({owner_id}): "
+            f"{prepared.get('message') or 'VK-очередь обновлена'}"
+        )
 
     _log(
         "цикл завершён | "
