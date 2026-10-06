@@ -195,6 +195,163 @@ def resolve_vk_community(value: str | int) -> dict[str, Any]:
     return {"community_id": int(resolved["object_id"]), "screen_name": name}
 
 
+def _vk_community_details_by_ids(
+    community_ids: Iterable[int],
+) -> list[dict[str, Any]]:
+    ids: list[int] = []
+    for value in community_ids:
+        try:
+            cid = abs(int(value))
+        except (TypeError, ValueError):
+            continue
+        if cid > 0 and cid not in ids:
+            ids.append(cid)
+    if not ids:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        response = _vk_api(
+            "groups.getById",
+            group_ids=",".join(str(x) for x in chunk),
+            fields="members_count,description,activity,screen_name,is_closed,type",
+        )
+        if isinstance(response, dict):
+            items = response.get("groups") or response.get("items") or []
+        else:
+            items = response or []
+        for item in items:
+            if isinstance(item, dict):
+                rows.append(item)
+    return rows
+
+
+def search_vk_communities(
+    owner_id: int,
+    *,
+    queries: Iterable[str] | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Неония ищет новые открытые VK-сообщества и ничего не подключает сама."""
+    owner_id = int(owner_id)
+    limit = max(1, min(30, int(limit or 10)))
+
+    search_queries = [
+        str(value or "").strip()
+        for value in (
+            queries
+            or (
+                "сетевой маркетинг",
+                "MLM бизнес",
+                "предприниматели",
+                "поиск партнеров бизнес",
+                "ИИ для бизнеса",
+            )
+        )
+        if str(value or "").strip()
+    ]
+
+    existing_ids = {
+        int(item.get("community_id") or 0)
+        for item in load_vk_sources(owner_id)
+        if str(item.get("community_id") or "").lstrip("-").isdigit()
+    }
+
+    discovered: dict[int, dict[str, Any]] = {}
+    for query in search_queries:
+        try:
+            response = _vk_api(
+                "groups.search",
+                q=query,
+                count=20,
+            )
+        except Exception:
+            continue
+        response = response if isinstance(response, dict) else {}
+        search_items = response.get("items") or []
+        ids = []
+        for item in search_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                cid = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if cid <= 0 or cid in existing_ids:
+                continue
+            ids.append(cid)
+
+        if not ids:
+            continue
+
+        try:
+            detailed = _vk_community_details_by_ids(ids)
+        except Exception:
+            detailed = search_items
+
+        for item in detailed:
+            if not isinstance(item, dict):
+                continue
+            try:
+                cid = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if cid <= 0 or cid in existing_ids:
+                continue
+
+            # В очередь предлагаем только открытые сообщества.
+            try:
+                is_closed = int(item.get("is_closed") or 0)
+            except (TypeError, ValueError):
+                is_closed = 0
+            if is_closed != 0:
+                continue
+
+            name = str(item.get("name") or "").strip()
+            screen_name = str(
+                item.get("screen_name") or ""
+            ).strip()
+            try:
+                members_count = int(item.get("members_count") or 0)
+            except (TypeError, ValueError):
+                members_count = 0
+
+            candidate = {
+                "community_id": cid,
+                "name": name or f"VK-сообщество {cid}",
+                "screen_name": screen_name,
+                "url": (
+                    f"https://vk.com/{screen_name}"
+                    if screen_name
+                    else f"https://vk.com/club{cid}"
+                ),
+                "members_count": members_count,
+                "query": query,
+            }
+
+            previous = discovered.get(cid)
+            if previous is None:
+                discovered[cid] = candidate
+            elif members_count > int(previous.get("members_count") or 0):
+                discovered[cid] = candidate
+
+    results = list(discovered.values())
+    # Сохраняем релевантность VK-поиска, но при равенстве показываем крупнее.
+    query_order = {
+        value: index
+        for index, value in enumerate(search_queries)
+    }
+    results.sort(
+        key=lambda item: (
+            query_order.get(str(item.get("query") or ""), 999),
+            -int(item.get("members_count") or 0),
+            str(item.get("name") or "").casefold(),
+        )
+    )
+    return results[:limit]
+
+
 def upsert_vk_source(
     owner_id: int,
     community: str | int,
@@ -220,10 +377,21 @@ def upsert_vk_source(
         if existing_rows
         else ""
     )
+    resolved_name = community_name.strip()
+    if not resolved_name:
+        try:
+            details = _vk_community_details_by_ids([cid])
+            if details:
+                resolved_name = str(
+                    details[0].get("name") or ""
+                ).strip()
+        except Exception:
+            resolved_name = ""
+
     payload = {
         "owner_telegram_id": int(owner_id),
         "community_id": cid,
-        "community_name": community_name.strip() or None,
+        "community_name": resolved_name or None,
         "community_url": f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/club{cid}",
         "active": True,
         "priority": max(0, min(100, int(priority))),
