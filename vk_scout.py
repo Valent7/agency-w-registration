@@ -395,6 +395,146 @@ def _today_vk_assignment_rows_all(owner_id: int) -> list[dict[str, Any]]:
     )
 
 
+def _owner_vk_source_shown_ids(
+    owner_id: int,
+    community_id: int,
+) -> set[int]:
+    """VK ID, уже реально показанные владельцу именно из этого сообщества."""
+    result: set[int] = set()
+    for row in _owner_vk_assignment_rows(owner_id):
+        if str(row.get("status") or "").strip() == "released":
+            continue
+        meta = vk_queue_assignment_meta(row)
+        try:
+            meta_community_id = int(meta.get("community_id") or 0)
+        except (TypeError, ValueError):
+            meta_community_id = 0
+        if meta_community_id != int(community_id):
+            continue
+        try:
+            uid = int(row.get("vk_user_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0:
+            result.add(uid)
+    return result
+
+
+def _other_owner_active_vk_ids(owner_id: int) -> set[int]:
+    """VK ID, которые сейчас закреплены за другими партнёрами Агентства W."""
+    result: set[int] = set()
+    offset = 0
+    page_size = 1000
+    for _ in range(100):
+        rows = _sb_get(
+            "agency_vk_assignments",
+            {
+                "owner_telegram_id": f"neq.{int(owner_id)}",
+                "status": "in.(" + ",".join(ACTIVE_ASSIGNMENT_STATUSES) + ")",
+                "select": "vk_user_id",
+                "limit": page_size,
+                "offset": offset,
+            },
+        )
+        for row in rows:
+            try:
+                uid = int(row.get("vk_user_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if uid > 0:
+                result.add(uid)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return result
+
+
+def refresh_vk_source_capacity(
+    owner_id: int,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    """Один раз считает реальную рабочую ёмкость VK-сообщества.
+
+    "Доступно Неонии" = живой профиль, можно написать в личные сообщения,
+    не является уже отмеченным партнёром, не закреплён за другим владельцем
+    и не был ранее показан этому владельцу из другого VK-источника.
+    """
+    owner_id = int(owner_id)
+    community_id = int(source.get("community_id") or 0)
+    if community_id <= 0:
+        raise VKScoutError("У VK-источника не найден community_id")
+
+    current_source_shown = _owner_vk_source_shown_ids(
+        owner_id,
+        community_id,
+    )
+    processed_elsewhere = (
+        _owner_processed_vk_ids(owner_id) - current_source_shown
+    )
+    partner_ids = _partner_vk_ids()
+    claimed_by_others = _other_owner_active_vk_ids(owner_id)
+
+    total = 0
+    workable_ids: set[int] = set()
+    closed_messages = 0
+    duplicate_or_prior = 0
+    claimed_elsewhere = 0
+    partner_skipped = 0
+    offset = 0
+
+    for _ in range(1000):
+        page = fetch_vk_members(
+            source,
+            offset=offset,
+            count=1000,
+        )
+        total = max(total, int(page.get("total") or 0))
+        raw_count = int(page.get("returned_count") or 0)
+
+        for candidate in page.get("members") or []:
+            try:
+                uid = int(candidate.get("vk_user_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0:
+                continue
+            if candidate.get("can_write_private_message") is not True:
+                closed_messages += 1
+                continue
+            if uid in partner_ids:
+                partner_skipped += 1
+                continue
+            if uid in claimed_by_others:
+                claimed_elsewhere += 1
+                continue
+            if uid in processed_elsewhere:
+                duplicate_or_prior += 1
+                continue
+            workable_ids.add(uid)
+
+        offset += raw_count
+        if raw_count == 0:
+            break
+        if total > 0 and offset >= total:
+            break
+        if raw_count < 1000:
+            break
+
+    state = _source_queue_state(source)
+    state = {
+        **state,
+        "total": total,
+        "workable_total": len(workable_ids),
+        "capacity_checked_at": datetime.now(UTC).isoformat(),
+        "closed_messages": closed_messages,
+        "duplicate_or_prior": duplicate_or_prior,
+        "claimed_elsewhere": claimed_elsewhere,
+        "partner_skipped": partner_skipped,
+    }
+    _save_source_queue_state(owner_id, source, state)
+    return state
+
+
 def load_vk_queue_progress(owner_id: int) -> dict[str, Any]:
     """Счётчик текущего VK-сообщества для интерфейса Неонии."""
     owner_id = int(owner_id)
@@ -418,6 +558,7 @@ def load_vk_queue_progress(owner_id: int) -> dict[str, Any]:
             "source_name": "VK — активных сообществ для очереди нет",
             "community_id": None,
             "total": 0,
+            "available": 0,
             "processed": 0,
             "remaining": 0,
             "today": today_count,
@@ -428,37 +569,72 @@ def load_vk_queue_progress(owner_id: int) -> dict[str, Any]:
 
     state = _source_queue_state(current)
     total = int(state.get("total") or 0)
-    if total <= 0:
-        page = fetch_vk_members(current, offset=0, count=1)
-        total = int(page.get("total") or 0)
-        state = {
-            **state,
-            "total": total,
-            "offset": max(0, int(state.get("offset") or 0)),
-            "completed": bool(state.get("completed")),
-        }
-        _save_source_queue_state(owner_id, current, state)
 
-    processed = min(
-        total,
-        max(0, int(state.get("offset") or 0)),
+    # Реальную рабочую ёмкость считаем один раз и сохраняем в источнике.
+    # Если VK временно не отвечает, интерфейс всё равно открывается и показывает
+    # уже известные данные вместо падения всего приложения.
+    if state.get("workable_total") is None:
+        try:
+            state = refresh_vk_source_capacity(owner_id, current)
+        except Exception as exc:
+            state = {
+                **state,
+                "capacity_error": str(exc)[:500],
+            }
+
+    total = max(total, int(state.get("total") or 0))
+    workable_total = state.get("workable_total")
+    try:
+        workable_total_int = (
+            max(0, int(workable_total))
+            if workable_total is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        workable_total_int = None
+
+    community_id = int(current.get("community_id") or 0)
+    shown_ids = _owner_vk_source_shown_ids(
+        owner_id,
+        community_id,
     )
+    shown_count = len(shown_ids)
+
+    today_from_current = 0
+    for row in today_rows:
+        meta = vk_queue_assignment_meta(row)
+        try:
+            meta_id = int(meta.get("community_id") or 0)
+        except (TypeError, ValueError):
+            meta_id = 0
+        if meta_id == community_id:
+            today_from_current += 1
+
     name = str(
         current.get("community_name")
         or current.get("community_url")
-        or f"VK-сообщество {current.get('community_id') or ''}"
+        or f"VK-сообщество {community_id}"
     ).strip()
+
+    remaining = (
+        max(0, workable_total_int - shown_count)
+        if workable_total_int is not None
+        else None
+    )
 
     return {
         "source_name": name,
-        "community_id": int(current.get("community_id") or 0),
+        "community_id": community_id,
         "total": total,
-        "processed": processed,
-        "remaining": max(0, total - processed),
+        "available": workable_total_int,
+        "processed": shown_count,
+        "remaining": remaining,
         "today": today_count,
+        "today_from_current": today_from_current,
         "completed_sources": completed_count,
         "sources_total": len(sources),
         "complete": False,
+        "capacity_error": str(state.get("capacity_error") or ""),
     }
 
 
