@@ -56,6 +56,12 @@ def get_workspace_state_keys(telegram_id):
         "selected_candidates": (
             f"neonia_selected_candidates_{telegram_id}"
         ),
+        "processed_candidates": (
+            f"neonia_processed_candidates_{telegram_id}"
+        ),
+        "source_progress": (
+            f"neonia_source_progress_{telegram_id}"
+        ),
         "owner_known_contacts": (
             f"neonia_owner_known_contacts_{telegram_id}"
         ),
@@ -89,6 +95,18 @@ def collect_workspace_state(telegram_id):
         keys["sent_log"],
         [],
     )
+    processed_candidates = st.session_state.get(
+        keys["processed_candidates"],
+        [],
+    )
+    if not isinstance(processed_candidates, list):
+        processed_candidates = []
+    source_progress = st.session_state.get(
+        keys["source_progress"],
+        {},
+    )
+    if not isinstance(source_progress, dict):
+        source_progress = {}
     blocked_first_messages = st.session_state.get(
         keys["blocked_first_messages"],
         [],
@@ -97,7 +115,7 @@ def collect_workspace_state(telegram_id):
         blocked_first_messages = []
 
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -154,6 +172,12 @@ def collect_workspace_state(telegram_id):
                 [],
             )
         ],
+        "processed_candidates": [
+            int(contact_id)
+            for contact_id in processed_candidates
+            if str(contact_id).lstrip("-").isdigit()
+        ],
+        "source_progress": source_progress,
         "owner_known_contacts": [
             contact
             for contact in owner_contacts.values()
@@ -373,6 +397,22 @@ def _normalize_workspace_state(state):
         except (TypeError, ValueError):
             continue
 
+    processed_candidates = []
+    for contact_id in state.get(
+        "processed_candidates",
+        [],
+    ):
+        try:
+            contact_id = int(contact_id)
+        except (TypeError, ValueError):
+            continue
+        if contact_id not in processed_candidates:
+            processed_candidates.append(contact_id)
+
+    source_progress = state.get("source_progress", {})
+    if not isinstance(source_progress, dict):
+        source_progress = {}
+
     try:
         selection_offset = int(
             state.get("selection_offset", 0) or 0
@@ -435,6 +475,8 @@ def _normalize_workspace_state(state):
         "candidates": candidates,
         "selection_offset": max(0, selection_offset),
         "selected_candidates": selected_candidates,
+        "processed_candidates": processed_candidates,
+        "source_progress": source_progress,
         "owner_known_contacts": owner_contacts,
         "neona_drafts": drafts,
         "sent_log": sent_log,
@@ -604,6 +646,12 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["selected_candidates"]
         ] = state["selected_candidates"]
+        st.session_state[
+            keys["processed_candidates"]
+        ] = state["processed_candidates"]
+        st.session_state[
+            keys["source_progress"]
+        ] = state["source_progress"]
         st.session_state[
             keys["owner_known_contacts"]
         ] = state["owner_known_contacts"]
