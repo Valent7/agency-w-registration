@@ -31,6 +31,7 @@ from vk_scout import (
     mark_manual_vk_reply_published,
     mark_vk_partner,
     skip_vk_assignment,
+    search_vk_communities,
     upsert_vk_source,
 )
 
@@ -1475,6 +1476,90 @@ def render_vk_sources(
                 st.error(str(exc))
             except Exception as exc:
                 st.error(f"Не удалось добавить источник VK: {exc}")
+
+    st.divider()
+    st.markdown("#### 🔎 Новые сообщества от Неонии")
+    st.caption(
+        "Неония может сама найти новые открытые VK-сообщества. "
+        "Она ничего не подключает без вашего решения: сначала показывает варианты, "
+        "а вы нажимаете «Добавить в работу»."
+    )
+
+    discovery_key = f"neonia_vk_discovery_{owner_id}"
+    if st.button(
+        "🔎 Найти новые сообщества VK",
+        key=f"neonia_vk_discovery_button_{owner_id}",
+        use_container_width=True,
+    ):
+        try:
+            st.session_state[discovery_key] = search_vk_communities(
+                owner_id,
+                limit=10,
+            )
+        except Exception as exc:
+            st.error(f"Не удалось выполнить поиск сообществ VK: {exc}")
+
+    discovered = st.session_state.get(discovery_key, [])
+    if isinstance(discovered, list) and discovered:
+        for item in discovered:
+            if not isinstance(item, dict):
+                continue
+            community_id = int(item.get("community_id") or 0)
+            name = str(
+                item.get("name")
+                or f"VK-сообщество {community_id}"
+            ).strip()
+            url = str(item.get("url") or "").strip()
+            members_count = int(item.get("members_count") or 0)
+            query = str(item.get("query") or "").strip()
+
+            with st.container(border=True):
+                st.markdown(f"**{name}**")
+                meta = []
+                if members_count:
+                    meta.append(
+                        f"участников по VK: {members_count:,}".replace(",", " ")
+                    )
+                if query:
+                    meta.append(f"найдено по теме: «{query}»")
+                if meta:
+                    st.caption(" · ".join(meta))
+                if url:
+                    st.link_button(
+                        "Открыть сообщество",
+                        url,
+                        use_container_width=False,
+                    )
+                if st.button(
+                    "➕ Добавить в работу",
+                    key=f"vk_discovery_add_{owner_id}_{community_id}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    try:
+                        upsert_vk_source(
+                            owner_id,
+                            community_id,
+                            community_name=name,
+                        )
+                        st.session_state[discovery_key] = [
+                            row
+                            for row in discovered
+                            if int(row.get("community_id") or 0)
+                            != community_id
+                        ]
+                        st.success(
+                            f"✅ {name} добавлено в очередь VK."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(
+                            f"Не удалось добавить сообщество: {exc}"
+                        )
+    elif isinstance(discovered, list) and discovered == []:
+        st.caption(
+            "Нажмите поиск — Неония покажет до 10 новых открытых сообществ."
+        )
 
     st.divider()
     st.markdown("#### Сохранённые источники")
