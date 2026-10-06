@@ -5284,6 +5284,11 @@ def _shown_candidate_ids_for_stagirite(
     return shown
 
 
+def get_all_shown_candidate_ids_for_stagirite(owner_id: int) -> list[int]:
+    """Публичный доступ к полной истории уже показанных Telegram-кандидатов."""
+    return sorted(_shown_candidate_ids_for_stagirite(int(owner_id)))
+
+
 def ensure_weekly_candidates_for_neona(
     owner_id: int,
     prepare_candidates_fn=None,
