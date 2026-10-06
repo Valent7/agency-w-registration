@@ -9,6 +9,8 @@ from vk_scout_oauth import (
     get_vk_scout_connection,
 )
 
+import vk_scout as _vk_scout
+
 from vk_scout import (
     VKScoutError,
     _sb_get,
@@ -17,8 +19,6 @@ from vk_scout import (
     load_known_vk_contacts,
     load_today_vk_assignments,
     load_vk_sources,
-    load_vk_queue_progress,
-    vk_queue_assignment_meta,
     mark_vk_invited,
     prepare_vk_feed_radar,
     prepare_vk_invitation,
@@ -32,6 +32,30 @@ from vk_scout import (
     mark_vk_partner,
     skip_vk_assignment,
     upsert_vk_source,
+)
+
+# Защита от краткого рассинхрона файлов во время Streamlit Cloud deploy:
+# старый vk_scout.py не должен уронить всё Агентство W, пока новый файл
+# ещё подхватывается контейнером.
+load_vk_queue_progress = getattr(
+    _vk_scout,
+    "load_vk_queue_progress",
+    lambda owner_id: {
+        "source_name": "VK-сообщество",
+        "community_id": None,
+        "total": 0,
+        "processed": 0,
+        "remaining": 0,
+        "today": len(load_today_vk_assignments(int(owner_id))),
+        "completed_sources": 0,
+        "sources_total": len(load_vk_sources(int(owner_id))),
+        "complete": False,
+    },
+)
+vk_queue_assignment_meta = getattr(
+    _vk_scout,
+    "vk_queue_assignment_meta",
+    lambda value: {},
 )
 
 UTC = timezone.utc
