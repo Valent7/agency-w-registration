@@ -28,7 +28,7 @@ from workspace_persistence import persist_workspace_if_changed
 
 UTC = timezone.utc
 DAILY_STORY_TARGET = 5
-STORY_ANALYSIS_BATCH = 10
+STORY_ANALYSIS_BATCH = 5
 AUTHOR_COOLDOWN_DAYS = 30
 MAX_RECOMMENDATIONS = 5
 
@@ -305,15 +305,43 @@ async def fetch_telegram_story_feed(
         if not await client.is_user_authorized():
             raise TelegramStoriesError("Telegram-сессия больше не авторизована")
 
+        # Telegram возвращает Stories страницами. Первая версия радара
+        # читала только начальную страницу (обычно около 10 авторов), поэтому
+        # он снова и снова видел верхушку ленты. Теперь дочитываем все страницы
+        # через state + next=True, пока has_more не исчезнет.
+        pages = []
         result = await client(
             GetAllStoriesRequest(next=False, hidden=False, state=None)
         )
+        pages.append(result)
 
-        users = {
-            int(getattr(user, "id")): user
-            for user in (getattr(result, "users", None) or [])
-            if getattr(user, "id", None) is not None
-        }
+        pagination_guard = 0
+        while bool(getattr(result, "has_more", False)):
+            pagination_guard += 1
+            if pagination_guard >= 100:
+                break
+            next_state = str(getattr(result, "state", "") or "").strip()
+            if not next_state:
+                break
+            result = await client(
+                GetAllStoriesRequest(
+                    next=True,
+                    hidden=False,
+                    state=next_state,
+                )
+            )
+            pages.append(result)
+
+        users = {}
+        peer_stories = []
+        for page in pages:
+            for user in (getattr(page, "users", None) or []):
+                if getattr(user, "id", None) is None:
+                    continue
+                users[int(getattr(user, "id"))] = user
+            peer_stories.extend(
+                list(getattr(page, "peer_stories", None) or [])
+            )
 
         excluded_story_keys = set(excluded_story_keys or set())
         excluded_author_ids = {
@@ -324,10 +352,6 @@ async def fetch_telegram_story_feed(
 
         feed: list[dict[str, Any]] = []
         now = datetime.now(UTC)
-        peer_stories = list(
-            getattr(result, "peer_stories", None) or []
-        )
-
         active_people = 0
         skipped_repeats = 0
 
@@ -505,11 +529,11 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     system_prompt = """
 Ты — Неона, помощница по мягкому человеческому знакомству в Агентстве W.
-Перед тобой до 10 свежих Telegram Stories реальных людей из ленты владельца кабинета.
-Твоя задача — подготовить живые ответы для максимально возможного числа Stories,
-если кадр или подпись дают хоть один естественный человеческий повод для разговора.
-Пропускай Story только когда контекста действительно недостаточно или ответ пришлось
-бы выдумывать.
+Перед тобой до 5 свежих Telegram Stories НОВЫХ авторов, которых система уже выбрала.
+Твоя задача — не отбирать людей, а подготовить по одному живому ответу для КАЖДОЙ
+переданной Story. Верни один объект на каждый story_index. Ничего не выдумывай:
+опирайся на подпись и реально видимый кадр. Если контекст минимальный, задай короткий
+естественный вопрос только по тому, что действительно видно или написано.
 
 Главный принцип:
 СМЫСЛ STORY → ЖИВОЙ ОТКЛИК → КОРОТКАЯ СОБСТВЕННАЯ МЫСЛЬ → ЕСТЕСТВЕННЫЙ ВОПРОС,
@@ -524,8 +548,8 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
 - НЕ задавай формальные вопросы только ради вопроса: «Куда вы ехали?», «Где это?», «Что за машина?», если сама Story не про поездку, место или машину;
 - не пиши дежурные фразы вроде «Спасибо, что поделились», «Классная сторис», «Приятно было увидеть» как самостоятельный ответ;
 - опирайся только на реально видимый кадр/превью и подпись; ничего не выдумывай;
-- если контекста недостаточно для содержательного и естественного отклика — ПРОПУСТИ Story;
-- старайся дать полезный естественный ответ на каждую понятную Story; пустой шаблон хуже пропуска;
+- не пропускай автора только потому, что Story короткая: найди самый простой естественный повод ответить;
+- если информации мало, используй короткий вопрос по реально видимому или написанному, без догадок;
 - ответ 1–2 коротких предложения, живой, конкретный, без лести и без канцелярита;
 - вопрос не обязателен. Если без вопроса отклик звучит естественнее — не добавляй его;
 - никакого Агентства W, ИИ, партнёрства, заработка, предложения, ссылки или рекламы;
@@ -536,10 +560,10 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
 1. Я отвечаю на смысл Story, а не цепляюсь за случайную деталь?
 2. Этот текст мог бы сказать живой внимательный человек?
 3. У автора есть естественный повод ответить?
-Если хотя бы на один вопрос ответ «нет» — пропусти эту Story.
+Если формулировка не проходит проверку — перепиши её, а не пропускай автора.
 
-Верни ТОЛЬКО JSON-массив. Верни до 5 лучших ответов из переданной партии.
-Включай только Stories, прошедшие самопроверку:
+Верни ТОЛЬКО JSON-массив. Для каждой переданной Story должен быть ровно один объект.
+Если передано 5 Stories — верни 5 объектов:
 [{"story_index":1,"reason":"какой смысл Story уловлен и почему ответ способен открыть разговор","reply":"готовый ответ"}]
 """.strip()
 
@@ -838,7 +862,7 @@ def render_telegram_stories_radar(owner_id: int) -> None:
             use_container_width=True,
         ):
             try:
-                with st.spinner("Неона смотрит свежие Stories и выбирает только сильные поводы для живого разговора..."):
+                with st.spinner("Неона проходит всю доступную ленту, пропускает повторы и собирает 5 новых авторов..."):
                     result = prepare_telegram_stories_radar(owner_id, target=5)
                 st.session_state[state_key] = result
                 for item in result.get("recommendations") or []:
@@ -871,12 +895,18 @@ def render_telegram_stories_radar(owner_id: int) -> None:
     available_people = int(result.get("available_people") or 0)
     skipped_repeats = int(result.get("skipped_repeats") or 0)
     target = int(result.get("target") or DAILY_STORY_TARGET)
-    st.caption(
-        f"Активных авторов в ленте: {available_people} · "
-        f"новых Stories просмотрено: {len(stories)} · "
-        f"повторов пропущено: {skipped_repeats} · "
-        f"сегодня выбрано: {len(recommendations)}/{target}"
-    )
+    with st.container(border=True):
+        st.markdown("#### 📊 Статистика Stories")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Активных авторов", available_people)
+        m2.metric("Повторов пропущено", skipped_repeats)
+        m3.metric("Новых просмотрено", len(stories))
+        m4.metric("Сегодня", f"{len(recommendations)}/{target}")
+        st.caption(
+            "Радар дочитывает все страницы доступной Telegram-ленты. "
+            "Уже просмотренная Story не возвращается; выбранный автор получает "
+            f"паузу {AUTHOR_COOLDOWN_DAYS} дней."
+        )
 
     if not stories:
         st.warning(
