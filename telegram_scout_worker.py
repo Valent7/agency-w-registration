@@ -1212,6 +1212,14 @@ def _write_daily_batch(owner_id: int, ranked_ids: list[int], reserve_ids: list[i
 def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     owner_id = int(owner_id)
     state, _ = _workspace_state(owner_id)
+
+    # Workspace v7 uses the persistent sequential queue prepared by the app.
+    # Do not rebuild the same daily batch with the legacy activity ranking.
+    try:
+        if int(state.get("schema_version") or 0) >= 7:
+            return {"owner_id": owner_id, "status": "skip", "reason": "workspace_v7_queue"}
+    except (TypeError, ValueError):
+        pass
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
     if not passport:
         return {"owner_id": owner_id, "status": "skip", "reason": "нет портрета ЦА"}
