@@ -1428,6 +1428,105 @@ def _safe_agency_w_audience(value):
     return audience
 
 
+def _build_generation_prompt(settings):
+    return f"""
+Создай недельный пакет контента.
+
+ПРОЕКТ: {settings['project_name']}
+ЧТО ПРОДВИГАЕМ: {settings['offer']}
+ЦЕЛЕВАЯ АУДИТОРИЯ:
+{settings['audience']}
+
+ЦЕЛЬ НЕДЕЛИ: {settings['goal']}
+ГЛАВНАЯ МЫСЛЬ: {settings['key_message']}
+ТОН: {settings['tone']}
+ЯЗЫК: {settings['language']}
+
+Нужно создать ровно:
+- {settings['reels_count']} Reels;
+- {settings['posts_count']} поста;
+- {settings['carousels_count']} карусель.
+
+Reels: вертикальный формат 9:16, длительность 20–45 секунд, сильный хук
+в первые две секунды, естественная устная речь, 4–7 коротких сцен.
+Поле script содержит ТОЛЬКО слова диктора. В нём запрещены номера сцен,
+ремарки, скобки и указания «в кадре», «на экране», «камера», «переход».
+Технические описания записывай исключительно в массив scenes.
+Не обещай доход и не используй давление.
+
+Пост: самостоятельная полезная мысль, живой текст, без канцелярита.
+
+Карусель: сам выбери от 6 до 8 слайдов — обложка, развитие одной истории
+и финальный CTA. Заголовок обложки — максимум 9 слов. Каждый следующий
+слайд должен быть понятен человеку, который впервые слышит об Агентстве W.
+Один слайд — одна конкретная мысль. Запрещены вода, канцелярит,
+непояснённые термины, англицизмы и смешение разных проектов.
+
+Агентство W — цифровая команда и рабочая структура вокруг предпринимателя.
+Не называй его закрытым клубом, лагерем, NFT-/реферальной экосистемой,
+крипто- или инвестиционным проектом.
+
+Используй разные смысловые углы: польза, история, объяснение, возражение,
+пример, человеческая ситуация. Не повторяй одну мысль разными словами.
+
+Строгая схема JSON:
+{{
+  "week_title": "краткое название недели",
+  "strategy": "почему этот пакет должен заинтересовать выбранную аудиторию",
+  "items": [
+    {{
+      "id": "reel_1",
+      "format": "reel|post|carousel",
+      "day": "Понедельник",
+      "title": "название",
+      "goal": "задача материала",
+      "hook": "хук — только для Reels",
+      "script": "только произносимая речь диктора — без описания кадров",
+      "scenes": ["техническое описание сцены 1", "техническое описание сцены 2"],
+      "post_text": "текст поста",
+      "slides": ["обложка", "слайд 2"],
+      "caption": "подпись под публикацией",
+      "cta": "одно естественное действие",
+      "visual_brief": "что должно быть в кадре или на иллюстрации",
+      "professionals": ["имена только тех профессионалов Агентства W, которые должны быть в кадре"]
+    }}
+  ]
+}}
+""".strip()
+
+
+FORMAT_LABELS = {
+    "post": "Пост",
+    "carousel": "Карусель",
+    "reel": "Reels",
+}
+
+
+def _transcribe_content_audio(audio_bytes, filename="content-request.wav"):
+    """Распознаёт простое голосовое задание и не отправляет его повторно."""
+    api_key = _clean_text(st.secrets.get("OPENAI_API_KEY"), 5000)
+    if not api_key:
+        raise RuntimeError("Ключ OpenAI не найден в настройках приложения.")
+
+    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+    cache_key = f"content_factory_voice_transcript_{audio_hash}"
+    cached = st.session_state.get(cache_key)
+    if cached:
+        return str(cached)
+
+    response = requests.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        data={"model": "gpt-4o-mini-transcribe", "language": "ru"},
+        files={"file": (filename, audio_bytes, "audio/wav")},
+        timeout=120,
+    )
+    response.raise_for_status()
+    transcript = _clean_text(response.json().get("text"), 7000)
+    st.session_state[cache_key] = transcript
+    return transcript
+
+
 def _analyse_content_request(content_format, request_text, target_profile, ask_ai_fn):
     """Превращает разговорное задание в короткое и проверяемое понимание."""
     audience_context = _audience_text(target_profile)
