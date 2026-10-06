@@ -7462,6 +7462,49 @@ if telegram_login_valid or remembered_data:
                         "🎯 Стагирит: " + daily_message
                     )
 
+            # ------------------------------------------------------
+            # Неония: видимый отчёт последовательной очереди.
+            # Показанный кандидат уже считается отработанным, поэтому
+            # "Отработано" включает сегодняшнюю пятёрку.
+            # ------------------------------------------------------
+            neonia_progress = st.session_state.get(
+                f"neonia_source_progress_{telegram_id}",
+                {},
+            )
+            if not isinstance(neonia_progress, dict):
+                neonia_progress = {}
+
+            if neonia_progress:
+                progress_total = int(
+                    neonia_progress.get("total") or 0
+                )
+                progress_processed = int(
+                    neonia_progress.get("processed") or 0
+                )
+                progress_remaining = int(
+                    neonia_progress.get("remaining") or 0
+                )
+                progress_today = int(
+                    neonia_progress.get("today") or 0
+                )
+                progress_source = str(
+                    neonia_progress.get("source_name")
+                    or "Telegram"
+                ).strip()
+
+                with st.container(border=True):
+                    st.markdown("### 📊 Очередь Неонии")
+                    st.caption(f"Текущий источник: {progress_source}")
+                    q1, q2, q3, q4 = st.columns(4)
+                    q1.metric("Всего", progress_total)
+                    q2.metric("Отработано", progress_processed)
+                    q3.metric("Осталось", progress_remaining)
+                    q4.metric("Сегодня", progress_today)
+                    st.caption(
+                        "Показан один раз = отработан в первом проходе. "
+                        "Повторно в ежедневную пятёрку человек не возвращается."
+                    )
+
             candidates_key = (
                 f"neonia_candidates_{telegram_id}"
             )
@@ -7596,11 +7639,20 @@ if telegram_login_valid or remembered_data:
                 }
             ]
 
-            st.info(
-                f"🎯 В работе сейчас: {len(selected_candidates)}. "
-                "К Неонии возвращайтесь только когда нужно получить или обновить "
-                "общий список людей из Telegram-контактов или чатов."
-            )
+            if neonia_progress:
+                st.info(
+                    f"🎯 Очередь: отработано "
+                    f"{int(neonia_progress.get('processed') or 0)} из "
+                    f"{int(neonia_progress.get('total') or 0)} · осталось "
+                    f"{int(neonia_progress.get('remaining') or 0)} · "
+                    f"сегодня {int(neonia_progress.get('today') or 0)}."
+                )
+            else:
+                st.info(
+                    f"🎯 В работе сейчас: {len(selected_candidates)}. "
+                    "После подготовки последовательной очереди здесь появится "
+                    "счётчик: всего / отработано / осталось / сегодня."
+                )
 
             with st.container(border=True):
                 st.markdown("**📅 Встречи**")
