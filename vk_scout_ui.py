@@ -17,6 +17,8 @@ from vk_scout import (
     load_known_vk_contacts,
     load_today_vk_assignments,
     load_vk_sources,
+    load_vk_queue_progress,
+    vk_queue_assignment_meta,
     mark_vk_invited,
     prepare_vk_feed_radar,
     prepare_vk_invitation,
@@ -780,21 +782,42 @@ def _render_today_vk_candidates(
 
     try:
         assignments = load_today_vk_assignments(owner_id)
+        progress = load_vk_queue_progress(owner_id)
     except Exception as exc:
-        st.error(f"Не удалось загрузить сегодняшних VK-кандидатов: {exc}")
+        st.error(f"Не удалось загрузить VK-очередь: {exc}")
         return
 
-    st.caption(f"Готово кандидатов: {len(assignments)}/5")
+    if isinstance(progress, dict):
+        with st.container(border=True):
+            st.markdown("#### 📊 Очередь VK")
+            st.caption(
+                "Текущий источник: "
+                + str(progress.get("source_name") or "VK-сообщество")
+            )
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Всего", int(progress.get("total") or 0))
+            c2.metric("Отработано", int(progress.get("processed") or 0))
+            c3.metric("Осталось", int(progress.get("remaining") or 0))
+            c4.metric("Сегодня", int(progress.get("today") or 0))
+            st.caption(
+                "Показан один раз = больше не возвращается в ежедневную пятёрку. "
+                "После окончания сообщества Неония переходит к следующему источнику."
+            )
+
+    today_count = int(progress.get("today") or len(assignments)) if isinstance(progress, dict) else len(assignments)
+    st.caption(
+        f"Сегодня выдано: {today_count}/5"
+        + (
+            f" · активных карточек сейчас: {len(assignments)}"
+            if len(assignments) != today_count
+            else ""
+        )
+    )
 
     if not assignments:
         st.info(
-            "Пока сегодняшняя VK-пятёрка не сформирована. После авторизации VK Scout "
-            "фоновый worker должен выполнить новый цикл: прочитать участников источников, "
-            "передать их Неонии на анализ и зарезервировать до 5 лучших кандидатов."
-        )
-        st.caption(
-            "Для первого теста можно перезапустить neona-worker в Render вручную; "
-            "дальше поиск будет идти автоматически по расписанию."
+            "Сегодня активных карточек VK пока нет. Если источник уже добавлен, "
+            "фоновый VK Scout возьмёт следующих людей по порядку, без отбора по ЦА."
         )
         return
 
@@ -804,11 +827,14 @@ def _render_today_vk_candidates(
         first_name = str(item.get("first_name") or "").strip()
         last_name = str(item.get("last_name") or "").strip()
         full_name = " ".join(x for x in (first_name, last_name) if x) or "VK-кандидат"
-        score = int(item.get("score") or 0)
+        queue_meta = vk_queue_assignment_meta(item)
         city = str(item.get("city_name") or "").strip()
         country = str(item.get("country_name") or "").strip()
         place = ", ".join(x for x in (city, country) if x)
-        fit = str(item.get("fit_summary") or "").strip()
+        source_name = str(
+            queue_meta.get("community_name")
+            or "VK-сообщество"
+        ).strip()
         profile_url = str(item.get("profile_url") or "").strip()
         status = str(item.get("status") or "reserved").strip()
         invitation_text = str(item.get("invitation_text") or "").strip()
@@ -823,13 +849,13 @@ def _render_today_vk_candidates(
         title = f"{position}. {full_name}" if position else full_name
         with st.container(border=True):
             st.markdown(f"#### {title}")
-            meta = [f"совпадение с ЦА: {score}/100"]
+            meta = [f"источник: {source_name}"]
             if place:
                 meta.append(place)
             st.caption(" · ".join(meta))
-
-            if fit:
-                st.write(f"**Почему Неония выбрала:** {fit}")
+            st.write(
+                "**Почему сегодня:** следующий новый человек в очереди этого сообщества."
+            )
 
             if profile_url:
                 st.link_button(
@@ -837,6 +863,13 @@ def _render_today_vk_candidates(
                     profile_url,
                     use_container_width=False,
                 )
+
+            if status == "skipped":
+                st.info(
+                    "⏭ Кандидат пропущен. Он уже считается отработанным "
+                    "и повторно в ежедневную пятёрку не вернётся."
+                )
+                continue
 
             _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn)
             st.divider()
@@ -1264,9 +1297,9 @@ def render_vk_sources(
 
     st.markdown("### 💙 Источники поиска VK")
     st.caption(
-        "Добавьте публичные тематические VK-сообщества, где может находиться ваша ЦА. "
-        "Неония будет анализировать только доступные публичные данные. "
-        "Холодные сообщения автоматически не отправляются."
+        "Добавьте публичные VK-сообщества в нужном порядке. Неония отрабатывает "
+        "участников последовательно: 5 новых человек в день, без повторов и без "
+        "отбора по ЦА. Закончилось одно сообщество — очередь переходит к следующему."
     )
 
     # VK user authorization for the background scanner. Tokens are encrypted
@@ -1404,8 +1437,8 @@ def render_vk_sources(
 
     if not sources:
         st.info(
-            "Пока нет ни одного источника. Добавьте первое тематическое VK-сообщество — "
-            "после этого фоновый VK Scout сможет начать поиск кандидатов."
+            "Пока нет ни одного источника. Добавьте первое VK-сообщество — "
+            "после этого Неония начнёт последовательную очередь участников."
         )
         return
 
@@ -1447,6 +1480,6 @@ def render_vk_sources(
                         st.error(f"Не удалось отключить источник: {exc}")
 
     st.caption(
-        "Фоновый worker заберёт активные источники в следующем цикле. "
-        "Поиск выполняется отдельно от страницы Агентства W."
+        "Фоновый worker продолжает очередь автоматически. Вступать в открытое "
+        "сообщество ради этой очереди не требуется: используется доступный VK API список участников."
     )
