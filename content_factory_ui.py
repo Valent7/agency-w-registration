@@ -81,6 +81,28 @@ def _portrait_references(names):
     return references
 
 
+AGENCY_W_AUDIENCE_BASELINE = (
+    "Предприниматели, сетевые лидеры, эксперты и руководители, которые строят "
+    "команду и структуру и хотят передать цифровой команде часть рутинного поиска, "
+    "переписки, организации встреч и сопровождения, чтобы высвободить время для жизни."
+)
+
+_AUDIENCE_FOREIGN_PROJECT_MARKERS = (
+    "24/7",
+    "закрытый клуб",
+    "клуб/лагерь",
+    "лагерь",
+    "lodge",
+    "монетизац",
+    "реферал",
+    "nft",
+    "крипт",
+    "инвестиц",
+    "экосистем",
+    "привилеги",
+)
+
+
 FACTORY_SYSTEM_PROMPT = """
 Ты — редакция и продюсерский центр «Контент-завода W».
 
@@ -93,6 +115,11 @@ FACTORY_SYSTEM_PROMPT = """
 
 Разведчик W не входит в публичную пятёрку. Он работает за кулисами:
 исследует рынок и конкурентов, проверяет факты и предлагает лучшие идеи.
+
+Агентство W — это цифровая команда и рабочая структура вокруг предпринимателя.
+Не называй Агентство W «закрытым клубом», «лагерем», NFT-/реферальной экосистемой,
+инвестиционным или криптопроектом. Эти темы относятся к другим проектам и не должны
+проникать в контент Агентства W.
 
 Создавай оригинальный контент, а не копии конкурентов. Каждый материал должен:
 - приносить человеку практическую пользу;
@@ -258,11 +285,18 @@ def _generate_reel_scenes(item, scenes, spoken_text, generate_illustration_fn):
 
 _CAROUSEL_BAD_PHRASES = (
     "лагерь",
+    "закрытый клуб",
+    "клуб/лагерь",
     "lodge",
     "видите вклад",
     "гарантия привилегий",
     "реферальная схема",
-    "nft-привилегии",
+    "реферал",
+    "монетизац",
+    "nft",
+    "крипт",
+    "инвестиц",
+    "экосистем",
     "уникальная возможность",
     "новый уровень успеха",
 )
@@ -1355,120 +1389,43 @@ def _load_latest_package(owner_id):
         return None
 
 
+def _contains_foreign_project_markers(value):
+    text = str(value or "").lower()
+    return any(marker in text for marker in _AUDIENCE_FOREIGN_PROJECT_MARKERS)
+
+
 def _audience_text(target_profile):
-    if not isinstance(target_profile, dict) or not target_profile:
-        return ""
-    preferred = []
-    for key in (
-        "portrait",
-        "who_is_this",
-        "current_situation",
-        "goals",
-        "pains",
-        "dreams",
-        "decision_triggers",
-    ):
-        value = target_profile.get(key)
-        if value:
-            preferred.append(f"{key}: {value}")
-    return "\n".join(preferred)[:7000]
+    """Даёт Контент-заводу только контекст Агентства W, без наследия других проектов."""
+    safe_parts = []
+    if isinstance(target_profile, dict):
+        for key in (
+            "portrait",
+            "who_is_this",
+            "current_situation",
+            "goals",
+            "pains",
+            "dreams",
+            "decision_triggers",
+        ):
+            value = _clean_text(target_profile.get(key), 1200)
+            if not value or _contains_foreign_project_markers(value):
+                continue
+            safe_parts.append(value)
+
+    context = [AGENCY_W_AUDIENCE_BASELINE]
+    if safe_parts:
+        context.append(
+            "Дополнительный безопасный контекст о людях: "
+            + " ".join(safe_parts)[:2200]
+        )
+    return "\n".join(context)[:3200]
 
 
-def _build_generation_prompt(settings):
-    return f"""
-Создай недельный пакет контента.
-
-ПРОЕКТ: {settings['project_name']}
-ЧТО ПРОДВИГАЕМ: {settings['offer']}
-ЦЕЛЕВАЯ АУДИТОРИЯ:
-{settings['audience']}
-
-ЦЕЛЬ НЕДЕЛИ: {settings['goal']}
-ГЛАВНАЯ МЫСЛЬ: {settings['key_message']}
-ТОН: {settings['tone']}
-ЯЗЫК: {settings['language']}
-
-Нужно создать ровно:
-- {settings['reels_count']} Reels;
-- {settings['posts_count']} поста;
-- {settings['carousels_count']} карусель.
-
-Reels: вертикальный формат 9:16, длительность 20–45 секунд, сильный хук
-в первые две секунды, естественная устная речь, 4–7 коротких сцен.
-Поле script содержит ТОЛЬКО слова диктора. В нём запрещены номера сцен,
-ремарки, скобки и указания «в кадре», «на экране», «камера», «переход».
-Технические описания записывай исключительно в массив scenes.
-Не обещай доход и не используй давление.
-
-Пост: самостоятельная полезная мысль, живой текст, без канцелярита.
-
-Карусель: ровно 6 слайдов — обложка плюс 5 последовательных мыслей.
-Заголовок обложки — максимум 9 слов: узнаваемая боль, важный результат или
-честное любопытство без кликбейта. Каждый следующий слайд должен быть понятен
-человеку, который впервые слышит о проекте. Один слайд — одна конкретная мысль.
-Запрещены вода, канцелярит, непояснённые термины, англицизмы и смешение разных
-проектов. Карусель должна вести по логике: проблема → причина → решение →
-механизм → результат → одно действие.
-
-Используй разные смысловые углы: польза, история, объяснение, возражение,
-пример, человеческая ситуация. Не повторяй одну мысль разными словами.
-
-Строгая схема JSON:
-{{
-  "week_title": "краткое название недели",
-  "strategy": "почему этот пакет должен заинтересовать выбранную аудиторию",
-  "items": [
-    {{
-      "id": "reel_1",
-      "format": "reel|post|carousel",
-      "day": "Понедельник",
-      "title": "название",
-      "goal": "задача материала",
-      "hook": "хук — только для Reels",
-      "script": "только произносимая речь диктора — без описания кадров",
-      "scenes": ["техническое описание сцены 1", "техническое описание сцены 2"],
-      "post_text": "текст поста",
-      "slides": ["обложка", "слайд 2"],
-      "caption": "подпись под публикацией",
-      "cta": "одно естественное действие",
-      "visual_brief": "что должно быть в кадре или на иллюстрации",
-      "professionals": ["имена только тех профессионалов Агентства W, которые должны быть в кадре"]
-    }}
-  ]
-}}
-""".strip()
-
-
-FORMAT_LABELS = {
-    "post": "Пост",
-    "carousel": "Карусель",
-    "reel": "Reels",
-}
-
-
-def _transcribe_content_audio(audio_bytes, filename="content-request.wav"):
-    """Распознаёт простое голосовое задание и не отправляет его повторно."""
-    api_key = _clean_text(st.secrets.get("OPENAI_API_KEY"), 5000)
-    if not api_key:
-        raise RuntimeError("Ключ OpenAI не найден в настройках приложения.")
-
-    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
-    cache_key = f"content_factory_voice_transcript_{audio_hash}"
-    cached = st.session_state.get(cache_key)
-    if cached:
-        return str(cached)
-
-    response = requests.post(
-        "https://api.openai.com/v1/audio/transcriptions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        data={"model": "gpt-4o-mini-transcribe", "language": "ru"},
-        files={"file": (filename, audio_bytes, "audio/wav")},
-        timeout=120,
-    )
-    response.raise_for_status()
-    transcript = _clean_text(response.json().get("text"), 7000)
-    st.session_state[cache_key] = transcript
-    return transcript
+def _safe_agency_w_audience(value):
+    audience = _clean_text(value, 700)
+    if not audience or _contains_foreign_project_markers(audience):
+        return AGENCY_W_AUDIENCE_BASELINE
+    return audience
 
 
 def _analyse_content_request(content_format, request_text, target_profile, ask_ai_fn):
@@ -1480,11 +1437,19 @@ def _analyse_content_request(content_format, request_text, target_profile, ask_a
 Он объяснил задачу своими словами:
 {request_text}
 
-ИЗВЕСТНЫЙ КОНТЕКСТ ЦЕЛЕВОЙ АУДИТОРИИ (может быть пустым):
+КОНТЕКСТ АУДИТОРИИ АГЕНТСТВА W:
 {audience_context}
 
 Пойми замысел человека, даже если он говорил разговорно, с повторами или
 непрофессиональными словами. Не меняй выбранный формат и не придумывай факты.
+
+ВАЖНО ПРО ПОЛЕ «audience»:
+- опиши только самих людей и их рабочую ситуацию;
+- Агентство W создаёт цифровую команду и структуру вокруг предпринимателя;
+- не перечисляй в этом поле функции продукта и не добавляй чужие предложения;
+- запрещены: AI-поддержка 24/7 как оффер, закрытый клуб/лагерь, Lodge, NFT,
+  реферальная монетизация, криптовалюта, инвестиции и «привилегии»;
+- если исходная задача уже ясно говорит, для кого материал, следуй ей в первую очередь.
 
 Верни только JSON:
 {{
@@ -1505,7 +1470,7 @@ def _analyse_content_request(content_format, request_text, target_profile, ask_a
         "format": content_format,
         "topic": _clean_text(data.get("topic"), 500),
         "main_idea": _clean_text(data.get("main_idea"), 900),
-        "audience": _clean_text(data.get("audience"), 1200),
+        "audience": _safe_agency_w_audience(data.get("audience")),
         "desired_result": _clean_text(data.get("desired_result"), 800),
         "cta": _clean_text(data.get("cta"), 500),
         "original_request": _clean_text(request_text, 7000),
@@ -1513,7 +1478,7 @@ def _analyse_content_request(content_format, request_text, target_profile, ask_a
     if not result["topic"] or not result["main_idea"]:
         raise ValueError("Не удалось выделить главную мысль. Скажите задачу ещё раз.")
     if not result["audience"]:
-        result["audience"] = "Люди, которым может быть полезно Агентство W"
+        result["audience"] = AGENCY_W_AUDIENCE_BASELINE
     if not result["desired_result"]:
         result["desired_result"] = "Человек понимает пользу и хочет узнать больше"
     if not result["cta"]:
@@ -1541,6 +1506,9 @@ def _single_content_prompt(understanding):
 - простой русский язык, понятный человеку без знаний маркетинга и ИИ;
 - конкретная польза вместо общих слов;
 - не обещай доход и не выдумывай возможности Агентства W;
+- Агентство W — цифровая команда и структура, а не клуб, лагерь, NFT-/реферальная
+  экосистема, крипто- или инвестиционный проект;
+- не переноси в материал предложения и терминологию других проектов;
 - призыв должен быть один, естественный и измеримый;
 - если владелец в исходном задании дал точную формулировку CTA, сохрани её по смыслу
   и не подменяй другим действием;
