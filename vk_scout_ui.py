@@ -818,15 +818,41 @@ def _render_today_vk_candidates(
                 "Текущий источник: "
                 + str(progress.get("source_name") or "VK-сообщество")
             )
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Всего", int(progress.get("total") or 0))
-            c2.metric("Отработано", int(progress.get("processed") or 0))
-            c3.metric("Осталось", int(progress.get("remaining") or 0))
-            c4.metric("Сегодня", int(progress.get("today") or 0))
-            st.caption(
-                "Показан один раз = больше не возвращается в ежедневную пятёрку. "
-                "После окончания сообщества Неония переходит к следующему источнику."
+            available_value = progress.get("available")
+            remaining_value = progress.get("remaining")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Всего в VK", int(progress.get("total") or 0))
+            c2.metric(
+                "Доступно Неонии",
+                (
+                    int(available_value)
+                    if available_value is not None
+                    else "—"
+                ),
             )
+            c3.metric("Отработано", int(progress.get("processed") or 0))
+            c4.metric(
+                "Осталось",
+                (
+                    int(remaining_value)
+                    if remaining_value is not None
+                    else "—"
+                ),
+            )
+            c5.metric("Сегодня", int(progress.get("today") or 0))
+            st.caption(
+                "«Доступно Неонии» — реальные профили этого сообщества, которые "
+                "можно передать в работу после технических исключений. "
+                "Показан один раз = больше не возвращается в ежедневную пятёрку."
+            )
+            capacity_error = str(
+                progress.get("capacity_error") or ""
+            ).strip()
+            if capacity_error and available_value is None:
+                st.caption(
+                    "VK пока не дал полный расчёт доступных профилей. "
+                    "Очередь продолжит работать, а число будет пересчитано автоматически."
+                )
 
     today_count = int(progress.get("today") or len(assignments)) if isinstance(progress, dict) else len(assignments)
     st.caption(
