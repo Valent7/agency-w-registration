@@ -533,6 +533,106 @@ def _carousel_slide_names(item, slide_text, index, total=None):
     return selected[:1]
 
 
+def _render_carousel_slide(image_bytes, slide_text, index, total, *, show_brand=True):
+    """Создаёт готовый Instagram-слайд 1080x1350 с точным русским текстом."""
+    with Image.open(BytesIO(image_bytes)) as source:
+        source = ImageOps.exif_transpose(source).convert("RGB")
+        frame = ImageOps.fit(
+            source,
+            (1080, 1350),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.42),
+        ).convert("RGBA")
+
+    overlay = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    # Мягкое затемнение снизу оставляет иллюстрацию видимой и делает текст читаемым.
+    gradient_top = 690
+    for y in range(gradient_top, 1350):
+        ratio = (y - gradient_top) / (1350 - gradient_top)
+        alpha = int(25 + 210 * ratio)
+        overlay_draw.line((0, y, 1080, y), fill=(4, 15, 31, alpha), width=1)
+    overlay_draw.rounded_rectangle(
+        (52, 820, 1028, 1300),
+        radius=32,
+        fill=(5, 18, 36, 205),
+        outline=(202, 157, 54, 160),
+        width=2,
+    )
+    frame = Image.alpha_composite(frame, overlay)
+    draw = ImageDraw.Draw(frame)
+
+    gold = (238, 191, 79, 255)
+    white = (255, 255, 255, 255)
+    muted = (220, 228, 238, 255)
+    brand_font = _font(30, bold=True)
+    count_font = _font(28, bold=True)
+    kicker_font = _font(34, bold=True)
+
+    if show_brand:
+        logo_path = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
+        if logo_path.is_file():
+            with Image.open(logo_path) as logo_image:
+                logo = logo_image.convert("RGBA")
+                logo.thumbnail((76, 76), Image.Resampling.LANCZOS)
+                frame.alpha_composite(logo, (52, 42))
+            draw = ImageDraw.Draw(frame)
+        draw.text((144, 58), "АГЕНТСТВО W", font=brand_font, fill=white)
+    # Нет логотипа — не подменять его одиночной буквой W.
+    counter = f"{index + 1}/{total}"
+    counter_width = draw.textlength(counter, font=count_font)
+    draw.text((1028 - counter_width, 61), counter, font=count_font, fill=muted)
+
+    kicker, body = _carousel_slide_parts(slide_text, index)
+    draw.text((92, 865), kicker, font=kicker_font, fill=gold)
+
+    # Подбираем размер так, чтобы даже длинный тезис не вылезал за карточку.
+    title_font = None
+    title_lines = []
+    for size in (62, 58, 54, 50, 46, 42):
+        candidate_font = _font(size, bold=True)
+        candidate_lines = _wrap_image_text(draw, body, candidate_font, 896, max_lines=5)
+        line_height = int(size * 1.20)
+        if len(candidate_lines) * line_height <= 320:
+            title_font = candidate_font
+            title_lines = candidate_lines
+            break
+    if title_font is None:
+        title_font = _font(40, bold=True)
+        title_lines = _wrap_image_text(draw, body, title_font, 896, max_lines=6)
+
+    y = 925
+    line_height = int(getattr(title_font, "size", 40) * 1.20)
+    for line in title_lines:
+        draw.text((92, y), line, font=title_font, fill=white)
+        y += line_height
+
+    output = BytesIO()
+    frame.convert("RGB").save(output, "PNG", optimize=True)
+    return output.getvalue()
+
+
+def _carousel_zip(slide_images, caption):
+    """Один архив: слайды уже названы в правильном порядке публикации."""
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, image_bytes in enumerate(slide_images, start=1):
+            archive.writestr(f"{index:02d}_carousel_slide.png", image_bytes)
+        archive.writestr(
+            "caption.txt",
+            (str(caption or "").strip() + "\n").encode("utf-8"),
+        )
+        archive.writestr(
+            "README.txt",
+            (
+                "Instagram-карусель Агентства W\n\n"
+                "Загрузите все PNG одним постом по порядку: 01, 02, 03...\n"
+                "Текст публикации находится в caption.txt.\n"
+            ).encode("utf-8"),
+        )
+    return output.getvalue()
+
+
 def _generate_ready_carousel(item, generate_illustration_fn):
     """Генерирует отдельную иллюстрацию и точную типографику для каждого тезиса."""
     slides = [_clean_text(value, 700) for value in (item.get("slides") or [])]
