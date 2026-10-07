@@ -613,7 +613,6 @@ def _render_carousel_slide(image_bytes, slide_text, index, total, *, show_brand=
                 logo.thumbnail((76, 76), Image.Resampling.LANCZOS)
                 frame.alpha_composite(logo, (52, 42))
             draw = ImageDraw.Draw(frame)
-        draw.text((144, 58), "АГЕНТСТВО W", font=brand_font, fill=white)
     # Нет логотипа — не подменять его одиночной буквой W.
     counter = f"{index + 1}/{total}"
     counter_width = draw.textlength(counter, font=count_font)
