@@ -57,9 +57,12 @@ def _office_reference_path():
     return None
 
 
-def _portrait_references(names, *, use_office=False, include_logo=True):
+def _portrait_references(names, *, use_office=False, include_logo=None):
     """Подключает портреты, фирменный знак и офис только к нужной сцене."""
     base = Path(__file__).resolve().parent / "assets"
+    names = list(names or [])
+    if include_logo is None:
+        include_logo = bool(names or use_office)
     references = []
     if use_office:
         office = _office_reference_path()
@@ -254,8 +257,25 @@ def _generate_reel_scenes(item, scenes, spoken_text, generate_illustration_fn):
     generated = []
     selected = item.get("professionals") or []
     for index, scene in enumerate(scenes[:6], start=1):
+        scene_lower = str(scene or "").lower()
+        office_scene = (
+            "офис" in scene_lower
+            and ("агентств" in scene_lower or "виртуальн" in scene_lower)
+        )
+        if office_scene and not _office_reference_path():
+            return {
+                "ok": False,
+                "error": (
+                    "Нужен эталон assets/content_ref_office.webp. "
+                    "Платные сцены не запускались."
+                ),
+            }
         names = _scene_professionals(scene, selected)
-        references = _portrait_references(names)
+        references = _portrait_references(
+            names,
+            use_office=office_scene,
+            include_logo=bool(names or office_scene),
+        )
         visual_task = (
             f"Вертикальный кадр {index} из {len(scenes[:6])} для одного Reels. "
             f"Содержание сцены: {scene}. "
