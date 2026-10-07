@@ -543,26 +543,43 @@ def _generate_ready_carousel(item, generate_illustration_fn):
             "error": "Для карусели нужны минимум обложка и один отдельный слайд.",
         }
 
+    if _carousel_time_story(item) and not _office_reference_path():
+        return {
+            "ok": False,
+            "error": "Для офисных кадров нужен assets/content_ref_office.png. "
+                     "Эталон пока не найден: платные изображения не запускались.",
+        }
+
     completed = []
     for index, slide_text in enumerate(slides):
-        names = _carousel_slide_names(item, slide_text, index)
-        references = _portrait_references(names)
+        agency_scene = _carousel_show_agency(item, slide_text, index, len(slides))
+        office_scene = agency_scene and _carousel_time_story(item)
+        names = _carousel_slide_names(item, slide_text, index, len(slides))
+        references = _portrait_references(
+            names, use_office=office_scene, include_logo=agency_scene
+        )
         kicker, body = _carousel_slide_parts(slide_text, index)
         visual_task = (
-            f"Фоновая иллюстрация для слайда {index + 1} из {len(slides)} "
-            f"Instagram-карусели Агентства W. Смысл: {body}. "
-            f"Общее задание серии: {item.get('visual_brief') or ''}. "
-            "Сохраняй единую художественную манеру всей карусели, но НЕ делай "
-            "одинаковый искусственный фон на всех слайдах. Если сцена происходит "
-            "в виртуальном офисе Агентства W, показывай один и тот же узнаваемый "
-            "фирменный офис, а не новый интерьер. Если сцена происходит дома, "
-            "в кафе, городе, на прогулке, в путешествии или на природе, показывай "
-            "реальное окружение естественно и правдоподобно — природные цвета, "
-            "нормальный дневной/вечерний свет, без сине-золотого перекрашивания мира. "
-            "Фирменные синий и золотой используй только как деликатные акценты там, "
-            "где это уместно. Оставь визуально спокойное пространство в нижней "
-            "трети для последующего размещения текста. Не рисуй буквы, цифры, "
-            "логотипы, водяные знаки, интерфейсы и рамки."
+            f"Иллюстрация {index + 1}/{len(slides)} Instagram-карусели. "
+            f"Смысл слайда: {body}. "
+            + (
+                "В кадре обычный живой человек крупным планом, "
+                "не похожий на лица ИИ-профессионалов. Покажи рутину, "
+                "усталость, потерянное время в естественной обстановке. "
+                "Без Агентства W, логотипа, букв W и цифровых агентов. "
+                if not agency_scene else
+                "На переднем плане живой человек, не похожий на ИИ-агентов. "
+                "Позади — только тот виртуальный офис Агентства W, что "
+                "показан на приложенном эталонном изображении. "
+                "Не меняй архитектуру и фирменный интерьер. "
+                "ИИ-профессионалы второстепенны, лица строго по портретам. "
+                "Любой фирменный знак — только официальный логотип, "
+                "не отдельная буква W. "
+            )
+            + "Реальные природные пейзажи и помещения оставляй "
+              "естественными без искусственной сине-золотой тонировки. "
+              "Нижнюю треть оставь свободной для текста. "
+              "Без самостоятельно нарисованных надписей и рамок."
         )
         result = generate_illustration_fn(
             f"{item.get('title') or ''}. {kicker}. {body}",
@@ -582,7 +599,8 @@ def _generate_ready_carousel(item, generate_illustration_fn):
         try:
             completed.append(
                 _render_carousel_slide(
-                    result["image_bytes"], slide_text, index, len(slides)
+                    result["image_bytes"], slide_text, index, len(slides),
+                    show_brand=agency_scene,
                 )
             )
         except (OSError, ValueError) as exc:
