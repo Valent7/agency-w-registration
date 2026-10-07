@@ -47,39 +47,46 @@ def _guess_professionals(item):
     return [name for name in PROFESSIONAL_PORTRAITS if name.lower() in source]
 
 
-def _portrait_references(names):
-    """Загружает только выбранные эталонные портреты в момент генерации."""
-    assets_dir = Path(__file__).resolve().parent / "assets"
+def _office_reference_path():
+    """Единый эталон виртуального офиса Агентства W."""
+    base = Path(__file__).resolve().parent / "assets"
+    for name in ("content_ref_office.png", "content_ref_office.webp"):
+        path = base / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _portrait_references(names, *, use_office=False, include_logo=True):
+    """Подключает портреты, фирменный знак и офис только к нужной сцене."""
+    base = Path(__file__).resolve().parent / "assets"
     references = []
+    if use_office:
+        office = _office_reference_path()
+        if office:
+            references.append({
+                "name": "Точный интерьер виртуального офиса Агентства W",
+                "kind": "office",
+                "image_bytes": office.read_bytes(),
+                "mime_type": "image/png" if office.suffix == ".png" else "image/webp",
+            })
     for name in names or []:
         filename = PROFESSIONAL_PORTRAITS.get(name)
-        if not filename:
-            continue
-        path = assets_dir / filename
-        if path.exists():
-            references.append(
-                {
-                    "name": name,
-                    "kind": "portrait",
-                    "image_bytes": path.read_bytes(),
-                    "mime_type": "image/webp",
-                }
-            )
-    logo_path = assets_dir / "agency_w_icon.png"
-    # Логотип нужен даже в сценах без названного героя (например, пиджаки
-    # крупным планом). Иначе художник видит только слово W в задании и
-    # подменяет официальный знак обычной буквой.
-    if logo_path.exists():
-        references.append(
-            {
-                "name": "Официальный знак Агентства W",
-                "kind": "logo",
-                "image_bytes": logo_path.read_bytes(),
-                "mime_type": "image/png",
-            }
-        )
+        if filename and (base / filename).is_file():
+            references.append({
+                "name": name,
+                "kind": "portrait",
+                "image_bytes": (base / filename).read_bytes(),
+                "mime_type": "image/webp",
+            })
+    if include_logo and (base / "agency_w_icon.png").is_file():
+        references.append({
+            "name": "Официальный логотип Агентства W",
+            "kind": "logo",
+            "image_bytes": (base / "agency_w_icon.png").read_bytes(),
+            "mime_type": "image/png",
+        })
     return references
-
 
 AGENCY_W_AUDIENCE_BASELINE = (
     "Предприниматели, сетевые лидеры, эксперты и руководители, которые строят "
