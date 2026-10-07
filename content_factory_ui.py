@@ -501,9 +501,9 @@ def _carousel_slide_names(item, slide_text, index):
         return named[:2]
     if not selected:
         return []
-    if index == 0:
-        return selected[:2]
-    return [selected[(index - 1) % len(selected)]]
+    if not named:
+        return []
+    return named[:2]
 
 
 def _render_carousel_slide(image_bytes, slide_text, index, total):
