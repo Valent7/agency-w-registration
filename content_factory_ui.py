@@ -57,6 +57,17 @@ def _office_reference_path():
     return None
 
 
+def _item_uses_office(item):
+    source = " ".join(
+        str(value or "") for value in (
+            item.get("visual_brief"),
+            item.get("goal"),
+            " ".join(item.get("scenes") or []),
+        )
+    ).lower()
+    return "офис" in source and ("агентств" in source or "виртуальн" in source)
+
+
 def _portrait_references(names, *, use_office=False, include_logo=None):
     """Подключает портреты, фирменный знак и офис только к нужной сцене."""
     base = Path(__file__).resolve().parent / "assets"
@@ -2161,7 +2172,10 @@ def _render_legacy_item(
                 use_container_width=True,
             ):
                 source_text = _item_source_text(item)
-                portrait_references = _portrait_references(item.get("professionals") or [])
+                portrait_references = _portrait_references(
+                    item.get("professionals") or [],
+                    use_office=_item_uses_office(item),
+                )
                 available_names = {
                     reference.get("name")
                     for reference in portrait_references
@@ -2711,7 +2725,10 @@ def _render_item(
             key=prefix + "_make_image",
             use_container_width=True,
         ):
-            references = _portrait_references(item.get("professionals") or [])
+            references = _portrait_references(
+                item.get("professionals") or [],
+                use_office=_item_uses_office(item),
+            )
             available = {
                 value.get("name")
                 for value in references
