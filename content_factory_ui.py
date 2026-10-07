@@ -498,119 +498,39 @@ def _carousel_slide_parts(slide_text, index):
     return kicker, body
 
 
-def _carousel_slide_names(item, slide_text, index):
-    """Берёт только нужных героев: так лица сохраняются заметно точнее."""
+def _carousel_time_story(item):
+    text = " ".join(str(value or "") for value in (
+        item.get("title"), item.get("goal"),
+        " ".join(item.get("slides") or []),
+    )).lower()
+    return "время" in text and any(
+        word in text for word in ("рутин", "переписк", "день", "встреч")
+    )
+
+
+def _carousel_show_agency(item, text, index, total):
+    if _carousel_time_story(item):
+        return index >= total - 2
+    source = str(text or "").lower()
+    return any(word in source for word in (
+        "агентств", "цифровая команда", "стагирит",
+        "неония", "неона", "тео", "неола", "виртуальный офис"
+    ))
+
+
+def _carousel_slide_names(item, slide_text, index, total=None):
+    """ИИ-профессионалы только в кадрах Агентства, не вместо людей."""
+    total = total or len(item.get("slides") or []) or 1
+    if not _carousel_show_agency(item, slide_text, index, total):
+        return []
     selected = [
-        name for name in (item.get("professionals") or []) if name in PROFESSIONAL_PORTRAITS
+        name for name in (item.get("professionals") or [])
+        if name in PROFESSIONAL_PORTRAITS
     ]
     named = _scene_professionals(slide_text, selected)
     if named:
         return named[:2]
-    if not selected:
-        return []
-    if not named:
-        return []
-    return named[:2]
-
-
-def _render_carousel_slide(image_bytes, slide_text, index, total):
-    """Создаёт готовый Instagram-слайд 1080x1350 с точным русским текстом."""
-    with Image.open(BytesIO(image_bytes)) as source:
-        source = ImageOps.exif_transpose(source).convert("RGB")
-        frame = ImageOps.fit(
-            source,
-            (1080, 1350),
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.42),
-        ).convert("RGBA")
-
-    overlay = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    # Мягкое затемнение снизу оставляет иллюстрацию видимой и делает текст читаемым.
-    gradient_top = 690
-    for y in range(gradient_top, 1350):
-        ratio = (y - gradient_top) / (1350 - gradient_top)
-        alpha = int(25 + 210 * ratio)
-        overlay_draw.line((0, y, 1080, y), fill=(4, 15, 31, alpha), width=1)
-    overlay_draw.rounded_rectangle(
-        (52, 820, 1028, 1300),
-        radius=32,
-        fill=(5, 18, 36, 205),
-        outline=(202, 157, 54, 160),
-        width=2,
-    )
-    frame = Image.alpha_composite(frame, overlay)
-    draw = ImageDraw.Draw(frame)
-
-    gold = (238, 191, 79, 255)
-    white = (255, 255, 255, 255)
-    muted = (220, 228, 238, 255)
-    brand_font = _font(30, bold=True)
-    count_font = _font(28, bold=True)
-    kicker_font = _font(34, bold=True)
-
-    draw.ellipse((52, 45, 116, 109), fill=(8, 25, 48, 220), outline=gold, width=3)
-    w_font = _font(34, bold=True)
-    w_box = draw.textbbox((0, 0), "W", font=w_font)
-    draw.text(
-        (84 - (w_box[2] - w_box[0]) / 2, 77 - (w_box[3] - w_box[1]) / 2 - 3),
-        "W",
-        font=w_font,
-        fill=gold,
-    )
-    draw.text((134, 58), "АГЕНТСТВО W", font=brand_font, fill=white)
-    counter = f"{index + 1}/{total}"
-    counter_width = draw.textlength(counter, font=count_font)
-    draw.text((1028 - counter_width, 61), counter, font=count_font, fill=muted)
-
-    kicker, body = _carousel_slide_parts(slide_text, index)
-    draw.text((92, 865), kicker, font=kicker_font, fill=gold)
-
-    # Подбираем размер так, чтобы даже длинный тезис не вылезал за карточку.
-    title_font = None
-    title_lines = []
-    for size in (62, 58, 54, 50, 46, 42):
-        candidate_font = _font(size, bold=True)
-        candidate_lines = _wrap_image_text(draw, body, candidate_font, 896, max_lines=5)
-        line_height = int(size * 1.20)
-        if len(candidate_lines) * line_height <= 320:
-            title_font = candidate_font
-            title_lines = candidate_lines
-            break
-    if title_font is None:
-        title_font = _font(40, bold=True)
-        title_lines = _wrap_image_text(draw, body, title_font, 896, max_lines=6)
-
-    y = 925
-    line_height = int(getattr(title_font, "size", 40) * 1.20)
-    for line in title_lines:
-        draw.text((92, y), line, font=title_font, fill=white)
-        y += line_height
-
-    output = BytesIO()
-    frame.convert("RGB").save(output, "PNG", optimize=True)
-    return output.getvalue()
-
-
-def _carousel_zip(slide_images, caption):
-    """Один архив: слайды уже названы в правильном порядке публикации."""
-    output = BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for index, image_bytes in enumerate(slide_images, start=1):
-            archive.writestr(f"{index:02d}_carousel_slide.png", image_bytes)
-        archive.writestr(
-            "caption.txt",
-            (str(caption or "").strip() + "\n").encode("utf-8"),
-        )
-        archive.writestr(
-            "README.txt",
-            (
-                "Instagram-карусель Агентства W\n\n"
-                "Загрузите все PNG одним постом по порядку: 01, 02, 03...\n"
-                "Текст публикации находится в caption.txt.\n"
-            ).encode("utf-8"),
-        )
-    return output.getvalue()
+    return selected[:1]
 
 
 def _generate_ready_carousel(item, generate_illustration_fn):
