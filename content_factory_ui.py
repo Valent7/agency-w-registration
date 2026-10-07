@@ -550,6 +550,11 @@ def _carousel_slide_names(item, slide_text, index, total=None):
     named = _scene_professionals(slide_text, selected)
     if named:
         return named[:2]
+    if _carousel_time_story(item):
+        # В истории о времени цифровая команда появляется только в момент решения.
+        if index == total - 2:
+            return selected[:5]
+        return []
     return selected[:1]
 
 
