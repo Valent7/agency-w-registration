@@ -1291,12 +1291,22 @@ FIX: <одно конкретное и достаточно подробное �
             f"data:{mime_type};base64,"
             + base64.b64encode(reference_bytes).decode("ascii")
         )
-        is_logo = reference.get("kind") == "logo"
-        reference_label = (
-            "Эталон официального золотого знака W — использовать только на лацкане"
-            if is_logo
-            else "Эталон лица и одежды: " + str(reference.get("name") or "герой")
-        )
+        kind = str(reference.get("kind") or "portrait")
+        if kind == "logo":
+            reference_label = (
+                "Официальный логотип Агентства W. Сверь форму знака; "
+                "не принимай одиночную букву W за логотип."
+            )
+        elif kind == "office":
+            reference_label = (
+                "Единственный эталон виртуального офиса Агентства W. "
+                "Сверь архитектуру и интерьер, а не лицо."
+            )
+        else:
+            reference_label = (
+                "Эталон лица и одежды ИИ-профессионала: "
+                + str(reference.get("name") or "герой")
+            )
         review_content.extend(
             [
                 {
