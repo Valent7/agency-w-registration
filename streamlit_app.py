@@ -1485,7 +1485,7 @@ def generate_openai_illustration(
     reference_names = ", ".join(
         str(item.get("name") or "")
         for item in reference_images
-        if item.get("name") and item.get("kind") != "logo"
+        if item.get("name") and item.get("kind") == "portrait"
     )
     if reference_names:
         clean_change = (
