@@ -676,6 +676,7 @@ def _generate_ready_carousel(item, generate_illustration_fn):
         }
 
     completed = []
+    human_reference = None
     for index, slide_text in enumerate(slides):
         agency_scene = _carousel_show_agency(item, slide_text, index, len(slides))
         office_scene = agency_scene and _carousel_time_story(item)
@@ -683,6 +684,8 @@ def _generate_ready_carousel(item, generate_illustration_fn):
         references = _portrait_references(
             names, use_office=office_scene, include_logo=agency_scene
         )
+        if human_reference is not None:
+            references.append(human_reference)
         kicker, body = _carousel_slide_parts(slide_text, index)
         visual_task = (
             f"Иллюстрация {index + 1}/{len(slides)} Instagram-карусели. "
@@ -720,6 +723,13 @@ def _generate_ready_carousel(item, generate_illustration_fn):
                     f"Не удалось создать слайд {index + 1}. "
                     + str((result or {}).get("error") or "Неизвестная ошибка Художника.")
                 ),
+            }
+        if human_reference is None:
+            human_reference = {
+                "name": "Обычный человек — главный герой карусели",
+                "kind": "human",
+                "image_bytes": result["image_bytes"],
+                "mime_type": "image/png",
             }
         try:
             completed.append(
