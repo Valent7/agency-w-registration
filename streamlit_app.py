@@ -8029,7 +8029,9 @@ if telegram_login_valid or remembered_data:
                         0,
                         len(queue_contact_ids) - restored_in_contacts,
                     ),
-                    "today": len(today_queue_ids),
+                    # Точное число "сегодня" берём ниже только из
+                    # сегодняшней партии Стагирита, а не из всех старых карточек.
+                    "today": 0,
                     "legacy_history_count": len(historical_ids),
                     "stagirite_history_count": len(stagirite_history_ids),
                     "migration_version": "candidate_history_v3",
@@ -8095,6 +8097,44 @@ if telegram_login_valid or remembered_data:
                 if daily_message:
                     st.caption(
                         "🎯 Стагирит: " + daily_message
+                    )
+
+            # Число "сегодня" обязано совпадать с реально показанной
+            # сегодняшней пятёркой Стагирита. Исторические карточки сюда не входят.
+            if (
+                isinstance(daily_stagirite_candidates, dict)
+                and daily_stagirite_candidates.get("active")
+            ):
+                exact_today_ids = []
+                for value in (
+                    daily_stagirite_candidates.get("candidate_ids", [])
+                    or []
+                ):
+                    try:
+                        cid = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if cid not in exact_today_ids:
+                        exact_today_ids.append(cid)
+
+                progress_key = f"neonia_source_progress_{telegram_id}"
+                exact_progress = st.session_state.get(
+                    progress_key,
+                    {},
+                )
+                if isinstance(exact_progress, dict):
+                    exact_progress = dict(exact_progress)
+                    exact_progress["today"] = min(
+                        5,
+                        len(exact_today_ids),
+                    )
+                    exact_progress["today_candidate_ids"] = (
+                        exact_today_ids[:5]
+                    )
+                    st.session_state[progress_key] = exact_progress
+                    persist_workspace_if_changed(
+                        telegram_id,
+                        force=True,
                     )
 
             # ------------------------------------------------------
