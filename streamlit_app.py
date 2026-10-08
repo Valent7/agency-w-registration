@@ -8905,18 +8905,39 @@ if telegram_login_valid or remembered_data:
                                     - technical_chat,
                                 )
 
-                                m1, m2, m3 = st.columns(3)
+                                today_chat = 0
+                                try:
+                                    progress_chat_id = int(
+                                        progress.get("current_chat_id")
+                                    )
+                                except (TypeError, ValueError):
+                                    progress_chat_id = None
+                                if (
+                                    str(progress.get("source_type") or "")
+                                    == "telegram_chat"
+                                    and progress_chat_id
+                                    == int(selected_chat_id)
+                                ):
+                                    today_chat = int(
+                                        progress.get("today") or 0
+                                    )
+
+                                m1, m2, m3, m4 = st.columns(4)
                                 m1.metric(
                                     "Всего в чате",
                                     total_chat,
                                 )
                                 m2.metric(
-                                    "Уже выдано Неонией",
+                                    "Отработано",
                                     shown_chat,
                                 )
                                 m3.metric(
                                     "Осталось",
                                     remaining_chat,
+                                )
+                                m4.metric(
+                                    "Сегодня",
+                                    today_chat,
                                 )
                                 if duplicate_chat or technical_chat:
                                     st.caption(
@@ -9042,7 +9063,112 @@ if telegram_login_valid or remembered_data:
                                 st.success(
                                     f"Найдено контактов: {len(contacts)}"
                                 )
-                        
+
+                                contact_ids_for_stats = []
+                                for contact in contacts:
+                                    if not isinstance(contact, dict):
+                                        continue
+                                    try:
+                                        cid = int(
+                                            contact.get("telegram_id")
+                                        )
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if cid not in contact_ids_for_stats:
+                                        contact_ids_for_stats.append(cid)
+
+                                processed_raw = st.session_state.get(
+                                    f"neonia_processed_candidates_{telegram_id}",
+                                    [],
+                                )
+                                processed_ids_for_stats = set()
+                                for value in processed_raw or []:
+                                    try:
+                                        processed_ids_for_stats.add(
+                                            int(value)
+                                        )
+                                    except (TypeError, ValueError):
+                                        continue
+
+                                contacts_processed = sum(
+                                    1
+                                    for cid in contact_ids_for_stats
+                                    if cid in processed_ids_for_stats
+                                )
+                                contacts_remaining = max(
+                                    0,
+                                    len(contact_ids_for_stats)
+                                    - contacts_processed,
+                                )
+                                source_progress = st.session_state.get(
+                                    f"neonia_source_progress_{telegram_id}",
+                                    {},
+                                )
+                                if not isinstance(source_progress, dict):
+                                    source_progress = {}
+                                contacts_today = (
+                                    int(source_progress.get("today") or 0)
+                                    if str(
+                                        source_progress.get("source_type")
+                                        or ""
+                                    )
+                                    == "telegram_contacts"
+                                    else 0
+                                )
+
+                                c1, c2, c3, c4 = st.columns(4)
+                                c1.metric(
+                                    "Всего",
+                                    len(contact_ids_for_stats),
+                                )
+                                c2.metric(
+                                    "Отработано",
+                                    contacts_processed,
+                                )
+                                c3.metric(
+                                    "Осталось",
+                                    contacts_remaining,
+                                )
+                                c4.metric(
+                                    "Сегодня",
+                                    contacts_today,
+                                )
+
+                                source_mode_key = (
+                                    f"neonia_daily_source_mode_{telegram_id}"
+                                )
+                                current_source_mode = str(
+                                    st.session_state.get(
+                                        source_mode_key,
+                                        "contacts",
+                                    )
+                                    or "contacts"
+                                )
+                                if current_source_mode == "contacts":
+                                    st.caption(
+                                        "✅ Личные контакты сейчас выбраны "
+                                        "источником ежедневной пятёрки."
+                                    )
+                                elif st.button(
+                                    "📇 Использовать личные контакты для ежедневной пятёрки",
+                                    type="primary",
+                                    key=(
+                                        "neonia_daily_contacts_from_contacts_"
+                                        f"{telegram_id}"
+                                    ),
+                                ):
+                                    st.session_state[
+                                        source_mode_key
+                                    ] = "contacts"
+                                    persist_workspace_if_changed(
+                                        telegram_id,
+                                        force=True,
+                                    )
+                                    st.success(
+                                        "Готово. Следующая новая пятёрка "
+                                        "будет из личных Telegram-контактов."
+                                    )
+
                                 contacts_for_table = [
                                     {
                                         "Имя": contact["name"],
