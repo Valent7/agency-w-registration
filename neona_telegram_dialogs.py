@@ -44,6 +44,66 @@ def _load_neona_reference_file(filename: str) -> str:
 NEONA_CONSTITUTION = _load_neona_reference_file("NEONA_CONSTITUTION.txt")
 NEONA_KNOWLEDGE_BASE = _load_neona_reference_file("NEONA_KNOWLEDGE_BASE.txt")
 
+def _owner_text_forms(owner_name: str) -> dict[str, str]:
+    raw = re.sub(r"\s+", " ", str(owner_name or "").strip())
+    if not raw:
+        return {
+            "nominative": "владелец кабинета",
+            "genitive": "владельца кабинета",
+            "instrumental": "владельцем кабинета",
+        }
+    low = raw.casefold()
+    known = {
+        "valentina": ("Валентина", "Валентины", "Валентиной"),
+        "walentina": ("Валентина", "Валентины", "Валентиной"),
+        "валентина": ("Валентина", "Валентины", "Валентиной"),
+        "надежда": ("Надежда", "Надежды", "Надеждой"),
+    }
+    if low in known:
+        nominative, genitive, instrumental = known[low]
+        return {
+            "nominative": nominative,
+            "genitive": genitive,
+            "instrumental": instrumental,
+        }
+    if re.fullmatch(r"[А-Яа-яЁё-]+", raw):
+        if raw.endswith("а"):
+            stem = raw[:-1]
+            genitive = stem + (
+                "и" if stem.casefold().endswith(("г", "к", "х", "ж", "ч", "ш", "щ"))
+                else "ы"
+            )
+            return {
+                "nominative": raw,
+                "genitive": genitive,
+                "instrumental": stem + "ой",
+            }
+        if raw.endswith("я"):
+            stem = raw[:-1]
+            return {
+                "nominative": raw,
+                "genitive": stem + "и",
+                "instrumental": stem + "ей",
+            }
+    return {
+        "nominative": raw,
+        "genitive": raw,
+        "instrumental": raw,
+    }
+
+
+def _personalize_neona_reference_text(value: str, owner_name: str) -> str:
+    forms = _owner_text_forms(owner_name)
+    text = str(value or "")
+    for old, new in (
+        ("Валентиной", forms["instrumental"]),
+        ("Валентины", forms["genitive"]),
+        ("Валентина", forms["nominative"]),
+    ):
+        text = text.replace(old, new)
+    return text
+
+
 try:
     import streamlit as st
 except Exception:  # pragma: no cover - standalone worker mode
@@ -1307,9 +1367,14 @@ def _openai_general_reply(
     knowledge = NEONA_KNOWLEDGE_BASE or (
         "Используй только подтверждённые факты об Агентстве W и не придумывай функции."
     )
+    constitution = _personalize_neona_reference_text(constitution, owner_name)
+    knowledge = _personalize_neona_reference_text(knowledge, owner_name)
 
     instructions = f"""
 Ты Неона — ИИ-секретарь-референт {owner_name} в Агентстве W.
+КРИТИЧНО: текущий владелец этого кабинета — {owner_name}. Не представляйся
+секретарём Валентины и не предлагай встречу с Валентиной, если текущий владелец
+не Валентина. Все упоминания владельца должны относиться именно к {owner_name}.
 Пиши по-русски простым человеческим языком, без корпоративного жаргона.
 
 {NEONA_DIALOG_CORE}
