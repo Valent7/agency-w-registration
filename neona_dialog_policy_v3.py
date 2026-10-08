@@ -176,7 +176,7 @@ def _identity_reply(owner_name: str, first_name: str, greet: bool) -> str:
     )
 
 
-def _hard_case(text: str, context: dict) -> bool:
+def _hard_case(text: str, context: dict, owner_name: str = "") -> bool:
     """То, что должно пройти через проверенные жёсткие правила V2."""
     return any((
         v2._do_not_contact(text),
@@ -184,7 +184,7 @@ def _hard_case(text: str, context: dict) -> bool:
         v2._source_question(text),
         v2._guarantee_question(text),
         v2._health_topic(text),
-        bool(v2._meeting_reason(text, context)),
+        bool(v2._meeting_reason(text, context, owner_name)),
     ))
 
 
@@ -314,6 +314,10 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
         reply = raw.strip()
         action = "continue"
 
+    # Старые реплики в памяти могли содержать «Валентина». В кабинете другого
+    # владельца это не должно менять того, от чьего имени работает Неона.
+    reply = v2._rewrite_wrong_owner_reference(reply, owner_name)
+
     # Защита от сегодняшнего казуса: медицина не может «просочиться» по ассоциации.
     if not v2._health_topic(text):
         if re.search(r"\b(?:врач|доктор|медицин|лечени|лекарств|здоровь)\w*\b", reply, flags=re.I):
@@ -383,7 +387,7 @@ def _process_v3(
         return _identity_reply(owner_name, first_name, greet), "idle", True, context
 
     # Всё, что имеет жёсткое правило или прямой мост к Валентине, не отдаём импровизации.
-    if _hard_case(text, context):
+    if _hard_case(text, context, owner_name):
         return _ORIGINAL_V2_PROCESS(
             config, owner_id, owner_name, contact_id, first_name, username,
             text, message_dt, state
