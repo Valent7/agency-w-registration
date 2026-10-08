@@ -33,6 +33,33 @@ def _mentions_owner(text: str, owner_name: str) -> bool:
     )
 
 
+def _rewrite_wrong_owner_reference(reply: str, owner_name: str) -> str:
+    """Не даёт старой памяти Валентины просочиться в кабинет другого владельца."""
+    forms = _owner_forms(owner_name)
+    owner = forms["nominative"].casefold()
+    if owner in {"валентина", "valentina", "walentina"}:
+        return str(reply or "")
+    text = str(reply or "")
+    lowered = text.casefold()
+    owner_context = any(
+        marker in lowered
+        for marker in (
+            "секретарь", "референт", "встреч", "поговор", "созвон",
+            "позвон", "календар", "владел",
+        )
+    )
+    if not owner_context:
+        return text
+    for old, new in (
+        ("Valentina", forms["nominative"]),
+        ("Валентиной", forms["instrumental"]),
+        ("Валентины", forms["genitive"]),
+        ("Валентина", forms["nominative"]),
+    ):
+        text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
+    return text
+
+
 def _ctx(state):
     raw = (state or {}).get("context")
     return dict(raw) if isinstance(raw, dict) else {}
@@ -240,7 +267,7 @@ def _meeting_consent_bridge(reason, owner_name):
         ),
         "technical": (
             "По технической части я не уполномочена консультировать. "
-            f"Эти вопросы лучше задать {forms['dative'] if 'dative' in forms else forms['nominative']}."
+            f"Этот вопрос лучше обсудить с {forms['instrumental']}."
         ),
         "cases": f"Кейсы, примеры и результаты лучше покажет {forms['nominative']}.",
         "interest": "Рада, что тема вам интересна.",
@@ -588,6 +615,7 @@ def _general_reply_v2(config, owner_name, first_name, text, greet, context=None)
 Верни только готовую реплику человеку.
 """.strip()
     reply = legacy._call_openai(config, instructions, text)
+    reply = _rewrite_wrong_owner_reference(reply, owner_name)
     return legacy._de_repeat_reply(config, reply, text, context)
 
 
