@@ -6112,11 +6112,30 @@ def _render_general_share_tools(
     if not isinstance(video_meta, dict):
         video_meta = {}
 
+    telegram_image_mode = "photo"
     if current_image:
         st.image(
             current_image,
             caption="К публикации будет добавлена эта картинка",
             use_container_width=True,
+        )
+        mode_label = st.radio(
+            "Как отправить картинку в Telegram",
+            options=[
+                "🖼️ Обычная картинка",
+                "🏷️ Стикер Telegram",
+            ],
+            horizontal=True,
+            key=f"stagirite_general_image_mode_{task_id}",
+            help=(
+                "Обычная картинка идёт как фото. "
+                "Стикер сохраняет прозрачный фон и отправляется отдельным сообщением после текста."
+            ),
+        )
+        telegram_image_mode = (
+            "sticker"
+            if mode_label == "🏷️ Стикер Telegram"
+            else "photo"
         )
     elif current_video:
         st.video(current_video)
@@ -6247,8 +6266,12 @@ def _render_general_share_tools(
     )
     selected_ids = [int(x) for x in selected_ids]
 
+    telegram_hash_text = clean_text
+    if current_image:
+        telegram_hash_text += f"\n[telegram_image_mode={telegram_image_mode}]"
+
     telegram_hash = _telegram_publication_hash(
-        clean_text,
+        telegram_hash_text,
         current_image,
         selected_ids,
         video=current_video,
@@ -6289,6 +6312,7 @@ def _render_general_share_tools(
                     or "video/mp4"
                 ),
                 destination_ids=selected_ids,
+                image_mode=telegram_image_mode,
             )
             accepted = int(published.get("accepted") or 0)
             updated = dict(result)
@@ -7488,6 +7512,25 @@ def _render_result(
                 and not source_changed
                 and telegram_destinations
             ):
+                content_image_mode_label = st.radio(
+                    "Как отправить эту иллюстрацию в Telegram",
+                    options=[
+                        "🖼️ Обычная картинка",
+                        "🏷️ Стикер Telegram",
+                    ],
+                    horizontal=True,
+                    key=f"stagirite_content_image_mode_{task_id}",
+                    help=(
+                        "В режиме стикера текст отправится один раз, "
+                        "а прозрачная иллюстрация — отдельным Telegram-стикером."
+                    ),
+                )
+                content_image_mode = (
+                    "sticker"
+                    if content_image_mode_label == "🏷️ Стикер Telegram"
+                    else "photo"
+                )
+
                 tg_ids = [
                     int(item.get("chat_id"))
                     for item in telegram_destinations
@@ -7497,7 +7540,8 @@ def _render_result(
                     result.get("edited_content") or draft
                 ).strip()
                 tg_hash = _telegram_publication_hash(
-                    clean_tg_text,
+                    clean_tg_text
+                    + f"\n[telegram_image_mode={content_image_mode}]",
                     current_image,
                     tg_ids,
                 )
@@ -7524,6 +7568,7 @@ def _render_result(
                             clean_tg_text,
                             image_bytes=current_image,
                             destination_ids=tg_ids,
+                            image_mode=content_image_mode,
                         )
                         updated = dict(result)
                         updated["telegram_published_at"] = datetime.now(UTC).isoformat()
