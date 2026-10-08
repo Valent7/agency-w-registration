@@ -16,6 +16,23 @@ def _norm(text):
     return re.sub(r"\s+", " ", str(text or "").casefold()).strip()
 
 
+def _owner_forms(owner_name: str) -> dict[str, str]:
+    return legacy._owner_forms(owner_name)
+
+
+def _mentions_owner(text: str, owner_name: str) -> bool:
+    forms = _owner_forms(owner_name)
+    value = _norm(text)
+    return any(
+        form and form.casefold() in value
+        for form in (
+            forms["nominative"],
+            forms["genitive"],
+            forms["instrumental"],
+        )
+    )
+
+
 def _ctx(state):
     raw = (state or {}).get("context")
     return dict(raw) if isinstance(raw, dict) else {}
@@ -67,23 +84,21 @@ def _decline(text):
     ))
 
 
-def _wants_human(text):
+def _wants_human(text, owner_name=""):
     v = _norm(text)
-    return any(re.search(p, v) for p in (
+    generic = any(re.search(p, v) for p in (
         r"\bне\s+хочу\s+(?:разговаривать|общаться)\s+(?:с\s+)?(?:ии|искусственн\w+\s+интеллект\w*|машин\w*)\b",
-        r"\bхочу\s+(?:поговорить|общаться)\s+(?:с\s+)?(?:человек\w*|валентин\w*)\b",
-        r"\bсоедините\s+(?:меня\s+)?(?:с\s+)?валентин\w*\b",
-        r"\bпусть\s+валентин\w*\s+(?:напишет|позвонит)\b",
+        r"\bхочу\s+(?:поговорить|общаться)\s+(?:с\s+)?человек\w*\b",
+        r"\bсоедините\s+(?:меня\s+)?(?:с\s+)?человек\w*\b",
         r"\bпозвоните\s+мне\b", r"\bперезвоните\s+мне\b",
     ))
-
-
-def _identity_question(text):
-    v = _norm(text)
-    return bool(
-        re.search(r"\b(?:вы|ты)\s+(?:ии|ai|искусственн\w+\s+интеллект\w*|бот)\b", v)
-        or re.search(r"\b(?:это|со\s+мной)\s+(?:ии|ai|бот)\b", v)
-    )
+    if generic:
+        return True
+    if owner_name and _mentions_owner(text, owner_name):
+        return any(word in v for word in (
+            "поговор", "созвон", "встрет", "соедин", "позвон", "напиш",
+        ))
+    return False
 
 
 def _source_question(text):
@@ -185,50 +200,57 @@ def _health_topic(text):
     )
 
 
-def _callback(text):
+def _callback(text, owner_name=""):
     v = _norm(text)
-    return any(x in v for x in (
-        "позвоните мне", "перезвоните мне", "пусть валентина позвонит",
-        "хочу звонок", "хочу поговорить с валентиной",
-    ))
+    if any(x in v for x in (
+        "позвоните мне", "перезвоните мне", "хочу звонок",
+    )):
+        return True
+    return bool(
+        owner_name
+        and _mentions_owner(text, owner_name)
+        and any(word in v for word in ("позвон", "перезвон"))
+    )
 
 
-def _explicit_valentina_meeting_request(text):
-    """Прямой запрос человека на разговор/встречу/звонок с Валентиной."""
+def _explicit_owner_meeting_request(text, owner_name=""):
+    """Прямой запрос на разговор/встречу/звонок с текущим владельцем кабинета."""
     v = _norm(text)
-    patterns = (
-        r"\bхочу\s+(?:поговорить|встретиться|созвониться)\s+(?:с\s+)?валентин\w*\b",
-        r"\bможно\s+(?:поговорить|встретиться|созвониться)\s+(?:с\s+)?валентин\w*\b",
-        r"\bсоедините\s+(?:меня\s+)?(?:с\s+)?валентин\w*\b",
-        r"\bпусть\s+валентин\w*\s+(?:позвонит|напишет)\b",
+    if any(re.search(pattern, v) for pattern in (
         r"\bпозвоните\s+мне\b",
         r"\bперезвоните\s+мне\b",
         r"\bназнач(?:ьте|ить)\s+встреч\w*\b",
         r"\bдавайте\s+(?:встретимся|созвонимся)\b",
-    )
-    return any(re.search(p, v) for p in patterns)
+    )):
+        return True
+    if not owner_name or not _mentions_owner(text, owner_name):
+        return False
+    return any(word in v for word in (
+        "поговор", "встрет", "созвон", "соедин", "позвон", "напиш",
+    ))
 
 
-def _meeting_consent_bridge(reason):
+def _meeting_consent_bridge(reason, owner_name):
     """Интерес к теме ещё не равен согласию на встречу."""
+    forms = _owner_forms(owner_name)
     lead = {
         "price": (
             "По стоимости я не уполномочена давать точную информацию. "
-            "Этот вопрос лучше обсудить с Валентиной."
+            f"Этот вопрос лучше обсудить с {forms['instrumental']}."
         ),
         "technical": (
             "По технической части я не уполномочена консультировать. "
-            "Эти вопросы лучше задать Валентине."
+            f"Эти вопросы лучше задать {forms['dative'] if 'dative' in forms else forms['nominative']}."
         ),
-        "cases": "Кейсы, примеры и результаты лучше покажет Валентина.",
+        "cases": f"Кейсы, примеры и результаты лучше покажет {forms['nominative']}.",
         "interest": "Рада, что тема вам интересна.",
-    }.get(reason, "Этот вопрос лучше обсудить с Валентиной.")
-    return lead + " Хотите, я организую вам встречу с Валентиной?"
+    }.get(reason, f"Этот вопрос лучше обсудить с {forms['instrumental']}.")
+    return lead + f" Хотите, я организую вам встречу с {forms['instrumental']}?"
 
 
-def _meeting_reason(text, context):
-    if _wants_human(text):
-        return "callback" if _callback(text) else "human"
+def _meeting_reason(text, context, owner_name=""):
+    if _wants_human(text, owner_name):
+        return "callback" if _callback(text, owner_name) else "human"
     if _price_question(text):
         return "price"
     if _technical_question(text):
@@ -240,15 +262,18 @@ def _meeting_reason(text, context):
     return ""
 
 
-def _prelude(reason):
+def _prelude(reason, owner_name):
+    forms = _owner_forms(owner_name)
+    owner = forms["nominative"]
+    owner_with = forms["instrumental"]
     return {
-        "price": "По стоимости я не уполномочена давать точную информацию. Этот вопрос лучше обсудить с Валентиной.",
-        "technical": "По технической части я не уполномочена консультировать. Эти вопросы лучше задать Валентине.",
-        "cases": "Кейсы, примеры и результаты лучше покажет Валентина — она сможет ответить на ваши вопросы.",
-        "human": "Конечно. Валентина с удовольствием поговорит с вами лично и ответит на ваши вопросы.",
-        "callback": "Конечно. Я подберу время, когда Валентина сможет вам позвонить.",
-        "interest": "Отлично. Тогда без лишних объяснений сразу подберу время для встречи с Валентиной.",
-    }.get(reason, "Хорошо. Тогда сразу подберу время для встречи с Валентиной.")
+        "price": f"По стоимости я не уполномочена давать точную информацию. Этот вопрос лучше обсудить с {owner_with}.",
+        "technical": f"По технической части я не уполномочена консультировать. Эти вопросы лучше задать владельцу кабинета — {owner}.",
+        "cases": f"Кейсы, примеры и результаты лучше покажет {owner} — и ответит на ваши вопросы.",
+        "human": f"Конечно. {owner} сможет поговорить с вами лично и ответить на ваши вопросы.",
+        "callback": f"Конечно. Я подберу время, когда {owner} сможет вам позвонить.",
+        "interest": f"Отлично. Тогда подберу время для встречи с {owner_with}.",
+    }.get(reason, f"Хорошо. Тогда подберу время для встречи с {owner_with}.")
 
 
 def _fmt_msk(start_utc):
@@ -284,7 +309,7 @@ def _find_slots(config, owner_id, after_utc=None, limit=3):
     return found
 
 
-def _offer_slots(config, owner_id, context, reason="", after_utc=None, prefix=""):
+def _offer_slots(config, owner_id, owner_name, context, reason="", after_utc=None, prefix=""):
     context = dict(context or {})
     context["contact_timezone"] = "Europe/Moscow"
     if reason:
@@ -292,7 +317,7 @@ def _offer_slots(config, owner_id, context, reason="", after_utc=None, prefix=""
     slots = _find_slots(config, owner_id, after_utc=after_utc, limit=3)
     if not slots:
         return (
-            prefix + (_prelude(reason) + " " if reason else "")
+            prefix + (_prelude(reason, owner_name) + " " if reason else "")
             + "В ближайшем рабочем окне свободного времени не нашлось. "
               "Встречу можно будет согласовать позже.",
             "idle", context,
@@ -301,9 +326,9 @@ def _offer_slots(config, owner_id, context, reason="", after_utc=None, prefix=""
     context.pop("proposed_start_at", None)
     context.pop("meeting_format", None)
     options = "\n".join(f"{i}. {_fmt_msk(x)}" for i, x in enumerate(slots, 1))
-    lead = (_prelude(reason) + "\n") if reason else ""
+    lead = (_prelude(reason, owner_name) + "\n") if reason else ""
     return (
-        prefix + lead + "У Валентины сейчас свободны такие варианты:\n"
+        prefix + lead + f"У {_owner_forms(owner_name)['genitive']} сейчас свободны такие варианты:\n"
         + options + "\nКакой вариант вам подходит?",
         "awaiting_slot_choice", context,
     )
@@ -351,12 +376,13 @@ def _create_meeting(config, owner_id, owner_name, contact_id, first_name, userna
         "vk": "Неона 2.0 — VK диалог",
     }.get(channel, "Неона 2.0 — диалог")
     reason = str(context.get("meeting_reason") or "")
+    owner_forms = _owner_forms(owner_name)
     notes = {
-        "price": "Вопрос о стоимости/условиях — мостик к Валентине.",
-        "technical": "Технический вопрос — мостик к Валентине.",
-        "cases": "Запрос кейсов/примеров — мостик к Валентине.",
+        "price": f"Вопрос о стоимости/условиях — мостик к {owner_forms['nominative']}.",
+        "technical": f"Технический вопрос — мостик к {owner_forms['nominative']}.",
+        "cases": f"Запрос кейсов/примеров — мостик к {owner_forms['nominative']}.",
         "human": "Человек предпочёл разговор с человеком.",
-        "callback": "Человек попросил звонок Валентины.",
+        "callback": f"Человек попросил звонок {owner_forms['genitive']}.",
         "interest": "Человек проявил интерес к автоматизации Агентства W.",
     }.get(reason, "Назначено Неоной 2.0 после выбора времени и формата.")
 
@@ -398,7 +424,7 @@ def _schedule_reply_v2(
     reason = str(context.get("meeting_reason") or "")
 
     if stage not in {"awaiting_slot_choice", "collecting_meeting_details", "awaiting_confirmation"}:
-        return _offer_slots(config, owner_id, context, reason=reason, prefix=prefix)
+        return _offer_slots(config, owner_id, owner_name, context, reason=reason, prefix=prefix)
 
     if stage == "awaiting_slot_choice":
         slots = context.get("offered_slots") or []
@@ -417,7 +443,7 @@ def _schedule_reply_v2(
                     ).astimezone(core.UTC) + timedelta(minutes=30)
                 except Exception:
                     pass
-            return _offer_slots(config, owner_id, context, after_utc=after, prefix=prefix)
+            return _offer_slots(config, owner_id, owner_name, context, after_utc=after, prefix=prefix)
 
         choice = _slot_choice(text, slots)
         if choice is None:
@@ -459,15 +485,16 @@ def _schedule_reply_v2(
             context.pop("proposed_start_at", None)
             context.pop("meeting_format", None)
             reply, new_stage, context = _offer_slots(
-                config, owner_id, context, after_utc=after, prefix=prefix
+                config, owner_id, owner_name, context, after_utc=after, prefix=prefix
             )
             return "Пока мы выбирали формат, это время стало занято.\n" + reply, new_stage, context
 
         created, start, zoom_link, zoom_note = made
+        owner_forms = _owner_forms(owner_name)
         if str(context.get("meeting_reason") or "") == "callback":
-            answer = f"Договорились. Валентина позвонит вам {_fmt_msk(start)}. Формат — {fmt}."
+            answer = f"Договорились. {owner_forms['nominative']} позвонит вам {_fmt_msk(start)}. Формат — {fmt}."
         else:
-            answer = f"Договорились. Встреча с Валентиной записана на {_fmt_msk(start)}. Формат — {fmt}."
+            answer = f"Договорились. Встреча с {owner_forms['instrumental']} записана на {_fmt_msk(start)}. Формат — {fmt}."
 
         if fmt == "Zoom" and zoom_link:
             answer += f" Ссылка Zoom: {zoom_link}."
@@ -477,7 +504,7 @@ def _schedule_reply_v2(
         farewell = "Хорошего вам дня!" if datetime.now(core.MSK).hour < 18 else "Хорошего вам вечера!"
         return answer + " " + farewell, "scheduled", context
 
-    return _offer_slots(config, owner_id, context, reason=reason, prefix=prefix)
+    return _offer_slots(config, owner_id, owner_name, context, reason=reason, prefix=prefix)
 
 
 def _open_door_close():
@@ -491,13 +518,14 @@ def _open_door_close():
 
 def _general_reply_v2(config, owner_name, first_name, text, greet, context=None):
     context = dict(context or {})
+    forms = _owner_forms(owner_name)
     history = legacy._dialog_context_block(context, max_turns=10)
     greeting = (
         f"Если это первое сообщение, можно начать с «{core._greeting(first_name)}»."
         if greet else "Не повторяй приветствие."
     )
     instructions = f"""
-Ты Неона — секретарь-референт Валентины в Агентстве W.
+Ты Неона — секретарь-референт {forms['genitive']} в Агентстве W.
 Ты ведёшь короткий, живой и деловой разговор. Ты НЕ универсальный консультант.
 
 ЖИВОЙ КОНТЕКСТ:
@@ -505,7 +533,7 @@ def _general_reply_v2(config, owner_name, first_name, text, greet, context=None)
 
 ГЛАВНАЯ ЛИНИЯ:
 бизнес → люди → сколько времени уходит → что человек сделал бы с освобождённым временем →
-«А хотели бы вы тратить на поиск и переписку меньше времени?» → при интересе встреча с Валентиной.
+«А хотели бы вы тратить на поиск и переписку меньше времени?» → при интересе встреча с {forms['instrumental']}.
 
 ПРАВИЛА:
 - После ответа на комментарий к Story/Reels/посту достаточно 1–2 вежливых реплик,
@@ -531,7 +559,7 @@ def _general_reply_v2(config, owner_name, first_name, text, greet, context=None)
 
 ЕСЛИ УЖЕ ЕСТЬ КОМАНДА:
 это не конец разговора. Можно поинтересоваться, сколько времени у людей команды уходит
-на поиск и переписку. Если интересно команде — Валентина готова встретиться с командой.
+на поиск и переписку. Если интересно команде — {forms['nominative']} может встретиться с командой.
 Если человек хочет сначала посмотреть сам — сначала личная встреча.
 
 ГРАНИЦЫ:
@@ -539,13 +567,13 @@ def _general_reply_v2(config, owner_name, first_name, text, greet, context=None)
   посторонних консультаций.
 - МЕДИЦИНСКУЮ ТЕМУ ЗДЕСЬ ВООБЩЕ НЕ УПОМИНАЙ. Отдельная программная проверка
   сама включит медицинскую границу только если текущее сообщение действительно о здоровье.
-- Цена, техника, кейсы/результаты — вопросы к Валентине.
+- Цена, техника, кейсы/результаты — вопросы к {forms['nominative']}.
 - Не обещай доход, количество партнёров/клиентов или гарантированный результат.
 - Не придумывай чек-листы, планы, файлы и помощь «от себя».
 - Если спрашивают, где нашли: «По открытой информации в интернете.»
 - Если прямо спрашивают, ИИ ли ты: честно скажи, что да, ты искусственный интеллект,
-  секретарь-референт Валентины.
-- Если человеку приятнее говорить с человеком — сразу мост к Валентине.
+  секретарь-референт {forms['genitive']}.
+- Если человеку приятнее говорить с человеком — сразу мост к {forms['nominative']}.
 - Явный отказ — закончить без спора и без нового вопроса.
 
 СТИЛЬ:
@@ -609,12 +637,12 @@ def _process_v2(
         reply = _general_reply_v2(config, owner_name, first_name, text, greet, context)
         return reply, "awaiting_meeting_consent", True, context
 
-    reason = _meeting_reason(text, context)
+    reason = _meeting_reason(text, context, owner_name)
     if reason:
         context["meeting_reason"] = reason
 
         # Только прямой запрос на Валентину уже сам является согласием.
-        if _explicit_valentina_meeting_request(text):
+        if _explicit_owner_meeting_request(text, owner_name):
             reply, new_stage, context = _schedule_reply_v2(
                 config, owner_id, owner_name, contact_id, first_name, username,
                 text, message_dt, "invited_to_meeting", context, greet
@@ -624,7 +652,7 @@ def _process_v2(
         # Интерес / цена / техника / кейсы — сначала спросить согласие на встречу.
         if reason in {"interest", "price", "technical", "cases"}:
             return (
-                prefix + _meeting_consent_bridge(reason),
+                prefix + _meeting_consent_bridge(reason, owner_name),
                 "awaiting_meeting_consent",
                 True,
                 context,
@@ -656,9 +684,10 @@ def _process_v2(
         return prefix + _open_door_close(), "opted_out", True, context
 
     if stage == "idle" and _identity_question(text):
+        forms = _owner_forms(owner_name)
         return (
-            prefix + "Да, я искусственный интеллект, секретарь-референт Валентины. "
-            "Если вам удобнее поговорить с человеком, я могу согласовать встречу с Валентиной.",
+            prefix + f"Да, я искусственный интеллект, секретарь-референт {forms['genitive']}. "
+            f"Если вам удобнее поговорить с человеком, я могу согласовать встречу с {forms['instrumental']}.",
             "idle", True, context,
         )
 
