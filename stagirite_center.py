@@ -6019,6 +6019,294 @@ def _render_weekly_meeting_goal(
                 st.write(f"**{name}** — {line}")
 
 
+
+def _render_general_share_tools(
+    task: dict[str, Any],
+    owner_id: int,
+    text: str,
+) -> None:
+    """Публикация любого готового текста Стагирита без потери медиа-функций."""
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return
+
+    task_id = str(
+        task.get("id")
+        or task.get("created_at")
+        or "general"
+    )
+    result = (
+        task.get("result")
+        if isinstance(task.get("result"), dict)
+        else {}
+    )
+
+    image_key = f"stagirite_general_image_{task_id}"
+    image_meta_key = f"stagirite_general_image_meta_{task_id}"
+    video_key = f"stagirite_general_video_{task_id}"
+    video_meta_key = f"stagirite_general_video_meta_{task_id}"
+
+    st.markdown("### 📣 Отправка и медиа")
+    st.caption(
+        "Готовый текст можно отправить партнёрам внутри Агентства, "
+        "в выбранные Telegram-чаты, а перед отправкой добавить картинку или MP4-видео."
+    )
+
+    u1, u2 = st.columns(2)
+    with u1:
+        uploaded_image = st.file_uploader(
+            "🖼️ Добавить картинку",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=False,
+            key=f"stagirite_general_image_upload_{task_id}",
+        )
+        if uploaded_image is not None and st.button(
+            "✅ Использовать картинку",
+            key=f"stagirite_general_image_use_{task_id}",
+            use_container_width=True,
+        ):
+            prepared = _prepare_uploaded_illustration(uploaded_image)
+            if prepared.get("ok"):
+                st.session_state[image_key] = prepared["image_bytes"]
+                st.session_state[image_meta_key] = {
+                    "mime_type": "image/png",
+                    "file_name": "agency_w_image.png",
+                }
+                st.session_state.pop(video_key, None)
+                st.session_state.pop(video_meta_key, None)
+                st.rerun()
+            else:
+                st.error(str(prepared.get("error") or "Не удалось подготовить картинку."))
+
+    with u2:
+        uploaded_video = st.file_uploader(
+            "🎬 Добавить видео",
+            type=["mp4"],
+            accept_multiple_files=False,
+            key=f"stagirite_general_video_upload_{task_id}",
+        )
+        if uploaded_video is not None and st.button(
+            "✅ Использовать видео",
+            key=f"stagirite_general_video_use_{task_id}",
+            use_container_width=True,
+        ):
+            prepared = _prepare_uploaded_video(uploaded_video)
+            if prepared.get("ok"):
+                st.session_state[video_key] = prepared["video_bytes"]
+                st.session_state[video_meta_key] = {
+                    "mime_type": str(prepared.get("mime_type") or "video/mp4"),
+                    "file_name": str(prepared.get("file_name") or "agency_w_video.mp4"),
+                }
+                st.session_state.pop(image_key, None)
+                st.session_state.pop(image_meta_key, None)
+                st.rerun()
+            else:
+                st.error(str(prepared.get("error") or "Не удалось подготовить видео."))
+
+    current_image = st.session_state.get(image_key)
+    current_video = st.session_state.get(video_key)
+    image_meta = st.session_state.get(image_meta_key, {})
+    video_meta = st.session_state.get(video_meta_key, {})
+    if not isinstance(image_meta, dict):
+        image_meta = {}
+    if not isinstance(video_meta, dict):
+        video_meta = {}
+
+    if current_image:
+        st.image(
+            current_image,
+            caption="К публикации будет добавлена эта картинка",
+            use_container_width=True,
+        )
+    elif current_video:
+        st.video(current_video)
+        st.caption(
+            "К публикации будет добавлено видео: "
+            + str(video_meta.get("file_name") or "ролик.mp4")
+        )
+
+    if current_image or current_video:
+        if st.button(
+            "🧹 Убрать медиа",
+            key=f"stagirite_general_media_clear_{task_id}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(image_key, None)
+            st.session_state.pop(image_meta_key, None)
+            st.session_state.pop(video_key, None)
+            st.session_state.pop(video_meta_key, None)
+            st.rerun()
+
+    recipients = [
+        int(x)
+        for x in structure_member_ids(owner_id)
+        if int(x) != int(owner_id)
+    ]
+    structure_hash = _telegram_publication_hash(
+        clean_text,
+        current_image,
+        recipients,
+        video=current_video,
+    ) if recipients else ""
+    structure_already = bool(
+        structure_hash
+        and str(result.get("general_structure_published_hash") or "")
+        == structure_hash
+    )
+
+    if not recipients:
+        st.caption("Во внутренней структуре пока нет зарегистрированных получателей.")
+    elif structure_already:
+        st.success(
+            "📣 Эта версия уже отправлена партнёрам: "
+            f"{int(result.get('general_structure_published_count') or 0)}."
+        )
+    elif st.button(
+        f"📣 Отправить моим партнёрам ({len(recipients)})",
+        key=f"stagirite_general_publish_structure_{task_id}",
+        use_container_width=True,
+        type="primary",
+        disabled=(
+            (current_video and publish_structure_video is None)
+            or (not current_video and current_image and publish_structure_material is None)
+            or (not current_video and not current_image and publish_structure_message is None)
+        ),
+    ):
+        try:
+            if current_video:
+                published = publish_structure_video(
+                    owner_id,
+                    clean_text,
+                    current_video,
+                    subject="Сообщение Агентства W",
+                    mime_type=str(video_meta.get("mime_type") or "video/mp4"),
+                    file_name=str(video_meta.get("file_name") or "agency_w_video.mp4"),
+                )
+                count = int(published.get("count") or 0)
+            elif current_image:
+                published = publish_structure_material(
+                    owner_id,
+                    clean_text,
+                    image_bytes=current_image,
+                    subject="Сообщение Агентства W",
+                    mime_type=str(image_meta.get("mime_type") or "image/png"),
+                    file_name=str(image_meta.get("file_name") or "agency_w_image.png"),
+                )
+                count = int(published.get("count") or 0)
+            else:
+                count = int(
+                    publish_structure_message(
+                        owner_id,
+                        clean_text,
+                        subject="Сообщение Агентства W",
+                    )
+                    or 0
+                )
+
+            updated = dict(result)
+            updated["general_structure_published_at"] = datetime.now(UTC).isoformat()
+            updated["general_structure_published_hash"] = structure_hash
+            updated["general_structure_published_count"] = count
+            _update_task(owner_id, task_id, {"result": updated})
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                "Не удалось отправить партнёрам. "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    telegram_destinations = []
+    if callable(list_publisher_destinations):
+        try:
+            telegram_destinations = list_publisher_destinations(owner_id)
+        except Exception:
+            telegram_destinations = []
+
+    if not telegram_destinations:
+        st.info(
+            "Для отправки в Telegram-чаты подключите их в разделе "
+            "«Команда → Мои площадки»."
+        )
+        return
+
+    by_id = {
+        int(item.get("chat_id")): item
+        for item in telegram_destinations
+        if item.get("chat_id") is not None
+    }
+    all_ids = list(by_id.keys())
+    selected_ids = st.multiselect(
+        "Куда отправить в Telegram",
+        options=all_ids,
+        default=all_ids,
+        format_func=lambda chat_id: str(
+            by_id.get(chat_id, {}).get("chat_title")
+            or "Telegram-площадка"
+        ),
+        key=f"stagirite_general_destinations_{task_id}",
+    )
+    selected_ids = [int(x) for x in selected_ids]
+
+    telegram_hash = _telegram_publication_hash(
+        clean_text,
+        current_image,
+        selected_ids,
+        video=current_video,
+    ) if selected_ids else ""
+    telegram_already = bool(
+        telegram_hash
+        and str(result.get("general_telegram_published_hash") or "")
+        == telegram_hash
+    )
+
+    if telegram_already:
+        st.success(
+            "📡 Эта версия уже отправлена в Telegram: "
+            f"{int(result.get('general_telegram_published_count') or 0)} площадк(а/и)."
+        )
+    elif st.button(
+        f"📡 Отправить в выбранные Telegram-чаты ({len(selected_ids)})",
+        key=f"stagirite_general_publish_telegram_{task_id}",
+        use_container_width=True,
+        type="primary",
+        disabled=(
+            not selected_ids
+            or publish_to_publisher_destinations is None
+        ),
+    ):
+        try:
+            published = publish_to_publisher_destinations(
+                owner_id,
+                clean_text,
+                image_bytes=current_image,
+                video_bytes=current_video,
+                video_file_name=str(
+                    video_meta.get("file_name")
+                    or "agency_w_video.mp4"
+                ),
+                video_mime_type=str(
+                    video_meta.get("mime_type")
+                    or "video/mp4"
+                ),
+                destination_ids=selected_ids,
+            )
+            accepted = int(published.get("accepted") or 0)
+            updated = dict(result)
+            updated["general_telegram_published_at"] = datetime.now(UTC).isoformat()
+            updated["general_telegram_published_hash"] = telegram_hash
+            updated["general_telegram_published_count"] = accepted
+            updated["general_telegram_publish_results"] = (
+                published.get("results") or []
+            )
+            _update_task(owner_id, task_id, {"result": updated})
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                "Не удалось отправить в Telegram. "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+
 def _render_result(
     task: dict[str, Any],
     owner_id: int,
@@ -7812,6 +8100,11 @@ def _render_result(
                 st.rerun()
         else:
             st.write(general_answer)
+            _render_general_share_tools(
+                task,
+                owner_id,
+                general_answer,
+            )
 
     note = str(result.get("note") or "").strip()
     if note and not result.get("content_error"):
