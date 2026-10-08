@@ -383,7 +383,7 @@ def _process_v3(
         )
 
     # Шутливое «я с роботом общаюсь 😂» тоже требует честного ответа.
-    if _identity_question_v3(text) or v2._identity_question(text):
+    if _identity_question_v3(text):
         return _identity_reply(owner_name, first_name, greet), "idle", True, context
 
     # Всё, что имеет жёсткое правило или прямой мост к Валентине, не отдаём импровизации.
