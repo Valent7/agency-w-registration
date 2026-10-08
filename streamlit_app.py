@@ -5024,6 +5024,8 @@ def prepare_candidates_for_stagirite(
     contacts_key = f"neonia_telegram_contacts_{owner_id}"
     chats_key = f"neonia_telegram_chats_{owner_id}"
     chat_offsets_key = f"neonia_chat_offsets_{owner_id}"
+    daily_source_key = f"neonia_daily_source_mode_{owner_id}"
+    selected_chat_key = f"neonia_selected_source_chat_{owner_id}"
     processed_key = f"neonia_processed_candidates_{owner_id}"
     progress_key = f"neonia_source_progress_{owner_id}"
     selected_key = f"neonia_selected_candidates_{owner_id}"
@@ -5069,12 +5071,20 @@ def prepare_candidates_for_stagirite(
         except (TypeError, ValueError):
             continue
 
+    daily_source = str(
+        st.session_state.get(daily_source_key, "contacts") or "contacts"
+    ).strip().lower()
+    if daily_source not in {"contacts", "chats"}:
+        daily_source = "contacts"
+        st.session_state[daily_source_key] = daily_source
+
     selected_today = []
     today_contact_count = 0
     today_chat_count = 0
 
     # --------------------------------------------------------------
-    # 1. Сначала добираем из личных контактов строго по очереди.
+    # 1. Личные контакты используются, когда владелец выбрал этот источник.
+    #    Если они заканчиваются посреди пятёрки, остаток можно добрать из чатов.
     # --------------------------------------------------------------
     contact_ids = [int(item["telegram_id"]) for item in normalized_contacts]
     remaining_contacts = [
@@ -5083,21 +5093,23 @@ def prepare_candidates_for_stagirite(
         if int(item["telegram_id"]) not in processed_ids
     ]
 
-    for item in remaining_contacts[:desired_count]:
-        candidate = {
-            **item,
-            "_queue_source_type": "telegram_contacts",
-            "_queue_source_name": "Личные контакты Telegram",
-        }
-        selected_today.append(candidate)
-        processed_ids.add(int(item["telegram_id"]))
-        today_contact_count += 1
+    if daily_source == "contacts":
+        for item in remaining_contacts[:desired_count]:
+            candidate = {
+                **item,
+                "_queue_source_type": "telegram_contacts",
+                "_queue_source_name": "Личные контакты Telegram",
+            }
+            selected_today.append(candidate)
+            processed_ids.add(int(item["telegram_id"]))
+            today_contact_count += 1
 
     need = max(0, desired_count - len(selected_today))
 
     # --------------------------------------------------------------
-    # 2. Когда личные контакты закончились (или осталось <5), добираем
-    #    из чатов. Один чат идёт до конца, потом следующий.
+    # 2. Если выбран режим чатов — берём пятёрку сразу из чатов.
+    #    В режиме личных контактов чат служит только добором после их исчерпания.
+    #    Один чат идёт до конца, затем следующий.
     # --------------------------------------------------------------
     progress_state = st.session_state.get(progress_key, {})
     if not isinstance(progress_state, dict):
@@ -5153,6 +5165,25 @@ def prepare_candidates_for_stagirite(
             continue
         seen_chat_ids.add(chat_id)
         eligible_chats.append({**chat, "chat_id": chat_id})
+
+    selected_source_chat = st.session_state.get(selected_chat_key)
+    try:
+        selected_source_chat = (
+            int(selected_source_chat)
+            if selected_source_chat not in (None, "")
+            else None
+        )
+    except (TypeError, ValueError):
+        selected_source_chat = None
+
+    # Выбранный владельцем чат имеет приоритет. После его завершения Неония
+    # продолжает по остальным доступным группам без повторов.
+    if selected_source_chat is not None:
+        eligible_chats.sort(
+            key=lambda chat: (
+                0 if int(chat["chat_id"]) == selected_source_chat else 1
+            )
+        )
 
     chat_by_id = {
         int(chat["chat_id"]): chat
@@ -5381,14 +5412,15 @@ def prepare_candidates_for_stagirite(
         for chat in eligible_chats
     )
 
-    if contacts_remaining > 0:
+    if daily_source == "contacts" and contacts_remaining > 0:
         progress = {
+            "source_mode": "contacts",
             "source_type": "telegram_contacts",
             "source_name": "Личные контакты Telegram",
             "total": len(contact_ids),
             "processed": processed_in_contacts,
             "remaining": contacts_remaining,
-            "today": len(selected_today),
+            "today": today_contact_count,
         }
     else:
         active_chat = next_chat_after(current_chat_id)
@@ -5407,6 +5439,7 @@ def prepare_candidates_for_stagirite(
             technical = int(stats.get("technical_skipped") or 0)
             remaining = max(0, total - shown - dupes - technical)
             progress = {
+                "source_mode": "chats",
                 "source_type": "telegram_chat",
                 "source_name": (
                     "Telegram-чат: "
@@ -5420,14 +5453,31 @@ def prepare_candidates_for_stagirite(
                 "duplicates_skipped": dupes,
                 "technical_skipped": technical,
             }
+        elif eligible_chats:
+            progress = {
+                "source_mode": "chats",
+                "source_type": "telegram_complete",
+                "source_name": "Telegram-чаты — первый проход завершён",
+                "total": sum(
+                    int(chat.get("participants_count") or 0)
+                    for chat in eligible_chats
+                ),
+                "processed": sum(
+                    int((chat_stats.get(str(int(chat["chat_id"]))) or {}).get("shown") or 0)
+                    for chat in eligible_chats
+                ),
+                "remaining": 0,
+                "today": today_chat_count,
+            }
         else:
             progress = {
-                "source_type": "telegram_complete",
-                "source_name": "Telegram — первый проход завершён",
-                "total": len(contact_ids),
-                "processed": len(processed_ids),
+                "source_mode": daily_source,
+                "source_type": "telegram_chats_empty",
+                "source_name": "Telegram-чаты",
+                "total": 0,
+                "processed": 0,
                 "remaining": 0,
-                "today": len(selected_today),
+                "today": today_chat_count,
             }
 
     progress.update(
@@ -5436,6 +5486,8 @@ def prepare_candidates_for_stagirite(
             "contacts_processed": processed_in_contacts,
             "contacts_remaining": contacts_remaining,
             "contacts_exhausted": contacts_remaining == 0,
+            "daily_source_mode": daily_source,
+            "selected_source_chat": selected_source_chat,
             "current_chat_id": current_chat_id,
             "completed_chat_ids": sorted(completed_chat_ids),
             "chat_stats": chat_stats,
@@ -5448,7 +5500,7 @@ def prepare_candidates_for_stagirite(
     st.session_state[progress_key] = progress
 
     reserve_ids = []
-    if contacts_remaining > 0:
+    if daily_source == "contacts" and contacts_remaining > 0:
         remaining_after_today = [
             int(item["telegram_id"])
             for item in normalized_contacts
@@ -5475,18 +5527,20 @@ def prepare_candidates_for_stagirite(
                 f"Сегодня выданы следующие {today_contact_count} новых личных "
                 "Telegram-контактов."
             )
-    elif contacts_remaining == 0 and all_chats_completed:
+    elif daily_source == "chats" and not eligible_chats:
         message = (
-            "Первый проход Telegram завершён: личные контакты и доступные "
-            "участники всех Telegram-чатов отработаны."
+            "Выбран поиск из Telegram-чатов, но список групп ещё не загружен. "
+            "Откройте Неония → Поиск чатов."
         )
-    elif contacts_remaining == 0 and not eligible_chats:
+    elif daily_source == "chats" and all_chats_completed:
+        message = "Первый проход по доступным Telegram-чатам завершён."
+    elif daily_source == "contacts" and contacts_remaining == 0 and not eligible_chats:
         message = (
             "Личные Telegram-контакты закончились. Доступных групп для "
             "следующего этапа пока нет."
         )
     else:
-        message = "Сегодня новых доступных людей в очереди не найдено."
+        message = "Сегодня новых доступных людей в выбранном источнике не найдено."
 
     return {
         "ok": True,
@@ -5498,9 +5552,10 @@ def prepare_candidates_for_stagirite(
         "available_reserve": len(reserve_ids),
         "checked_detail": len(selected_today),
         "exhausted": (
-            contacts_remaining == 0
-            and (all_chats_completed or not eligible_chats)
+            (daily_source == "contacts" and contacts_remaining == 0 and (all_chats_completed or not eligible_chats))
+            or (daily_source == "chats" and (all_chats_completed or not eligible_chats))
         ),
+        "source_mode": daily_source,
         "message": message,
         "progress": progress,
     }
