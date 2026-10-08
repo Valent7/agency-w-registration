@@ -3153,8 +3153,44 @@ def _render_item(
             )
 
             st.caption(
-                "Если озвучка обрезалась или вы хотите перезаписать голос, "
-                "сцены OpenAI и Runway останутся прежними."
+                "Если финальный MP4 обрезал последние слова, сначала пересоберите "
+                "его без новой озвучки. Сцены OpenAI и Runway останутся прежними."
+            )
+
+            if narration_video and runway_tasks and st.button(
+                "🛠 Пересобрать текущий Reels без новой озвучки",
+                key=prefix + "_reassemble_existing",
+                use_container_width=True,
+            ):
+                try:
+                    with st.spinner(
+                        "Пересобираем MP4 из уже готового голоса и существующих Runway-сцен..."
+                    ):
+                        runway_result = _check_runway_scenes(runway_tasks)
+                        if runway_result.get("pending"):
+                            raise RuntimeError(
+                                "Одна из Runway-сцен ещё не готова. Попробуйте чуть позже."
+                            )
+                        live_clips = _download_runway_videos(
+                            runway_result.get("video_urls") or []
+                        )
+                        reel_state["final_video"] = _assemble_animated_reel(
+                            live_clips,
+                            narration_video,
+                            reel_state.get("spoken_text") or "",
+                            item.get("cta") or "",
+                        )
+                        reel_state["status"] = "ready"
+                        reel_state.pop("error", None)
+                        st.session_state[reel_state_key] = reel_state
+                    st.success("✅ Reels пересобран без новой озвучки и без новых Runway-сцен.")
+                    st.rerun()
+                except (requests.RequestException, RuntimeError, OSError) as exc:
+                    st.error("Не удалось пересобрать Reels: " + str(exc))
+
+            st.caption(
+                "Если сама запись Неоны уже обрезана, тогда используйте кнопку ниже: "
+                "перезапишется только голос, сцены останутся прежними."
             )
             if st.button(
                 "🔊 Перезаписать голос и пересобрать Reels",
