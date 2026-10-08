@@ -2499,6 +2499,51 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 if retry_message is not None:
                     new_messages = [retry_message]
 
+            failed_id = int(
+                state_context.get("last_processing_failed_id") or 0
+            )
+            failed_error = str(
+                state_context.get("last_processing_error") or ""
+            )
+            recovered_once = int(
+                state_context.get("fixed_code_retry_id") or 0
+            )
+            if (
+                not new_messages
+                and failed_id
+                and failed_id == last_id
+                and recovered_once != failed_id
+                and failed_error.startswith(
+                    "AttributeError: module 'neona_dialog_policy'"
+                )
+            ):
+                attempts = (
+                    dict(state_context.get("message_processing_attempts"))
+                    if isinstance(
+                        state_context.get("message_processing_attempts"),
+                        dict,
+                    )
+                    else {}
+                )
+                attempts.pop(str(failed_id), None)
+                state_context = {
+                    **state_context,
+                    "message_processing_attempts": attempts,
+                    "fixed_code_retry_id": failed_id,
+                    "fixed_code_retry_at": datetime.now(UTC).isoformat(),
+                }
+                recovery_message = next(
+                    (
+                        message
+                        for message in recent
+                        if not bool(getattr(message, "out", False))
+                        and int(message.id) == failed_id
+                    ),
+                    None,
+                )
+                if recovery_message is not None:
+                    new_messages = [recovery_message]
+
             if diag_this_run:
                 print(
                     f"[NeonaDiag] owner={int(owner_id)} contact={contact_id} "
