@@ -39,4 +39,8 @@ if __name__ == "__main__":
             daemon=True,
         ).start()
 
-    neona_worker_forever(int(os.getenv("NEONA_POLL_SECONDS", "30")))
+    # Не возвращать частый опрос Telegram: он уже приводил к лишним запросам,
+    # расходам и FloodWait. Даже если в окружении случайно осталось старое
+    # значение 15/30 секунд, ниже действует безопасный минимум 120 секунд.
+    requested_poll = int(os.getenv("NEONA_POLL_SECONDS", "300"))
+    neona_worker_forever(max(120, requested_poll))
