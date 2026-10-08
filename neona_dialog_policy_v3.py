@@ -45,6 +45,23 @@ def _load_personality() -> str:
         return _DEFAULT_PERSONALITY
 
 
+def _owner_forms(owner_name: str) -> dict[str, str]:
+    return legacy._owner_forms(owner_name)
+
+
+def _personalize_owner_text(value: str, owner_name: str) -> str:
+    forms = _owner_forms(owner_name)
+    text = str(value or "")
+    # Важно заменять падежные формы раньше именительного.
+    for old, new in (
+        ("Валентиной", forms["instrumental"]),
+        ("Валентины", forms["genitive"]),
+        ("Валентина", forms["nominative"]),
+    ):
+        text = text.replace(old, new)
+    return text
+
+
 def _model_candidates() -> list[str]:
     """Качество по умолчанию, но с мягким fallback без поломки диалогов."""
     requested = str(os.getenv("NEONA_DIALOG_MODEL") or "gpt-6.1-sol").strip()
@@ -148,11 +165,13 @@ def _identity_question_v3(text: str) -> bool:
     )
 
 
-def _identity_reply(first_name: str, greet: bool) -> str:
+def _identity_reply(owner_name: str, first_name: str, greet: bool) -> str:
     prefix = f"{core._greeting(first_name)} " if greet else ""
+    forms = _owner_forms(owner_name)
     return (
         prefix
-        + "Да, вы меня раскусили 😄 Я искусственный интеллект, секретарь-референт Валентины. "
+        + f"Да, вы меня раскусили 😄 Я искусственный интеллект, "
+          f"секретарь-референт {forms['genitive']}. "
           "Стараюсь быть полезной без лишнего шума — и кофе, к счастью, не требую."
     )
 
@@ -171,7 +190,8 @@ def _hard_case(text: str, context: dict) -> bool:
 
 def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet: bool) -> str:
     history = legacy._dialog_context_block(context, max_turns=12)
-    personality = _load_personality()
+    forms = _owner_forms(owner_name)
+    personality = _personalize_owner_text(_load_personality(), owner_name)
     greeting_rule = (
         f"Это первое сообщение в текущем диалоге. Можно начать с «{core._greeting(first_name)}»."
         if greet
@@ -179,7 +199,7 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
     )
 
     return f"""
-Ты Неона — секретарь-референт Валентины в Агентстве W.
+Ты Неона — секретарь-референт {forms['genitive']} в Агентстве W.
 
 ТВОЙ ХАРАКТЕР И МАНЕРА:
 {personality}
@@ -197,9 +217,9 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 
 ДЕЛОВОЙ КОМПАС:
 Агентству W нужны партнёры и клиенты, но человека нельзя тянуть к встрече механически.
-Твоя задача — сделать разговор с Валентиной естественным продолжением реального интереса.
+Твоя задача — сделать разговор с {forms['instrumental']} естественным продолжением реального интереса.
 Важная линия: бизнес → люди → время → ценность освобождённого времени → автоматизация →
-согласие поговорить с Валентиной.
+согласие поговорить с {forms['instrumental']}.
 
 ЕСЛИ ЧЕЛОВЕК ЗАНИМАЕТСЯ БИЗНЕСОМ:
 Не устраивай анкету. Разумно подведи к теме времени:
@@ -220,7 +240,7 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 Ты НЕ имеешь права показывать время календаря в свободном диалоге.
 Интерес к Агентству или автоматизации ещё НЕ означает согласия на встречу.
 Если по смыслу уже естественно предложить встречу, action должен быть "ask_meeting_consent",
-а reply должен спросить, хочет ли человек поговорить с Валентиной.
+а reply должен спросить, хочет ли человек поговорить с {forms['instrumental']}.
 Только программная календарная ветка после явного согласия покажет свободное время.
 
 ЖЁСТКИЕ ГРАНИЦЫ:
@@ -250,7 +270,7 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 
 action:
 - continue — обычный живой разговор;
-- ask_meeting_consent — человек уже достаточно заинтересован, естественно спросить про разговор с Валентиной;
+- ask_meeting_consent — человек уже достаточно заинтересован, естественно спросить про разговор с {forms['instrumental']};
 - close_gently — разговор естественно завершён, но человек НЕ просил запретить контакт.
 
 Никогда не показывай человеку поле why и внутренний анализ.
@@ -258,8 +278,9 @@ action:
 
 
 def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str) -> str:
+    forms = _owner_forms(owner_name)
     instructions = f"""
-Ты редактор одной реплики Неоны — секретаря-референта Валентины.
+Ты редактор одной реплики Неоны — секретаря-референта {forms['genitive']}.
 Исправь только указанную ошибку, сохрани смысл и естественный тон.
 Не добавляй новых фактов, встречи, времени или советов.
 1–3 коротких предложения.
@@ -310,15 +331,21 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
 
     # Если модель решила предложить встречу, формулировка должна быть именно просьбой о согласии.
     if action == "ask_meeting_consent":
-        if not (
-            "валентин" in reply.casefold()
-            and ("встреч" in reply.casefold() or "поговор" in reply.casefold() or "созвон" in reply.casefold())
-            and "?" in reply
-        ):
+        forms = _owner_forms(owner_name)
+        owner_variants = {
+            forms["nominative"].casefold(),
+            forms["genitive"].casefold(),
+            forms["instrumental"].casefold(),
+        }
+        owner_mentioned = any(value and value in reply.casefold() for value in owner_variants)
+        meeting_mentioned = any(
+            word in reply.casefold() for word in ("встреч", "поговор", "созвон")
+        )
+        if not (owner_mentioned and meeting_mentioned and "?" in reply):
             reply = reply.rstrip(" .")
             if reply:
                 reply += ". "
-            reply += "Хотите, я организую вам встречу с Валентиной?"
+            reply += f"Хотите, я организую вам встречу с {forms['instrumental']}?"
 
     return {"reply": reply, "action": action, "why": why}
 
@@ -353,7 +380,7 @@ def _process_v3(
 
     # Шутливое «я с роботом общаюсь 😂» тоже требует честного ответа.
     if _identity_question_v3(text) or v2._identity_question(text):
-        return _identity_reply(first_name, greet), "idle", True, context
+        return _identity_reply(owner_name, first_name, greet), "idle", True, context
 
     # Всё, что имеет жёсткое правило или прямой мост к Валентине, не отдаём импровизации.
     if _hard_case(text, context):
