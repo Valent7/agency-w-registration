@@ -4050,7 +4050,10 @@ def _execute_general_director_task(
   Теста миссии W и дай короткую рекомендацию;
 - не добавляй свои веса, проценты, KPI, юридические чек-листы, планы отката, kill switch,
   execution_mode и другие внутренние технические процедуры, если Директор прямо их не запросил;
-- ответ Директору должен быть настолько коротким, насколько позволяет задача.
+- ответ Директору должен быть настолько коротким, насколько позволяет задача;
+- если Директор просит вопросы к посту, рефлексию или вопросы для команды, дай только 3–5 коротких живых вопросов, на которые хочется ответить;
+- не дели такие вопросы на категории и не добавляй технические проверки, SLA, поля данных, роли, права доступа и другие внутренние детали, если Директор прямо этого не просил;
+- каждый вопрос для команды должен быть понятен без знания внутреннего устройства Агентства и помещаться максимум в 1–2 короткие строки.
 
 Верни только готовый результат для Директора.
 """.strip()
@@ -7755,7 +7758,60 @@ def _render_result(
     ).strip()
     if general_answer:
         st.markdown("### 🧭 Решение Стагирита")
-        st.write(general_answer)
+        generic_task_id = str(
+            task.get("id")
+            or task.get("created_at")
+            or "general"
+        )
+        generic_edit_flag = (
+            f"stagirite_edit_general_{generic_task_id}"
+        )
+        generic_draft_key = (
+            f"stagirite_general_draft_{generic_task_id}"
+        )
+
+        if st.session_state.get(generic_edit_flag):
+            if generic_draft_key not in st.session_state:
+                st.session_state[generic_draft_key] = general_answer
+
+            edited_general_answer = st.text_area(
+                "Отредактируйте результат",
+                key=generic_draft_key,
+                height=320,
+            )
+            e1, e2 = st.columns(2)
+            if e1.button(
+                "💾 Сохранить правки",
+                key=f"stagirite_save_general_{generic_task_id}",
+                use_container_width=True,
+                type="primary",
+            ):
+                updated = dict(result)
+                updated["general_answer"] = str(
+                    edited_general_answer
+                ).strip()
+                _update_task(
+                    owner_id,
+                    generic_task_id,
+                    {
+                        "result": updated,
+                        "status": "Нужно решение владельца",
+                    },
+                )
+                st.session_state.pop(generic_edit_flag, None)
+                st.session_state.pop(generic_draft_key, None)
+                st.rerun()
+
+            if e2.button(
+                "Отмена",
+                key=f"stagirite_cancel_general_{generic_task_id}",
+                use_container_width=True,
+            ):
+                st.session_state.pop(generic_edit_flag, None)
+                st.session_state.pop(generic_draft_key, None)
+                st.rerun()
+        else:
+            st.write(general_answer)
 
     note = str(result.get("note") or "").strip()
     if note and not result.get("content_error"):
@@ -8017,21 +8073,74 @@ def render_stagirite_center(
             and not is_content_task
             and status in {"Готово к утверждению", "Нужно решение владельца"}
         ):
-            c1, c2 = st.columns(2)
+            c1, c2, c3, c4 = st.columns(4)
+
             if c1.button(
+                "✏️ Редактировать",
+                key=f"stagirite_edit_{task_id}",
+                use_container_width=True,
+            ):
+                st.session_state[
+                    f"stagirite_edit_general_{task_id}"
+                ] = True
+                st.rerun()
+
+            delete_flag_key = f"stagirite_delete_general_confirm_{task_id}"
+            if c2.button(
+                "🗑 Удалить",
+                key=f"stagirite_delete_general_{task_id}",
+                use_container_width=True,
+            ):
+                st.session_state[delete_flag_key] = True
+                st.rerun()
+
+            if c3.button(
                 "✅ Утвердить",
                 key=f"stagirite_approve_{task_id}",
                 use_container_width=True,
             ):
                 _update_task(owner_id, task_id, {"status": "Утверждено"})
                 st.rerun()
-            if c2.button(
-                "✅ Считать выполненным",
+
+            if c4.button(
+                "✅ Выполнено",
                 key=f"stagirite_done_{task_id}",
                 use_container_width=True,
             ):
                 _update_task(owner_id, task_id, {"status": "Выполнено"})
                 st.rerun()
+
+            if st.session_state.get(delete_flag_key):
+                st.warning(
+                    "Удалить это поручение и его результат? "
+                    "Оно исчезнет из текущей работы Стагирита."
+                )
+                d1, d2 = st.columns(2)
+                if d1.button(
+                    "Да, удалить",
+                    key=f"stagirite_delete_general_yes_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    _delete_task(owner_id, task_id)
+                    st.session_state.pop(delete_flag_key, None)
+                    st.session_state.pop(
+                        f"stagirite_edit_general_{task_id}",
+                        None,
+                    )
+                    st.session_state.pop(
+                        f"stagirite_general_draft_{task_id}",
+                        None,
+                    )
+                    st.rerun()
+
+                if d2.button(
+                    "Отмена",
+                    key=f"stagirite_delete_general_no_{task_id}",
+                    use_container_width=True,
+                ):
+                    st.session_state.pop(delete_flag_key, None)
+                    st.rerun()
 
     previous = visible_tasks[1:]
     if previous:
