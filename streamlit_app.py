@@ -8406,6 +8406,7 @@ if telegram_login_valid or remembered_data:
                         "🌿 Stories Telegram",
                         "📸 Instagram Radar",
                         "🔎 Поиск чатов",
+                        "👥 Поиск контактов из чата",
                         "👥 Поиск контактов",
                     ]
                     if talkback_mode:
@@ -8415,6 +8416,7 @@ if telegram_login_valid or remembered_data:
                             "🌿 Stories Telegram": "Stories Telegram",
                             "📸 Instagram Radar": "Instagram Radar",
                             "🔎 Поиск чатов": "Поиск чатов",
+                            "👥 Поиск контактов из чата": "Поиск контактов из чата",
                             "👥 Поиск контактов": "Поиск контактов",
                         }
                         neonia_mode = st.radio(
@@ -8453,9 +8455,10 @@ if telegram_login_valid or remembered_data:
                             "отрабатывать доступных участников этих чатов "
                             "последовательно, по 5 новых человек в день."
                         ),
-                        "🎯 Поиск контактов в чатах по ЦА": (
-                            "Здесь Неония выбирает найденную группу, получает "
-                            "доступных участников и сравнивает их с паспортом ЦА."
+                        "👥 Поиск контактов из чата": (
+                            "Выберите Telegram-группу, из которой Неония должна "
+                            "брать по 5 новых людей в ежедневную пятёрку. "
+                            "Повторов с личными контактами и другими чатами не будет."
                         ),
                         "👥 Поиск контактов": (
                             "Здесь можно получить или вручную обновить исходный "
@@ -8682,66 +8685,81 @@ if telegram_login_valid or remembered_data:
                                     "групп или каналов."
                                 )
 
-                        elif neonia_mode == "🎯 Поиск контактов в чатах по ЦА":
-                            passport_key = (
-                                f"neonia_target_audience_passport_{telegram_id}"
-                            )
+                        elif neonia_mode == "👥 Поиск контактов из чата":
                             chats_state_key = (
                                 f"neonia_telegram_chats_{telegram_id}"
+                            )
+                            chats_search_done_key = (
+                                f"neonia_chats_search_done_{telegram_id}"
                             )
                             selected_chat_key = (
                                 f"neonia_selected_source_chat_{telegram_id}"
                             )
-                            members_map_key = (
-                                f"neonia_chat_members_{telegram_id}"
+                            source_mode_key = (
+                                f"neonia_daily_source_mode_{telegram_id}"
                             )
-                            chat_candidates_map_key = (
-                                f"neonia_chat_candidates_{telegram_id}"
+                            progress_key = (
+                                f"neonia_source_progress_{telegram_id}"
                             )
-                            chat_offsets_map_key = (
-                                f"neonia_chat_offsets_{telegram_id}"
+                            processed_key = (
+                                f"neonia_processed_candidates_{telegram_id}"
                             )
-                            global_candidates_key = (
-                                f"neonia_candidates_{telegram_id}"
-                            )
-                            selected_candidates_key = (
-                                f"neonia_selected_candidates_{telegram_id}"
-                            )
-                            owner_contacts_key = (
-                                f"neonia_owner_known_contacts_{telegram_id}"
-                            )
-
-                            passport = st.session_state.get(passport_key)
-                            if isinstance(passport, dict):
-                                profile_for_search = passport.get("profile")
-                                if not (
-                                    passport.get("schema_version") == 2
-                                    and isinstance(profile_for_search, dict)
-                                    and profile_for_search.get("portrait")
-                                ):
-                                    passport = None
 
                             chats = st.session_state.get(
                                 chats_state_key,
                                 [],
                             )
+                            if not isinstance(chats, list):
+                                chats = []
+
+                            if not chats:
+                                if st.button(
+                                    "🔎 Загрузить мои Telegram-чаты",
+                                    type="primary",
+                                    key=(
+                                        "neonia_load_chats_for_daily_"
+                                        f"{telegram_id}"
+                                    ),
+                                ):
+                                    with st.spinner(
+                                        "Неония получает список Telegram-групп..."
+                                    ):
+                                        try:
+                                            chats = run_telegram_async(
+                                                fetch_telegram_chats(
+                                                    telegram_id
+                                                )
+                                            )
+                                            st.session_state[
+                                                chats_state_key
+                                            ] = chats
+                                            st.session_state[
+                                                chats_search_done_key
+                                            ] = True
+                                            persist_workspace_if_changed(
+                                                telegram_id,
+                                                force=True,
+                                            )
+                                            st.rerun()
+                                        except Exception as exc:
+                                            st.error(
+                                                "Не удалось получить чаты: "
+                                                f"{exc}"
+                                            )
+
                             eligible_chats = [
                                 chat
                                 for chat in chats
-                                if chat.get("type")
+                                if isinstance(chat, dict)
+                                and chat.get("type")
                                 in {"Группа", "Супергруппа"}
                             ]
 
-                            if not passport:
-                                st.warning(
-                                    "Сначала откройте «Определить мою целевую аудиторию» "
-                                    "и создайте паспорт целевой аудитории."
-                                )
-                            elif not eligible_chats:
-                                st.warning(
-                                    "Сначала откройте «Поиск чатов» и загрузите "
-                                    "Telegram-группы. Каналы на этом этапе не "
-                                    "используются, потому что нужен список людей."
+                            if not eligible_chats:
+                                st.info(
+                                    "Сначала загрузите доступные Telegram-группы. "
+                                    "Каналы не подходят: для ежедневной пятёрки "
+                                    "нужен доступ к списку участников."
                                 )
                             else:
                                 chat_by_id = {
@@ -8757,700 +8775,185 @@ if telegram_login_valid or remembered_data:
                                 except (TypeError, ValueError):
                                     saved_chat_id = None
 
-                                default_index = 0
-                                if saved_chat_id in chat_ids:
-                                    default_index = chat_ids.index(
-                                        saved_chat_id
-                                    )
-
+                                default_index = (
+                                    chat_ids.index(saved_chat_id)
+                                    if saved_chat_id in chat_ids
+                                    else 0
+                                )
                                 selected_chat_id = st.selectbox(
-                                    "Выберите чат для поиска контактов",
+                                    "Из какого чата брать ежедневную пятёрку",
                                     chat_ids,
                                     index=default_index,
                                     format_func=lambda value: (
-                                        f"{chat_by_id[value]['title']} · "
-                                        f"{chat_by_id[value]['type']} · "
+                                        f"{chat_by_id[value].get('title') or 'Без названия'} · "
                                         f"{chat_by_id[value].get('participants_count') or '—'} участников"
                                     ),
                                     key=(
-                                        "neonia_target_chat_select_"
+                                        "neonia_daily_chat_select_"
                                         f"{telegram_id}"
                                     ),
                                 )
                                 selected_chat = chat_by_id[
                                     int(selected_chat_id)
                                 ]
-                                st.session_state[selected_chat_key] = int(
-                                    selected_chat_id
-                                )
 
-                                st.caption(
-                                    "Неония использует только доступные Telegram-профили "
-                                    "и публичные сообщения в выбранной группе. Личная "
-                                    "переписка и номера телефонов не анализируются."
-                                )
-
-                                pass_limit = st.selectbox(
-                                    "Сколько доступных участников проверить на первом проходе",
-                                    [100, 200, 500],
-                                    index=1,
-                                    key=(
-                                        "neonia_chat_members_limit_"
-                                        f"{telegram_id}_{selected_chat_id}"
-                                    ),
-                                )
-
-                                members_map = st.session_state.get(
-                                    members_map_key,
-                                    {},
-                                )
-                                if not isinstance(members_map, dict):
-                                    members_map = {}
-
-                                chat_candidates_map = st.session_state.get(
-                                    chat_candidates_map_key,
-                                    {},
-                                )
-                                if not isinstance(chat_candidates_map, dict):
-                                    chat_candidates_map = {}
-
-                                chat_offsets_map = st.session_state.get(
-                                    chat_offsets_map_key,
-                                    {},
-                                )
-                                if not isinstance(chat_offsets_map, dict):
-                                    chat_offsets_map = {}
-
-                                chat_map_id = str(int(selected_chat_id))
-                                members = members_map.get(
-                                    chat_map_id,
-                                    [],
-                                )
-                                candidate_results = chat_candidates_map.get(
-                                    chat_map_id,
-                                    [],
-                                )
-                                try:
-                                    current_offset = int(
-                                        chat_offsets_map.get(
-                                            chat_map_id,
-                                            0,
-                                        )
-                                        or 0
+                                current_mode = str(
+                                    st.session_state.get(
+                                        source_mode_key,
+                                        "contacts",
                                     )
-                                except (TypeError, ValueError):
-                                    current_offset = 0
+                                    or "contacts"
+                                )
+                                if current_mode == "chats":
+                                    st.success(
+                                        "Сейчас источник ежедневной пятёрки: "
+                                        "Telegram-чаты."
+                                    )
+                                else:
+                                    st.caption(
+                                        "Сейчас источник ежедневной пятёрки: "
+                                        "личные Telegram-контакты."
+                                    )
 
-                                load_members = st.button(
-                                    "👥 Загрузить участников выбранного чата",
+                                progress = st.session_state.get(
+                                    progress_key,
+                                    {},
+                                )
+                                if not isinstance(progress, dict):
+                                    progress = {}
+                                chat_stats = progress.get(
+                                    "chat_stats",
+                                    {},
+                                )
+                                if not isinstance(chat_stats, dict):
+                                    chat_stats = {}
+                                selected_stats = chat_stats.get(
+                                    str(int(selected_chat_id)),
+                                    {},
+                                )
+                                if not isinstance(selected_stats, dict):
+                                    selected_stats = {}
+
+                                total_chat = int(
+                                    selected_chat.get(
+                                        "participants_count"
+                                    )
+                                    or selected_stats.get("total")
+                                    or 0
+                                )
+                                shown_chat = int(
+                                    selected_stats.get("shown") or 0
+                                )
+                                duplicate_chat = int(
+                                    selected_stats.get(
+                                        "duplicates_skipped"
+                                    )
+                                    or 0
+                                )
+                                technical_chat = int(
+                                    selected_stats.get(
+                                        "technical_skipped"
+                                    )
+                                    or 0
+                                )
+                                remaining_chat = max(
+                                    0,
+                                    total_chat
+                                    - shown_chat
+                                    - duplicate_chat
+                                    - technical_chat,
+                                )
+
+                                m1, m2, m3 = st.columns(3)
+                                m1.metric(
+                                    "Всего в чате",
+                                    total_chat,
+                                )
+                                m2.metric(
+                                    "Уже выдано Неонией",
+                                    shown_chat,
+                                )
+                                m3.metric(
+                                    "Осталось",
+                                    remaining_chat,
+                                )
+                                if duplicate_chat or technical_chat:
+                                    st.caption(
+                                        f"Пропущено повторов: {duplicate_chat} · "
+                                        f"технически недоступных: {technical_chat}."
+                                    )
+
+                                activate_chat = st.button(
+                                    "✅ Каждое утро брать 5 из этого чата",
                                     type="primary",
                                     key=(
-                                        "neonia_load_chat_members_"
+                                        "neonia_activate_daily_chat_"
                                         f"{telegram_id}_{selected_chat_id}"
                                     ),
                                 )
+                                if activate_chat:
+                                    st.session_state[
+                                        selected_chat_key
+                                    ] = int(selected_chat_id)
+                                    st.session_state[
+                                        source_mode_key
+                                    ] = "chats"
 
-                                if load_members:
-                                    with st.spinner(
-                                        "Неония получает доступных участников чата..."
-                                    ):
-                                        try:
-                                            members = run_telegram_async(
-                                                fetch_telegram_chat_members(
-                                                    telegram_id,
-                                                    selected_chat,
-                                                    limit=pass_limit,
-                                                )
-                                            )
-                                            members_map[chat_map_id] = members
-                                            chat_candidates_map[chat_map_id] = []
-                                            chat_offsets_map[chat_map_id] = 0
-                                            candidate_results = []
-                                            current_offset = 0
-
-                                            st.session_state[
-                                                members_map_key
-                                            ] = members_map
-                                            st.session_state[
-                                                chat_candidates_map_key
-                                            ] = chat_candidates_map
-                                            st.session_state[
-                                                chat_offsets_map_key
-                                            ] = chat_offsets_map
-
-                                            persist_workspace_if_changed(
-                                                telegram_id,
-                                                force=True,
-                                            )
-
-                                            if members:
-                                                st.success(
-                                                    f"Получено участников для проверки: "
-                                                    f"{len(members)}."
-                                                )
-                                            else:
-                                                st.info(
-                                                    "Telegram не вернул доступных "
-                                                    "участников этого чата."
-                                                )
-
-                                        except Exception as exc:
-                                            st.error(
-                                                "Не удалось получить участников: "
-                                                f"{exc}"
-                                            )
-
-                                if members:
-                                    analyzed_count = min(
-                                        current_offset,
-                                        len(members),
+                                    progress = st.session_state.get(
+                                        progress_key,
+                                        {},
                                     )
-                                    recommended_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get("recommendation")
-                                        == "Передать Неоне"
+                                    if not isinstance(progress, dict):
+                                        progress = {}
+                                    progress[
+                                        "preferred_source_mode"
+                                    ] = "chats"
+                                    progress[
+                                        "preferred_chat_id"
+                                    ] = int(selected_chat_id)
+                                    progress[
+                                        "preferred_chat_title"
+                                    ] = str(
+                                        selected_chat.get("title")
+                                        or "Без названия"
                                     )
-                                    more_data_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get("recommendation")
-                                        == "Нужно больше данных"
+                                    st.session_state[
+                                        progress_key
+                                    ] = progress
+                                    persist_workspace_if_changed(
+                                        telegram_id,
+                                        force=True,
                                     )
-                                    not_fit_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get("recommendation")
-                                        == "Пока не подходит"
+                                    st.success(
+                                        "Готово. Следующая новая ежедневная "
+                                        "пятёрка будет собрана из выбранного чата. "
+                                        "Сегодняшняя уже готовая пятёрка не меняется."
                                     )
 
-                                    metric_columns = st.columns(4)
-                                    metric_columns[0].metric(
-                                        "Загружено",
-                                        len(members),
+                                if st.button(
+                                    "📇 Вернуться к личным контактам",
+                                    key=(
+                                        "neonia_activate_daily_contacts_"
+                                        f"{telegram_id}"
+                                    ),
+                                ):
+                                    st.session_state[
+                                        source_mode_key
+                                    ] = "contacts"
+                                    persist_workspace_if_changed(
+                                        telegram_id,
+                                        force=True,
                                     )
-                                    metric_columns[1].metric(
-                                        "Проанализировано",
-                                        analyzed_count,
-                                    )
-                                    metric_columns[2].metric(
-                                        "Соответствует ЦА",
-                                        recommended_count,
-                                    )
-                                    metric_columns[3].metric(
-                                        "Недостаточно данных",
-                                        more_data_count,
-                                    )
-
-                                    if analyzed_count < len(members):
-                                        button_label = (
-                                            "🧠 Начать поиск по критериям ЦА"
-                                            if analyzed_count == 0
-                                            else "🧠 Проверить следующие 10 участников"
-                                        )
-                                        analyze_members = st.button(
-                                            button_label,
-                                            type="primary",
-                                            key=(
-                                                "neonia_analyze_chat_members_"
-                                                f"{telegram_id}_{selected_chat_id}_"
-                                                f"{current_offset}"
-                                            ),
-                                        )
-                                    else:
-                                        analyze_members = False
-                                        st.success(
-                                            "Все загруженные участники проверены."
-                                        )
-
-                                    if analyze_members:
-                                        batch = members[
-                                            current_offset:
-                                            current_offset + 10
-                                        ]
-                                        with st.spinner(
-                                            "Неония изучает профили и публичные "
-                                            "сообщения, затем сравнивает людей "
-                                            "с паспортом ЦА..."
-                                        ):
-                                            try:
-                                                member_contexts = (
-                                                    run_telegram_async(
-                                                        fetch_chat_member_contexts(
-                                                            telegram_id,
-                                                            selected_chat,
-                                                            batch,
-                                                        )
-                                                    )
-                                                )
-                                                batch_results = (
-                                                    analyze_chat_members_for_target_audience(
-                                                        passport["analysis"],
-                                                        member_contexts,
-                                                    )
-                                                )
-                                                candidate_results = (
-                                                    merge_candidate_results(
-                                                        candidate_results,
-                                                        batch_results,
-                                                    )
-                                                )
-                                                current_offset += len(batch)
-
-                                                chat_candidates_map[
-                                                    chat_map_id
-                                                ] = candidate_results
-                                                chat_offsets_map[
-                                                    chat_map_id
-                                                ] = current_offset
-                                                st.session_state[
-                                                    chat_candidates_map_key
-                                                ] = chat_candidates_map
-                                                st.session_state[
-                                                    chat_offsets_map_key
-                                                ] = chat_offsets_map
-
-                                                global_candidates = (
-                                                    st.session_state.get(
-                                                        global_candidates_key,
-                                                        [],
-                                                    )
-                                                )
-                                                st.session_state[
-                                                    global_candidates_key
-                                                ] = merge_candidate_results(
-                                                    global_candidates,
-                                                    batch_results,
-                                                )
-
-                                                persist_workspace_if_changed(
-                                                    telegram_id,
-                                                    force=True,
-                                                )
-                                                st.success(
-                                                    "Партия обработана. "
-                                                    f"Проверено: {current_offset} "
-                                                    f"из {len(members)}."
-                                                )
-
-                                            except Exception as exc:
-                                                st.error(
-                                                    "Поиск по критериям ЦА "
-                                                    f"не выполнен: {exc}"
-                                                )
-
-                                    analyzed_count = min(
-                                        current_offset,
-                                        len(members),
-                                    )
-                                    recommended_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get("recommendation")
-                                        == "Передать Неоне"
-                                    )
-                                    more_data_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get("recommendation")
-                                        == "Нужно больше данных"
-                                    )
-                                    not_fit_count = sum(
-                                        1
-                                        for item in candidate_results
-                                        if item.get("recommendation")
-                                        == "Пока не подходит"
+                                    st.success(
+                                        "Готово. Следующая новая пятёрка "
+                                        "будет снова из личных Telegram-контактов."
                                     )
 
-                                    st.write(
-                                        f"Всего загружено: **{len(members)}** · "
-                                        f"Проанализировано: **{analyzed_count}** · "
-                                        f"Соответствует ЦА: **{recommended_count}** · "
-                                        f"Недостаточно данных: **{more_data_count}** · "
-                                        f"Не подходит: **{not_fit_count}**"
-                                    )
-                                    st.progress(
-                                        analyzed_count / len(members)
-                                    )
-
-                                    suitable_candidates = sorted(
-                                        [
-                                            item
-                                            for item in candidate_results
-                                            if item.get("recommendation")
-                                            == "Передать Неоне"
-                                        ],
-                                        key=lambda item: item.get(
-                                            "score",
-                                            0,
-                                        ),
-                                        reverse=True,
-                                    )
-
-                                    if suitable_candidates:
-                                        top_chat_candidates = suitable_candidates[:10]
-                                        st.markdown(
-                                            "#### ⭐ 10 лучших кандидатов из чата"
-                                        )
-                                        st.caption(
-                                            "Неония рекомендует людей, но окончательный "
-                                            "выбор делает владелец кабинета. Откройте "
-                                            "карточку, изучите основания и отметьте тех, "
-                                            "с кем хотите работать. Количество определяет владелец."
-                                        )
-
-                                        global_candidates = st.session_state.get(
-                                            global_candidates_key,
-                                            [],
-                                        )
-                                        global_candidate_by_id = {
-                                            int(item["telegram_id"]): item
-                                            for item in global_candidates
-                                            if item.get("telegram_id") is not None
-                                        }
-                                        owner_contacts = st.session_state.get(
-                                            owner_contacts_key,
-                                            {},
-                                        )
-                                        if not isinstance(owner_contacts, dict):
-                                            owner_contacts = {}
-                                        known_contact_ids = {
-                                            int(contact_id)
-                                            for contact_id in owner_contacts
-                                        }
-                                        # Жёсткого дневного лимита нет.
-                                        # Владелец сам определяет рабочий объём.
-                                        recommended_limit = 10
-
-                                        existing_selected_ids = []
-                                        for contact_id in st.session_state.get(
-                                            selected_candidates_key,
-                                            [],
-                                        ):
-                                            try:
-                                                contact_id = int(contact_id)
-                                            except (TypeError, ValueError):
-                                                continue
-                                            if (
-                                                contact_id in global_candidate_by_id
-                                                and contact_id not in known_contact_ids
-                                                and contact_id not in existing_selected_ids
-                                            ):
-                                                existing_selected_ids.append(contact_id)
-                                        existing_selected_ids = existing_selected_ids[
-                                            :recommended_limit
-                                        ]
-
-                                        top_candidate_by_id = {
-                                            int(item["telegram_id"]): item
-                                            for item in top_chat_candidates
-                                        }
-                                        top_candidate_ids = list(top_candidate_by_id)
-                                        selected_elsewhere_ids = [
-                                            contact_id
-                                            for contact_id in existing_selected_ids
-                                            if contact_id not in top_candidate_by_id
-                                        ]
-                                        current_chat_limit = len(top_candidate_ids)
-
-                                        for contact_id in top_candidate_ids:
-                                            checkbox_key = (
-                                                "chat_candidate_select_"
-                                                f"{telegram_id}_{selected_chat_id}_"
-                                                f"{contact_id}"
-                                            )
-                                            if checkbox_key not in st.session_state:
-                                                st.session_state[checkbox_key] = (
-                                                    contact_id in existing_selected_ids
-                                                )
-
-                                        currently_checked = [
-                                            contact_id
-                                            for contact_id in top_candidate_ids
-                                            if st.session_state.get(
-                                                "chat_candidate_select_"
-                                                f"{telegram_id}_{selected_chat_id}_"
-                                                f"{contact_id}",
-                                                False,
-                                            )
-                                        ]
-
-                                        if selected_elsewhere_ids:
-                                            st.caption(
-                                                "В других источниках уже есть выбранные кандидаты. "
-                                                "Это не ограничивает выбор в текущем ТОП-10."
-                                            )
-
-                                        for number, candidate in enumerate(
-                                            top_chat_candidates,
-                                            start=1,
-                                        ):
-                                            contact_id = int(
-                                                candidate["telegram_id"]
-                                            )
-                                            checkbox_key = (
-                                                "chat_candidate_select_"
-                                                f"{telegram_id}_{selected_chat_id}_"
-                                                f"{contact_id}"
-                                            )
-                                            is_checked = bool(
-                                                st.session_state.get(
-                                                    checkbox_key,
-                                                    False,
-                                                )
-                                            )
-                                            limit_reached = False
-                                            username = (
-                                                f"@{candidate['username']}"
-                                                if candidate.get("username")
-                                                else "без username"
-                                            )
-
-                                            with st.container(border=True):
-                                                st.checkbox(
-                                                    (
-                                                        f"Выбрать кандидата №{number}: "
-                                                        f"{candidate['name']}"
-                                                    ),
-                                                    key=checkbox_key,
-                                                    disabled=False,
-                                                )
-                                                st.markdown(
-                                                    f"**{candidate['score']}% соответствия** "
-                                                    f"· {candidate['segment']}"
-                                                )
-                                                st.caption(
-                                                    f"{username} · источник: "
-                                                    f"{candidate.get('source_chat_title') or selected_chat['title']}"
-                                                )
-
-                                                with st.expander(
-                                                    "📋 Открыть карточку кандидата"
-                                                ):
-                                                    st.write(
-                                                        f"**Уверенность Неонии:** "
-                                                        f"{candidate.get('confidence', '—')}"
-                                                    )
-                                                    st.write(
-                                                        "**Почему соответствует ЦА:**"
-                                                    )
-                                                    for reason in candidate.get(
-                                                        "reasons",
-                                                        [],
-                                                    ):
-                                                        st.write(f"• {reason}")
-
-                                                    profile_about = str(
-                                                        candidate.get(
-                                                            "profile_about",
-                                                            "",
-                                                        )
-                                                        or ""
-                                                    ).strip()
-                                                    if profile_about:
-                                                        st.write("**Bio профиля:**")
-                                                        st.write(profile_about)
-
-                                                    public_messages = candidate.get(
-                                                        "public_messages",
-                                                        [],
-                                                    )
-                                                    if public_messages:
-                                                        st.write(
-                                                            "**Публичные сообщения, "
-                                                            "учтённые при анализе:**"
-                                                        )
-                                                        for message in public_messages[:3]:
-                                                            message_text = str(
-                                                                message.get("text") or ""
-                                                            ).strip()
-                                                            if message_text:
-                                                                st.markdown(
-                                                                    f"> {message_text}"
-                                                                )
-
-                                                    facts = []
-                                                    if candidate.get("mutual_contact"):
-                                                        facts.append(
-                                                            "есть взаимный контакт"
-                                                        )
-                                                    if candidate.get("verified"):
-                                                        facts.append(
-                                                            "профиль подтверждён Telegram"
-                                                        )
-                                                    if facts:
-                                                        st.caption(
-                                                            "Дополнительно: "
-                                                            + "; ".join(facts)
-                                                        )
-
-                                                    st.write(
-                                                        "**Безопасная тема первого "
-                                                        "обращения:**"
-                                                    )
-                                                    st.write(
-                                                        candidate.get(
-                                                            "message_angle",
-                                                            "Нейтральное знакомство",
-                                                        )
-                                                    )
-
-                                        checked_current_ids = [
-                                            contact_id
-                                            for contact_id in top_candidate_ids
-                                            if st.session_state.get(
-                                                "chat_candidate_select_"
-                                                f"{telegram_id}_{selected_chat_id}_"
-                                                f"{contact_id}",
-                                                False,
-                                            )
-                                        ]
-                                        if len(checked_current_ids) > current_chat_limit:
-                                            overflow_ids = checked_current_ids[
-                                                current_chat_limit:
-                                            ]
-                                            for contact_id in overflow_ids:
-                                                st.session_state[
-                                                    "chat_candidate_select_"
-                                                    f"{telegram_id}_{selected_chat_id}_"
-                                                    f"{contact_id}"
-                                                ] = False
-                                            checked_current_ids = checked_current_ids[
-                                                :current_chat_limit
-                                            ]
-
-                                        final_selected_ids = (
-                                            selected_elsewhere_ids
-                                            + checked_current_ids
-                                        )[:recommended_limit]
-                                        st.session_state[
-                                            selected_candidates_key
-                                        ] = final_selected_ids
-                                        persist_workspace_if_changed(telegram_id)
-
-                                        selected_total = (
-                                            len(final_selected_ids)
-                                            + len(owner_contacts)
-                                        )
-                                        st.markdown(
-                                            f"**Выбрано владельцем: "
-                                            f"{selected_total} из 5**"
-                                        )
-
-                                        selected_from_this_chat = [
-                                            top_candidate_by_id[contact_id]
-                                            for contact_id in checked_current_ids
-                                            if contact_id in top_candidate_by_id
-                                        ]
-                                        if selected_from_this_chat:
-                                            st.markdown(
-                                                "#### ✅ Выбраны из этого чата"
-                                            )
-                                            for candidate in selected_from_this_chat:
-                                                st.write(
-                                                    f"• **{candidate['name']}** · "
-                                                    f"{candidate['score']}% · "
-                                                    f"{candidate['segment']}"
-                                                )
-
-                                        confirm_selection = st.button(
-                                            "✅ Сохранить выбор и передать Неоне",
-                                            type="primary",
-                                            disabled=not final_selected_ids,
-                                            key=(
-                                                "confirm_chat_candidates_"
-                                                f"{telegram_id}_{selected_chat_id}"
-                                            ),
-                                        )
-                                        if confirm_selection:
-                                            selected_id_set = set(
-                                                final_selected_ids
-                                            )
-                                            for item in global_candidates:
-                                                try:
-                                                    item_id = int(
-                                                        item.get("telegram_id")
-                                                    )
-                                                except (TypeError, ValueError):
-                                                    continue
-                                                if item_id in selected_id_set:
-                                                    item["status"] = (
-                                                        "Выбран владельцем"
-                                                    )
-                                            st.session_state[
-                                                global_candidates_key
-                                            ] = global_candidates
-                                            for item in candidate_results:
-                                                try:
-                                                    item_id = int(
-                                                        item.get("telegram_id")
-                                                    )
-                                                except (TypeError, ValueError):
-                                                    continue
-                                                if item_id in selected_id_set:
-                                                    item["status"] = (
-                                                        "Выбран владельцем"
-                                                    )
-                                            chat_candidates_map[
-                                                chat_map_id
-                                            ] = candidate_results
-                                            st.session_state[
-                                                chat_candidates_map_key
-                                            ] = chat_candidates_map
-                                            persist_workspace_if_changed(
-                                                telegram_id,
-                                                force=True,
-                                            )
-                                            st.success(
-                                                "Выбор сохранён. Неона получила "
-                                                "выбранных кандидатов для следующего "
-                                                "этапа — подготовки персональных "
-                                                "первых сообщений."
-                                            )
-
-                                    if candidate_results:
-                                        with st.expander(
-                                            "Все результаты по выбранному чату"
-                                        ):
-                                            all_results_table = [
-                                                {
-                                                    "Имя": item["name"],
-                                                    "Username": (
-                                                        f"@{item['username']}"
-                                                        if item.get("username")
-                                                        else "—"
-                                                    ),
-                                                    "Сегмент": item["segment"],
-                                                    "Соответствие": (
-                                                        f"{item['score']}%"
-                                                    ),
-                                                    "Уверенность": item[
-                                                        "confidence"
-                                                    ],
-                                                    "Рекомендация": item[
-                                                        "recommendation"
-                                                    ],
-                                                }
-                                                for item in sorted(
-                                                    candidate_results,
-                                                    key=lambda value: value.get(
-                                                        "score",
-                                                        0,
-                                                    ),
-                                                    reverse=True,
-                                                )
-                                            ]
-                                            st.dataframe(
-                                                all_results_table,
-                                                use_container_width=True,
-                                                hide_index=True,
-                                            )
-
-                                else:
-                                    st.info(
-                                        "Выберите чат и нажмите «Загрузить "
-                                        "участников выбранного чата»."
-                                    )
+                                st.caption(
+                                    "Один Telegram ID выдаётся только один раз. "
+                                    "Если человек уже был среди личных контактов "
+                                    "или в другом чате, Неония его пропустит."
+                                )
 
                         elif neonia_mode == "👥 Поиск контактов":
                             contacts_result = render_neonia_contacts()
