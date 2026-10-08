@@ -5190,6 +5190,15 @@ def prepare_candidates_for_stagirite(
         for chat in eligible_chats
     }
 
+    if (
+        daily_source == "chats"
+        and selected_source_chat in chat_by_id
+        and int(selected_source_chat) not in completed_chat_ids
+        and current_chat_id != int(selected_source_chat)
+    ):
+        # Владелец явно сменил чат: следующая новая пятёрка начинается с него.
+        current_chat_id = int(selected_source_chat)
+
     def next_chat_after(current_id=None):
         if (
             current_id in chat_by_id
