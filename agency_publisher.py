@@ -5,8 +5,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import os
+from io import BytesIO
+
 import requests
 import streamlit as st
+from PIL import Image, UnidentifiedImageError
 
 UTC = ZoneInfo("UTC")
 
@@ -568,11 +571,109 @@ def _publication_parts(text: str) -> tuple[str, str]:
 
     caption = title if title and len(title) <= 180 else "Агентство W"
 
-    remainder = clean
-    if first.startswith("#") and len(lines) > 1:
-        remainder = "\n".join(lines[1:]).strip()
+    # Первую строку уже показали в caption, поэтому не дублируем её
+    # вторым сообщением независимо от того, была ли она Markdown-заголовком.
+    remainder = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
 
     return caption, remainder
+
+
+
+def _sticker_webp_bytes(image_bytes: Any) -> bytes:
+    """Готовит статичный Telegram-стикер WEBP с сохранением прозрачности."""
+    raw = _image_bytes(image_bytes)
+    if not raw:
+        raise ValueError("Изображение для стикера пустое.")
+
+    try:
+        with Image.open(BytesIO(raw)) as opened:
+            opened.load()
+            image = opened.convert("RGBA")
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise ValueError("Не удалось открыть изображение для стикера.") from exc
+
+    image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+
+    # Telegram ограничивает статичные стикеры по размеру файла.
+    # Сначала стараемся сохранить максимально чисто, затем аккуратно
+    # снижаем качество, не уничтожая альфа-канал.
+    attempts = [
+        {"lossless": True, "quality": 100, "method": 6},
+        {"lossless": False, "quality": 92, "method": 6},
+        {"lossless": False, "quality": 84, "method": 6},
+        {"lossless": False, "quality": 76, "method": 6},
+        {"lossless": False, "quality": 68, "method": 6},
+        {"lossless": False, "quality": 60, "method": 6},
+    ]
+    last = b""
+    for options in attempts:
+        buffer = BytesIO()
+        image.save(buffer, format="WEBP", **options)
+        last = buffer.getvalue()
+        if len(last) <= 512 * 1024:
+            return last
+
+    if not last:
+        raise ValueError("Не удалось подготовить WEBP-стикер.")
+    return last
+
+
+def _send_sticker(chat_id: int, image_bytes: Any) -> dict[str, Any]:
+    raw = _sticker_webp_bytes(image_bytes)
+    token = _bot_token()
+    response = requests.post(
+        f"{_telegram_api_base()}/bot{token}/sendSticker",
+        data={"chat_id": str(int(chat_id))},
+        files={
+            "sticker": (
+                "agency_w_sticker.webp",
+                raw,
+                "image/webp",
+            )
+        },
+        timeout=90,
+    )
+    if not response.ok:
+        try:
+            error_data = response.json()
+            description = (
+                str(error_data.get("description") or "")
+                if isinstance(error_data, dict)
+                else ""
+            )
+        except Exception:
+            description = str(response.text or "").strip()[:500]
+        raise RuntimeError(
+            f"Telegram API HTTP {response.status_code}: "
+            f"{description or 'стикер отклонён.'}"
+        )
+
+    data = response.json()
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        description = (
+            str(data.get("description") or "")
+            if isinstance(data, dict)
+            else ""
+        )
+        raise RuntimeError(description or "Telegram не принял стикер.")
+
+    result = data.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _send_sticker_by_file_id(chat_id: int, file_id: str) -> dict[str, Any]:
+    clean_file_id = str(file_id or "").strip()
+    if not clean_file_id:
+        raise ValueError("Telegram file_id стикера пустой.")
+    result = _telegram_call(
+        "sendSticker",
+        payload={
+            "chat_id": int(chat_id),
+            "sticker": clean_file_id,
+        },
+        timeout=45,
+    )
+    return result if isinstance(result, dict) else {}
 
 
 def _send_photo(chat_id: int, image_bytes: Any, caption: str = "") -> dict[str, Any]:
@@ -728,6 +829,7 @@ def publish_to_publisher_destinations(
     video_file_name: str = "agency_w_video.mp4",
     video_mime_type: str = "video/mp4",
     destination_ids: list[int] | None = None,
+    image_mode: str = "photo",
 ) -> dict[str, Any]:
     """
     Публикует утверждённый материал только в площадки данного владельца.
@@ -739,6 +841,9 @@ def publish_to_publisher_destinations(
     clean_text = str(text or "").strip()
     raw_image = _image_bytes(image_bytes) if image_bytes is not None else b""
     raw_video = _video_bytes(video_bytes) if video_bytes is not None else b""
+    normalized_image_mode = str(image_mode or "photo").strip().lower()
+    if normalized_image_mode not in {"photo", "sticker"}:
+        normalized_image_mode = "photo"
     if raw_image and raw_video:
         raise ValueError("В одной публикации выберите либо изображение, либо видео.")
     if not clean_text and not raw_image and not raw_video:
@@ -756,6 +861,7 @@ def publish_to_publisher_destinations(
     # того же владельца повторно используем его — это заметно ускоряет массовую
     # публикацию большого ролика и не гоняет один и тот же файл по сети N раз.
     reusable_video_file_id: str | None = None
+    reusable_sticker_file_id: str | None = None
 
     for item in destinations:
         title = str(item.get("chat_title") or "Telegram-площадка").strip()
@@ -770,10 +876,49 @@ def publish_to_publisher_destinations(
                 raise RuntimeError("Площадка или права Publisher больше не подтверждены.")
 
             photo_message_id: int | None = None
+            sticker_message_id: int | None = None
             video_message_id: int | None = None
             text_to_send = clean_text
+            text_message_ids: list[int] = []
 
-            if raw_image:
+            if raw_image and normalized_image_mode == "sticker":
+                # Для настоящего стикера текст отправляем отдельно и только один раз.
+                # Стикер идёт вторым сообщением и сохраняет прозрачность Telegram.
+                if clean_text:
+                    text_message_ids = _send_text_chunks(
+                        chat_id,
+                        clean_text,
+                    )
+
+                if reusable_sticker_file_id:
+                    sticker_result = _send_sticker_by_file_id(
+                        chat_id,
+                        reusable_sticker_file_id,
+                    )
+                else:
+                    sticker_result = _send_sticker(
+                        chat_id,
+                        raw_image,
+                    )
+                    sticker_info = (
+                        sticker_result.get("sticker")
+                        if isinstance(sticker_result.get("sticker"), dict)
+                        else {}
+                    )
+                    reusable_sticker_file_id = str(
+                        sticker_info.get("file_id") or ""
+                    ).strip() or None
+
+                try:
+                    sticker_message_id = int(
+                        sticker_result.get("message_id")
+                    )
+                except (TypeError, ValueError):
+                    sticker_message_id = None
+
+                text_to_send = ""
+
+            elif raw_image:
                 caption, text_to_send = _publication_parts(clean_text)
                 photo_result = _send_photo(
                     chat_id,
@@ -814,7 +959,6 @@ def publish_to_publisher_destinations(
                 except (TypeError, ValueError):
                     video_message_id = None
 
-            text_message_ids = []
             if text_to_send:
                 text_message_ids = _send_text_chunks(
                     chat_id,
@@ -827,8 +971,10 @@ def publish_to_publisher_destinations(
                 "ok": True,
                 "status": "accepted_by_telegram",
                 "photo_message_id": photo_message_id,
+                "sticker_message_id": sticker_message_id,
                 "video_message_id": video_message_id,
                 "text_message_ids": text_message_ids,
+                "image_mode": normalized_image_mode,
             })
         except Exception as exc:
             results.append({
