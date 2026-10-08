@@ -105,7 +105,10 @@ from neona_dialog_policy_v3 import (
     initialize_dialog_after_first_message,
     run_sync_owner_once,
 )
-from neona_telegram_dialogs import get_last_voice_diagnostics
+from neona_telegram_dialogs import (
+    get_last_voice_diagnostics,
+    reopen_last_incoming_for_retry,
+)
 from workspace_persistence import (
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
@@ -3368,6 +3371,67 @@ def render_neona_telegram_dialog_center(
                 if last_reply:
                     st.markdown("**Последний автоматический ответ Неоны:**")
                     st.write(last_reply)
+
+                last_incoming_id = int(
+                    state.get("last_incoming_message_id") or 0
+                )
+                last_reply_id = int(context.get("last_reply_id") or 0)
+                last_reply_verified = bool(
+                    context.get("last_reply_verified")
+                )
+                failed_id = int(
+                    context.get("last_processing_failed_id") or 0
+                )
+                retry_candidate = bool(
+                    last_incoming_id
+                    and (
+                        failed_id == last_incoming_id
+                        or not last_reply_id
+                        or not last_reply_verified
+                    )
+                )
+                if retry_candidate:
+                    st.warning(
+                        "Последнее входящее отмечено системой, но "
+                        "подтверждённого ответа Неоны после него нет."
+                    )
+                    if st.button(
+                        "🔁 Повторно обработать последнее входящее",
+                        key=(
+                            f"neona_dialog_retry_{owner_telegram_id}_"
+                            f"{contact_id}_{last_incoming_id}"
+                        ),
+                        use_container_width=True,
+                    ):
+                        try:
+                            reopened_id = reopen_last_incoming_for_retry(
+                                owner_telegram_id,
+                                contact_id,
+                            )
+                            with st.spinner(
+                                "Неона повторно обрабатывает последнее входящее..."
+                            ):
+                                retry_stats = run_sync_owner_once(
+                                    owner_telegram_id,
+                                    str(owner_name or "Владелец"),
+                                    initialize_new_dialogs=True,
+                                )
+                            if int(retry_stats.get("replied") or 0) > 0:
+                                st.success(
+                                    "✅ Неона повторно обработала сообщение и ответила."
+                                )
+                            else:
+                                st.info(
+                                    "Сообщение возвращено в обработку. "
+                                    "Если ответа нет, откройте карточку снова — "
+                                    "покажем следующую причину без повторной рассылки."
+                                )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(
+                                "Не удалось повторно обработать входящее: "
+                                + friendly_telegram_send_error(exc)
+                            )
 
                 history_key = (
                     f"neona_dialog_center_history_{owner_telegram_id}_{contact_id}"
