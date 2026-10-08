@@ -134,6 +134,16 @@ def _wants_human(text, owner_name=""):
     return False
 
 
+def _identity_question(text):
+    value = _norm(text)
+    return bool(
+        re.search(
+            r"\\b(?:бот|робот|ии|нейросет\\w*)\\b",
+            value,
+        )
+    )
+
+
 def _source_question(text):
     v = _norm(text)
     return any(x in v for x in (
