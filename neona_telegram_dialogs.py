@@ -25,6 +25,21 @@ NEONA_DIALOG_CORE = agency_core_prompt(
     "вести живой диалог после первого ответа, понимать возражения и двигаться только к осознанной встрече без давления",
 )
 
+# Экономный режим Telegram. Новое входящее само поднимает диалог наверх,
+# поэтому нет смысла каждые секунды перечитывать старые переписки.
+NEONA_MIN_POLL_SECONDS = 120
+NEONA_DEFAULT_POLL_SECONDS = 300
+NEONA_RECENT_DIALOG_HOURS = 48
+
+
+def _flood_wait_seconds(error: Exception) -> int:
+    if error.__class__.__name__ != "FloodWaitError":
+        return 0
+    try:
+        return max(1, int(getattr(error, "seconds", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
 
 _NEONA_BASE_DIR = Path(__file__).resolve().parent
 
@@ -2049,7 +2064,13 @@ async def _verified_sent_message(client: TelegramClient, entity, contact_id: int
     return None
 
 
-async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dialogs: bool = True) -> dict[str, int]:
+async def sync_owner_once(
+    owner_id: int,
+    owner_name: str,
+    *,
+    initialize_new_dialogs: bool = True,
+    force_full_scan: bool = False,
+) -> dict[str, int]:
     _voice_diag_reset()
     """
     Проверяет новые личные входящие сообщения только от людей, которым из
@@ -2137,6 +2158,21 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
             matched_allowed_ids.add(contact_id)
             if not getattr(entity, "first_name", None) and not getattr(entity, "last_name", None):
                 continue
+
+            if not force_full_scan:
+                dialog_dt = getattr(dialog, "date", None)
+                if dialog_dt is not None:
+                    try:
+                        dialog_dt_utc = dialog_dt.astimezone(UTC)
+                        if datetime.now(UTC) - dialog_dt_utc > timedelta(
+                            hours=NEONA_RECENT_DIALOG_HOURS
+                        ):
+                            # Если человек ответит спустя неделю или месяц,
+                            # Telegram обновит dialog.date, и диалог сразу снова
+                            # попадёт в быструю проверку.
+                            continue
+                    except Exception:
+                        pass
 
             state = _dialog_state(config, int(owner_id), contact_id)
             all_recent = []
@@ -2655,6 +2691,8 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         stats["replied"] += 1
                         stats["partner_handoffs"] += 1
                     except Exception as exc:
+                        if _flood_wait_seconds(exc):
+                            raise
                         print(
                             f"[NeonaPartnerGate] owner={int(owner_id)} "
                             f"contact={contact_id} handoff_error="
@@ -2913,6 +2951,8 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                             )
                             notice_id = int(getattr(sent_notice, "id", 0) or 0)
                         except Exception as exc:
+                            if _flood_wait_seconds(exc):
+                                raise
                             _voice_diag_add(
                                 "voice_failure_notice_send_error",
                                 latest_message_id=int(latest.id),
@@ -3139,6 +3179,8 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                     )
                     stats["replied"] += 1
                 except Exception as exc:
+                    if _flood_wait_seconds(exc):
+                        raise
                     print(
                         "[NeonaDialogError] "
                         f"owner={int(owner_id)} contact={contact_id} "
@@ -3378,25 +3420,59 @@ def _owners(config: Config) -> list[tuple[int, str]]:
     return [(owner_id, names.get(owner_id, "Владелец")) for owner_id in ids]
 
 
-def worker_forever(poll_seconds: int = 15) -> None:
+def worker_forever(poll_seconds: int = NEONA_DEFAULT_POLL_SECONDS) -> None:
     config = load_config()
-    print("Neona Telegram worker started", flush=True)
+    safe_poll_seconds = max(NEONA_MIN_POLL_SECONDS, int(poll_seconds))
+    flood_until_by_owner: dict[int, float] = {}
+    print(
+        f"Neona Telegram worker started; poll={safe_poll_seconds}s; "
+        f"recent_window={NEONA_RECENT_DIALOG_HOURS}h",
+        flush=True,
+    )
     while True:
         try:
             for owner_id, owner_name in _owners(config):
+                owner_id = int(owner_id)
+                now_mono = time.monotonic()
+                blocked_until = float(flood_until_by_owner.get(owner_id, 0) or 0)
+                if blocked_until > now_mono:
+                    continue
                 try:
-                    stats = asyncio.run(sync_owner_once(owner_id, owner_name, initialize_new_dialogs=True))
+                    stats = asyncio.run(
+                        sync_owner_once(
+                            owner_id,
+                            owner_name,
+                            initialize_new_dialogs=True,
+                            force_full_scan=False,
+                        )
+                    )
                     if stats["processed"] or stats["initialized"] or stats["errors"]:
                         print(f"owner={owner_id} stats={stats}", flush=True)
                 except Exception as exc:
+                    wait_seconds = _flood_wait_seconds(exc)
+                    if wait_seconds:
+                        # Не продолжаем стучаться в аккаунт во время FloodWait.
+                        # Добавляем небольшой запас, чтобы не попасть в новый цикл
+                        # в ту же секунду, когда ограничение формально закончится.
+                        flood_until_by_owner[owner_id] = (
+                            time.monotonic() + wait_seconds + 30
+                        )
+                        print(
+                            f"[NeonaFloodWait] owner={owner_id} "
+                            f"pause={wait_seconds + 30}s",
+                            flush=True,
+                        )
+                        continue
                     print(f"owner={owner_id} error={exc}", flush=True)
         except Exception as exc:
             print(f"worker error={exc}", flush=True)
-        time.sleep(max(5, int(poll_seconds)))
+        time.sleep(safe_poll_seconds)
 
 
 if __name__ == "__main__":
-    # Постоянный рабочий цикл Неоны.
-    # Интервал 15 секунд достаточно быстрый для живого диалога
-    # и не вызывает OpenAI, если новых сообщений нет.
-    worker_forever(poll_seconds=15)
+    # Безопасный резервный запуск. Частоту нельзя возвращать к 15–30 секундам:
+    # это создаёт лишние Telegram/Supabase запросы и риск FloodWait.
+    configured_poll = int(
+        os.getenv("NEONA_POLL_SECONDS", str(NEONA_DEFAULT_POLL_SECONDS))
+    )
+    worker_forever(poll_seconds=configured_poll)
