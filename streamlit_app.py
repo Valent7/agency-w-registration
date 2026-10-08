@@ -3098,6 +3098,10 @@ def _neona_telegram_stage_label(state):
         "awaiting_slot_choice",
     }:
         return "🟣 согласование встречи", "meeting_progress", replied
+    owner_fence_id = int(context.get("owner_outgoing_fence_id") or 0)
+    last_incoming_id = int(state.get("last_incoming_message_id") or 0)
+    if owner_fence_id and owner_fence_id > last_incoming_id:
+        return "👤 диалог ведёт владелец", "owner_active", True
     if replied:
         return "🟢 диалог идёт", "dialogue", True
     return "🟡 ждём ответа", "waiting", False
@@ -3156,6 +3160,7 @@ def render_neona_telegram_dialog_center(
                     int(owner_telegram_id),
                     str(owner_name or "Владелец"),
                     initialize_new_dialogs=True,
+                    force_full_scan=True,
                 )
 
             replied_now = int(sync_stats.get("replied") or 0)
@@ -3415,6 +3420,7 @@ def render_neona_telegram_dialog_center(
                                     owner_telegram_id,
                                     str(owner_name or "Владелец"),
                                     initialize_new_dialogs=True,
+                                    force_full_scan=True,
                                 )
                             if int(retry_stats.get("replied") or 0) > 0:
                                 st.success(
@@ -3610,11 +3616,23 @@ def friendly_telegram_send_error(error):
     if error_name == "FloodWaitError":
         seconds = getattr(error, "seconds", None)
         if seconds:
+            total = max(1, int(seconds))
+            hours, remainder = divmod(total, 3600)
+            minutes, secs = divmod(remainder, 60)
+            if hours:
+                wait_text = f"{hours} ч. {minutes} мин."
+            elif minutes:
+                wait_text = f"{minutes} мин. {secs} сек."
+            else:
+                wait_text = f"{secs} сек."
             return (
-                "Telegram временно ограничил отправку. "
-                f"Повторите через {seconds} секунд."
+                "Telegram временно ограничил запросы к аккаунту. "
+                f"Ничего повторно не нажимайте примерно {wait_text}"
             )
-        return "Telegram временно ограничил отправку. Повторите позже."
+        return (
+            "Telegram временно ограничил запросы к аккаунту. "
+            "Повторите позже."
+        )
 
     error_messages = {
         "PeerFloodError": (
@@ -3674,6 +3692,7 @@ def _blocked_first_message_policy(reason, failed_at=None):
     if (
         "ограничил новые обращения" in reason_text
         or "временно ограничил отправку" in reason_text
+        or "временно ограничил запросы" in reason_text
         or "peerflood" in reason_text
         or "floodwait" in reason_text
     ):
