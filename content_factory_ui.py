@@ -1103,7 +1103,12 @@ def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta):
         temp_path = Path(temp_dir)
         narration_path = temp_path / "narration.mp4"
         narration_path.write_bytes(narration_video)
-        duration = _probe_video_duration(narration_path)
+        voice_duration = _probe_video_duration(narration_path)
+        # Небольшой безопасный хвост нужен из-за округления кадров при сборке:
+        # иначе последний видеосегмент может закончиться чуть раньше аудио,
+        # а -shortest обрежет последние слова Неоны.
+        end_padding = 1.5
+        duration = voice_duration + end_padding
         scene_duration = duration / len(scene_images)
         logo_path = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
         segment_paths = []
@@ -1163,17 +1168,18 @@ def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta):
             raise RuntimeError("Не удалось соединить сцены Reels.")
 
         subtitle_path = temp_path / "captions.ass"
-        _write_subtitles(subtitle_path, spoken_text, cta, duration)
+        _write_subtitles(subtitle_path, spoken_text, cta, voice_duration)
         final_path = temp_path / "ready_reel.mp4"
         final_result = subprocess.run(
             [
                 ffmpeg_path, "-y", "-i", str(silent_path),
                 "-i", str(narration_path),
                 "-vf", f"subtitles={subtitle_path.as_posix()}",
-                "-map", "0:v:0", "-map", "1:a:0", "-t", f"{duration:.3f}",
+                "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-                "-movflags", "+faststart", "-shortest", str(final_path),
+                "-af", f"apad=pad_dur={end_padding:.3f}",
+                "-t", f"{duration:.3f}", "-movflags", "+faststart", str(final_path),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1216,7 +1222,12 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
         temp_path = Path(temp_dir)
         narration_path = temp_path / "narration.mp4"
         narration_path.write_bytes(narration_video)
-        duration = _probe_video_duration(narration_path)
+        voice_duration = _probe_video_duration(narration_path)
+        # Оставляем финальному кадру запас после голоса. Runway-клипы и
+        # перекодирование могут терять несколько кадров на стыках; без запаса
+        # -shortest раньше обрезал последние слова озвучки.
+        end_padding = 1.5
+        duration = voice_duration + end_padding
         scene_duration = duration / len(scene_videos)
         segment_paths = []
 
@@ -1274,7 +1285,7 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
             raise RuntimeError("Не удалось соединить живые сцены Reels.")
 
         subtitle_path = temp_path / "captions.ass"
-        _write_subtitles(subtitle_path, spoken_text, cta, duration)
+        _write_subtitles(subtitle_path, spoken_text, cta, voice_duration)
         assets_dir = Path(__file__).resolve().parent / "assets"
         logo_path = assets_dir / "agency_w_icon.png"
         music_path = assets_dir / "reel_music.mp3"
@@ -1311,7 +1322,7 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
         if music_index is not None:
             filters.extend(
                 [
-                    "[1:a]volume=1.0[voice]",
+                    f"[1:a]apad=pad_dur={end_padding:.3f},volume=1.0[voice]",
                     f"[{music_index}:a]volume=0.09[music]",
                     "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[finalaudio]",
                 ]
@@ -1321,12 +1332,15 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
         if music_index is not None:
             command.extend(["-map", "[finalaudio]"])
         else:
-            command.extend(["-map", "1:a:0"])
+            command.extend([
+                "-map", "1:a:0",
+                "-af", f"apad=pad_dur={end_padding:.3f}",
+            ])
         command.extend(
             [
                 "-t", f"{duration:.3f}", "-c:v", "libx264", "-preset", "veryfast",
                 "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac",
-                "-b:a", "192k", "-movflags", "+faststart", "-shortest",
+                "-b:a", "192k", "-movflags", "+faststart",
                 str(final_path),
             ]
         )
