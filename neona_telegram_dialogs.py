@@ -695,6 +695,82 @@ def _save_dialog_state(
     response.raise_for_status()
 
 
+def reopen_last_incoming_for_retry(
+    owner_id: int,
+    contact_id: int,
+) -> int:
+    """Безопасно возвращает последнее входящее в очередь по явному решению владельца.
+
+    Используется только когда Telegram уже показал входящий ответ, но в
+    agency_dialog_states он отмечен как обработанный без подтверждённого ответа
+    Неоны. Старую переписку не открывает и новые первые сообщения не создаёт.
+    """
+    config = load_config()
+    state = _dialog_state(config, int(owner_id), int(contact_id))
+    if not isinstance(state, dict):
+        raise DialogError("Состояние этого диалога Неоны не найдено.")
+
+    last_id = int(state.get("last_incoming_message_id") or 0)
+    if last_id <= 0:
+        raise DialogError("Последнего входящего сообщения для повтора нет.")
+
+    context = (
+        dict(state.get("context"))
+        if isinstance(state.get("context"), dict)
+        else {}
+    )
+    owner_fence_id = int(context.get("owner_outgoing_fence_id") or 0)
+    if owner_fence_id >= last_id:
+        raise DialogError(
+            "После этого входящего владелец уже писал вручную. "
+            "Автоматически повторять обработку небезопасно."
+        )
+
+    failed_id = int(context.get("last_processing_failed_id") or 0)
+    last_reply_id = int(context.get("last_reply_id") or 0)
+    last_reply_verified = bool(context.get("last_reply_verified"))
+
+    if last_reply_id and last_reply_verified and failed_id != last_id:
+        raise DialogError(
+            "У последнего входящего уже есть подтверждённый ответ Неоны. "
+            "Повторная отправка заблокирована."
+        )
+
+    attempts_map = (
+        dict(context.get("message_processing_attempts"))
+        if isinstance(context.get("message_processing_attempts"), dict)
+        else {}
+    )
+    attempts_map.pop(str(last_id), None)
+
+    cleaned_context = {
+        **context,
+        "message_processing_attempts": attempts_map,
+        "manual_retry_message_id": last_id,
+        "manual_retry_requested_at": datetime.now(UTC).isoformat(),
+    }
+    for key in (
+        "last_processing_failed_id",
+        "last_processing_failed_attempts",
+        "last_processing_failed_at",
+        "last_processing_error",
+        "last_processing_suppressed_id",
+        "last_processing_suppressed_at",
+    ):
+        cleaned_context.pop(key, None)
+
+    _save_dialog_state(
+        config,
+        int(owner_id),
+        int(contact_id),
+        last_incoming_id=max(0, last_id - 1),
+        stage=str(state.get("stage") or "idle"),
+        greeted=bool(state.get("greeted", False)),
+        context=cleaned_context,
+    )
+    return last_id
+
+
 def initialize_dialog_after_first_message(
     owner_id: int,
     contact_id: int,
