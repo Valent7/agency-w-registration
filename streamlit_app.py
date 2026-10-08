@@ -3118,6 +3118,7 @@ def render_neona_telegram_dialog_center(
     owner_telegram_id,
     contacts,
     sent_log,
+    owner_name="Владелец",
 ):
     """
     Постоянный рабочий стол Telegram-диалогов Неоны.
@@ -3136,6 +3137,50 @@ def render_neona_telegram_dialog_center(
         "видео или тёплое касание. Видно, кто ответил, где диалог идёт и на каком "
         "этапе находится разговор Неоны."
     )
+
+    st.caption(
+        "Если автоматический Telegram-worker временно не подхватил ответ, "
+        "кнопка ниже безопасно проверит только уже начатые диалоги Неоны."
+    )
+    if st.button(
+        "🔄 Подхватить входящие сейчас",
+        key=f"neona_dialog_sync_now_{owner_telegram_id}",
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner("Неона проверяет новые ответы Telegram..."):
+                sync_stats = run_sync_owner_once(
+                    int(owner_telegram_id),
+                    str(owner_name or "Владелец"),
+                    initialize_new_dialogs=True,
+                )
+
+            replied_now = int(sync_stats.get("replied") or 0)
+            processed_now = int(sync_stats.get("processed") or 0)
+            errors_now = int(sync_stats.get("errors") or 0)
+
+            if replied_now > 0:
+                st.success(
+                    f"✅ Неона подхватила входящие и ответила: {replied_now}."
+                )
+            elif errors_now > 0:
+                st.warning(
+                    "Неона проверила входящие, но при обработке возникла ошибка. "
+                    "Автоматический worker нужно проверить отдельно."
+                )
+            elif processed_now > 0:
+                st.info(
+                    f"Новых сообщений обработано: {processed_now}. "
+                    "Проверьте карточку диалога ниже."
+                )
+            else:
+                st.info("Новых необработанных входящих сейчас не найдено.")
+            st.rerun()
+        except Exception as exc:
+            st.error(
+                "Не удалось проверить входящие Telegram: "
+                + friendly_telegram_send_error(exc)
+            )
 
     allowed_kinds = {
         "first_message",
@@ -10015,6 +10060,7 @@ if telegram_login_valid or remembered_data:
                         telegram_id,
                         all_contacts,
                         sent_log_for_today,
+                        owner_name=first_name,
                     )
                     st.divider()
 
