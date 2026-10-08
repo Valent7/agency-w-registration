@@ -2475,6 +2475,30 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                 if int(message.id) > max(last_id, owner_fence_id)
             ]
 
+            # Явный ручной повтор от владельца имеет приоритет над baseline.
+            # Это важно при гонке между Streamlit и фоновым worker: worker мог
+            # успеть снова сохранить last_incoming_id, но marker остаётся в
+            # context и гарантированно возвращает ровно одно сообщение в работу.
+            manual_retry_id = int(
+                state_context.get("manual_retry_message_id") or 0
+            )
+            if (
+                not new_messages
+                and manual_retry_id
+                and manual_retry_id > owner_fence_id
+            ):
+                retry_message = next(
+                    (
+                        message
+                        for message in recent
+                        if not bool(getattr(message, "out", False))
+                        and int(message.id) == manual_retry_id
+                    ),
+                    None,
+                )
+                if retry_message is not None:
+                    new_messages = [retry_message]
+
             if diag_this_run:
                 print(
                     f"[NeonaDiag] owner={int(owner_id)} contact={contact_id} "
@@ -2968,6 +2992,8 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                             context,
                             int(latest.id),
                         )
+                        context.pop("manual_retry_message_id", None)
+                        context.pop("manual_retry_requested_at", None)
                         _save_dialog_state(
                             config,
                             int(owner_id),
@@ -3050,6 +3076,8 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                         context,
                         int(latest.id),
                     )
+                    context.pop("manual_retry_message_id", None)
+                    context.pop("manual_retry_requested_at", None)
                     _save_dialog_state(
                         config,
                         int(owner_id),
@@ -3066,6 +3094,13 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                     )
                     stats["replied"] += 1
                 except Exception as exc:
+                    print(
+                        "[NeonaDialogError] "
+                        f"owner={int(owner_id)} contact={contact_id} "
+                        f"message_id={int(latest.id)} attempt={current_attempt} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
                     _voice_diag_add(
                         "dialog_or_send_error",
                         latest_message_id=int(latest.id),
@@ -3087,6 +3122,8 @@ async def sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dial
                                 f"{type(exc).__name__}: {exc}"
                             )[:500],
                         }
+                        stopped_context.pop("manual_retry_message_id", None)
+                        stopped_context.pop("manual_retry_requested_at", None)
                         _save_dialog_state(
                             config,
                             int(owner_id),
