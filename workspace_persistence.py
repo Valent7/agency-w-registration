@@ -38,6 +38,9 @@ def get_workspace_state_keys(telegram_id):
         "selected_source_chat": (
             f"neonia_selected_source_chat_{telegram_id}"
         ),
+        "daily_source_mode": (
+            f"neonia_daily_source_mode_{telegram_id}"
+        ),
         "chat_members": (
             f"neonia_chat_members_{telegram_id}"
         ),
@@ -124,7 +127,7 @@ def collect_workspace_state(telegram_id):
         blocked_first_messages = []
 
     return {
-        "schema_version": 8,
+        "schema_version": 9,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -150,6 +153,13 @@ def collect_workspace_state(telegram_id):
         ),
         "selected_source_chat": st.session_state.get(
             keys["selected_source_chat"]
+        ),
+        "daily_source_mode": str(
+            st.session_state.get(
+                keys["daily_source_mode"],
+                "contacts",
+            )
+            or "contacts"
         ),
         "chat_members": st.session_state.get(
             keys["chat_members"],
@@ -261,6 +271,12 @@ def _normalize_workspace_state(state):
                 )
             except (TypeError, ValueError):
                 chat[numeric_key] = 0
+
+    daily_source_mode = str(
+        state.get("daily_source_mode") or "contacts"
+    ).strip().lower()
+    if daily_source_mode not in {"contacts", "chats"}:
+        daily_source_mode = "contacts"
 
     selected_source_chat = state.get("selected_source_chat")
     try:
@@ -505,6 +521,7 @@ def _normalize_workspace_state(state):
             state.get("chats_search_done", False)
         ),
         "selected_source_chat": selected_source_chat,
+        "daily_source_mode": daily_source_mode,
         "chat_members": chat_members,
         "chat_candidates": chat_candidates,
         "chat_offsets": chat_offsets,
@@ -665,6 +682,9 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["selected_source_chat"]
         ] = state["selected_source_chat"]
+        st.session_state[
+            keys["daily_source_mode"]
+        ] = state["daily_source_mode"]
         st.session_state[
             keys["chat_members"]
         ] = state["chat_members"]
