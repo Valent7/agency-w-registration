@@ -1306,6 +1306,33 @@ def _process_message_without_memory(
     )
     greet = not greeted
     context = _update_ai_counterparty_context(context, text)
+
+    # Самовосстановление после прежнего слишком широкого commercial-intent:
+    # «бесплатный тест» / «без оплаты» могли ошибочно увести Story-диалог
+    # в стадию встречи и породить ответ про стоимость. Если память показывает
+    # такой ложный коммерческий ход, возвращаем разговор в обычный idle.
+    if stage == "invited_to_meeting" and context.get("commercial_interest_at"):
+        previous_memory = _relationship_memory(context)
+        previous_incoming = str(
+            previous_memory.get("last_incoming") or ""
+        ).strip()
+        previous_reply = str(
+            previous_memory.get("last_reply") or ""
+        ).strip()
+        if (
+            previous_incoming
+            and not _commercial_intent(previous_incoming)
+            and "по стоимости" in previous_reply.casefold()
+        ):
+            context = _clear_meeting_context(context)
+            context.pop("commercial_interest_at", None)
+            context.pop("meeting_reason", None)
+            context["commercial_false_positive_recovered_at"] = (
+                datetime.now(core.UTC).isoformat()
+            )
+            stage = "idle"
+            state["stage"] = "idle"
+
     state["context"] = context
 
     if bool(context.get("warmup_mode")):
