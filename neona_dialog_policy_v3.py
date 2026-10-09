@@ -4,11 +4,14 @@ from __future__ import annotations
 Неона 3.0 — «легко, интересно, приятно».
 
 Архитектура:
-- neona_dialog_policy_v2.py остаётся базой жёстких правил, календаря и safety;
-- этот слой отвечает за понимание смысла, характер и естественное ведение разговора;
-- свободный диалог обрабатывает более сильная модель;
-- календарь, согласие на встречу, стоп-сигналы и реальные действия остаются
-  детерминированными и не отдаются модели на фантазию.
+- GPT-6.1 Sol является основным смысловым мозгом обычного диалога;
+- neona_dialog_policy_v2.py остаётся только исполнительным слоем для календаря,
+  жёсткого запрета контакта и других реальных действий;
+- слова-триггеры не имеют права заменять понимание смысла;
+- safety-правила работают как ограждения ПОСЛЕ понимания контекста, а не как
+  набор шаблонных ответов;
+- календарь и реальные действия остаются детерминированными и не отдаются
+  модели на фантазию.
 """
 
 import json
@@ -165,27 +168,38 @@ def _identity_question_v3(text: str) -> bool:
     )
 
 
-def _identity_reply(owner_name: str, first_name: str, greet: bool) -> str:
-    prefix = f"{core._greeting(first_name)} " if greet else ""
-    forms = _owner_forms(owner_name)
-    return (
-        prefix
-        + f"Да, вы меня раскусили 😄 Я искусственный интеллект, "
-          f"секретарь-референт {forms['genitive']}. "
-          "Стараюсь быть полезной без лишнего шума — и кофе, к счастью, не требую."
-    )
+def _must_use_deterministic_policy(text: str) -> bool:
+    """Только настоящая жёсткая граница обходит смысловой слой.
+
+    Отказ от конкретного предложения, вопрос об источнике, здоровье, цене,
+    ИИ или встрече — это всё ещё разговор и должно пониматься по смыслу.
+    Детерминированно обрабатываем только прямой запрет дальнейшего контакта.
+    """
+    return bool(v2._do_not_contact(text))
 
 
-def _hard_case(text: str, context: dict, owner_name: str = "") -> bool:
-    """То, что должно пройти через проверенные жёсткие правила V2."""
-    return any((
-        v2._do_not_contact(text),
-        v2._decline(text),
-        v2._source_question(text),
-        v2._guarantee_question(text),
-        v2._health_topic(text),
-        bool(v2._meeting_reason(text, context, owner_name)),
-    ))
+def _repair_false_legacy_stage(stage: str, context: dict) -> tuple[str, dict]:
+    """Снимает старую ложную стадию встречи, созданную keyword-скриптом."""
+    context = dict(context or {})
+    if stage not in {"invited_to_meeting", "awaiting_meeting_consent"}:
+        return stage, context
+
+    mem = legacy._relationship_memory(context)
+    previous_incoming = str(mem.get("last_incoming") or "").strip()
+    previous_reply = str(mem.get("last_reply") or "").strip()
+
+    if (
+        previous_incoming
+        and not legacy._commercial_intent(previous_incoming)
+        and "по стоимости" in previous_reply.casefold()
+    ):
+        context = legacy._clear_meeting_context(context)
+        context.pop("commercial_interest_at", None)
+        context.pop("meeting_reason", None)
+        context["semantic_stage_recovered"] = True
+        return "idle", context
+
+    return stage, context
 
 
 def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet: bool) -> str:
@@ -207,13 +221,27 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 ПОСЛЕДНИЙ КОНТЕКСТ ДИАЛОГА:
 {history}
 
-ГЛАВНЫЙ ПРИНЦИП:
+ГЛАВНЫЙ ПРИНЦИП — СНАЧАЛА СМЫСЛ, ПОТОМ ЦЕЛЬ:
 Не отвечай на ключевые слова. Отвечай на СМЫСЛ последней реплики в контексте разговора.
 Перед ответом молча пойми:
-- на что человек отвечает;
-- что он сейчас сообщает: факт, шутку, сомнение, интерес, отказ или вопрос;
+- на что именно человек отвечает;
+- что он сейчас делает: рассказывает о себе, отвечает на вопрос, предлагает свою услугу,
+  делится ссылкой, шутит, сомневается, интересуется, отказывает или задаёт вопрос;
+- что человек ХОЧЕТ от этого сообщения, если вообще чего-то хочет;
 - что уже известно и что нельзя спрашивать повторно;
-- какой ОДИН следующий шаг естественен.
+- какой ОДИН следующий шаг естественен — или что следующий шаг сейчас вообще не нужен.
+
+КРИТИЧЕСКИ:
+- слова «бесплатно», «без оплаты», «ИИ», «здоровье», «клиенты», «встреча» и другие
+  НЕ являются намерением сами по себе;
+- если человек рассказывает О СВОЁМ продукте, тесте, работе или услуге — не превращай
+  это в вопрос о цене/услугах Агентства W;
+- если человек прислал ссылку, поблагодари за источник, но НЕ обещай «зайти»,
+  «посмотреть», «изучить» или «прочитать», если система реально этого не сделала;
+- если сообщение содержательное, ответ должен опираться хотя бы на ОДНУ конкретную
+  деталь из него. Нельзя отвечать универсальной заготовкой, подходящей к любому человеку;
+- не вытаскивай старую тему из памяти, если последняя реплика явно о другом;
+- не веди к Агентству W в каждой реплике: сначала будь нормальным собеседником.
 
 ДЕЛОВОЙ КОМПАС:
 Агентству W нужны партнёры и клиенты, но человека нельзя тянуть к встрече механически.
@@ -244,11 +272,17 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 Только программная календарная ветка после явного согласия покажет свободное время.
 
 ЖЁСТКИЕ ГРАНИЦЫ:
-- Если текущее сообщение НЕ о здоровье, вообще не упоминай врача, лечение, медицину или здоровье.
+- Если человек просто работает с продуктами/темами здоровья, это НЕ медицинский вопрос.
+  Ограничение про врача нужно только когда человек реально просит медицинский совет,
+  диагноз, лечение или оценку здоровья.
 - Не консультируй по праву, финансам, криптовалютам, медицине, рекламе и чужой стратегии.
 - Не обещай доход, количество клиентов/партнёров и гарантированный результат.
 - Не придумывай цены, кейсы, факты, файлы, услуги и действия.
 - Не говори, что уже что-то записала/передала/отправила, если действие не выполнено системой.
+- Если прямо спрашивают, человек ли ты / ИИ ли ты — ответь честно и спокойно:
+  ты Неона, цифровой секретарь-референт {forms['genitive']}, работающий с ИИ.
+  НЕ говори «вы меня раскусили», не шути про разоблачение и не делай из этого событие.
+- Если НЕ спрашивают о твоей природе — вообще не поднимай тему ИИ.
 - Не называй внутренние имена ИИ-агентов без необходимости.
 - Не дави на семью, возраст, страх потери времени или деньги.
 - Не задавай несколько вопросов подряд.
@@ -264,16 +298,18 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 Верни ТОЛЬКО JSON, без markdown:
 {{
   "reply": "готовая реплика человеку, обычно 1–3 коротких предложения",
-  "action": "continue | ask_meeting_consent | close_gently",
+  "intent": "share | answer | question | offer | interest | objection | identity | meeting | close | other",
+  "action": "continue | ask_meeting_consent | schedule_now | close_gently",
   "why": "очень коротко, 3–8 слов, только для внутреннего журнала"
 }}
 
 action:
 - continue — обычный живой разговор;
-- ask_meeting_consent — человек уже достаточно заинтересован, естественно спросить про разговор с {forms['instrumental']};
+- ask_meeting_consent — встреча ещё НЕ согласована, но естественно спросить согласие;
+- schedule_now — человек САМ прямо попросил встречу/созвон или уже явно согласился;
 - close_gently — разговор естественно завершён, но человек НЕ просил запретить контакт.
 
-Никогда не показывай человеку поле why и внутренний анализ.
+Никогда не показывай человеку поля why/intent и внутренний анализ.
 """.strip()
 
 
@@ -303,10 +339,19 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
     )
     data = _extract_json(raw)
     reply = str(data.get("reply") or "").strip()
+    intent = str(data.get("intent") or "other").strip().lower()
     action = str(data.get("action") or "continue").strip()
     why = str(data.get("why") or "").strip()[:120]
 
-    if action not in {"continue", "ask_meeting_consent", "close_gently"}:
+    if intent not in {
+        "share", "answer", "question", "offer", "interest",
+        "objection", "identity", "meeting", "close", "other",
+    }:
+        intent = "other"
+
+    if action not in {
+        "continue", "ask_meeting_consent", "schedule_now", "close_gently"
+    }:
         action = "continue"
 
     # Если модель не соблюла JSON, безопасно используем текст как обычную реплику.
@@ -318,13 +363,44 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
     # владельца это не должно менять того, от чьего имени работает Неона.
     reply = v2._rewrite_wrong_owner_reference(reply, owner_name)
 
-    # Защита от сегодняшнего казуса: медицина не может «просочиться» по ассоциации.
+    # Семантические предохранители: не позволяем старым темам/ключевым словам
+    # просочиться в ответ, если человек их сейчас не спрашивал.
     if not v2._health_topic(text):
         if re.search(r"\b(?:врач|доктор|медицин|лечени|лекарств|здоровь)\w*\b", reply, flags=re.I):
             reply = _repair_reply(
                 config, owner_name, text, reply,
-                "В текущем сообщении нет темы здоровья. Полностью убери медицинскую тему.",
+                "В текущем сообщении нет медицинского вопроса. Убери медицинскую тему и ответь на реальный смысл сообщения.",
             )
+
+    if (
+        not legacy._commercial_intent(text)
+        and re.search(r"\b(?:стоимост|цен[аеуы]|оплат|тариф)\w*\b", reply, flags=re.I)
+    ):
+        reply = _repair_reply(
+            config, owner_name, text, reply,
+            "Человек не спрашивал цену или оплату Агентства. Не придумывай коммерческий вопрос; ответь на то, что человек реально сообщил.",
+        )
+        if action in {"ask_meeting_consent", "schedule_now"}:
+            action = "continue"
+
+    if (
+        not _identity_question_v3(text)
+        and re.search(r"\b(?:искусственн\w+\s+интеллект|я\s+ии|я\s+бот|я\s+робот)\b", reply, flags=re.I)
+    ):
+        reply = _repair_reply(
+            config, owner_name, text, reply,
+            "Человек не спрашивал, ИИ ли ты. Не поднимай тему своей природы; ответь на смысл его сообщения.",
+        )
+
+    if re.search(
+        r"\b(?:загляну|посмотрю|изучу|прочитаю|перейду\s+по\s+ссылке)\b",
+        reply,
+        flags=re.I,
+    ) and re.search(r"https?://|t\.me/", str(text or ""), flags=re.I):
+        reply = _repair_reply(
+            config, owner_name, text, reply,
+            "Не обещай открыть или изучить присланную ссылку. Поблагодари за источник и продолжи разговор только по доступному тексту.",
+        )
 
     # До согласия нельзя выдавать слоты календаря.
     if action != "ask_meeting_consent" and re.search(r"\b\d{1,2}:\d{2}\b", reply):
@@ -351,7 +427,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
                 reply += ". "
             reply += f"Хотите, я организую вам встречу с {forms['instrumental']}?"
 
-    return {"reply": reply, "action": action, "why": why}
+    return {"reply": reply, "intent": intent, "action": action, "why": why}
 
 
 def _general_reply_v3(config, owner_name, first_name, text, greet, context=None):
@@ -369,31 +445,41 @@ def _process_v3(
     config, owner_id, owner_name, contact_id, first_name, username,
     text, message_dt, state,
 ):
-    stage = str((state or {}).get("stage") or "idle")
-    greeted = bool((state or {}).get("greeted", False))
+    state = dict(state or {})
+    stage = str(state.get("stage") or "idle")
+    greeted = bool(state.get("greeted", False))
     greet = not greeted
     context = v2._ctx(state)
 
-    # Все календарные стадии, подтверждение встречи, стоп-сигналы и прочие
-    # детерминированные действия оставляем V2.
-    if stage != "idle":
+    # Лечим старые ложные стадии, созданные keyword-скриптами.
+    stage, context = _repair_false_legacy_stage(stage, context)
+    state["stage"] = stage
+    state["context"] = context
+
+    # После реального согласия календарь остаётся детерминированным.
+    if stage in {
+        "awaiting_meeting_consent",
+        "invited_to_meeting",
+        "awaiting_slot_choice",
+        "collecting_meeting_details",
+        "awaiting_confirmation",
+        "scheduled",
+    }:
         return _ORIGINAL_V2_PROCESS(
             config, owner_id, owner_name, contact_id, first_name, username,
             text, message_dt, state
         )
 
-    # Шутливое «я с роботом общаюсь 😂» тоже требует честного ответа.
-    if _identity_question_v3(text):
-        return _identity_reply(owner_name, first_name, greet), "idle", True, context
-
-    # Всё, что имеет жёсткое правило или прямой мост к Валентине, не отдаём импровизации.
-    if _hard_case(text, context, owner_name):
+    # Только прямой запрет дальнейшего контакта имеет право обойти смысловой мозг.
+    if _must_use_deterministic_policy(text):
         return _ORIGINAL_V2_PROCESS(
             config, owner_id, owner_name, contact_id, first_name, username,
             text, message_dt, state
         )
 
-    # Обычный живой разговор: одна сильная модель видит контекст и выбирает следующий шаг.
+    # ВСЕ остальные обычные реплики — включая цену, здоровье как сферу бизнеса,
+    # вопросы об ИИ, рассказы о себе, ссылки, возражения и интерес — сначала
+    # понимает сильная модель в полном контексте.
     result = _reasoned_turn(
         config, owner_name, first_name, text, greet, context
     )
@@ -401,12 +487,28 @@ def _process_v3(
         config, result["reply"], text, context
     )
 
+    context["neona_v3_last_intent"] = result.get("intent") or "other"
     context["neona_v3_last_action"] = result["action"]
     if result["why"]:
         context["neona_v3_last_reason"] = result["why"]
 
+    print(
+        "[NeonaBrain] "
+        f"owner={int(owner_id)} contact={int(contact_id)} "
+        f"intent={context['neona_v3_last_intent']} "
+        f"action={result['action']}",
+        flush=True,
+    )
+
+    if result["action"] == "schedule_now":
+        # Человек сам прямо попросил встречу/созвон или уже согласился.
+        return _ORIGINAL_V2_PROCESS(
+            config, owner_id, owner_name, contact_id, first_name, username,
+            text, message_dt, state
+        )
+
     if result["action"] == "ask_meeting_consent":
-        context["meeting_reason"] = "interest"
+        context["meeting_reason"] = "semantic_interest"
         return reply, "awaiting_meeting_consent", True, context
 
     if result["action"] == "close_gently":
