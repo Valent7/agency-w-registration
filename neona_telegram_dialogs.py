@@ -2641,6 +2641,73 @@ async def sync_owner_once(
                         flush=True,
                     )
 
+            # Самовосстановление Story-диалогов.
+            # Бывает, что состояние уже записало последнее входящее как seen,
+            # хотя после него в реальном Telegram-чате нет исходящего ответа.
+            # Для диалогов, начатых ответом владельца на Story, это безопасно
+            # проверяем по самой переписке и один раз возвращаем входящее в работу.
+            story_reply_id = int(
+                state_context.get("story_reply_message_id") or 0
+            )
+            story_recovery_done_id = int(
+                state_context.get("story_silent_recovery_id") or 0
+            )
+            current_stage = str(state.get("stage") or "idle")
+            if (
+                not new_messages
+                and str(state_context.get("activated_by") or "") == "telegram_story_reply"
+                and last_id > 0
+                and last_id > story_reply_id
+                and last_id > owner_fence_id
+                and story_recovery_done_id != last_id
+                and current_stage not in {
+                    "contact_closed",
+                    "opted_out",
+                    "partner_active",
+                    "partner_registered",
+                }
+            ):
+                latest_seen_incoming = next(
+                    (
+                        message
+                        for message in recent
+                        if not bool(getattr(message, "out", False))
+                        and int(message.id) == last_id
+                    ),
+                    None,
+                )
+                real_outgoing_after_seen = any(
+                    bool(getattr(message, "out", False))
+                    and int(message.id) > last_id
+                    for message in all_recent
+                )
+                if (
+                    latest_seen_incoming is not None
+                    and not real_outgoing_after_seen
+                ):
+                    attempts = (
+                        dict(state_context.get("message_processing_attempts"))
+                        if isinstance(
+                            state_context.get("message_processing_attempts"),
+                            dict,
+                        )
+                        else {}
+                    )
+                    attempts.pop(str(last_id), None)
+                    state_context = {
+                        **state_context,
+                        "message_processing_attempts": attempts,
+                        "story_silent_recovery_id": last_id,
+                        "story_silent_recovery_at": datetime.now(UTC).isoformat(),
+                    }
+                    new_messages = [latest_seen_incoming]
+                    print(
+                        f"[NeonaRecovery] owner={int(owner_id)} "
+                        f"contact={contact_id} message_id={last_id} "
+                        "reason=story_seen_without_real_reply",
+                        flush=True,
+                    )
+
             # Точечное одноразовое восстановление Ильи после сбоя 08.10.
             # Массовый replay отключён; это конкретный диалог, подтверждённый
             # логами и владельцем как оставшийся без ответа.
