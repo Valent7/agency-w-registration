@@ -2578,6 +2578,136 @@ async def instagram_webhook_receive(request: Request):
     )
 
 
+def _catch_up_recent_instagram_comment_replies() -> None:
+    """Recover replies missed while the webhook was unavailable.
+
+    Safety: only inspect recent root threads where the owner already approved
+    Neona's first public reply. This is a startup safety net, not polling.
+    """
+    try:
+        rows = _sb_get(
+            "agency_instagram_comments",
+            {
+                "status": "eq.replied",
+                "select": "*",
+                "order": "replied_at.desc",
+                "limit": 50,
+            },
+        )
+    except Exception as exc:
+        print(
+            "INSTAGRAM_COMMENT_CATCHUP_LOOKUP_ERROR:",
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return
+
+    checked = 0
+    recovered = 0
+    seen_roots = set()
+    for raw_row in rows or []:
+        row = dict(raw_row or {})
+        if str(row.get("parent_comment_id") or "").strip():
+            continue
+        root_id = str(row.get("comment_id") or "").strip()
+        account_id = str(row.get("instagram_account_id") or "").strip()
+        if not root_id or not account_id or root_id in seen_roots:
+            continue
+        seen_roots.add(root_id)
+
+        try:
+            connection = _resolve_instagram_connection(account_id)
+            data = _instagram_graph_get(
+                f"{root_id}/replies",
+                access_token=str(connection.get("access_token") or ""),
+                fields="id,text,username,timestamp,parent_id,from",
+            )
+            replies = data.get("data") if isinstance(data, dict) else []
+            if not isinstance(replies, list):
+                replies = []
+            checked += 1
+
+            account_username = str(
+                connection.get("instagram_username") or ""
+            ).strip().lower()
+            account_self_id = str(
+                connection.get("instagram_account_id") or ""
+            ).strip()
+            our_reply_id = str(row.get("reply_id") or "").strip()
+
+            for reply in replies:
+                if not isinstance(reply, dict):
+                    continue
+                reply_id = str(reply.get("id") or "").strip()
+                if not reply_id or reply_id == our_reply_id:
+                    continue
+                from_data = (
+                    reply.get("from")
+                    if isinstance(reply.get("from"), dict)
+                    else {}
+                )
+                author_id = str(from_data.get("id") or "").strip()
+                author_username = str(
+                    reply.get("username")
+                    or from_data.get("username")
+                    or ""
+                ).strip()
+                if author_id and author_id == account_self_id:
+                    continue
+                if (
+                    account_username
+                    and author_username.lower() == account_username
+                ):
+                    continue
+
+                existing = _sb_get(
+                    "agency_instagram_comments",
+                    {
+                        "comment_id": f"eq.{reply_id}",
+                        "select": "comment_id",
+                        "limit": 1,
+                    },
+                )
+                if existing:
+                    continue
+
+                event = {
+                    "instagram_account_id": account_id,
+                    "comment_id": reply_id,
+                    "parent_comment_id": str(
+                        reply.get("parent_id") or root_id
+                    ).strip(),
+                    "media_id": str(row.get("media_id") or "").strip(),
+                    "media_type": str(row.get("media_type") or "").strip(),
+                    "media_permalink": str(
+                        row.get("media_permalink") or ""
+                    ).strip(),
+                    "media_caption": str(row.get("media_caption") or ""),
+                    "author_id": author_id,
+                    "author_username": author_username,
+                    "comment_text": str(reply.get("text") or "").strip(),
+                    "comment_timestamp": reply.get("timestamp"),
+                    "raw_value": reply,
+                }
+                _store_instagram_comment(event, connection)
+                recovered += 1
+        except Exception as exc:
+            print(
+                "INSTAGRAM_COMMENT_CATCHUP_ERROR:",
+                {
+                    "comment_id": root_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                flush=True,
+            )
+
+    print(
+        "INSTAGRAM_COMMENT_CATCHUP_DONE:",
+        {"threads_checked": checked, "replies_recovered": recovered},
+        flush=True,
+    )
+
+
 def _restore_instagram_subscriptions_on_startup() -> None:
     """Idempotently restore comments/messages webhook subscriptions after deploys."""
     try:
@@ -2664,6 +2794,7 @@ routes = [
 @asynccontextmanager
 async def _app_lifespan(app):
     _restore_instagram_subscriptions_on_startup()
+    _catch_up_recent_instagram_comment_replies()
     yield
 
 
