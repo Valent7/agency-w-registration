@@ -1055,23 +1055,50 @@ def _general_reply(config, owner_name, first_name, text, greet, context=None):
     return _de_repeat_reply(config, reply, text, context)
 
 _COMMERCIAL_INTENT_PATTERNS = (
-    r"\bплатн\w*\b",
-    r"\bбесплатн\w*\b",
+    r"\bкакая\s+цен\w*\b",
+    r"\bпо\s+какой\s+цен\w*\b",
     r"\bцен(?:а|ы|е|у|ой|ами|ах)?\b",
     r"\bстоимост\w*\b",
     r"\bсколько\s+(?:это\s+)?(?:стоит|будет\s+стоить)\b",
     r"\bпоч[её]м\b",
     r"\bтариф\w*\b",
-    r"\bоплат\w*\b",
+    r"\bкак\s+(?:можно\s+)?оплат\w*\b",
+    r"\bуслови(?:я|я)\s+оплат\w*\b",
+    r"\bспособ\w*\s+оплат\w*\b",
     r"\bплат[её]ж\w*\b",
-    r"\bуслови(?:е|я|й|ям|ях)\b",
+)
+
+
+_FREE_OFFER_PATTERNS = (
+    r"\bбез\s+оплат\w*\b",
+    r"\bбесплатн\w*\s+(?:тест|консультац|встреч|разбор|диагностик|заняти)\w*\b",
+    r"\bпровед\w*\s+[^.!?]{0,80}\b(?:без\s+оплат\w*|бесплатн\w*)\b",
+    r"\bпредлага\w*\s+[^.!?]{0,80}\bбесплатн\w*\b",
+    r"\bготов\w*\s+записат\w*\s+на\s+тест\b",
 )
 
 
 def _commercial_intent(text: str) -> bool:
-    """Цена/оплата/условия — это прямой сигнал вести к Директору, а не фантазировать."""
+    """Распознаёт вопрос человека о цене/оплате Агентства, а не его собственное предложение.
+
+    Фразы вроде «проведу бесплатный тест» или «тест без оплаты» описывают
+    предложение собеседника и не должны отправлять Неону в ветку цены Агентства W.
+    """
     normalized = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
-    return bool(normalized) and any(
+    if not normalized:
+        return False
+
+    if any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in _FREE_OFFER_PATTERNS
+    ):
+        return False
+
+    # Короткие вопросы «это платно?» / «это бесплатно?» действительно про условия.
+    if re.search(r"\b(?:это\s+)?(?:платно|бесплатно)\s*\??$", normalized):
+        return True
+
+    return any(
         re.search(pattern, normalized, flags=re.IGNORECASE)
         for pattern in _COMMERCIAL_INTENT_PATTERNS
     )
