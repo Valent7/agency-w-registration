@@ -2641,61 +2641,6 @@ async def sync_owner_once(
                         flush=True,
                     )
 
-            # Одноразовое восстановление сбоя 08–09.10.2026.
-            # В тот период wrapper worker падал до обычной обработки, а часть
-            # старых попыток уже успела записать incoming как "seen".
-            # Возвращаем только сообщения окна аварии, если:
-            # - подтверждённого ответа Неоны после них нет;
-            # - владелец сам после них не писал;
-            # - это ещё не восстанавливалось.
-            if not new_messages and recent:
-                # Берём весь 8 октября: локальное время Telegram у
-                # владельцев отличается, а message.date хранится в UTC.
-                # Старые сообщения до первого касания всё равно защищены
-                # проверкой реального исходящего после них.
-                outage_start = datetime(2026, 10, 8, 0, 0, tzinfo=UTC)
-                outage_end = datetime(2026, 10, 9, 4, 33, tzinfo=UTC)
-                latest_seen = recent[-1]
-                latest_seen_id = int(latest_seen.id)
-                latest_seen_dt = latest_seen.date.astimezone(UTC)
-                outage_recovery_done_id = int(
-                    state_context.get("outage_recovery_20261009_id") or 0
-                )
-                real_outgoing_after_incoming = any(
-                    bool(getattr(message, "out", False))
-                    and int(message.id) > latest_seen_id
-                    for message in all_recent
-                )
-                if (
-                    latest_seen_id == last_id
-                    and outage_start <= latest_seen_dt <= outage_end
-                    and latest_seen_id > owner_fence_id
-                    and outage_recovery_done_id != latest_seen_id
-                    and not real_outgoing_after_incoming
-                ):
-                    attempts = (
-                        dict(state_context.get("message_processing_attempts"))
-                        if isinstance(
-                            state_context.get("message_processing_attempts"),
-                            dict,
-                        )
-                        else {}
-                    )
-                    attempts.pop(str(latest_seen_id), None)
-                    state_context = {
-                        **state_context,
-                        "message_processing_attempts": attempts,
-                        "outage_recovery_20261009_id": latest_seen_id,
-                        "outage_recovery_20261009_at": datetime.now(UTC).isoformat(),
-                    }
-                    new_messages = [latest_seen]
-                    print(
-                        f"[NeonaRecovery] owner={int(owner_id)} "
-                        f"contact={contact_id} message_id={latest_seen_id} "
-                        "reason=20261008_worker_outage",
-                        flush=True,
-                    )
-
             if diag_this_run:
                 print(
                     f"[NeonaDiag] owner={int(owner_id)} contact={contact_id} "
