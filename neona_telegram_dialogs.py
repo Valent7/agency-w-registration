@@ -2580,6 +2580,67 @@ async def sync_owner_once(
                 if recovery_message is not None:
                     new_messages = [recovery_message]
 
+            # Общая страховка после технических сбоев:
+            # если входящее уже помечено как обработанное из-за ошибки,
+            # подтверждённого ответа Неоны нет и владелец сам не вмешивался,
+            # один раз возвращаем это сообщение в работу автоматически.
+            stale_failed_id = int(
+                state_context.get("last_processing_failed_id") or 0
+            )
+            stale_recovery_done = int(
+                state_context.get("auto_failed_recovery_id") or 0
+            )
+            last_reply_id_for_recovery = int(
+                state_context.get("last_reply_id") or 0
+            )
+            last_reply_verified_for_recovery = bool(
+                state_context.get("last_reply_verified")
+            )
+            if (
+                not new_messages
+                and stale_failed_id
+                and stale_failed_id == last_id
+                and stale_failed_id > owner_fence_id
+                and stale_recovery_done != stale_failed_id
+                and not last_reply_verified_for_recovery
+                and (
+                    not last_reply_id_for_recovery
+                    or last_reply_id_for_recovery < stale_failed_id
+                )
+            ):
+                stale_message = next(
+                    (
+                        message
+                        for message in recent
+                        if not bool(getattr(message, "out", False))
+                        and int(message.id) == stale_failed_id
+                    ),
+                    None,
+                )
+                if stale_message is not None:
+                    attempts = (
+                        dict(state_context.get("message_processing_attempts"))
+                        if isinstance(
+                            state_context.get("message_processing_attempts"),
+                            dict,
+                        )
+                        else {}
+                    )
+                    attempts.pop(str(stale_failed_id), None)
+                    state_context = {
+                        **state_context,
+                        "message_processing_attempts": attempts,
+                        "auto_failed_recovery_id": stale_failed_id,
+                        "auto_failed_recovery_at": datetime.now(UTC).isoformat(),
+                    }
+                    new_messages = [stale_message]
+                    print(
+                        f"[NeonaRecovery] owner={int(owner_id)} "
+                        f"contact={contact_id} message_id={stale_failed_id} "
+                        "reason=stale_failed_without_verified_reply",
+                        flush=True,
+                    )
+
             if diag_this_run:
                 print(
                     f"[NeonaDiag] owner={int(owner_id)} contact={contact_id} "
