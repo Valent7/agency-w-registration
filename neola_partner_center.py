@@ -2146,6 +2146,108 @@ def _render_neola_conversation(telegram_id, owner_name, ui_context, ask_openai_f
             st.error(f"Неола не смогла ответить: {exc}")
 
 
+def render_neola_fallback_voice(
+    telegram_id,
+    owner_name,
+    ui_context,
+    ask_openai_fn,
+):
+    """Надёжный резерв для случаев, когда браузерный Live/WebRTC недоступен.
+
+    Этот режим использует стандартный Streamlit audio_input:
+    микрофон -> серверное распознавание -> обычный интеллект Неолы -> голосовой ответ.
+    Он не зависит от прямого браузерного соединения с Realtime/WebRTC.
+    """
+    activation = ensure_partner_activation(telegram_id)
+    member = get_member_by_telegram_id(telegram_id)
+
+    if not activation_is_confirmed(activation):
+        return False
+
+    st.markdown("#### 🔁 Резервный голос Неолы")
+    st.caption(
+        "Если Live-разговор не подключился, просто нажмите микрофон ниже и "
+        "скажите вопрос. Неола распознает речь и ответит голосом."
+    )
+
+    if not hasattr(st, "audio_input"):
+        st.warning(
+            "Резервный микрофон недоступен в этой версии Streamlit. "
+            "Можно написать вопрос Неоле текстом."
+        )
+        return False
+
+    audio = st.audio_input(
+        "🎙 Резервный микрофон Неолы",
+        key=f"neola_fallback_audio_{int(telegram_id)}",
+    )
+    if audio is None:
+        return False
+
+    audio_bytes = audio.getvalue()
+    if not audio_bytes:
+        st.warning("Запись получилась пустой. Попробуйте сказать вопрос ещё раз.")
+        return False
+
+    audio_hash = hashlib.sha256(audio_bytes).hexdigest()[:20]
+    processed_key = f"neola_fallback_processed_{int(telegram_id)}_{audio_hash}"
+    result_key = f"neola_fallback_result_{int(telegram_id)}_{audio_hash}"
+
+    if st.session_state.get(processed_key):
+        cached = st.session_state.get(result_key) or {}
+        transcript = str(cached.get("transcript") or "").strip()
+        answer = str(cached.get("answer") or "").strip()
+        speech = cached.get("speech")
+        if transcript:
+            st.info(f"Вы сказали: {transcript}")
+        if answer:
+            st.success(answer)
+        if speech:
+            st.audio(speech, format="audio/mp3")
+        return True
+
+    try:
+        with st.spinner("Неола слушает..."):
+            transcript = _transcribe_audio(audio)
+        if not transcript:
+            raise RuntimeError("Речь не распознана. Попробуйте сказать вопрос ещё раз.")
+
+        with st.spinner("Неола отвечает..."):
+            answer = _ask_neola(
+                owner_name,
+                telegram_id,
+                transcript,
+                ui_context,
+                activation,
+                member,
+                ask_openai_fn,
+            )
+            speech = _synthesize_speech(answer)
+
+        st.session_state[processed_key] = True
+        st.session_state[result_key] = {
+            "transcript": transcript,
+            "answer": answer,
+            "speech": speech,
+        }
+
+        st.info(f"Вы сказали: {transcript}")
+        st.success(answer)
+        if speech:
+            st.audio(
+                speech,
+                format="audio/mp3",
+                autoplay=True,
+            )
+        return True
+    except Exception as exc:
+        st.error(
+            "Резервный голос Неолы не смог обработать запись. "
+            f"Попробуйте ещё раз. Техническая причина: {exc}"
+        )
+        return False
+
+
 def render_neola_quick_assistant(telegram_id, owner_name, ui_context, ask_openai_fn):
     activation = ensure_partner_activation(telegram_id)
     label = "🎙 Неола рядом" if activation_is_confirmed(activation) else "🔒 Неола"
