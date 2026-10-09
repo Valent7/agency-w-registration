@@ -2649,7 +2649,11 @@ async def sync_owner_once(
             # - владелец сам после них не писал;
             # - это ещё не восстанавливалось.
             if not new_messages and recent:
-                outage_start = datetime(2026, 10, 8, 15, 0, tzinfo=UTC)
+                # Берём весь 8 октября: локальное время Telegram у
+                # владельцев отличается, а message.date хранится в UTC.
+                # Старые сообщения до первого касания всё равно защищены
+                # проверкой реального исходящего после них.
+                outage_start = datetime(2026, 10, 8, 0, 0, tzinfo=UTC)
                 outage_end = datetime(2026, 10, 9, 4, 33, tzinfo=UTC)
                 latest_seen = recent[-1]
                 latest_seen_id = int(latest_seen.id)
