@@ -41,3 +41,25 @@ At minimum verify:
 - no polling interval was accidentally reset to 15–30 seconds.
 
 These guardrails should be reviewed whenever Telegram, Neona, Neonia, Publisher, or shared Streamlit dialogue code is changed.
+
+
+## 6. Mandatory post-change regression control
+No change is considered finished immediately after code is committed or deployed.
+
+After **every** modification to Agency W, perform a post-change control to make sure partners do not lose existing functionality.
+
+Mandatory checks:
+- open every page directly affected by the change;
+- confirm that previously useful buttons, forms, tabs, counters, filters, media controls, publication controls and statistics are still present;
+- verify that the changed function itself works;
+- verify at least the neighboring functions that share the same page, state, worker, storage or API;
+- check that existing partner workflows still make sense from start to finish;
+- confirm that a fix did not silently rename, hide, disable or remove a working function;
+- if Telegram/Neona/Neonia is involved, check both automation and manual controls;
+- if content/publishing is involved, check text, image/video attachment, edit/delete, preview and send/publish controls;
+- if statistics are involved, compare what the UI shows with the actual current batch/data;
+- record any discovered regression and fix it before calling the task complete.
+
+Product principle:
+**Agency W must become more reliable after every change, not merely different.**
+The goal is that partners feel confident using the Agency and can recommend it to others without fear that a familiar function disappeared after an update.
