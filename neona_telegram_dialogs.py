@@ -2657,11 +2657,13 @@ async def sync_owner_once(
                 outage_recovery_done_id = int(
                     state_context.get("outage_recovery_20261009_id") or 0
                 )
-                latest_reply_id = int(
-                    state_context.get("last_reply_id") or 0
-                )
                 latest_reply_verified = bool(
                     state_context.get("last_reply_verified")
+                )
+                real_outgoing_after_incoming = any(
+                    bool(getattr(message, "out", False))
+                    and int(message.id) > latest_seen_id
+                    for message in all_recent
                 )
                 if (
                     latest_seen_id == last_id
@@ -2669,10 +2671,7 @@ async def sync_owner_once(
                     and latest_seen_id > owner_fence_id
                     and outage_recovery_done_id != latest_seen_id
                     and not latest_reply_verified
-                    and (
-                        not latest_reply_id
-                        or latest_reply_id < latest_seen_id
-                    )
+                    and not real_outgoing_after_incoming
                 ):
                     attempts = (
                         dict(state_context.get("message_processing_attempts"))
