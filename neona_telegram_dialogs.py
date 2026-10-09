@@ -407,6 +407,70 @@ def _load_workspace(config: Config, owner_id: int) -> dict[str, Any]:
         return {}
 
 
+def _persisted_dialog_contacts(
+    config: Config,
+    owner_id: int,
+) -> dict[int, dict[str, Any]]:
+    """Возвращает все диалоги, которые Неона уже когда-либо вела.
+
+    Эти контакты не должны выпадать из наблюдения только потому, что сегодняшняя
+    пятёрка/очередь Неонии изменилась. Таблица agency_dialog_states — постоянная
+    память живых диалогов Неоны.
+    """
+    response = requests.get(
+        f"{config.supabase_url}/rest/v1/agency_dialog_states",
+        headers=_headers(config),
+        params={
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "select": "contact_telegram_id,stage,context,updated_at",
+            "limit": 5000,
+        },
+        timeout=20,
+    )
+    if response.status_code == 404:
+        return {}
+    response.raise_for_status()
+    rows = response.json() if response.text.strip() else []
+
+    result: dict[int, dict[str, Any]] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            contact_id = int(row.get("contact_telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if contact_id <= 0:
+            continue
+
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        try:
+            first_message_id = int(
+                context.get("story_reply_message_id")
+                or context.get("first_message_id")
+                or 0
+            )
+        except (TypeError, ValueError):
+            first_message_id = 0
+
+        result[contact_id] = {
+            "sent_at": str(
+                context.get("first_message_sent_at")
+                or row.get("updated_at")
+                or ""
+            ),
+            "recipient_name": str(
+                context.get("contact_name")
+                or context.get("recipient_name")
+                or ""
+            ),
+            "message_id": first_message_id,
+            "kind": "persisted_dialog",
+            "stage": str(row.get("stage") or "idle"),
+        }
+    return result
+
+
 def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]]:
     workspace = _load_workspace(config, owner_id)
     allowed: dict[int, dict[str, Any]] = {}
@@ -435,6 +499,12 @@ def _allowed_contacts(config: Config, owner_id: int) -> dict[int, dict[str, Any]
             "message_id": first_message_id,
             "kind": event_kind,
         }
+
+    # Постоянная память Неоны имеет меньший приоритет, чем свежий sent_log,
+    # но гарантирует: уже начатый диалог не исчезнет после смены дневной пятёрки.
+    for contact_id, item in _persisted_dialog_contacts(config, owner_id).items():
+        allowed.setdefault(contact_id, item)
+
     return allowed
 
 
