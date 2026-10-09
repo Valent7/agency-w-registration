@@ -4,6 +4,7 @@ import os
 import re
 import mimetypes
 import tempfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -2660,7 +2661,13 @@ routes = [
     ),
 ]
 
+@asynccontextmanager
+async def _app_lifespan(app):
+    _restore_instagram_subscriptions_on_startup()
+    yield
+
+
 app = Starlette(
     routes=routes,
-    on_startup=[_restore_instagram_subscriptions_on_startup],
+    lifespan=_app_lifespan,
 )
