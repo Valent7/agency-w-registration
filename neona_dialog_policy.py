@@ -1717,16 +1717,21 @@ def _process_message(
 
 
 
-# --- Telegram Stories -> live dialogue handoff ---------------------------------
-# Пользователь отправляет подготовленный Radar-ответ вручную. Если Telegram
-# помечает исходящее как reply_to Story, Неона автоматически принимает этот
-# личный чат под наблюдение и обрабатывает следующий входящий ответ человека.
+# --- Telegram Stories / returning business chats -> live dialogue handoff ------
+# 1) Story-reply: исходящее reply_to Story автоматически открывает живой диалог.
+# 2) Returning business chat: если контакт уже есть в пуле кандидатов Агентства
+#    и сам снова написал после прежнего исходящего, диалог возвращается Неоне.
+# 3) Для старых ручных кейсов без записи в пуле допускается только очень узкий
+#    сигнал: явная просьба о созвоне после как минимум двух исходящих voice/video
+#    касаний. Это позволяет восстановить деловой диалог, не открывая Неоне все
+#    личные чаты владельца.
 _CORE_ALLOWED_CONTACTS = core._allowed_contacts
 _CORE_SYNC_OWNER_ONCE = core.sync_owner_once
 _STORY_ALLOWED_BY_OWNER: dict[int, dict[int, dict]] = {}
 _STORY_LAST_SCAN: dict[int, float] = {}
 _STORY_SCAN_INTERVAL_SECONDS = 60
 _STORY_LOOKBACK_HOURS = 96
+_RETURN_HISTORY_DAYS = 30
 
 
 def _story_reply_id(message) -> int:
@@ -1736,6 +1741,61 @@ def _story_reply_id(message) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _normalized_username(value: str) -> str:
+    return str(value or "").strip().lstrip("@").casefold()
+
+
+def _workspace_candidate_identities(config, owner_id: int) -> tuple[set[int], set[str]]:
+    """Возвращает бизнес-кандидатов Неонии без чтения личных чатов."""
+    workspace = core._load_workspace(config, int(owner_id))
+    raw = workspace.get("candidates")
+    rows = raw if isinstance(raw, list) else []
+
+    ids: set[int] = set()
+    usernames: set[str] = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        try:
+            contact_id = int(item.get("telegram_id") or 0)
+        except (TypeError, ValueError):
+            contact_id = 0
+        if contact_id > 0:
+            ids.add(contact_id)
+
+        username = _normalized_username(item.get("username") or "")
+        if username:
+            usernames.add(username)
+    return ids, usernames
+
+
+def _explicit_return_meeting_request(text: str) -> bool:
+    value = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    if not value:
+        return False
+    patterns = (
+        r"\bможно\b[^.!?]{0,80}\bсозвон\w*",
+        r"\bможем\b[^.!?]{0,80}\bсозвон\w*",
+        r"\bдавайте\b[^.!?]{0,80}\bсозвон\w*",
+        r"\bхочу\b[^.!?]{0,80}\bсозвон\w*",
+        r"\bпредлагаю\b[^.!?]{0,80}\bсозвон\w*",
+        r"\bкогда\b[^.!?]{0,80}\bсозвон\w*",
+        r"\bможно\b[^.!?]{0,80}\b(?:поговорить|пообщаться|встретиться)\b",
+    )
+    return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _owner_media_touch(message) -> bool:
+    if not bool(getattr(message, "out", False)):
+        return False
+    return bool(
+        getattr(message, "voice", False)
+        or getattr(message, "audio", False)
+        or getattr(message, "video", False)
+        or getattr(message, "video_note", False)
+    )
 
 
 def _story_allowed_contacts(config, owner_id: int):
@@ -1755,11 +1815,18 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
     config = core.load_config()
     base_allowed = _CORE_ALLOWED_CONTACTS(config, owner_id)
     cached = dict(_STORY_ALLOWED_BY_OWNER.get(owner_id, {}))
+    candidate_ids, candidate_usernames = _workspace_candidate_identities(
+        config,
+        owner_id,
+    )
     session = core._get_telegram_session(config, owner_id)
     if not session:
         return
 
-    cutoff = datetime.now(core.UTC) - timedelta(hours=_STORY_LOOKBACK_HOURS)
+    now_utc = datetime.now(core.UTC)
+    latest_cutoff = now_utc - timedelta(hours=_STORY_LOOKBACK_HOURS)
+    history_cutoff = now_utc - timedelta(days=_RETURN_HISTORY_DAYS)
+
     client = core.TelegramClient(
         core.StringSession(session),
         config.telegram_api_id,
@@ -1785,23 +1852,26 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
 
             latest = getattr(dialog, "message", None)
             latest_date = getattr(latest, "date", None)
+            if latest is None:
+                continue
             if latest_date is not None:
                 try:
-                    if latest_date.astimezone(core.UTC) < cutoff:
+                    if latest_date.astimezone(core.UTC) < latest_cutoff:
                         continue
                 except Exception:
                     pass
 
             messages = []
-            # Если последняя реплика — наша Story-reply, можно обойтись без второго запроса.
-            if latest is not None and bool(getattr(latest, "out", False)) and _story_reply_id(latest):
+            # Если последняя реплика — наша Story-reply, можно обойтись без
+            # дополнительного широкого чтения.
+            if bool(getattr(latest, "out", False)) and _story_reply_id(latest):
                 messages = [latest]
-            elif latest is not None and not bool(getattr(latest, "out", False)):
-                async for item in client.iter_messages(entity, limit=10):
+            elif not bool(getattr(latest, "out", False)):
+                async for item in client.iter_messages(entity, limit=20):
                     item_date = getattr(item, "date", None)
                     if item_date is not None:
                         try:
-                            if item_date.astimezone(core.UTC) < cutoff:
+                            if item_date.astimezone(core.UTC) < history_cutoff:
                                 break
                         except Exception:
                             pass
@@ -1813,9 +1883,71 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
                 item for item in messages
                 if bool(getattr(item, "out", False)) and _story_reply_id(item)
             ]
-            if not story_outgoing:
-                continue
-            warmup = max(story_outgoing, key=lambda item: int(getattr(item, "id", 0) or 0))
+
+            activation_source = ""
+            activation_reason = ""
+            if story_outgoing:
+                warmup = max(
+                    story_outgoing,
+                    key=lambda item: int(getattr(item, "id", 0) or 0),
+                )
+                activation_source = "telegram_story_reply"
+                activation_reason = "story_reply"
+            else:
+                # Возврат старого делового диалога. Нужны одновременно:
+                # - новый входящий как последняя реплика;
+                # - прежнее исходящее владельца;
+                # - либо контакт уже в бизнес-пуле Неонии, либо очень узкий
+                #   legacy-сигнал: явный созвон после >=2 voice/video касаний.
+                if bool(getattr(latest, "out", False)):
+                    continue
+
+                entity_username = _normalized_username(
+                    getattr(entity, "username", "") or ""
+                )
+                candidate_match = bool(
+                    contact_id in candidate_ids
+                    or (
+                        entity_username
+                        and entity_username in candidate_usernames
+                    )
+                )
+
+                outgoing_before_latest = [
+                    item for item in messages
+                    if bool(getattr(item, "out", False))
+                    and int(getattr(item, "id", 0) or 0)
+                    < int(getattr(latest, "id", 0) or 0)
+                ]
+                if not outgoing_before_latest:
+                    continue
+
+                latest_text = str(
+                    getattr(latest, "message", "") or ""
+                ).strip()
+                media_touch_count = sum(
+                    1 for item in outgoing_before_latest
+                    if _owner_media_touch(item)
+                )
+                legacy_meeting_return = bool(
+                    _explicit_return_meeting_request(latest_text)
+                    and media_touch_count >= 2
+                )
+
+                if not candidate_match and not legacy_meeting_return:
+                    continue
+
+                warmup = max(
+                    outgoing_before_latest,
+                    key=lambda item: int(getattr(item, "id", 0) or 0),
+                )
+                activation_source = "returning_business_dialog"
+                activation_reason = (
+                    "candidate_pool"
+                    if candidate_match
+                    else "meeting_after_media_touch"
+                )
+
             warmup_id = int(getattr(warmup, "id", 0) or 0)
             warmup_date = getattr(warmup, "date", None)
             sent_at = (
@@ -1830,17 +1962,22 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
                 "sent_at": sent_at,
                 "recipient_name": name,
                 "message_id": warmup_id,
-                "source": "telegram_story_reply",
+                "source": activation_source,
                 "story_id": story_id,
             }
 
-            # Жёсткая граница истории должна храниться в том же измерении,
-            # которое использует core.sync_owner_once: last_incoming_message_id.
-            # Поэтому baseline = последнее ВХОДЯЩЕЕ до нашего Story-reply,
-            # а не ID исходящего Story-reply. Старый текст при этом не передаётся
-            # в Неону: мы читаем только служебные id/date для определения границы.
+            # Граница истории хранится в том же измерении, что и core:
+            # последнее ВХОДЯЩЕЕ до исходящего, после которого начинается
+            # рабочий диалог Неоны. Старый текст модели не передаём.
             history = []
-            async for item in client.iter_messages(entity, limit=20):
+            async for item in client.iter_messages(entity, limit=30):
+                item_date = getattr(item, "date", None)
+                if item_date is not None:
+                    try:
+                        if item_date.astimezone(core.UTC) < history_cutoff:
+                            break
+                    except Exception:
+                        pass
                 history.append(item)
 
             incoming_before = []
@@ -1866,31 +2003,53 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
                 if isinstance(previous, dict) and isinstance(previous.get("context"), dict)
                 else {}
             )
-            previous_last = int(previous.get("last_incoming_message_id") or 0) if isinstance(previous, dict) else 0
-            same_story = int(previous_context.get("story_reply_message_id") or 0) == warmup_id
-
-            # После перезапуска worker не сбрасываем уже живой диалог назад.
-            # Но автоматически лечим состояние из предыдущей версии, где
-            # last_incoming_message_id ошибочно был равен ID исходящего Story-reply.
-            old_bad_fence = bool(
-                same_story
-                and previous_last == warmup_id
-                and int(previous_context.get("history_fence_message_id") or 0) == warmup_id
+            previous_last = (
+                int(previous.get("last_incoming_message_id") or 0)
+                if isinstance(previous, dict)
+                else 0
             )
-            if same_story and not old_bad_fence:
-                continue
 
-            fresh_context = {
-                "activated_by": "telegram_story_reply",
-                "warmup_mode": True,
-                "warmup_incoming_count": 0,
-                "story_reply_message_id": warmup_id,
-                "story_id": story_id,
-                "first_message_sent_at": sent_at,
-                "history_fence_incoming_id": baseline,
-                "pre_activation_history_forbidden": True,
-                "post_activation_memory_started": False,
-            }
+            if activation_source == "telegram_story_reply":
+                same_story = (
+                    int(previous_context.get("story_reply_message_id") or 0)
+                    == warmup_id
+                )
+                old_bad_fence = bool(
+                    same_story
+                    and previous_last == warmup_id
+                    and int(
+                        previous_context.get("history_fence_message_id") or 0
+                    )
+                    == warmup_id
+                )
+                if same_story and not old_bad_fence:
+                    continue
+
+                fresh_context = {
+                    "activated_by": "telegram_story_reply",
+                    "warmup_mode": True,
+                    "warmup_incoming_count": 0,
+                    "story_reply_message_id": warmup_id,
+                    "story_id": story_id,
+                    "first_message_sent_at": sent_at,
+                    "history_fence_incoming_id": baseline,
+                    "pre_activation_history_forbidden": True,
+                    "post_activation_memory_started": False,
+                }
+            else:
+                if isinstance(previous, dict):
+                    # Уже существующее состояние теперь попадает в base_allowed
+                    # через постоянную память core; назад его не сбрасываем.
+                    continue
+                fresh_context = {
+                    "activated_by": "returning_business_dialog",
+                    "returning_handoff_reason": activation_reason,
+                    "returning_outgoing_message_id": warmup_id,
+                    "first_message_sent_at": sent_at,
+                    "history_fence_incoming_id": baseline,
+                    "pre_activation_history_forbidden": True,
+                    "post_activation_memory_started": False,
+                }
 
             core._save_dialog_state(
                 config,
@@ -1901,11 +2060,21 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
                 greeted=True,
                 context=fresh_context,
             )
-            print(
-                f"[NeonaStoryHandoff] owner={owner_id} contact={contact_id} "
-                f"story_id={story_id} outgoing_id={warmup_id}",
-                flush=True,
-            )
+
+            if activation_source == "telegram_story_reply":
+                print(
+                    f"[NeonaStoryHandoff] owner={owner_id} contact={contact_id} "
+                    f"story_id={story_id} outgoing_id={warmup_id}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[NeonaReturnHandoff] owner={owner_id} contact={contact_id} "
+                    f"username=@{str(getattr(entity, 'username', '') or '')} "
+                    f"reason={activation_reason} outgoing_id={warmup_id} "
+                    f"baseline={baseline}",
+                    flush=True,
+                )
 
         _STORY_ALLOWED_BY_OWNER[owner_id] = cached
     finally:
