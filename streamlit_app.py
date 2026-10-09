@@ -85,6 +85,7 @@ from neola_partner_center import (
     ensure_partner_activation,
     render_neola_agent,
     render_neola_quick_assistant,
+    render_neola_fallback_voice,
     render_neola_study_questions,
     render_neola_knowledge_base,
     render_partner_center,
@@ -8032,6 +8033,13 @@ if telegram_login_valid or remembered_data:
                         neola_first_name,
                         neola_ui_context,
                         neola_step,
+                    )
+                    st.divider()
+                    render_neola_fallback_voice(
+                        int(telegram_id),
+                        neola_first_name,
+                        neola_ui_context,
+                        ask_openai,
                     )
         else:
             st.caption(
