@@ -1858,7 +1858,19 @@ async def _refresh_manual_story_warmups(owner_id: int) -> None:
         await client.disconnect()
 
 
-async def _story_aware_sync_owner_once(owner_id: int, owner_name: str, *, initialize_new_dialogs: bool = True):
+async def _story_aware_sync_owner_once(
+    owner_id: int,
+    owner_name: str,
+    *,
+    initialize_new_dialogs: bool = True,
+    **sync_options,
+):
+    """Story-обёртка не должна терять новые параметры основного sync_owner_once.
+
+    Любые безопасные опции синхронизации (например force_full_scan) передаются
+    дальше без изменения. Это защищает worker от регрессии, когда основной
+    Telegram-модуль получает новый keyword-аргумент.
+    """
     try:
         await _refresh_manual_story_warmups(int(owner_id))
     except Exception as exc:
@@ -1872,6 +1884,7 @@ async def _story_aware_sync_owner_once(owner_id: int, owner_name: str, *, initia
         owner_id,
         owner_name,
         initialize_new_dialogs=initialize_new_dialogs,
+        **sync_options,
     )
 
 
