@@ -2641,6 +2641,51 @@ async def sync_owner_once(
                         flush=True,
                     )
 
+            # Точечное одноразовое восстановление Ильи после сбоя 08.10.
+            # Массовый replay отключён; это конкретный диалог, подтверждённый
+            # логами и владельцем как оставшийся без ответа.
+            if (
+                not new_messages
+                and int(owner_id) == 1129658410
+                and contact_id == 332006775
+                and last_id == 43178
+                and owner_fence_id < 43178
+                and int(
+                    state_context.get("ilya_recovery_20261009_id") or 0
+                ) != 43178
+            ):
+                ilya_message = next(
+                    (
+                        message
+                        for message in recent
+                        if not bool(getattr(message, "out", False))
+                        and int(message.id) == 43178
+                    ),
+                    None,
+                )
+                if ilya_message is not None:
+                    attempts = (
+                        dict(state_context.get("message_processing_attempts"))
+                        if isinstance(
+                            state_context.get("message_processing_attempts"),
+                            dict,
+                        )
+                        else {}
+                    )
+                    attempts.pop("43178", None)
+                    state_context = {
+                        **state_context,
+                        "message_processing_attempts": attempts,
+                        "ilya_recovery_20261009_id": 43178,
+                        "ilya_recovery_20261009_at": datetime.now(UTC).isoformat(),
+                    }
+                    new_messages = [ilya_message]
+                    print(
+                        "[NeonaRecovery] owner=1129658410 contact=332006775 "
+                        "message_id=43178 reason=targeted_ilya_recovery",
+                        flush=True,
+                    )
+
             if diag_this_run:
                 print(
                     f"[NeonaDiag] owner={int(owner_id)} contact={contact_id} "
