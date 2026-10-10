@@ -1588,6 +1588,30 @@ def render_vk_sources(
 
     st.caption(f"Активных источников: {len(sources)}")
 
+    # Одна выборка из сохранённой истории на весь экран, без новых вызовов VK.
+    # Метаданные старых назначений могут не содержать community_id:
+    # такие строки не приписываем произвольному источнику.
+    source_shown_counts = {}
+    try:
+        assignment_history = _vk_scout._owner_vk_assignment_rows(int(owner_id))
+        source_shown_ids = {}
+        for row in assignment_history:
+            if str(row.get("status") or "").strip() == "released":
+                continue
+            meta = vk_queue_assignment_meta(row)
+            try:
+                cid = int(meta.get("community_id") or 0)
+                uid = int(row.get("vk_user_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if cid > 0 and uid > 0:
+                source_shown_ids.setdefault(cid, set()).add(uid)
+        source_shown_counts = {
+            cid: len(ids) for cid, ids in source_shown_ids.items()
+        }
+    except Exception:
+        st.caption("История выдачи VK временно недоступна; показатели обработанных скрыты.")
+
     for source in sources:
         source_id = source.get("id")
         community_id = source.get("community_id")
@@ -1607,6 +1631,27 @@ def render_vk_sources(
                     )
                 if community_id:
                     st.caption(f"ID сообщества: {community_id}")
+
+                # Показываем только реально сохранённые числа, без пересчёта
+                # ёмкости и без запуска фоновой выдачи из интерфейса.
+                state = _vk_scout._source_queue_state(source)
+                try:
+                    cid = int(community_id or 0)
+                    total = int(state["total"]) if state.get("total") is not None else None
+                    workable = (
+                        int(state["workable_total"])
+                        if state.get("workable_total") is not None else None
+                    )
+                except (TypeError, ValueError):
+                    total, workable = None, None
+                shown = source_shown_counts.get(cid)
+                metrics = st.columns(3)
+                metrics[0].metric("Всего в VK", f"{total:,}".replace(",", " ") if total is not None else "—")
+                metrics[1].metric("Доступно Неонии", f"{workable:,}".replace(",", " ") if workable is not None else "—")
+                metrics[2].metric("Выдано ранее", shown if shown is not None else "—")
+                st.caption("По сохранённым данным источника. «Выдано ранее» — уникальные профили, показанные в ежедневных пятёрках, а не подтверждённые диалоги.")
+                if state.get("error") or state.get("capacity_error"):
+                    st.caption("⚠️ Последний расчёт источника содержал ошибку; часть показателей может быть недоступна.")
 
             with cols[1]:
                 if source_id is None:
