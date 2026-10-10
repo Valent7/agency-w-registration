@@ -116,6 +116,9 @@ def _call_reasoning_model(config, instructions: str, input_text: str) -> str:
 
             answer = _response_text(response.json())
             if answer:
+                # Логируем фактически использованную модель без содержания переписки:
+                # иначе по одним настройкам невозможно понять, сработал ли fallback.
+                print(f"[NeonaModel] selected={model}", flush=True)
                 return answer
             last_error = RuntimeError(f"{model}: пустой ответ")
         except Exception as exc:
