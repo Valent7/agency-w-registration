@@ -112,6 +112,7 @@ from neona_telegram_dialogs import (
     reopen_last_incoming_for_retry,
 )
 from workspace_persistence import (
+    get_workspace_state_keys,
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
 )
@@ -7899,6 +7900,10 @@ if telegram_login_valid or remembered_data:
         st.session_state["neona_instagram_connected"] = instagram_connected
 
         hydrate_workspace_state_once(telegram_id)
+        neola_workspace_keys = get_workspace_state_keys(telegram_id)
+        neola_has_target_profile = bool(
+            st.session_state.get(neola_workspace_keys["passport"])
+        )
 
         # Персональный режим доступности для TalkBack/экранных дикторов.
         # По умолчанию выключен, поэтому обычный интерфейс других партнёров
@@ -8047,6 +8052,7 @@ if telegram_login_valid or remembered_data:
                         neola_ui_context,
                         neola_step,
                         daily_greeting_done=True,
+                        has_target_profile=neola_has_target_profile,
                     )
                     st.divider()
                     render_neola_fallback_voice(
