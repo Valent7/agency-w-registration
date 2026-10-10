@@ -2042,10 +2042,11 @@ def build_neola_daily_greeting(owner_name, meeting_count=None, onboarding_step=0
 
 
 def render_neola_daily_greeting(telegram_id, owner_name, onboarding_step=0):
-    """Один раз за день озвучивает наставническое приветствие.
+    """Голосовое приветствие при первом посещении Агентства за день.
 
-    Автозапуск пробуется сразу. Если браузер блокирует звук без жеста пользователя,
-    приветствие запускается при первом клике/касании/нажатии клавиши в Агентстве.
+    На мобильных устройствах autoplay может быть запрещён. Поэтому есть
+    отдельная видимая кнопка запуска, не требующая открытия Live-разговора.
+    Отметка хранится в localStorage *этого браузера*, не на всех устройствах.
     """
     today = datetime.now(BERLIN_TZ).date().isoformat()
     session_key = f"neola_daily_greeting_rendered_{int(telegram_id)}"
@@ -2053,68 +2054,92 @@ def render_neola_daily_greeting(telegram_id, owner_name, onboarding_step=0):
         return False
 
     meeting_count = _today_meeting_count(telegram_id)
-    text = build_neola_daily_greeting(
+    greeting_text = build_neola_daily_greeting(
         owner_name,
         meeting_count=meeting_count,
         onboarding_step=onboarding_step,
     )
+    st.caption(f"🎙 Неола: {greeting_text}")
 
     try:
-        speech = _synthesize_speech(text)
+        speech = _synthesize_speech(greeting_text)
     except Exception:
         speech = None
-
-    # Видимое короткое сообщение остаётся полезным, даже если браузер запретил autoplay.
-    st.caption(f"🎙 Неола: {text}")
 
     if speech:
         audio_b64 = base64.b64encode(speech).decode("ascii")
         storage_key = f"agency_w_neola_daily_greeting_{int(telegram_id)}"
+        # The visible button is essential on Safari/iPhone, where autoplay
+        # and play() from unrelated page gestures may be rejected.
         st.html(
             f"""
+            <div id="neola-daily-voice">
+              <button type="button" id="neola-daily-play"
+                style="padding:0.5rem 1rem;border-radius:0.6rem;
+                       border:1px solid #a99762;background:transparent;
+                       color:inherit;cursor:pointer">
+                ▶ Послушать приветствие Неолы
+              </button>
+              <span id="neola-daily-status" role="status" aria-live="polite"></span>
+            </div>
             <script>
             (() => {{
+              const root = document.getElementById("neola-daily-voice");
+              if (!root || root.dataset.ready === "1") return;
+              root.dataset.ready = "1";
+              const button = root.querySelector("#neola-daily-play");
+              const status = root.querySelector("#neola-daily-status");
               const storageKey = {json.dumps(storage_key)};
               const today = {json.dumps(today)};
-              try {{
-                if (localStorage.getItem(storageKey) === today) return;
-              }} catch (_) {{}}
+              let done = false;
+              try {{ done = localStorage.getItem(storageKey) === today; }}
+              catch (_) {{}}
 
               const audio = new Audio("data:audio/mpeg;base64,{audio_b64}");
               audio.preload = "auto";
-
-              const markPlayed = () => {{
-                try {{ localStorage.setItem(storageKey, today); }} catch (_) {{}}
-                cleanup();
+              const complete = () => {{
+                done = true;
+                try {{ localStorage.setItem(storageKey, today); }}
+                catch (_) {{}}
+                button.hidden = true;
+                status.textContent = " ✓ Приветствие прослушано";
               }};
-
-              const tryPlay = () => {{
-                const promise = audio.play();
-                if (promise && typeof promise.then === "function") {{
-                  promise.then(markPlayed).catch(() => {{
-                    // Браузер ждёт первый пользовательский жест.
-                  }});
+              audio.addEventListener("ended", complete, {{ once: true }});
+              audio.addEventListener("error", () => {{
+                status.textContent = " Не удалось воспроизвести звук.";
+                button.disabled = false;
+              }});
+              const play = () => {{
+                if (done) return;
+                button.disabled = true;
+                status.textContent = "";
+                const attempt = audio.play();
+                if (attempt && typeof attempt.then === "function") {{
+                  attempt.then(() => {{ button.disabled = false; }})
+                    .catch(() => {{
+                      button.disabled = false;
+                      status.textContent = " Нажмите кнопку для запуска звука.";
+                    }});
                 }}
               }};
-
-              const onGesture = () => tryPlay();
-              const cleanup = () => {{
-                window.removeEventListener("pointerdown", onGesture, true);
-                window.removeEventListener("keydown", onGesture, true);
-                window.removeEventListener("touchstart", onGesture, true);
-              }};
-
-              window.addEventListener("pointerdown", onGesture, true);
-              window.addEventListener("keydown", onGesture, true);
-              window.addEventListener("touchstart", onGesture, true);
-              audio.addEventListener("ended", cleanup, {{ once: true }});
-              tryPlay();
+              button.addEventListener("click", play);
+              if (done) {{
+                button.hidden = true;
+                status.textContent = " ✓ Сегодня Неола уже приветствовала вас";
+              }} else {{
+                // Try autoplay, with an explicit button as the reliable fallback.
+                play();
+              }}
             }})();
             </script>
             """,
             unsafe_allow_javascript=True,
         )
+    else:
+        st.caption("Если звук недоступен, приветствие можно прочитать выше.")
 
+    # Only suppress duplicate server-side rendering within this Streamlit session.
+    # The browser marks a greeting completed only when audio playback finishes.
     st.session_state[session_key] = today
     return True
 
