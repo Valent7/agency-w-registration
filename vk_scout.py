@@ -2371,13 +2371,28 @@ def prepare_vk_feed_radar(
     ]
 
     if not items:
+        pool_size = int(feed.get("pool_size") or 0)
+        checked_count = int(feed.get("checked_candidates") or 0)
+        errors_count = len(feed.get("errors") or [])
+        if pool_size == 0:
+            reason = (
+                "Нет доступных кандидатов в текущем пуле Неонии (оценка от 60). "
+                "Проверьте, что Неония выполнила анализ кандидатов из подключённых VK-сообществ."
+            )
+        elif errors_count and errors_count >= checked_count:
+            reason = (
+                "Не удалось прочитать публичные стены проверенных кандидатов. "
+                "Проверьте подключение VK и повторите попытку позже."
+            )
+        else:
+            reason = (
+                "Среди проверенных кандидатов пока не найдено новых доступных публикаций "
+                "за последние 30 дней. Это не означает, что в подключённых сообществах закончились люди."
+            )
         return {
             **feed,
             "recommendations": [],
-            "message": (
-                "Среди подходящих кандидатов сейчас не найдено свежих публичных постов "
-                "с открытыми комментариями."
-            ),
+            "message": reason,
         }
 
     public_view = [
