@@ -280,7 +280,7 @@ def create_realtime_client_secret(
             "audio": {
                 "input": {
                     "noise_reduction": {
-                        "type": "near_field",
+                        "type": "far_field",
                     },
                     "transcription": {
                         "model": "gpt-4o-mini-transcribe",
