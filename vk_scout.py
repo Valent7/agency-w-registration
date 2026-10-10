@@ -803,6 +803,8 @@ def load_vk_queue_progress(owner_id: int) -> dict[str, Any]:
         "sources_total": len(sources),
         "complete": False,
         "capacity_error": str(state.get("capacity_error") or ""),
+        "queue_error": bool(str(state.get("error") or "").strip()),
+        "queue_offset": int(state.get("offset") or 0),
     }
 
 
