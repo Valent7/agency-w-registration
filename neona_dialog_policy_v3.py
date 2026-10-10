@@ -66,24 +66,12 @@ def _personalize_owner_text(value: str, owner_name: str) -> str:
 
 
 def _pilot_model_candidates(owner_id: int | None) -> list[str]:
-    """Опциональный allowlist пилота. Денежный лимит здесь не реализован."""
-    standard = _model_candidates()
-    if str(os.getenv("NEONA_PILOT_ENABLED") or "").strip().lower() != "true":
-        return standard
-    # Fail closed: a flag and allowlist alone do not impose a money limit.
-    # Until an independently verified budget governor is integrated,
-    # never route production messages to the experimental premium model.
-    if str(os.getenv("NEONA_PILOT_BUDGET_GATE_VERIFIED") or "").strip().lower() != "true":
-        print("[NeonaPilot] blocked: budget governor not verified", flush=True)
-        return standard
-    allowed = {
-        int(x) for x in str(os.getenv("NEONA_PILOT_OWNER_IDS") or "").split(",")
-        if x.strip().isdigit()
-    }
-    if owner_id is None or int(owner_id) not in allowed:
-        return standard
-    preferred = str(os.getenv("NEONA_PILOT_MODEL") or "").strip()
-    return ([preferred] + [m for m in standard if m != preferred]) if preferred else standard
+    """Premium pilot intentionally disabled until atomic budget wiring is tested.
+
+    Environment flags alone are insufficient: they could silently bypass the
+    budget and incur unbounded costs. Normal production routing is unchanged.
+    """
+    return _model_candidates()
 
 
 def _model_candidates() -> list[str]:
