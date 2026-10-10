@@ -113,6 +113,7 @@ def build_neola_realtime_instructions(
     owner_name,
     ui_context,
     onboarding_step=0,
+    daily_greeting_done=False,
 ):
     owner_name = str(owner_name or "Партнёр").strip()
     ui_context = str(ui_context or "Агентство W").strip()
@@ -141,10 +142,13 @@ def build_neola_realtime_instructions(
 - Не торопи и не перегружай техническими словами.
 
 # Golden Rule: one step = one action
+- Ты наставник: сама веди рабочий маршрут, а не жди бесконечных вопросов.
+- Не начинай разговор с «Чем вам помочь?», если человеку ещё нужен маршрут.
 - Если человеку нужно что-то нажать, давай ТОЛЬКО ОДИН следующий шаг.
-- После шага остановись и дождись подтверждения человека.
-- Пример: «Нажмите “🤖 Агенты”. Скажите мне, когда откроется».
+- После шага спроси «Получилось?» или «Готово?» и дождись подтверждения.
+- Пример: «Нажмите “🤖 Агенты”. Получилось?»
 - Даже если знаешь весь маршрут, не произноси его целиком без необходимости.
+- Если дневной минимум не выполнен, напомни мягко; не дави. По ситуации выясни, что мешает человеку.
 
 # Current screen
 Всегда учитывай текущий экран: {ui_context}.
@@ -182,11 +186,22 @@ def build_neola_realtime_instructions(
 - Если говорит «где это?» — опиши один ориентир на экране простыми словами.
 - Ошибки пользователя воспринимай спокойно: помоги вернуться на нужный шаг.
 
-# First phrase
-При ПЕРВОМ знакомстве обязательно кратко объясни, кто ты, зачем нужна и как с тобой работать. Скажи по смыслу:
-«{owner_name}, здравствуйте! Я Неола — ваш персональный наставник в Агентстве W. Моя задача — провести вас от первого шага до первого партнёра и научить повторять этот путь самостоятельно. Вы ведь хотите, чтобы у вас постепенно появлялось всё больше партнёров и росла собственная структура? Вот этим мы с вами и будем заниматься. Со мной всё просто: говорите обычными словами, что хотите сделать или где запутались. Я буду вести вас по одному шагу. Начнём?»
-Не превращай это знакомство в длинную презентацию.
-Если человек уже знаком с тобой, не представляйся заново: «{owner_name}, я рядом. Продолжим с того места, где остановились?»
+# Mentor opening
+Ежедневное приветствие уже прозвучало при входе в Агентство: {bool(daily_greeting_done)}.
+Если оно уже было, НИКОГДА не здоровайся второй раз и не говори Hello.
+При подключении живого разговора сразу переходи к наставничеству.
+
+Если текущий шаг онбординга 0:
+- начни с вопроса: «Сначала проверим основу. Вы уже определили свою целевую аудиторию?»
+- если человек говорит «да», предложи проверить/уточнить портрет ЦА в Агентстве;
+- если говорит, что этот этап уже сделан, не повторяй его и переходи к выбору Telegram или VK.
+
+Если партнёр уже продвинулся:
+- коротко скажи: «{owner_name}, продолжим работу»;
+- веди с текущего этапа;
+- если точное место остановки неясно, задай ОДИН диагностический вопрос.
+
+После каждого действия спрашивай «Получилось?» или «Готово?».
 """.strip()
 
 
@@ -229,6 +244,7 @@ def create_realtime_client_secret(
     owner_name,
     ui_context,
     onboarding_step=0,
+    daily_greeting_done=False,
 ):
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
@@ -238,6 +254,7 @@ def create_realtime_client_secret(
         owner_name,
         ui_context,
         onboarding_step,
+        daily_greeting_done=daily_greeting_done,
     )
 
     body = {
@@ -315,7 +332,7 @@ def create_realtime_client_secret(
 
 def _render_realtime_html(
     ephemeral_key, instructions, ui_context, expires_at=0,
-    knowledge_url="", knowledge_token="",
+    knowledge_url="", knowledge_token="", opening_instruction="",
 ):
     token_json = json.dumps(ephemeral_key)
     instructions_json = json.dumps(instructions, ensure_ascii=False)
@@ -323,6 +340,10 @@ def _render_realtime_html(
     knowledge_url_json = json.dumps(str(knowledge_url or ""))
     knowledge_token_json = json.dumps(str(knowledge_token or ""))
     knowledge_tool_json = json.dumps(KNOWLEDGE_SEARCH_TOOL, ensure_ascii=False)
+    opening_instruction_json = json.dumps(
+        str(opening_instruction or "").strip(),
+        ensure_ascii=False,
+    )
     try:
         expires_at_ms = int(expires_at or 0) * 1000
     except (TypeError, ValueError):
@@ -385,6 +406,7 @@ def _render_realtime_html(
   const KNOWLEDGE_URL = {knowledge_url_json};
   const KNOWLEDGE_TOKEN = {knowledge_token_json};
   const KNOWLEDGE_TOOL = {knowledge_tool_json};
+  const OPENING_INSTRUCTION = {opening_instruction_json};
 
   const shell = document.getElementById("neola-live-shell");
   const statusEl = document.getElementById("neola-live-status");
@@ -592,13 +614,13 @@ def _render_realtime_html(
         uiConnected();
         sendContextUpdate();
 
-        // Просим Неолу начать первой короткой фразой.
+        // Приветствие уже звучит при входе в Агентство.
+        // Live сразу продолжает работу как наставник — без второго приветствия.
         dc.send(JSON.stringify({{
           type: "response.create",
           response: {{
-            instructions:
-              "Начни разговор одной короткой фразой приветствия из системной инструкции. " +
-              "После этого замолчи и слушай человека."
+            instructions: OPENING_INSTRUCTION ||
+              "Не здоровайся повторно. Сразу продолжи наставнический маршрут одним коротким шагом."
           }}
         }}));
       }});
@@ -766,6 +788,7 @@ def render_neola_realtime_voice(
     owner_name,
     ui_context,
     onboarding_step=0,
+    daily_greeting_done=False,
 ):
     """
     Первый живой голосовой прототип Неолы.
@@ -781,6 +804,7 @@ def render_neola_realtime_voice(
             owner_name=owner_name,
             ui_context=ui_context,
             onboarding_step=onboarding_step,
+            daily_greeting_done=daily_greeting_done,
         )
     except Exception as exc:
         # Партнёру показываем только понятный русский текст без API-деталей.
@@ -793,6 +817,17 @@ def render_neola_realtime_voice(
         st.error(str(exc))
         return False
 
+    opening_instruction = (
+        "Не здоровайся повторно и не говори Hello. "
+        "Сразу спроси: «Сначала проверим основу. Вы уже определили свою целевую аудиторию?» "
+        "После ответа веди только по одному шагу."
+        if int(onboarding_step or 0) <= 0
+        else
+        "Не здоровайся повторно и не говори Hello. "
+        f"Скажи: «{str(owner_name or 'Партнёр').strip()}, продолжим работу». "
+        "Затем веди с текущего этапа одним шагом; если место остановки неясно, задай один диагностический вопрос."
+    )
+
     html_body = _render_realtime_html(
         ephemeral_key=token,
         instructions=instructions,
@@ -800,6 +835,7 @@ def render_neola_realtime_voice(
         expires_at=expires_at,
         knowledge_url=knowledge_url,
         knowledge_token=knowledge_token,
+        opening_instruction=opening_instruction,
     )
 
     # Новые версии Streamlit умеют безопасно выполнять явно разрешённый JS
