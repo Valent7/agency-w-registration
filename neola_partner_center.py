@@ -2029,15 +2029,9 @@ def build_neola_daily_greeting(owner_name, meeting_count=None, onboarding_step=0
         )
         parts.append(motivations[now.toordinal() % len(motivations)])
 
-    if int(onboarding_step or 0) <= 0:
-        parts.append(
-            "Я Неола, ваш наставник в Агентстве W. Я буду вести вас шаг за шагом. "
-            "Начинаем с целевой аудитории: сначала нужно понять, для кого ваш проект."
-        )
-    else:
-        parts.append(
-            "Вы строите своё настоящее. Без дисциплины и работы над собой трудно прийти к своей мечте."
-        )
+    parts.append(
+        "Вы строите своё настоящее. Без дисциплины и работы над собой трудно прийти к своей мечте."
+    )
 
     parts.append(
         "Одна из ваших задач на сегодня — отработать 5 кандидатов, "
@@ -2128,12 +2122,17 @@ def render_neola_daily_greeting(telegram_id, owner_name, onboarding_step=0):
 def _neola_system_prompt(owner_name, ui_context, activation, member):
     onboarding_step = int((activation or {}).get("onboarding_step") or 0)
     cabinet_map = neola_cabinet_knowledge()
+    member_id = int((member or {}).get("telegram_id") or 0)
+    has_target_profile = bool(
+        st.session_state.get(f"neonia_target_audience_passport_{member_id}")
+    ) if member_id else False
     return f"""
 Ты — Неола, голосовой наставник партнёра в Агентстве W.
 Партнёр: {owner_name}.
 Текущий статус: {activation_label(activation)}.
 Шаг онбординга: {onboarding_step}/7.
 Текущий интерфейс: {ui_context}.
+Портрет ЦА уже сохранён в Агентстве: {has_target_profile}.
 Код партнёра: {str((member or {}).get('member_code') or '')}.
 
 Твоя главная миссия:
