@@ -866,10 +866,19 @@ def _render_today_vk_candidates(
     )
 
     if not assignments:
-        st.info(
-            "Сегодня активных карточек VK пока нет. Если источник уже добавлен, "
-            "фоновый VK Scout возьмёт следующих людей по порядку, без отбора по ЦА."
-        )
+        if isinstance(progress, dict) and progress.get("queue_error"):
+            st.warning(
+                "VK Scout столкнулся с ошибкой при чтении текущего источника. "
+                "Очередь сохранена, но выдача новых кандидатов пока остановлена. "
+                "Сообщите администратору для проверки журнала VK Scout."
+            )
+        elif isinstance(progress, dict) and progress.get("complete"):
+            st.info("Активные источники VK завершены. Для новой пятёрки потребуется ещё один источник.")
+        else:
+            st.info(
+                "Сегодня активных карточек VK пока нет. Источник подключён, "
+                "но новых назначений пока не создано. Нужно проверить работу фонового VK Scout."
+            )
         return
 
     for item in assignments:
