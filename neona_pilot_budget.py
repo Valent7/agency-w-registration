@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import requests
 
 
@@ -47,7 +47,10 @@ def _rpc(name: str, body: dict) -> bool:
 
 def reserve(owner_id: int, *, worst_case_usd: str, pilot_key: str = "neona_v4") -> Reservation:
     """Резервирует максимум расходов до API вызова; НЕ использует оценку после вызова."""
-    value = Decimal(str(worst_case_usd))
+    try:
+        value = Decimal(str(worst_case_usd))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise PilotBudgetBlocked("Некорректная максимальная стоимость запроса") from exc
     if not value.is_finite() or value <= 0:
         raise PilotBudgetBlocked("Некорректная максимальная стоимость запроса")
     amount = int((value * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
@@ -61,7 +64,10 @@ def reserve(owner_id: int, *, worst_case_usd: str, pilot_key: str = "neona_v4") 
 
 
 def settle(reservation: Reservation, *, actual_usd: str) -> None:
-    value = Decimal(str(actual_usd))
+    try:
+        value = Decimal(str(actual_usd))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise PilotBudgetBlocked("Недостоверная стоимость вызова") from exc
     if not value.is_finite() or value < 0:
         raise PilotBudgetBlocked("Недостоверная стоимость вызова")
     actual = int((value * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
