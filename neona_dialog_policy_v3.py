@@ -70,6 +70,12 @@ def _pilot_model_candidates(owner_id: int | None) -> list[str]:
     standard = _model_candidates()
     if str(os.getenv("NEONA_PILOT_ENABLED") or "").strip().lower() != "true":
         return standard
+    # Fail closed: a flag and allowlist alone do not impose a money limit.
+    # Until an independently verified budget governor is integrated,
+    # never route production messages to the experimental premium model.
+    if str(os.getenv("NEONA_PILOT_BUDGET_GATE_VERIFIED") or "").strip().lower() != "true":
+        print("[NeonaPilot] blocked: budget governor not verified", flush=True)
+        return standard
     allowed = {
         int(x) for x in str(os.getenv("NEONA_PILOT_OWNER_IDS") or "").split(",")
         if x.strip().isdigit()
