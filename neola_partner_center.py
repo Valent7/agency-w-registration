@@ -3,7 +3,7 @@ import hashlib
 import json
 import re
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -1971,6 +1971,160 @@ def _synthesize_speech(text):
     return response.content
 
 
+def _meeting_word_ru(count):
+    count = abs(int(count or 0))
+    if count % 10 == 1 and count % 100 != 11:
+        return "встреча"
+    if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}:
+        return "встречи"
+    return "встреч"
+
+
+def _today_meeting_count(telegram_id):
+    """Считает сегодняшние встречи владельца; None означает, что календарь недоступен."""
+    try:
+        from agency_calendar import list_meetings
+
+        now = datetime.now(BERLIN_TZ)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        rows = list_meetings(
+            int(telegram_id),
+            day_start.astimezone(UTC_TZ),
+            day_end.astimezone(UTC_TZ),
+        )
+        return len(rows)
+    except Exception:
+        return None
+
+
+def build_neola_daily_greeting(owner_name, meeting_count=None, onboarding_step=0):
+    """Короткое наставническое приветствие при первом входе за день."""
+    now = datetime.now(BERLIN_TZ)
+    name = str(owner_name or "").strip()
+    if now.hour < 12:
+        hello = "Доброе утро"
+    elif now.hour < 18:
+        hello = "Добрый день"
+    else:
+        hello = "Добрый вечер"
+
+    address = f", {name}" if name else ""
+    parts = [f"{hello}{address}."]
+
+    if meeting_count is None:
+        parts.append("Загляните сегодня в календарь и проверьте встречи.")
+    elif int(meeting_count) > 0:
+        count = int(meeting_count)
+        parts.append(
+            f"Сегодня у вас запланировано {count} {_meeting_word_ru(count)}. "
+            "Загляните в календарь и проверьте время."
+        )
+    else:
+        motivations = (
+            "На сегодня встреч пока нет. Но сегодняшний рабочий ритм создаёт результат завтра.",
+            "На сегодня встреч пока нет. Как в тренировке, результат создаёт не один рывок, а повторяемые действия.",
+            "На сегодня встреч пока нет. Вспомните Эдисона: важна не одна попытка, а готовность продолжать искать решение.",
+            "На сегодня встреч пока нет. Спокойная последовательность сегодня готовит завтрашний результат.",
+        )
+        parts.append(motivations[now.toordinal() % len(motivations)])
+
+    if int(onboarding_step or 0) <= 0:
+        parts.append(
+            "Я Неола, ваш наставник в Агентстве W. Я буду вести вас шаг за шагом. "
+            "Начинаем с целевой аудитории: сначала нужно понять, для кого ваш проект."
+        )
+    else:
+        parts.append(
+            "Вы строите своё настоящее. Без дисциплины и работы над собой трудно прийти к своей мечте."
+        )
+
+    parts.append(
+        "Одна из ваших задач на сегодня — отработать 5 кандидатов, "
+        "которых подготовили Неония и Стагирит. "
+        "Если понадобится моя помощь — обращайтесь."
+    )
+    return " ".join(parts)
+
+
+def render_neola_daily_greeting(telegram_id, owner_name, onboarding_step=0):
+    """Один раз за день озвучивает наставническое приветствие.
+
+    Автозапуск пробуется сразу. Если браузер блокирует звук без жеста пользователя,
+    приветствие запускается при первом клике/касании/нажатии клавиши в Агентстве.
+    """
+    today = datetime.now(BERLIN_TZ).date().isoformat()
+    session_key = f"neola_daily_greeting_rendered_{int(telegram_id)}"
+    if st.session_state.get(session_key) == today:
+        return False
+
+    meeting_count = _today_meeting_count(telegram_id)
+    text = build_neola_daily_greeting(
+        owner_name,
+        meeting_count=meeting_count,
+        onboarding_step=onboarding_step,
+    )
+
+    try:
+        speech = _synthesize_speech(text)
+    except Exception:
+        speech = None
+
+    # Видимое короткое сообщение остаётся полезным, даже если браузер запретил autoplay.
+    st.caption(f"🎙 Неола: {text}")
+
+    if speech:
+        audio_b64 = base64.b64encode(speech).decode("ascii")
+        storage_key = f"agency_w_neola_daily_greeting_{int(telegram_id)}"
+        st.html(
+            f"""
+            <script>
+            (() => {{
+              const storageKey = {json.dumps(storage_key)};
+              const today = {json.dumps(today)};
+              try {{
+                if (localStorage.getItem(storageKey) === today) return;
+              }} catch (_) {{}}
+
+              const audio = new Audio("data:audio/mpeg;base64,{audio_b64}");
+              audio.preload = "auto";
+
+              const markPlayed = () => {{
+                try {{ localStorage.setItem(storageKey, today); }} catch (_) {{}}
+                cleanup();
+              }};
+
+              const tryPlay = () => {{
+                const promise = audio.play();
+                if (promise && typeof promise.then === "function") {{
+                  promise.then(markPlayed).catch(() => {{
+                    // Браузер ждёт первый пользовательский жест.
+                  }});
+                }}
+              }};
+
+              const onGesture = () => tryPlay();
+              const cleanup = () => {{
+                window.removeEventListener("pointerdown", onGesture, true);
+                window.removeEventListener("keydown", onGesture, true);
+                window.removeEventListener("touchstart", onGesture, true);
+              }};
+
+              window.addEventListener("pointerdown", onGesture, true);
+              window.addEventListener("keydown", onGesture, true);
+              window.addEventListener("touchstart", onGesture, true);
+              audio.addEventListener("ended", cleanup, {{ once: true }});
+              tryPlay();
+            }})();
+            </script>
+            """,
+            unsafe_allow_javascript=True,
+        )
+
+    st.session_state[session_key] = today
+    return True
+
+
 def _neola_system_prompt(owner_name, ui_context, activation, member):
     onboarding_step = int((activation or {}).get("onboarding_step") or 0)
     cabinet_map = neola_cabinet_knowledge()
@@ -1990,15 +2144,18 @@ def _neola_system_prompt(owner_name, ui_context, activation, member):
 
 ПРАВИЛА РАБОТЫ:
 - Официальное название всегда: «Агентство W» — одна буква W. Никогда не говори и не пиши «Агентство WW».
+- Ты наставник: сама веди рабочий маршрут, а не жди бесконечных вопросов.
+- Не начинай с «Чем вам помочь?». Если маршрут ещё не определён — начинай с целевой аудитории.
 - Говори просто, тепло и коротко. Обычно 1–3 коротких предложения.
-- Один шаг = одно действие. После действия дождись ответа человека.
+- Один шаг = одно действие. После действия спроси «Получилось?» или «Готово?» и дождись ответа.
 - Всегда учитывай текущий экран: {ui_context}.
 - Если человек уже находится в нужном разделе, продолжай оттуда.
 - Никогда не выдумывай кнопку, вкладку, статус или выполненное действие.
 - Если реальный экран отличается от карты, доверься экрану пользователя: спроси, что на нём написано.
 - Если человеку трудно, объясни проще; если просит повторить — повтори только последний шаг.
 - Не выбирай кандидатов вместо владельца.
-- Не редактируй и не оценивай тексты Неоны. Покажи, где владелец сам может их изменить.
+- Карточка кандидата — только первые штрихи: занятие, проект, активность. Не объявляй по карточке, что человек «точно ЦА».
+- Не редактируй и не оценивай тексты Неоны. Объясни, что владелец может сам изменить текст или заменить его готовым скриптом, и покажи где.
 - Не выполняй работу Неонии, Неоны, Стагирита или календаря вместо них.
 - Telegram подключается один раз. Если он уже подключён, не предлагай подключать его снова.
 
