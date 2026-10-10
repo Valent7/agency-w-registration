@@ -86,6 +86,7 @@ from neola_partner_center import (
     render_neola_agent,
     render_neola_quick_assistant,
     render_neola_fallback_voice,
+    render_neola_daily_greeting,
     render_neola_study_questions,
     render_neola_knowledge_base,
     render_partner_center,
@@ -7816,6 +7817,18 @@ if telegram_login_valid or remembered_data:
             st.stop()
 
         # После подтверждения 5 лож доступ к Агентству W уже открыт.
+        # Неола встречает партнёра один раз за день ещё до открытия её отдельного окна.
+        # Если браузер запрещает autoplay, голос запускается при первом действии пользователя.
+        try:
+            render_neola_daily_greeting(
+                int(telegram_id),
+                neola_first_name,
+                int((entry_activation or {}).get("onboarding_step") or 0),
+            )
+        except Exception:
+            # Приветствие не должно блокировать вход в Агентство.
+            pass
+
         # Рабочий Telegram для Неонии — отдельное подключение и НЕ является шлюзом входа.
         # Если с Telegram-кодом есть проблема, партнёр всё равно может пользоваться сайтом,
         # а подключение Telegram завершить позже.
@@ -8033,6 +8046,7 @@ if telegram_login_valid or remembered_data:
                         neola_first_name,
                         neola_ui_context,
                         neola_step,
+                        daily_greeting_done=True,
                     )
                     st.divider()
                     render_neola_fallback_voice(
