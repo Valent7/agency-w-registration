@@ -96,7 +96,68 @@ def _response_text(data: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _pilot_selected(owner_id: int | None) -> bool:
+    """Explicit opt-in, never enabled by a missing/empty setting."""
+    if str(os.getenv("NEONA_PILOT_ENABLED") or "").lower() != "true":
+        return False
+    ids = {int(x.strip()) for x in str(os.getenv("NEONA_PILOT_OWNER_IDS") or "").split(",")
+           if x.strip().isdigit()}
+    return owner_id is not None and int(owner_id) in ids
+
+
+def _call_pilot_budgeted(config, instructions: str, input_text: str, owner_id: int) -> str:
+    """One model call only, with DB reservation BEFORE API request; fail closed.
+
+    Rates are operator-configured conservative USD/M-token ceilings.
+    Never release an in-flight reservation on timeout or unknown usage.
+    """
+    from decimal import Decimal
+    from neona_pilot_budget import reserve, settle, PilotBudgetBlocked
+
+    model = str(os.getenv("NEONA_PILOT_MODEL") or "").strip()
+    rate_input = Decimal(str(os.getenv("NEONA_PILOT_MAX_INPUT_USD_PER_M") or "0"))
+    rate_output = Decimal(str(os.getenv("NEONA_PILOT_MAX_OUTPUT_USD_PER_M") or "0"))
+    max_output = int(os.getenv("NEONA_PILOT_MAX_OUTPUT_TOKENS") or "900")
+    if not model or rate_input <= 0 or rate_output <= 0 or not 1 <= max_output <= 2000:
+        raise PilotBudgetBlocked("Не указаны проверенные модель и тарифные потолки пилота")
+    # Conservative upper bound for textual input; counting UTF-8 bytes overestimates
+    # token count for normal text. Reserve ALL allowed output tokens.
+    input_bound = len((instructions + input_text).encode("utf-8")) + 512
+    worst_usd = (
+        Decimal(input_bound) * rate_input +
+        Decimal(max_output) * rate_output
+    ) / Decimal(1_000_000)
+    ticket = reserve(int(owner_id), worst_case_usd=str(worst_usd))
+    # After reservation, any error keeps the budget occupied. Never retry the
+    # potentially billed API request without a new reservation.
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={"Authorization": f"Bearer {config.openai_api_key}",
+                 "Content-Type": "application/json"},
+        json={"model": model, "instructions": instructions, "input": input_text,
+              "max_output_tokens": max_output, "store": False},
+        timeout=90,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    usage = payload.get("usage") or {}
+    if not isinstance(usage.get("input_tokens"), int) or not isinstance(usage.get("output_tokens"), int):
+        raise PilotBudgetBlocked("API не подтвердил расход токенов; резерв сохранён")
+    actual_usd = (
+        Decimal(usage["input_tokens"]) * rate_input +
+        Decimal(usage["output_tokens"]) * rate_output
+    ) / Decimal(1_000_000)
+    settle(ticket, actual_usd=str(actual_usd))
+    answer = _response_text(payload)
+    if not answer:
+        raise RuntimeError("Пустой ответ пилотной модели")
+    print(f"[NeonaPilot] owner={owner_id} model={model} usage_accounted=true", flush=True)
+    return answer
+
+
 def _call_reasoning_model(config, instructions: str, input_text: str, *, owner_id: int | None = None) -> str:
+    if _pilot_selected(owner_id):
+        return _call_pilot_budgeted(config, instructions, input_text, int(owner_id))
     last_error = None
     for model in _pilot_model_candidates(owner_id):
         try:
