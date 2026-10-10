@@ -114,6 +114,7 @@ def build_neola_realtime_instructions(
     ui_context,
     onboarding_step=0,
     daily_greeting_done=False,
+    has_target_profile=False,
 ):
     owner_name = str(owner_name or "Партнёр").strip()
     ui_context = str(ui_context or "Агентство W").strip()
@@ -125,6 +126,7 @@ def build_neola_realtime_instructions(
 Партнёр: {owner_name}.
 Текущий интерфейс: {ui_context}.
 Текущий шаг онбординга: {int(onboarding_step)}/7.
+Портрет ЦА уже сохранён в Агентстве: {bool(has_target_profile)}.
 
 Твоя главная миссия:
 {NEOLA_MISSION}
@@ -191,15 +193,16 @@ def build_neola_realtime_instructions(
 Если оно уже было, НИКОГДА не здоровайся второй раз и не говори Hello.
 При подключении живого разговора сразу переходи к наставничеству.
 
-Если текущий шаг онбординга 0:
+Если портрет ЦА ещё НЕ сохранён:
 - начни с вопроса: «Сначала проверим основу. Вы уже определили свою целевую аудиторию?»
-- если человек говорит «да», предложи проверить/уточнить портрет ЦА в Агентстве;
-- если говорит, что этот этап уже сделан, не повторяй его и переходи к выбору Telegram или VK.
+- если человек говорит «да», предложи создать/уточнить портрет ЦА в Агентстве;
+- если говорит, что этот этап уже сделан, не спорь: уточни, сохранён ли портрет в Неонии, и веди к следующему шагу.
 
-Если партнёр уже продвинулся:
-- коротко скажи: «{owner_name}, продолжим работу»;
-- веди с текущего этапа;
-- если точное место остановки неясно, задай ОДИН диагностический вопрос.
+Если портрет ЦА уже сохранён:
+- не возвращай человека к созданию ЦА;
+- коротко скажи: «{owner_name}, продолжим работу. Портрет ЦА у вас уже есть.»
+- следующий вопрос наставника: «Где сегодня работаем — Telegram или VK?»
+- после выбора веди только по выбранной сети, по одному действию.
 
 После каждого действия спрашивай «Получилось?» или «Готово?».
 """.strip()
@@ -245,6 +248,7 @@ def create_realtime_client_secret(
     ui_context,
     onboarding_step=0,
     daily_greeting_done=False,
+    has_target_profile=False,
 ):
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
@@ -255,6 +259,7 @@ def create_realtime_client_secret(
         ui_context,
         onboarding_step,
         daily_greeting_done=daily_greeting_done,
+        has_target_profile=has_target_profile,
     )
 
     body = {
@@ -789,6 +794,7 @@ def render_neola_realtime_voice(
     ui_context,
     onboarding_step=0,
     daily_greeting_done=False,
+    has_target_profile=False,
 ):
     """
     Первый живой голосовой прототип Неолы.
@@ -805,6 +811,7 @@ def render_neola_realtime_voice(
             ui_context=ui_context,
             onboarding_step=onboarding_step,
             daily_greeting_done=daily_greeting_done,
+            has_target_profile=has_target_profile,
         )
     except Exception as exc:
         # Партнёру показываем только понятный русский текст без API-деталей.
@@ -819,13 +826,14 @@ def render_neola_realtime_voice(
 
     opening_instruction = (
         "Не здоровайся повторно и не говори Hello. "
-        "Сразу спроси: «Сначала проверим основу. Вы уже определили свою целевую аудиторию?» "
-        "После ответа веди только по одному шагу."
-        if int(onboarding_step or 0) <= 0
+        f"Скажи: «{str(owner_name or 'Партнёр').strip()}, продолжим работу. Портрет ЦА у вас уже есть». "
+        "Затем спроси: «Где сегодня работаем — Telegram или VK?» "
+        "После выбора веди только по выбранной сети и только по одному шагу."
+        if bool(has_target_profile)
         else
         "Не здоровайся повторно и не говори Hello. "
-        f"Скажи: «{str(owner_name or 'Партнёр').strip()}, продолжим работу». "
-        "Затем веди с текущего этапа одним шагом; если место остановки неясно, задай один диагностический вопрос."
+        "Сразу спроси: «Сначала проверим основу. Вы уже определили свою целевую аудиторию?» "
+        "После ответа веди только по одному шагу."
     )
 
     html_body = _render_realtime_html(
