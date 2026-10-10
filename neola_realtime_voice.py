@@ -515,7 +515,8 @@ def _render_realtime_html(
         type: "realtime",
         instructions: live.instructions,
         tools: live.tools,
-        tool_choice: "auto"
+        tool_choice: "auto",
+        audio: {{ input: {{ noise_reduction: {{ type: /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ? "near_field" : "far_field" }} }} }}
       }}
     }}));
   }}
