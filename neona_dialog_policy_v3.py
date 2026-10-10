@@ -65,6 +65,21 @@ def _personalize_owner_text(value: str, owner_name: str) -> str:
     return text
 
 
+def _pilot_model_candidates(owner_id: int | None) -> list[str]:
+    """Опциональный allowlist пилота. Денежный лимит здесь не реализован."""
+    standard = _model_candidates()
+    if str(os.getenv("NEONA_PILOT_ENABLED") or "").strip().lower() != "true":
+        return standard
+    allowed = {
+        int(x) for x in str(os.getenv("NEONA_PILOT_OWNER_IDS") or "").split(",")
+        if x.strip().isdigit()
+    }
+    if owner_id is None or int(owner_id) not in allowed:
+        return standard
+    preferred = str(os.getenv("NEONA_PILOT_MODEL") or "").strip()
+    return ([preferred] + [m for m in standard if m != preferred]) if preferred else standard
+
+
 def _model_candidates() -> list[str]:
     """Качество по умолчанию, но с мягким fallback без поломки диалогов."""
     requested = str(os.getenv("NEONA_DIALOG_MODEL") or "gpt-6.1-sol").strip()
@@ -87,9 +102,9 @@ def _response_text(data: dict) -> str:
     return "\n".join(parts).strip()
 
 
-def _call_reasoning_model(config, instructions: str, input_text: str) -> str:
+def _call_reasoning_model(config, instructions: str, input_text: str, *, owner_id: int | None = None) -> str:
     last_error = None
-    for model in _model_candidates():
+    for model in _pilot_model_candidates(owner_id):
         try:
             response = requests.post(
                 "https://api.openai.com/v1/responses",
@@ -349,12 +364,13 @@ def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str) 
     return _call_reasoning_model(config, instructions, text)
 
 
-def _reasoned_turn(config, owner_name, first_name, text, greet, context):
+def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owner_id=None):
     instructions = _dialog_instructions(owner_name, first_name, context, greet)
     raw = _call_reasoning_model(
         config,
         instructions,
         "НОВОЕ СООБЩЕНИЕ ЧЕЛОВЕКА:\n" + str(text or ""),
+        owner_id=owner_id,
     )
     data = _extract_json(raw)
     reply = str(data.get("reply") or "").strip()
@@ -500,7 +516,7 @@ def _process_v3(
     # вопросы об ИИ, рассказы о себе, ссылки, возражения и интерес — сначала
     # понимает сильная модель в полном контексте.
     result = _reasoned_turn(
-        config, owner_name, first_name, text, greet, context
+        config, owner_name, first_name, text, greet, context, owner_id=owner_id
     )
     reply = legacy._de_repeat_reply(
         config, result["reply"], text, context
