@@ -639,11 +639,16 @@ def _run(coro):
             loop.close()
 
 
-async def _latest_incoming_message_id(owner_id: int, contact_id: int) -> int:
-    """Возвращает последний входящий message_id до ручного ответа на Story.
+async def _confirmed_story_reply_cursor(
+    owner_id: int,
+    contact_id: int,
+    story_id: int,
+    expected_text: str,
+) -> tuple[int, int]:
+    """Resolve the ACTUAL sent Story reply and the incoming baseline before it.
 
-    Эта точка отсчёта нужна, чтобы Неона не отвечала на старую переписку и
-    подхватила только НОВЫЙ ответ человека после тёплого касания.
+    Never guess an outgoing id. Otherwise Neona can mistake a Story reply
+    for a manual owner takeover or accidentally skip an incoming response.
     """
     session_string = _load_session(int(owner_id))
     api_id, api_hash = _api_credentials()
@@ -653,11 +658,46 @@ async def _latest_incoming_message_id(owner_id: int, contact_id: int) -> int:
         if not await client.is_user_authorized():
             raise TelegramStoriesError("Telegram-сессия больше не авторизована")
         entity = await client.get_entity(int(contact_id))
-        async for message in client.iter_messages(entity, limit=50):
-            if bool(getattr(message, "out", False)):
+        messages = [
+            message
+            async for message in client.iter_messages(entity, limit=100)
+        ]
+        story_matches = []
+        text_matches = []
+        expected_normalized = " ".join(str(expected_text or "").split())
+        for message in messages:
+            if not bool(getattr(message, "out", False)):
                 continue
-            return int(getattr(message, "id", 0) or 0)
-        return 0
+            reply_header = getattr(message, "reply_to", None)
+            linked_story = int(getattr(reply_header, "reply_to_story_id", 0) or 0)
+            outgoing_text = " ".join(
+                str(getattr(message, "message", "") or "").split()
+            )
+            if story_id > 0 and linked_story == story_id:
+                story_matches.append(message)
+            if expected_normalized and outgoing_text == expected_normalized:
+                text_matches.append(message)
+
+        # Matching exact message text takes priority. A direct story reply may
+        # retain a Telegram Story header even if text gets shortened in UI.
+        matched = text_matches or story_matches
+        if not matched:
+            raise TelegramStoriesError(
+                "Не удалось подтвердить отправленное сообщение в этом чате. "
+                "Проверьте отправку в Telegram и повторите регистрацию."
+            )
+        sent = max(matched, key=lambda msg: int(msg.id))
+        sent_id = int(sent.id)
+        baseline = max(
+            (
+                int(message.id)
+                for message in messages
+                if not bool(getattr(message, "out", False))
+                and int(message.id) < sent_id
+            ),
+            default=0,
+        )
+        return baseline, sent_id
     finally:
         await client.disconnect()
 
@@ -672,7 +712,11 @@ def _register_story_reply_for_neona(
         raise TelegramStoriesError("Не найден Telegram ID автора Story")
 
     story_id = int(item.get("story_id") or 0)
-    baseline_incoming_id = int(_run(_latest_incoming_message_id(owner_id, contact_id)) or 0)
+    reply_key = f"telegram_story_reply_{int(owner_id)}_{contact_id}_{story_id}"
+    draft_text = str(st.session_state.get(reply_key, item.get("reply") or ""))
+    baseline_incoming_id, story_reply_message_id = _run(
+        _confirmed_story_reply_cursor(owner_id, contact_id, story_id, draft_text)
+    )
     sent_at = datetime.now(UTC).isoformat()
 
     initialize_dialog_after_story_reply(
@@ -682,6 +726,7 @@ def _register_story_reply_for_neona(
         sent_at=sent_at,
         story_id=story_id,
         recipient_name=str(item.get("name") or "Telegram-контакт"),
+        story_reply_message_id=story_reply_message_id,
     )
 
     # Неона-worker берёт разрешённые диалоги из рабочего sent_log.
@@ -707,7 +752,7 @@ def _register_story_reply_for_neona(
                 "recipient_name": str(item.get("name") or "Telegram-контакт"),
                 "sent_at": "",
                 "story_sent_at": sent_at,
-                "message_id": 0,
+                "message_id": story_reply_message_id,
                 "kind": "story_reply",
                 "story_id": story_id,
                 "source": "telegram_story",
