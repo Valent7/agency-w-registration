@@ -402,7 +402,7 @@ action:
 """.strip()
 
 
-def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str) -> str:
+def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str, *, owner_id=None) -> str:
     forms = _owner_forms(owner_name)
     instructions = f"""
 Ты редактор одной реплики Неоны — секретаря-референта {forms['genitive']}.
@@ -416,7 +416,7 @@ def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str) 
 
 Верни только исправленную реплику, без пояснений.
 """.strip()
-    return _call_reasoning_model(config, instructions, text)
+    return _call_reasoning_model(config, instructions, text, owner_id=owner_id)
 
 
 def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owner_id=None):
@@ -460,6 +460,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owne
             reply = _repair_reply(
                 config, owner_name, text, reply,
                 "В текущем сообщении нет медицинского вопроса. Убери медицинскую тему и ответь на реальный смысл сообщения.",
+                owner_id=owner_id,
             )
 
     if (
@@ -469,6 +470,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owne
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Человек не спрашивал цену или оплату Агентства. Не придумывай коммерческий вопрос; ответь на то, что человек реально сообщил.",
+            owner_id=owner_id,
         )
         if action in {"ask_meeting_consent", "schedule_now"}:
             action = "continue"
@@ -480,6 +482,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owne
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Человек не спрашивал, ИИ ли ты. Не поднимай тему своей природы; ответь на смысл его сообщения.",
+            owner_id=owner_id,
         )
 
     if re.search(
@@ -490,6 +493,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owne
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Не обещай открыть или изучить присланную ссылку. Поблагодари за источник и продолжи разговор только по доступному тексту.",
+            owner_id=owner_id,
         )
 
     # До согласия нельзя выдавать слоты календаря.
@@ -497,6 +501,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owne
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Нельзя предлагать время встречи до отдельного согласия человека.",
+            owner_id=owner_id,
         )
 
     # Если модель решила предложить встречу, формулировка должна быть именно просьбой о согласии.
