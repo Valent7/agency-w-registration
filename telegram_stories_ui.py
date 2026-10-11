@@ -237,6 +237,54 @@ def _append_story_rotation_event(
         st.session_state[_story_rotation_key(owner_id)] = history[-2000:]
 
 
+def _persisted_story_cooldown_authors(owner_id: int) -> set[int]:
+    """Cross-check Story authors against durable Agency dialog state.
+
+    A Streamlit browser session may be lost; cooldown must survive reboot
+    and another device. Called only when the owner explicitly runs the radar.
+    """
+    url, key = _supabase_config()
+    try:
+        response = requests.get(
+            f"{url}/rest/v1/agency_dialog_states",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            params={
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "select": "contact_telegram_id,context",
+                "limit": 5000,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        rows = response.json() if response.text.strip() else []
+    except (requests.RequestException, ValueError) as exc:
+        print(
+            "[StoryRotation] persistent cooldown lookup failed: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return set()
+
+    since = datetime.now(UTC) - timedelta(days=AUTHOR_COOLDOWN_DAYS)
+    authors: set[int] = set()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        context = row.get("context")
+        if not isinstance(context, dict):
+            continue
+        if str(context.get("activated_by") or "") != "telegram_story_reply":
+            continue
+        try:
+            contact_id = int(row.get("contact_telegram_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        touched_at = _parse_iso_datetime(context.get("story_reply_sent_at"))
+        if contact_id > 0 and touched_at is not None and touched_at >= since:
+            authors.add(contact_id)
+    return authors
+
+
 def _story_rotation_exclusions(owner_id: int) -> tuple[set[str], set[int]]:
     """Exact Story never repeats; shown/replied author gets a 30-day cooldown."""
     story_keys: set[str] = set()
@@ -286,6 +334,7 @@ def _story_rotation_exclusions(owner_id: int) -> tuple[set[str], set[int]]:
             if when is None or when.astimezone(UTC) >= cooldown_since:
                 cooldown_authors.add(contact_id)
 
+    cooldown_authors.update(_persisted_story_cooldown_authors(owner_id))
     return story_keys, cooldown_authors
 
 
