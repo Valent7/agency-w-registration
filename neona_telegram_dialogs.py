@@ -891,6 +891,7 @@ def initialize_dialog_after_story_reply(
     sent_at: str = "",
     story_id: int = 0,
     recipient_name: str = "",
+    story_reply_message_id: int = 0,
 ) -> None:
     """Подключает Неону после вручную отправленного тёплого ответа на Story.
 
@@ -908,6 +909,10 @@ def initialize_dialog_after_story_reply(
         context={
             "story_reply_sent_at": str(sent_at or ""),
             "story_id": int(story_id or 0),
+            # Actual outbound Story reply. Otherwise the worker mistakes it
+            # for an owner takeover and silently skips genuine responses.
+            "story_reply_message_id": int(story_reply_message_id or 0),
+            "first_message_id": int(story_reply_message_id or 0),
             "recipient_name": str(recipient_name or ""),
             "channel": "telegram",
             "activated_by": "telegram_story_reply",
