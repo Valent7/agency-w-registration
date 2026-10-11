@@ -65,6 +65,15 @@ def _personalize_owner_text(value: str, owner_name: str) -> str:
     return text
 
 
+def _pilot_model_candidates(owner_id: int | None) -> list[str]:
+    """Premium pilot intentionally disabled until atomic budget wiring is tested.
+
+    Environment flags alone are insufficient: they could silently bypass the
+    budget and incur unbounded costs. Normal production routing is unchanged.
+    """
+    return _model_candidates()
+
+
 def _model_candidates() -> list[str]:
     """Качество по умолчанию, но с мягким fallback без поломки диалогов."""
     requested = str(os.getenv("NEONA_DIALOG_MODEL") or "gpt-6.1-sol").strip()
@@ -87,9 +96,70 @@ def _response_text(data: dict) -> str:
     return "\n".join(parts).strip()
 
 
-def _call_reasoning_model(config, instructions: str, input_text: str) -> str:
+def _pilot_selected(owner_id: int | None) -> bool:
+    """Explicit opt-in, never enabled by a missing/empty setting."""
+    if str(os.getenv("NEONA_PILOT_ENABLED") or "").lower() != "true":
+        return False
+    ids = {int(x.strip()) for x in str(os.getenv("NEONA_PILOT_OWNER_IDS") or "").split(",")
+           if x.strip().isdigit()}
+    return owner_id is not None and int(owner_id) in ids
+
+
+def _call_pilot_budgeted(config, instructions: str, input_text: str, owner_id: int) -> str:
+    """One model call only, with DB reservation BEFORE API request; fail closed.
+
+    Rates are operator-configured conservative USD/M-token ceilings.
+    Never release an in-flight reservation on timeout or unknown usage.
+    """
+    from decimal import Decimal
+    from neona_pilot_budget import reserve, settle, PilotBudgetBlocked
+
+    model = str(os.getenv("NEONA_PILOT_MODEL") or "").strip()
+    rate_input = Decimal(str(os.getenv("NEONA_PILOT_MAX_INPUT_USD_PER_M") or "0"))
+    rate_output = Decimal(str(os.getenv("NEONA_PILOT_MAX_OUTPUT_USD_PER_M") or "0"))
+    max_output = int(os.getenv("NEONA_PILOT_MAX_OUTPUT_TOKENS") or "900")
+    if not model or rate_input <= 0 or rate_output <= 0 or not 1 <= max_output <= 2000:
+        raise PilotBudgetBlocked("Не указаны проверенные модель и тарифные потолки пилота")
+    # Conservative upper bound for textual input; counting UTF-8 bytes overestimates
+    # token count for normal text. Reserve ALL allowed output tokens.
+    input_bound = len((instructions + input_text).encode("utf-8")) + 512
+    worst_usd = (
+        Decimal(input_bound) * rate_input +
+        Decimal(max_output) * rate_output
+    ) / Decimal(1_000_000)
+    ticket = reserve(int(owner_id), worst_case_usd=str(worst_usd))
+    # After reservation, any error keeps the budget occupied. Never retry the
+    # potentially billed API request without a new reservation.
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={"Authorization": f"Bearer {config.openai_api_key}",
+                 "Content-Type": "application/json"},
+        json={"model": model, "instructions": instructions, "input": input_text,
+              "max_output_tokens": max_output, "store": False},
+        timeout=90,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    usage = payload.get("usage") or {}
+    if not isinstance(usage.get("input_tokens"), int) or not isinstance(usage.get("output_tokens"), int):
+        raise PilotBudgetBlocked("API не подтвердил расход токенов; резерв сохранён")
+    actual_usd = (
+        Decimal(usage["input_tokens"]) * rate_input +
+        Decimal(usage["output_tokens"]) * rate_output
+    ) / Decimal(1_000_000)
+    settle(ticket, actual_usd=str(actual_usd))
+    answer = _response_text(payload)
+    if not answer:
+        raise RuntimeError("Пустой ответ пилотной модели")
+    print(f"[NeonaPilot] owner={owner_id} model={model} usage_accounted=true", flush=True)
+    return answer
+
+
+def _call_reasoning_model(config, instructions: str, input_text: str, *, owner_id: int | None = None) -> str:
+    if _pilot_selected(owner_id):
+        return _call_pilot_budgeted(config, instructions, input_text, int(owner_id))
     last_error = None
-    for model in _model_candidates():
+    for model in _pilot_model_candidates(owner_id):
         try:
             response = requests.post(
                 "https://api.openai.com/v1/responses",
@@ -116,6 +186,9 @@ def _call_reasoning_model(config, instructions: str, input_text: str) -> str:
 
             answer = _response_text(response.json())
             if answer:
+                # Логируем фактически использованную модель без содержания переписки:
+                # иначе по одним настройкам невозможно понять, сработал ли fallback.
+                print(f"[NeonaModel] selected={model}", flush=True)
                 return answer
             last_error = RuntimeError(f"{model}: пустой ответ")
         except Exception as exc:
@@ -250,12 +323,13 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 согласие поговорить с {forms['instrumental']}.
 
 ЕСЛИ ЧЕЛОВЕК ЗАНИМАЕТСЯ БИЗНЕСОМ:
-Не устраивай анкету. Разумно подведи к теме времени:
-поиск людей, переписка, первые разговоры, возражения, встречи, сопровождение.
-Хороший вопрос, когда он уместен:
-«А если бы у вас освободилось несколько часов в неделю, на что вам хотелось бы их потратить?»
-Позже:
-«А хотели бы вы тратить на поиск и переписку меньше времени?»
+Не устраивай анкету. Тема времени, поиска людей, переписки, встреч или
+сопровождения уместна ТОЛЬКО если вытекает из слов самого собеседника.
+Не задавай универсальный вопрос о том, куда он потратит свободные часы,
+и не повторяй одинаковый вопрос о поиске и переписке в разных диалогах.
+Если нужен вопрос — придумай один конкретный вопрос, опираясь на реально
+названную человеком трудность или интерес. Если нет повода — не спрашивай.
+Оцени, когда человек не заинтересован: не продолжай продажу после отказа.
 
 ЕСЛИ У ЧЕЛОВЕКА УЖЕ ЕСТЬ ИИ ИЛИ КОМАНДА:
 Не спорь и не доказывай, что наше решение лучше.
@@ -289,6 +363,22 @@ def _dialog_instructions(owner_name: str, first_name: str, context: dict, greet:
 - Не заканчивай каждую реплику вопросом автоматически.
 - {greeting_rule}
 
+СТАНДАРТ НЕОНЫ 4.0 — ИНТЕЛЛЕКТ БЕЗ ШАБЛОНОВ:
+- Цель Агентства W помни всегда: полезное знакомство, доверие,
+  осмысленный интерес к возможностям и добровольная встреча с владельцем.
+- Стратегия не означает давление: при отказе прекращай предложение,
+  при отсутствии интереса не маскируй продажи под дружескую беседу.
+- Учитывай индивидуальные детали и тон конкретного собеседника,
+  не повторяй заученные одинаковые вопросы и рекламные обороты.
+- На сложный вопрос ответь простым языком, сохрани точность,
+  при неопределённости честно обозначь её.
+- Комментарий к публикации опирай на содержание самой публикации,
+  не выдумывай, что видела фото, сторис или прочитала ссылку.
+- Владельцы кабинетов различны: говори только от имени владельца
+  ТЕКУЩЕГО разговора и не переноси чужие имена и истории.
+- Остроумие — инструмент, не обязанность; при тревоге, боли,
+  серьёзных возражениях или отказе шутка неуместна.
+
 ЮМОР / ЭРУДИЦИЯ:
 Можно добавить ОДНУ маленькую человеческую искру: лёгкую шутку, метафору
 или очень редкую латинскую фразу с переводом — только если это действительно к месту.
@@ -313,7 +403,7 @@ action:
 """.strip()
 
 
-def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str) -> str:
+def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str, *, owner_id=None) -> str:
     forms = _owner_forms(owner_name)
     instructions = f"""
 Ты редактор одной реплики Неоны — секретаря-референта {forms['genitive']}.
@@ -327,15 +417,16 @@ def _repair_reply(config, owner_name: str, text: str, reply: str, problem: str) 
 
 Верни только исправленную реплику, без пояснений.
 """.strip()
-    return _call_reasoning_model(config, instructions, text)
+    return _call_reasoning_model(config, instructions, text, owner_id=owner_id)
 
 
-def _reasoned_turn(config, owner_name, first_name, text, greet, context):
+def _reasoned_turn(config, owner_name, first_name, text, greet, context, *, owner_id=None):
     instructions = _dialog_instructions(owner_name, first_name, context, greet)
     raw = _call_reasoning_model(
         config,
         instructions,
         "НОВОЕ СООБЩЕНИЕ ЧЕЛОВЕКА:\n" + str(text or ""),
+        owner_id=owner_id,
     )
     data = _extract_json(raw)
     reply = str(data.get("reply") or "").strip()
@@ -370,6 +461,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
             reply = _repair_reply(
                 config, owner_name, text, reply,
                 "В текущем сообщении нет медицинского вопроса. Убери медицинскую тему и ответь на реальный смысл сообщения.",
+                owner_id=owner_id,
             )
 
     if (
@@ -379,6 +471,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Человек не спрашивал цену или оплату Агентства. Не придумывай коммерческий вопрос; ответь на то, что человек реально сообщил.",
+            owner_id=owner_id,
         )
         if action in {"ask_meeting_consent", "schedule_now"}:
             action = "continue"
@@ -390,6 +483,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Человек не спрашивал, ИИ ли ты. Не поднимай тему своей природы; ответь на смысл его сообщения.",
+            owner_id=owner_id,
         )
 
     if re.search(
@@ -400,6 +494,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Не обещай открыть или изучить присланную ссылку. Поблагодари за источник и продолжи разговор только по доступному тексту.",
+            owner_id=owner_id,
         )
 
     # До согласия нельзя выдавать слоты календаря.
@@ -407,6 +502,7 @@ def _reasoned_turn(config, owner_name, first_name, text, greet, context):
         reply = _repair_reply(
             config, owner_name, text, reply,
             "Нельзя предлагать время встречи до отдельного согласия человека.",
+            owner_id=owner_id,
         )
 
     # Если модель решила предложить встречу, формулировка должна быть именно просьбой о согласии.
@@ -481,7 +577,7 @@ def _process_v3(
     # вопросы об ИИ, рассказы о себе, ссылки, возражения и интерес — сначала
     # понимает сильная модель в полном контексте.
     result = _reasoned_turn(
-        config, owner_name, first_name, text, greet, context
+        config, owner_name, first_name, text, greet, context, owner_id=owner_id
     )
     reply = legacy._de_repeat_reply(
         config, result["reply"], text, context
