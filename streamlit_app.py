@@ -3086,8 +3086,15 @@ def load_neona_telegram_dialog_states(owner_telegram_id):
     return rows if isinstance(rows, list) else []
 
 
-def _neona_telegram_stage_label(state):
+def _neona_telegram_stage_label(state, event=None):
+    """Status is about real replies, not inferred ownership from message IDs.
+
+    An outgoing fence merely means something was sent from the account.
+    Story replies and Neona's own sends are outgoing too, so the fence
+    alone CANNOT prove that the human owner took over the conversation.
+    """
     state = state if isinstance(state, dict) else {}
+    event = event if isinstance(event, dict) else {}
     stage = str(state.get("stage") or "idle").strip()
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
     replied = bool(state.get("greeted")) or bool(context.get("last_reply_text"))
@@ -3101,13 +3108,51 @@ def _neona_telegram_stage_label(state):
         "awaiting_slot_choice",
     }:
         return "🟣 согласование встречи", "meeting_progress", replied
-    owner_fence_id = int(context.get("owner_outgoing_fence_id") or 0)
+    if stage in {"contact_closed", "opted_out"}:
+        return "⚪ диалог завершён", "closed", replied
+    if stage in {"partner_registered", "partner_active"}:
+        return "⚪ передан сопровождению", "partner", replied
+
     last_incoming_id = int(state.get("last_incoming_message_id") or 0)
-    if owner_fence_id and owner_fence_id > last_incoming_id:
+    last_reply_id = int(context.get("last_reply_id") or 0)
+    last_reply_verified = bool(context.get("last_reply_verified"))
+    first_sent_id = int(
+        event.get("message_id")
+        or context.get("story_reply_message_id")
+        or context.get("first_message_id")
+        or 0
+    )
+    # When the first outgoing ID is known, a newer inbound is a verified
+    # response from the person. Surface it if Neona did not answer after it.
+    incoming_after_first = bool(
+        first_sent_id and last_incoming_id > first_sent_id
+    )
+    neona_answered_after_incoming = bool(
+        last_reply_verified and last_reply_id > last_incoming_id
+    )
+    failed_id = int(context.get("last_processing_failed_id") or 0)
+    if (
+        (incoming_after_first and not neona_answered_after_incoming)
+        or (failed_id and failed_id == last_incoming_id)
+    ):
+        return "🟠 входящее — проверить ответ", "needs_attention", True
+
+    # No reply recorded: yellow, even if the account has outgoing activity.
+    # Existing legacy Story messages may not have a stored first sent ID;
+    # those must not be attributed to a human owner without proof.
+    if not replied:
+        return "🟡 ждём ответа", "waiting", False
+
+    owner_fence_id = int(context.get("owner_outgoing_fence_id") or 0)
+    # The label "owner handles conversation" requires an explicit takeover;
+    # a later outgoing message ID by itself does not establish authorship.
+    if (
+        bool(context.get("owner_takeover_confirmed"))
+        and owner_fence_id > last_incoming_id
+    ):
         return "👤 диалог ведёт владелец", "owner_active", True
-    if replied:
-        return "🟢 диалог идёт", "dialogue", True
-    return "🟡 ждём ответа", "waiting", False
+
+    return "🟢 диалог ведёт Неона", "dialogue", True
 
 
 def _format_neona_dialog_datetime(value):
@@ -3301,7 +3346,7 @@ def render_neona_telegram_dialog_center(
         ).strip()
         username = str(contact.get("username") or "").strip()
 
-        status_label, status_code, replied = _neona_telegram_stage_label(state)
+        status_label, status_code, replied = _neona_telegram_stage_label(state, event)
         sort_time = str(
             state.get("updated_at")
             or event.get("sent_at")
