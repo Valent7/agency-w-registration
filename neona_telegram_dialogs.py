@@ -3668,64 +3668,77 @@ def _owners(config: Config) -> list[tuple[int, str]]:
     return [(owner_id, names.get(owner_id, "Владелец")) for owner_id in ids]
 
 
+def _sync_owner_with_diagnostics(owner_id: int, owner_name: str) -> dict[str, int]:
+    """One isolated Telegram session per owner; safe to execute in a worker thread."""
+    started_at = time.monotonic()
+    stats = asyncio.run(
+        sync_owner_once(
+            owner_id,
+            owner_name,
+            initialize_new_dialogs=True,
+            force_full_scan=False,
+        )
+    )
+    print(
+        f"[NeonaLatency] owner={owner_id} "
+        f"sync_seconds={time.monotonic() - started_at:.2f} "
+        f"processed={stats['processed']} "
+        f"replied={stats['replied']} errors={stats['errors']}",
+        flush=True,
+    )
+    if stats["processed"] or stats["initialized"] or stats["errors"]:
+        print(f"owner={owner_id} stats={stats}", flush=True)
+    return stats
+
+
 def worker_forever(poll_seconds: int = NEONA_DEFAULT_POLL_SECONDS) -> None:
+    # Opt-in parallelism: default remains one owner at a time until reviewed.
+    # A small bound prevents one slow owner from blocking every other owner,
+    # without increasing the frequency of Telegram scans for any owner.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     config = load_config()
     safe_poll_seconds = max(NEONA_MIN_POLL_SECONDS, int(poll_seconds))
+    max_parallel = max(1, min(3, int(os.getenv("NEONA_OWNER_WORKERS", "1"))))
     flood_until_by_owner: dict[int, float] = {}
     print(
         f"Neona Telegram worker started; poll={safe_poll_seconds}s; "
-        f"recent_window={NEONA_RECENT_DIALOG_HOURS}h",
+        f"owner_workers={max_parallel}; recent_window={NEONA_RECENT_DIALOG_HOURS}h",
         flush=True,
     )
-    while True:
-        try:
-            for owner_id, owner_name in _owners(config):
-                owner_id = int(owner_id)
-                now_mono = time.monotonic()
-                blocked_until = float(flood_until_by_owner.get(owner_id, 0) or 0)
-                if blocked_until > now_mono:
-                    continue
-                try:
-                    started_at = time.monotonic()
-                    stats = asyncio.run(
-                        sync_owner_once(
-                            owner_id,
-                            owner_name,
-                            initialize_new_dialogs=True,
-                            force_full_scan=False,
-                        )
-                    )
-                    elapsed_seconds = time.monotonic() - started_at
-                    # Diagnostics only; do not change polling or send behavior.
-                    print(
-                        f"[NeonaLatency] owner={owner_id} "
-                        f"sync_seconds={elapsed_seconds:.2f} "
-                        f"processed={stats['processed']} "
-                        f"replied={stats['replied']} "
-                        f"errors={stats['errors']}",
-                        flush=True,
-                    )
-                    if stats["processed"] or stats["initialized"] or stats["errors"]:
-                        print(f"owner={owner_id} stats={stats}", flush=True)
-                except Exception as exc:
-                    wait_seconds = _flood_wait_seconds(exc)
-                    if wait_seconds:
-                        # Не продолжаем стучаться в аккаунт во время FloodWait.
-                        # Добавляем небольшой запас, чтобы не попасть в новый цикл
-                        # в ту же секунду, когда ограничение формально закончится.
-                        flood_until_by_owner[owner_id] = (
-                            time.monotonic() + wait_seconds + 30
-                        )
-                        print(
-                            f"[NeonaFloodWait] owner={owner_id} "
-                            f"pause={wait_seconds + 30}s",
-                            flush=True,
-                        )
-                        continue
-                    print(f"owner={owner_id} error={exc}", flush=True)
-        except Exception as exc:
-            print(f"worker error={exc}", flush=True)
-        time.sleep(safe_poll_seconds)
+    with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix="neona-owner") as pool:
+        while True:
+            try:
+                eligible = [
+                    (int(owner_id), owner_name)
+                    for owner_id, owner_name in _owners(config)
+                    if float(flood_until_by_owner.get(int(owner_id), 0) or 0)
+                    <= time.monotonic()
+                ]
+                futures = {
+                    pool.submit(_sync_owner_with_diagnostics, owner_id, owner_name): owner_id
+                    for owner_id, owner_name in eligible
+                }
+                for future in as_completed(futures):
+                    owner_id = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        wait_seconds = _flood_wait_seconds(exc)
+                        if wait_seconds:
+                            flood_until_by_owner[owner_id] = (
+                                time.monotonic() + wait_seconds + 30
+                            )
+                            print(
+                                f"[NeonaFloodWait] owner={owner_id} "
+                                f"pause={wait_seconds + 30}s",
+                                flush=True,
+                            )
+                        else:
+                            print(f"owner={owner_id} error={exc}", flush=True)
+            except Exception as exc:
+                print(f"worker error={exc}", flush=True)
+            time.sleep(safe_poll_seconds)
 
 
 if __name__ == "__main__":
