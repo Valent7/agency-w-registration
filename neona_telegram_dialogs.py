@@ -3686,6 +3686,7 @@ def worker_forever(poll_seconds: int = NEONA_DEFAULT_POLL_SECONDS) -> None:
                 if blocked_until > now_mono:
                     continue
                 try:
+                    started_at = time.monotonic()
                     stats = asyncio.run(
                         sync_owner_once(
                             owner_id,
@@ -3693,6 +3694,16 @@ def worker_forever(poll_seconds: int = NEONA_DEFAULT_POLL_SECONDS) -> None:
                             initialize_new_dialogs=True,
                             force_full_scan=False,
                         )
+                    )
+                    elapsed_seconds = time.monotonic() - started_at
+                    # Diagnostics only; do not change polling or send behavior.
+                    print(
+                        f"[NeonaLatency] owner={owner_id} "
+                        f"sync_seconds={elapsed_seconds:.2f} "
+                        f"processed={stats['processed']} "
+                        f"replied={stats['replied']} "
+                        f"errors={stats['errors']}",
+                        flush=True,
                     )
                     if stats["processed"] or stats["initialized"] or stats["errors"]:
                         print(f"owner={owner_id} stats={stats}", flush=True)
