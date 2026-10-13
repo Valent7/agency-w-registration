@@ -7455,19 +7455,142 @@ if not _agency_user_logged_in:
 
     st.markdown(
         """
-        <div class="registration-card">
-            <h2>Добро пожаловать!</h2>
-            <p>
-                Сегодня искусственный интеллект способен взять на себя
-                тысячи часов рутинной работы.
+        <style>
+        /* Только экран первого входа. Рабочий кабинет и вход Telegram не меняем. */
+        .aw-welcome {
+            position: relative;
+            isolation: isolate;
+            overflow: hidden;
+            margin: 0.7rem auto 1.5rem;
+            padding: clamp(1.4rem, 4.5vw, 3.2rem);
+            border: 1px solid rgba(208, 166, 76, 0.53);
+            border-radius: 26px;
+            background:
+                radial-gradient(ellipse at 90% 5%, rgba(196, 153, 60, 0.16), transparent 47%),
+                radial-gradient(ellipse at 5% 90%, rgba(57, 109, 143, 0.19), transparent 50%),
+                linear-gradient(145deg, #101b27 0%, #0c1018 60%, #15130f 100%);
+            box-shadow: 0 22px 60px rgba(0,0,0,0.35);
+            color: #f7f4ec;
+        }
+        .aw-welcome::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 7%;
+            right: 7%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, #e6c27a, transparent);
+        }
+        .aw-welcome__eyebrow {
+            margin: 0 0 1.05rem;
+            color: #e8ca8b;
+            font-size: clamp(0.77rem, 1.9vw, 0.93rem);
+            font-weight: 650;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+        }
+        .aw-welcome__headline {
+            margin: 0 0 1.1rem;
+            max-width: 850px;
+            font-size: clamp(2rem, 5vw, 3.8rem);
+            font-weight: 750;
+            line-height: 1.13;
+            letter-spacing: -0.035em;
+            color: #fffdf7;
+        }
+        .aw-welcome__headline span { color: #e5c079; }
+        .aw-welcome__lead {
+            max-width: 760px;
+            margin: 0;
+            font-size: clamp(1rem, 2.2vw, 1.23rem);
+            line-height: 1.65;
+            color: #e3e3e5;
+        }
+        .aw-welcome__grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.85rem;
+            margin-top: 1.65rem;
+        }
+        .aw-welcome__feature {
+            min-width: 0;
+            padding: 1.05rem 1.15rem;
+            background: rgba(244, 239, 225, 0.055);
+            border: 1px solid rgba(232, 209, 156, 0.18);
+            border-radius: 14px;
+        }
+        .aw-welcome__feature strong {
+            display: block;
+            margin-bottom: 0.2rem;
+            color: #f8e5b4;
+            font-size: 1.06rem;
+            font-weight: 700;
+        }
+        .aw-welcome__feature span {
+            display: block;
+            color: #e1e1e1;
+            font-size: 0.96rem;
+            line-height: 1.45;
+        }
+        .aw-welcome__next {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 0.5rem 1rem;
+            margin-top: 1.6rem;
+            padding-top: 1.15rem;
+            border-top: 1px solid rgba(229, 192, 121, 0.3);
+        }
+        .aw-welcome__next strong {
+            color: #f8e5b4;
+            font-weight: 700;
+        }
+        .aw-welcome__next span {
+            color: #e4e7e7;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+        @media (max-width: 620px) {
+            .aw-welcome { border-radius: 18px; padding: 1.25rem; }
+            .aw-welcome__grid { grid-template-columns: 1fr; gap: 0.65rem; }
+            .aw-welcome__eyebrow { letter-spacing: 0.09em; }
+            .aw-welcome__feature { padding: 0.9rem 1rem; }
+        }
+        </style>
+        <section class="aw-welcome" aria-label="Знакомство с Агентством W">
+            <p class="aw-welcome__eyebrow">Ваш виртуальный офис · команда ИИ</p>
+            <h1 class="aw-welcome__headline">
+                Ваше время — для жизни.<br>
+                <span>Рутину доверьте Агентству W.</span>
+            </h1>
+            <p class="aw-welcome__lead">
+                Вы занимаетесь главным, а цифровая команда помогает находить
+                людей, начинать деловые диалоги и организовывать встречи.
+                Всё в одном рабочем пространстве.
             </p>
-            <p>
-                Агентство W создаёт для каждого человека команду цифровых
-                помощников, которые помогают искать людей, вести первые
-                диалоги, анализировать информацию и освобождать время для
-                самого главного — жизни, семьи и развития.
-            </p>
-        </div>
+            <div class="aw-welcome__grid">
+                <div class="aw-welcome__feature">
+                    <strong>Неония</strong>
+                    <span>Помогает находить подходящих людей.</span>
+                </div>
+                <div class="aw-welcome__feature">
+                    <strong>Неона</strong>
+                    <span>Ведёт диалоги и помогает договориться о встрече.</span>
+                </div>
+                <div class="aw-welcome__feature">
+                    <strong>Стагирит</strong>
+                    <span>Координирует задачи и рабочие действия.</span>
+                </div>
+                <div class="aw-welcome__feature">
+                    <strong>Неола</strong>
+                    <span>Подсказывает следующие шаги и поддерживает вас.</span>
+                </div>
+            </div>
+            <div class="aw-welcome__next">
+                <strong>Ваш первый шаг</strong>
+                <span>Войдите через Telegram ниже, чтобы продолжить регистрацию.</span>
+            </div>
+        </section>
         """,
         unsafe_allow_html=True,
     )
