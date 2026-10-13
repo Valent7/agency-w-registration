@@ -73,6 +73,7 @@ class RealtimePilots:
             raise core.DialogError("Telegram session missing for realtime owner")
 
         pending: dict[int, object] = {}
+        pending_since: dict[int, float] = {}
         changed = asyncio.Event()
         client = TelegramClient(
             StringSession(session), config.telegram_api_id, config.telegram_api_hash
@@ -98,6 +99,7 @@ class RealtimePilots:
                 return
             # Only one pending item per sender, even during rapid-fire messages.
             pending[sender_id] = sender
+            pending_since.setdefault(sender_id, time.monotonic())
             changed.set()
 
         await client.connect()
@@ -109,7 +111,9 @@ class RealtimePilots:
                 raise core.DialogError("Realtime Telegram session owner mismatch")
 
             # Establish state and catch up before taking ownership from polling.
-            await self._scan(owner_id, owner_name, client)
+            initial_stats = await self._scan(owner_id, owner_name, client)
+            if initial_stats["errors"]:
+                raise core.DialogError("Realtime initial scan did not pass safety checks")
             self._set_ready(owner_id, True)
             print(f"[NeonaRealtime] owner={owner_id} listener_ready=true", flush=True)
             next_full_scan = time.monotonic() + self.poll_seconds
@@ -126,7 +130,9 @@ class RealtimePilots:
                 # Snapshot and clear before awaiting: events arriving during a
                 # scan remain queued for the next iteration.
                 targets = list(pending.values())
+                first_event_at = min(pending_since.values()) if pending_since else None
                 pending.clear()
+                pending_since.clear()
                 changed.clear()
                 full = time.monotonic() >= next_full_scan
 
@@ -137,7 +143,12 @@ class RealtimePilots:
                 if targets and not full:
                     await asyncio.sleep(0.35)
                     targets.extend(pending.values())
+                    if pending_since:
+                        first_event_at = min(
+                            first_event_at or time.monotonic(), min(pending_since.values())
+                        )
                     pending.clear()
+                    pending_since.clear()
                     changed.clear()
 
                 try:
@@ -145,6 +156,13 @@ class RealtimePilots:
                         owner_id, owner_name, client,
                         target_entities=None if full else targets,
                     )
+                    if targets and first_event_at is not None:
+                        print(
+                            f"[NeonaRealtimeLatency] owner={owner_id} "
+                            f"event_to_scan_finished_s={time.monotonic() - first_event_at:.2f} "
+                            f"replied={stats['replied']}",
+                            flush=True,
+                        )
                     if stats["errors"]:
                         consecutive_failures += 1
                     else:
