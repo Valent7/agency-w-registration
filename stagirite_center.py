@@ -584,8 +584,8 @@ def _detect_intents(text: str) -> list[str]:
     ) or bool(
         # Zoom between a booking verb and 'meeting' must not hide intent.
         re.search(
-            r"\\b(?:организуй|назначь|согласуй|организовать|назначить|согласовать)"
-            r"\\s+(?:(?:zoom|зум)[-\\s]*)?встреч",
+            r"\b(?:организуй|назначь|согласуй|организовать|назначить|согласовать)"
+            r"\s+(?:(?:zoom|зум)[-\s]*)?встреч",
             lowered,
         )
     )
