@@ -6,6 +6,7 @@ on:
       - "neola_partner_center.py"
       - "streamlit_app.py"
       - "tests/test_neola_daily_brief.py"
+      - "tests/test_neola_voice_template.py"
       - ".github/workflows/neola-daily-voice.yml"
   workflow_dispatch:
 
@@ -23,5 +24,7 @@ jobs:
           python-version: "3.11"
       - name: Compile changed application modules
         run: python -m py_compile neola_daily_brief.py neola_partner_center.py streamlit_app.py tests/test_neola_daily_brief.py
-      - name: Test daily spoken brief and calendar filtering
-        run: python -m unittest discover -s tests -p "test_neola_daily_brief.py" -v
+      - name: Test daily spoken brief, calendar filtering and browser voice
+        run: |
+          python -m unittest discover -s tests -p "test_neola_daily_brief.py" -v
+          python -m unittest discover -s tests -p "test_neola_voice_template.py" -v
