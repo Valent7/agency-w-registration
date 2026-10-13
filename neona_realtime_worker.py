@@ -63,29 +63,43 @@ class RealtimePilots:
                         continue
                     # No first messages or remembered dialogues: there is nothing
                     # to listen for yet. Legacy polling handles these accounts.
-                    if not core._allowed_contacts(config, owner_id):
-                        continue
-                    self._started.add(owner_id)
-                    threading.Thread(
-                        target=self._run_thread,
-                        args=(owner_id, owner_name),
-                        daemon=True,
-                        name=f"neona-realtime-{owner_id}",
-                    ).start()
-                    # Stagger Telegram connections to avoid startup rate bursts.
-                    time.sleep(2)
+                    try:
+                        if not core._allowed_contacts(config, owner_id):
+                            continue
+                        listener = threading.Thread(
+                            target=self._run_thread,
+                            args=(owner_id, owner_name),
+                            daemon=True,
+                            name=f"neona-realtime-{owner_id}",
+                        )
+                        listener.start()
+                        self._started.add(owner_id)
+                        # Stagger Telegram connections to avoid startup bursts.
+                        time.sleep(2)
+                    except Exception as exc:
+                        print(
+                            f"[NeonaRealtime] owner={owner_id} startup_error="
+                            f"{type(exc).__name__}: {exc}", flush=True
+                        )
             except Exception as exc:
                 print(f"[NeonaRealtime] supervisor_error={type(exc).__name__}: {exc}", flush=True)
             time.sleep(self.poll_seconds)
 
     def _run_thread(self, owner_id: int, owner_name: str) -> None:
+        failures = 0
         while True:
             reconnect_delay = 30
             try:
                 asyncio.run(self._listen(owner_id, owner_name))
+                failures = 0
             except Exception as exc:
                 self._set_ready(owner_id, False)
-                reconnect_delay += core._flood_wait_seconds(exc)
+                failures += 1
+                # Back off repeated bad sessions; never fight Telegram FloodWait.
+                reconnect_delay = max(
+                    min(600, 30 * (2 ** min(4, failures - 1))),
+                    core._flood_wait_seconds(exc) + 30,
+                )
                 print(
                     f"[NeonaRealtime] owner={owner_id} listener_error={type(exc).__name__}: {exc} "
                     f"reconnect_delay={reconnect_delay}s",
