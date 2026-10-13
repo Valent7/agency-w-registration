@@ -46,6 +46,70 @@ class NeonaRealtimeTests(unittest.TestCase):
         pilots._set_ready(101, False)
         self.assertFalse(pilots.is_ready(101))
 
+    def test_realtime_events_are_coalesced_and_fallback_restored(self):
+        class StubClient:
+            last = None
+
+            def __init__(self, *args, **kwargs):
+                StubClient.last = self
+                self.connected = False
+                self.handler = None
+
+            def on(self, _):
+                def decorator(callback):
+                    self.handler = callback
+                    return callback
+                return decorator
+
+            async def connect(self):
+                self.connected = True
+
+            async def is_user_authorized(self):
+                return True
+
+            async def get_me(self):
+                return SimpleNamespace(id=101)
+
+            def is_connected(self):
+                return self.connected
+
+            async def disconnect(self):
+                self.connected = False
+
+        class FakeEvent:
+            is_private = True
+            sender_id = 555
+            message = SimpleNamespace(message="Hello", voice=False, audio=False, document=None)
+
+            async def get_sender(self):
+                return SimpleNamespace(id=555, first_name="User", bot=False)
+
+        calls = []
+        pilot = realtime.RealtimePilots({101}, poll_seconds=300)
+
+        async def fake_scan(owner_id, owner_name, client, target_entities=None):
+            calls.append(None if target_entities is None else [e.id for e in target_entities])
+            if len(calls) == 1:
+                # Two Telegram updates must cause only one targeted scan.
+                await client.handler(FakeEvent())
+                await client.handler(FakeEvent())
+            else:
+                self.assertTrue(pilot.is_ready(101))
+                client.connected = False
+            return {"processed": 0, "replied": 0, "errors": 0}
+
+        config = SimpleNamespace(telegram_api_id=1, telegram_api_hash="unused")
+        with (
+            patch.object(core, "load_config", return_value=config),
+            patch.object(core, "_get_telegram_session", return_value="session"),
+            patch.object(realtime, "StringSession", side_effect=lambda x: x),
+            patch.object(realtime, "TelegramClient", StubClient),
+            patch.object(pilot, "_scan", side_effect=fake_scan),
+        ):
+            asyncio.run(pilot._listen(101, "Owner"))
+        self.assertEqual(calls, [None, [555]])
+        self.assertFalse(pilot.is_ready(101))
+
     def test_targeted_scan_rejects_unapproved_contact_without_network_read(self):
         client = FakeClient()
         config = SimpleNamespace()
