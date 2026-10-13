@@ -1,0 +1,25 @@
+name: Agency W registration welcome checks
+on:
+  pull_request:
+    paths:
+      - "streamlit_app.py"
+      - "tests/test_registration_welcome.py"
+      - ".github/workflows/registration-welcome.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  registration-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile Streamlit application
+        run: python -m py_compile streamlit_app.py
+      - name: Check welcome design and preserve referral/TG login
+        run: python -m unittest discover -s tests -p "test_registration_welcome.py" -v
