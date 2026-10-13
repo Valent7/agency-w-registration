@@ -5,6 +5,8 @@ import json
 import os
 import re
 import time
+import threading
+from types import SimpleNamespace
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any
@@ -30,6 +32,15 @@ NEONA_DIALOG_CORE = agency_core_prompt(
 NEONA_MIN_POLL_SECONDS = 120
 NEONA_DEFAULT_POLL_SECONDS = 300
 NEONA_RECENT_DIALOG_HOURS = 48
+
+# One synchronized processing lane per Telegram owner, shared by polling and realtime.
+_OWNER_LOCKS: dict[int, threading.Lock] = {}
+_OWNER_LOCKS_GUARD = threading.Lock()
+
+
+def owner_sync_lock(owner_id: int) -> threading.Lock:
+    with _OWNER_LOCKS_GUARD:
+        return _OWNER_LOCKS.setdefault(int(owner_id), threading.Lock())
 
 
 def _flood_wait_seconds(error: Exception) -> int:
@@ -2145,6 +2156,8 @@ async def sync_owner_once(
     *,
     initialize_new_dialogs: bool = True,
     force_full_scan: bool = False,
+    client: TelegramClient | None = None,
+    target_entities: list | None = None,
 ) -> dict[str, int]:
     _voice_diag_reset()
     """
@@ -2212,12 +2225,13 @@ async def sync_owner_once(
 
     matched_allowed_ids: set[int] = set()
 
-    session = _get_telegram_session(config, int(owner_id))
-    if not session:
-        raise DialogError("Telegram-сессия владельца не найдена.")
-
-    client = TelegramClient(StringSession(session), config.telegram_api_id, config.telegram_api_hash)
-    await client.connect()
+    owns_client = client is None
+    if owns_client:
+        session = _get_telegram_session(config, int(owner_id))
+        if not session:
+            raise DialogError("Telegram-сессия владельца не найдена.")
+        client = TelegramClient(StringSession(session), config.telegram_api_id, config.telegram_api_hash)
+        await client.connect()
     try:
         if not await client.is_user_authorized():
             raise DialogError("Telegram-сессия владельца больше не авторизована.")
@@ -2225,7 +2239,15 @@ async def sync_owner_once(
         if int(me.id) != int(owner_id):
             raise DialogError("Подключена Telegram-сессия другого владельца.")
 
-        async for dialog in client.iter_dialogs(limit=500):
+        async def _candidates():
+            if target_entities is None:
+                async for item in client.iter_dialogs(limit=500):
+                    yield item
+            else:
+                for target in target_entities:
+                    yield SimpleNamespace(entity=target, date=datetime.now(UTC))
+
+        async for dialog in _candidates():
             entity = dialog.entity
             contact_id = int(getattr(entity, "id", 0) or 0)
             if contact_id not in allowed or getattr(entity, "bot", False):
@@ -3481,7 +3503,8 @@ async def sync_owner_once(
 
         return stats
     finally:
-        await client.disconnect()
+        if owns_client:
+            await client.disconnect()
 
 
 
@@ -3671,14 +3694,15 @@ def _owners(config: Config) -> list[tuple[int, str]]:
 def _sync_owner_with_diagnostics(owner_id: int, owner_name: str) -> dict[str, int]:
     """One isolated Telegram session per owner; safe to execute in a worker thread."""
     started_at = time.monotonic()
-    stats = asyncio.run(
-        sync_owner_once(
-            owner_id,
-            owner_name,
-            initialize_new_dialogs=True,
-            force_full_scan=False,
+    with owner_sync_lock(owner_id):
+        stats = asyncio.run(
+            sync_owner_once(
+                owner_id,
+                owner_name,
+                initialize_new_dialogs=True,
+                force_full_scan=False,
+            )
         )
-    )
     print(
         f"[NeonaLatency] owner={owner_id} "
         f"sync_seconds={time.monotonic() - started_at:.2f} "
@@ -3691,7 +3715,10 @@ def _sync_owner_with_diagnostics(owner_id: int, owner_name: str) -> dict[str, in
     return stats
 
 
-def worker_forever(poll_seconds: int = NEONA_DEFAULT_POLL_SECONDS) -> None:
+def worker_forever(
+    poll_seconds: int = NEONA_DEFAULT_POLL_SECONDS,
+    owner_active_check=None,
+) -> None:
     # Opt-in parallelism: default remains one owner at a time until reviewed.
     # A small bound prevents one slow owner from blocking every other owner,
     # without increasing the frequency of Telegram scans for any owner.
@@ -3712,7 +3739,8 @@ def worker_forever(poll_seconds: int = NEONA_DEFAULT_POLL_SECONDS) -> None:
                 eligible = [
                     (int(owner_id), owner_name)
                     for owner_id, owner_name in _owners(config)
-                    if float(flood_until_by_owner.get(int(owner_id), 0) or 0)
+                    if (owner_active_check is None or not owner_active_check(int(owner_id)))
+                    and float(flood_until_by_owner.get(int(owner_id), 0) or 0)
                     <= time.monotonic()
                 ]
                 futures = {
