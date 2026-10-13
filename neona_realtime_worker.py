@@ -1,9 +1,8 @@
-"""Opt-in Telegram update listener for selected Neona owners.
+"""Opt-in Telegram update listener for Neona owners.
 
-Each selected account owns one long-lived Telegram client. New private messages
-trigger an inexpensive, single-dialog scan; a 5-minute full scan catches missed
-updates. The legacy polling worker remains the automatic fallback for accounts
-whose listener is not healthy. No real-time listeners start without explicit IDs.
+A long-lived Telethon client receives new messages and performs a targeted scan.
+The old five-minute poller is a safe fallback whenever realtime is unavailable.
+Enable for all with NEONA_REALTIME_ALL=true; disabled by default.
 """
 from __future__ import annotations
 
@@ -23,8 +22,10 @@ def _owner_ids(value: str) -> set[int]:
 
 
 class RealtimePilots:
-    def __init__(self, owner_ids: set[int], poll_seconds: int = 300):
+    def __init__(self, owner_ids: set[int], poll_seconds: int = 300, all_owners: bool = False):
         self.owner_ids = set(owner_ids)
+        self.all_owners = bool(all_owners)
+        self._started: set[int] = set()
         self.poll_seconds = max(core.NEONA_MIN_POLL_SECONDS, int(poll_seconds))
         self._ready: set[int] = set()
         self._guard = threading.Lock()
@@ -41,17 +42,41 @@ class RealtimePilots:
                 self._ready.discard(int(owner_id))
 
     def start(self) -> None:
-        config = core.load_config()
-        for owner_id, owner_name in core._owners(config):
-            if int(owner_id) not in self.owner_ids:
-                continue
-            threading.Thread(
-                target=self._run_thread,
-                args=(int(owner_id), owner_name),
-                daemon=True,
-                name=f"neona-realtime-{owner_id}",
-            ).start()
-        print(f"[NeonaRealtime] pilots_requested={len(self.owner_ids)}", flush=True)
+        # A supervisor can also pick up new partners after they start a dialog.
+        threading.Thread(
+            target=self._supervise, daemon=True, name="neona-realtime-supervisor"
+        ).start()
+        print(
+            f"[NeonaRealtime] all_owners={self.all_owners} "
+            f"selected_count={len(self.owner_ids)}", flush=True
+        )
+
+    def _supervise(self) -> None:
+        while True:
+            try:
+                config = core.load_config()
+                for owner_id, owner_name in core._owners(config):
+                    owner_id = int(owner_id)
+                    if not self.all_owners and owner_id not in self.owner_ids:
+                        continue
+                    if owner_id in self._started:
+                        continue
+                    # No first messages or remembered dialogues: there is nothing
+                    # to listen for yet. Legacy polling handles these accounts.
+                    if not core._allowed_contacts(config, owner_id):
+                        continue
+                    self._started.add(owner_id)
+                    threading.Thread(
+                        target=self._run_thread,
+                        args=(owner_id, owner_name),
+                        daemon=True,
+                        name=f"neona-realtime-{owner_id}",
+                    ).start()
+                    # Stagger Telegram connections to avoid startup rate bursts.
+                    time.sleep(2)
+            except Exception as exc:
+                print(f"[NeonaRealtime] supervisor_error={type(exc).__name__}: {exc}", flush=True)
+            time.sleep(self.poll_seconds)
 
     def _run_thread(self, owner_id: int, owner_name: str) -> None:
         while True:
@@ -64,7 +89,8 @@ class RealtimePilots:
                     flush=True,
                 )
             # A failed listener hands the account back to ordinary polling.
-            time.sleep(30)
+            # Respect Telegram's explicit FloodWait even on initial connection.
+            time.sleep(core._flood_wait_seconds(exc) + 30 if 'exc' in locals() else 30)
 
     async def _listen(self, owner_id: int, owner_name: str) -> None:
         config = core.load_config()
@@ -209,8 +235,9 @@ class RealtimePilots:
 
 def launch_from_environment(poll_seconds: int) -> RealtimePilots | None:
     ids = _owner_ids(os.getenv("NEONA_REALTIME_OWNER_IDS", ""))
-    if not ids:
+    all_owners = os.getenv("NEONA_REALTIME_ALL", "").strip().lower() == "true"
+    if not ids and not all_owners:
         return None
-    pilots = RealtimePilots(ids, poll_seconds=poll_seconds)
+    pilots = RealtimePilots(ids, poll_seconds=poll_seconds, all_owners=all_owners)
     pilots.start()
     return pilots
