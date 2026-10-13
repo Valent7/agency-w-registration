@@ -2942,7 +2942,7 @@ def _generate_announcement_content(
         # Never echo a stored private meeting URL when the instructions say
         # contacts must find the link in the Agency cabinet.
         text = re.sub(
-            r"https?://[^\\s]+(?:zoom\\.us|zoom\\.com)[^\\s]*",
+            r"https?://\S*(?:zoom\.us|zoom\.com)\S*",
             "",
             text,
             flags=re.I,
@@ -6992,11 +6992,14 @@ def _render_result(
 
             recipients = structure_member_ids(owner_id)
             recipients_count = len(recipients)
-            zoom_link = str(
-                result.get("zoom_link")
-                or _load_stagirite_settings(owner_id).get("zoom_link")
-                or ""
-            ).strip()
+            zoom_link = (
+                "" if _zoom_link_stays_in_cabinet(task.get("assignment") or "")
+                else str(
+                    result.get("zoom_link")
+                    or _load_stagirite_settings(owner_id).get("zoom_link")
+                    or ""
+                ).strip()
+            )
 
             if published_at:
                 st.success(
