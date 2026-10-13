@@ -170,7 +170,12 @@ class RealtimePilots:
                 # A modest debounce groups short bursts without a busy poll.
                 if targets and not full:
                     await asyncio.sleep(0.35)
-                    targets.extend(pending.values())
+                    # Deduplicate senders that sent again during the debounce.
+                    targets_by_id = {
+                        int(getattr(entity, "id", 0)): entity for entity in targets
+                    }
+                    targets_by_id.update(pending)
+                    targets = list(targets_by_id.values())
                     if pending_since:
                         first_event_at = min(
                             first_event_at or time.monotonic(), min(pending_since.values())
