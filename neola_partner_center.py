@@ -2008,7 +2008,7 @@ def _neola_today_agenda(telegram_id: int, now: datetime | None = None) -> list[d
     return upcoming_meetings(rows, now)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def _neola_cached_daily_speech(text: str) -> bytes | None:
     # Memoize audio to avoid paid TTS calls on Streamlit reruns.
     return _synthesize_speech(text)
@@ -2044,7 +2044,6 @@ def _render_neola_voice_clip(
     audio_b64 = base64.b64encode(speech).decode("ascii")
     player_id = f"neola-speech-{int(telegram_id)}-{kind}"
     storage_key = f"agency_w_neola_{kind}_{int(telegram_id)}"
-    label = json.dumps(str(button_label), ensure_ascii=False)
     template = """
 <div id="__ROOT__" style="margin:0.4rem 0 0.8rem;">
   <button type="button" style="background:#31583e;color:#fff;border:1px solid #63876a;border-radius:12px;padding:0.65rem 1rem;font-weight:650;cursor:pointer;">▶ __LABEL__</button>
@@ -2075,11 +2074,18 @@ def _render_neola_voice_clip(
 
   const tryPlay = (force) => {
     if (isPlaying) return;
+    // Never overlap a daily greeting with an appointment reminder.
+    const other = window.__agencyWNeolaActiveAudio;
+    if (other && other !== audio && !other.paused) {
+      if (!force) return;
+      other.pause();
+    }
     if (!force && playedToday()) {
       status.textContent = "Сегодня уже прослушано. Можно повторить.";
       return;
     }
     if (force) audio.currentTime = 0;
+    window.__agencyWNeolaActiveAudio = audio;
     const attempt = audio.play();
     if (!attempt || typeof attempt.then !== "function") return;
     attempt.then(() => {
@@ -2087,6 +2093,9 @@ def _render_neola_voice_clip(
       markPlayed();
       status.textContent = "Неола говорит...";
     }).catch(() => {
+      if (window.__agencyWNeolaActiveAudio === audio) {
+        window.__agencyWNeolaActiveAudio = null;
+      }
       // Autoplay is forbidden until the user taps/clicks in some browsers.
       status.textContent = "Для озвучивания нажмите кнопку.";
     });
@@ -2101,9 +2110,17 @@ def _render_neola_voice_clip(
   };
   audio.addEventListener("ended", () => {
     isPlaying = false;
+    if (window.__agencyWNeolaActiveAudio === audio) {
+      window.__agencyWNeolaActiveAudio = null;
+    }
     status.textContent = "Прослушано. Можно повторить.";
   });
-  audio.addEventListener("pause", () => { isPlaying = false; });
+  audio.addEventListener("pause", () => {
+    isPlaying = false;
+    if (window.__agencyWNeolaActiveAudio === audio) {
+      window.__agencyWNeolaActiveAudio = null;
+    }
+  });
   button.addEventListener("click", onClick);
   document.addEventListener("pointerdown", onFirstGesture, true);
   document.addEventListener("keydown", onFirstGesture, true);
