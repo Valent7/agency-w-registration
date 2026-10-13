@@ -37,6 +37,16 @@ class NeonaRealtimeTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             self.assertIsNone(realtime.launch_from_environment(300))
 
+    def test_explicit_all_accounts_setting(self):
+        with patch.dict(
+            "os.environ",
+            {"NEONA_REALTIME_ALL": "true", "NEONA_REALTIME_OWNER_IDS": ""},
+            clear=True,
+        ), patch.object(realtime.RealtimePilots, "start") as mock_start:
+            pilots = realtime.launch_from_environment(300)
+        self.assertTrue(pilots.all_owners)
+        mock_start.assert_called_once()
+
     def test_ready_only_after_explicit_confirmation(self):
         pilots = realtime.RealtimePilots({101, 202}, poll_seconds=300)
         self.assertFalse(pilots.is_ready(101))
@@ -93,6 +103,11 @@ class NeonaRealtimeTests(unittest.TestCase):
                 # Two Telegram updates must cause only one targeted scan.
                 await client.handler(FakeEvent())
                 await client.handler(FakeEvent())
+                # One more duplicate during debounce must not re-scan sender.
+                async def later_update():
+                    await asyncio.sleep(0.05)
+                    await client.handler(FakeEvent())
+                asyncio.create_task(later_update())
             else:
                 self.assertTrue(pilot.is_ready(101))
                 client.connected = False
