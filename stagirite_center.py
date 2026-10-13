@@ -8382,6 +8382,47 @@ def render_stagirite_center(
     task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
     task_kind = str(task.get("task_kind") or "")
 
+    # Earlier versions accidentally saved 'write a Zoom reminder' as a
+    # meeting/candidate campaign. Offer a one-click repair of that exact
+    # task, preserving its ID and original text, with no outward messages.
+    if (
+        "meetings" in task_kind
+        and _editorial_output_requested(assignment_text)
+        and "meetings" not in _detect_intents(assignment_text)
+    ):
+        st.warning(
+            "Это поручение ошибочно попало в поиск встреч и кандидатов. "
+            "Здесь нужен Мастер текста, Художник и инструменты контента."
+        )
+        if st.button(
+            "🔄 Исправить маршрут: передать Мастеру контента",
+            key=f"stagirite_repair_content_route_{task_id}",
+            use_container_width=True,
+            type="primary",
+        ):
+            with st.spinner("Мастер контента готовит материал..."):
+                corrected = _process_assignment(
+                    owner_id,
+                    owner_name,
+                    assignment_text,
+                    ask_openai_fn,
+                    ask_claude_fn=ask_claude_fn,
+                )
+                if task_id:
+                    _update_task(
+                        owner_id,
+                        task_id,
+                        {
+                            "task_kind": corrected["task_kind"],
+                            "status": corrected["status"],
+                            "plan": corrected["plan"],
+                            "result": corrected["result"],
+                        },
+                    )
+                else:
+                    _save_task(owner_id, corrected)
+                st.rerun()
+
     display_status = status
     if "meetings" in task_kind:
         refreshed_result, refreshed_status = _refresh_meeting_task(
