@@ -1,0 +1,25 @@
+name: Stagirite editorial and media safety checks
+on:
+  pull_request:
+    paths:
+      - "stagirite_center.py"
+      - "tests/test_stagirite_content_routing.py"
+      - ".github/workflows/stagirite-content-route.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile Stagirite
+        run: python -m py_compile stagirite_center.py tests/test_stagirite_content_routing.py
+      - name: Check content routing, real meeting routing and media tools
+        run: python -m unittest discover -s tests -p "test_stagirite_content_routing.py" -v

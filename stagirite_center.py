@@ -454,6 +454,41 @@ def _meeting_count_from_text(text: str) -> int:
     return 2
 
 
+def _editorial_output_requested(text: str) -> bool:
+    """Explicit instruction to WRITE/CREATE a deliverable, not book a meeting.
+
+    The recipient/topic (Zoom, candidates, team) is content context, not
+    permission to schedule meetings or send messages to candidates.
+    """
+    lowered = str(text or "").strip().lower().replace("ё", "е")
+    if re.search(r"\b(?:напиши|перепиши|сформулируй|сочини)\b", lowered):
+        return True
+    action = re.search(
+        r"\b(?:составь|создай|подготовь|сделай|оформи|разработай)\b",
+        lowered,
+    )
+    deliverable = re.search(
+        r"\b(?:напоминан\w*|анонс\w*|приглашени\w*|пост\w*|"
+        r"текст\w*|сообщени\w*|объявлени\w*|подпис\w*|"
+        r"видеоролик\w*|ролик\w*|иллюстраци\w*|изображени\w*|"
+        r"картин\w*|афиш\w*)\b",
+        lowered,
+    )
+    return bool(action and deliverable)
+
+
+def _zoom_link_stays_in_cabinet(assignment: str) -> bool:
+    """Respect 'the Zoom link is in the Agency cabinet' in announcements."""
+    lowered = str(assignment or "").lower().replace("ё", "е")
+    return bool(
+        ("ссылк" in lowered and ("кабинет" in lowered or "личном кабинете" in lowered))
+        or "без ссылки" in lowered
+        or "ссылку не" in lowered
+        or "не давай ссылку" in lowered
+        or "не отправляй ссылку" in lowered
+    )
+
+
 def _detect_intents(text: str) -> list[str]:
     """
     Различает:
@@ -511,6 +546,7 @@ def _detect_intents(text: str) -> list[str]:
     content_requested = bool(
         content_requested
         or creative_action
+        or _editorial_output_requested(text)
     )
 
     # Явные глаголы, означающие, что Директор действительно хочет
@@ -545,6 +581,13 @@ def _detect_intents(text: str) -> list[str]:
     meeting_action_requested = any(
         x in lowered
         for x in meeting_action_words
+    ) or bool(
+        # Zoom between a booking verb and 'meeting' must not hide intent.
+        re.search(
+            r"\b(?:организуй|назначь|согласуй|организовать|назначить|согласовать)"
+            r"\s+(?:(?:zoom|зум)[-\s]*)?встреч",
+            lowered,
+        )
     )
 
     meeting_context_words = (
@@ -2770,7 +2813,11 @@ def _generate_announcement_content(
     Это уменьшает число AI-вызовов и число точек отказа.
     """
     settings = _load_stagirite_settings(int(owner_id))
-    zoom_link = str(settings.get("zoom_link") or "").strip()
+    cabinet_link_only = _zoom_link_stays_in_cabinet(assignment)
+    zoom_link = (
+        "" if cabinet_link_only
+        else str(settings.get("zoom_link") or "").strip()
+    )
     time_hint = _announcement_time_hint(assignment)
 
     system_prompt = f"""
@@ -2804,7 +2851,8 @@ def _generate_announcement_content(
 - не превращай анонс в художественную «Хронику»;
 - тон живой, тёплый, уверенный, без канцелярита;
 - допустим 1 лёгкий интригующий штрих;
-- если Zoom-ссылка сохранена — поставь её в конце отдельной строкой;
+- если Zoom-ссылка сохранена и Директор не запретил делиться ею — поставь её в конце отдельной строкой;
+- если Директор написал, что ссылка находится в кабинете Агентства W, НЕ публикуй Zoom-URL, а скажи «Ссылка на Zoom — в кабинете Агентства W»;
 - не упоминай внутреннюю техническую кухню Агентства;
 - верни ТОЛЬКО готовый текст анонса.
 """.strip()
@@ -2894,17 +2942,20 @@ def _generate_announcement_content(
         text = "\n".join(lines).strip()
         engine = "deterministic_fallback"
 
-    # На всякий случай гарантируем наличие сохранённой ссылки,
-    # если Мастер её пропустил.
-    if (
-        zoom_link
-        and zoom_link not in text
-    ):
-        text = (
-            text.rstrip()
-            + "\n\n"
-            + f"🔗 Zoom: {zoom_link}"
-        )
+    # Add direct Zoom URL only when the Director actually allows it.
+    if zoom_link and zoom_link not in text:
+        text = text.rstrip() + "\n\n" + f"🔗 Zoom: {zoom_link}"
+    if cabinet_link_only:
+        # Never echo a stored private meeting URL when the instructions say
+        # contacts must find the link in the Agency cabinet.
+        text = re.sub(
+            r"https?://\S*(?:zoom\.us|zoom\.com)\S*",
+            "",
+            text,
+            flags=re.I,
+        ).strip()
+        if "кабинет" not in text.lower():
+            text += "\n\n🔗 Ссылка на Zoom — в кабинете Агентства W."
 
     return {
         "text": text,
@@ -3768,6 +3819,10 @@ def _needs_semantic_director(
     - Директор просит подумать/разобраться/придумать решение.
     """
     lowered = str(assignment or "").lower().replace("ё", "е")
+    # An unambiguous 'write a reminder/post/announcement' goes directly to
+    # the Content Master. AI may write the text, not reinterpret it as a booking.
+    if _editorial_output_requested(assignment) and "meetings" not in deterministic_intents:
+        return False
     if deterministic_intents == ["general"]:
         return True
 
@@ -4584,6 +4639,12 @@ def _process_assignment(
         understanding.get("intents"),
         deterministic_intents,
     )
+    # Guard against a semantic classifier turning editorial copy about Zoom
+    # into a candidate/meeting campaign. Explicit meeting execution remains valid.
+    if _editorial_output_requested(assignment) and "meetings" not in deterministic_intents:
+        intents = [intent for intent in intents if intent not in {"meetings", "general"}]
+        if "content" not in intents:
+            intents.insert(0, "content")
     meeting_count = _meeting_count_from_text(assignment)
     result: dict[str, Any] = {
         "intents": intents,
@@ -6938,11 +6999,14 @@ def _render_result(
 
             recipients = structure_member_ids(owner_id)
             recipients_count = len(recipients)
-            zoom_link = str(
-                result.get("zoom_link")
-                or _load_stagirite_settings(owner_id).get("zoom_link")
-                or ""
-            ).strip()
+            zoom_link = (
+                "" if _zoom_link_stays_in_cabinet(task.get("assignment") or "")
+                else str(
+                    result.get("zoom_link")
+                    or _load_stagirite_settings(owner_id).get("zoom_link")
+                    or ""
+                ).strip()
+            )
 
             if published_at:
                 st.success(
@@ -8327,6 +8391,47 @@ def render_stagirite_center(
     created = str(task.get("created_at") or "")
     task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
     task_kind = str(task.get("task_kind") or "")
+
+    # Earlier versions accidentally saved 'write a Zoom reminder' as a
+    # meeting/candidate campaign. Offer a one-click repair of that exact
+    # task, preserving its ID and original text, with no outward messages.
+    if (
+        "meetings" in task_kind
+        and _editorial_output_requested(assignment_text)
+        and "meetings" not in _detect_intents(assignment_text)
+    ):
+        st.warning(
+            "Это поручение ошибочно попало в поиск встреч и кандидатов. "
+            "Здесь нужен Мастер текста, Художник и инструменты контента."
+        )
+        if st.button(
+            "🔄 Исправить маршрут: передать Мастеру контента",
+            key=f"stagirite_repair_content_route_{task_id}",
+            use_container_width=True,
+            type="primary",
+        ):
+            with st.spinner("Мастер контента готовит материал..."):
+                corrected = _process_assignment(
+                    owner_id,
+                    owner_name,
+                    assignment_text,
+                    ask_openai_fn,
+                    ask_claude_fn=ask_claude_fn,
+                )
+                if task_id:
+                    _update_task(
+                        owner_id,
+                        task_id,
+                        {
+                            "task_kind": corrected["task_kind"],
+                            "status": corrected["status"],
+                            "plan": corrected["plan"],
+                            "result": corrected["result"],
+                        },
+                    )
+                else:
+                    _save_task(owner_id, corrected)
+                st.rerun()
 
     display_status = status
     if "meetings" in task_kind:
