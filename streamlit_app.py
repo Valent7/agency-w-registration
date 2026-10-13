@@ -87,10 +87,12 @@ from neola_partner_center import (
     render_neola_quick_assistant,
     render_neola_fallback_voice,
     render_neola_daily_greeting,
+    render_neola_calendar_voice_reminder,
     render_neola_study_questions,
     render_neola_knowledge_base,
     render_partner_center,
 )
+from neola_daily_brief import daily_mood_for_date
 from neola_realtime_voice import render_neola_realtime_voice
 import neola_role_policy  # фиксирует границы роли Неолы
 from neonia_intelligence_v2 import (
@@ -8114,30 +8116,9 @@ if telegram_login_valid or remembered_data:
         if main_section == "☀️ День":
             st.markdown("### ☀️ Мой день")
 
-            daily_moods = [
-                "Сегодня важно сделать один конкретный шаг, который приблизит вас к цели.",
-                "Не стремитесь сделать всё сразу. Главное — двигаться вперёд каждый день.",
-                "Своё настоящее мы создаём решениями, которые принимаем сегодня.",
-                "Спокойствие, ясность и последовательность сильнее суеты.",
-                "Сегодня хороший день, чтобы завершить то, что давно откладывалось.",
-                "Большой результат начинается с одного простого действия.",
-                "Сосредоточьтесь не на трудностях, а на следующем возможном шаге.",
-                "Каждый новый человек — это новая история, а не просто контакт.",
-                "Сегодня выбирайте действия, которые создают результат, а не занятость.",
-                "Уверенность появляется не до действия, а после первых сделанных шагов.",
-                "Не сравнивайте своё начало с чужим результатом. Продолжайте свой путь.",
-                "Сегодня достаточно стать немного сильнее, чем вы были вчера.",
-                "Возможности замечает тот, кто готов действовать.",
-                "Ваш опыт — это ваша сила. Технологии помогают её масштабировать.",
-            ]
-    
-            berlin_today = datetime.now(
-                    ZoneInfo("Europe/Berlin")
-            ).date()
-    
-            mood_index = berlin_today.toordinal() % len(daily_moods)
-            mood_of_the_day = daily_moods[mood_index]
-    
+            berlin_today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+            mood_of_the_day = daily_mood_for_date(berlin_today)
+
             st.info(f"Настрой дня: {mood_of_the_day}")
 
             # Одноразовая миграция старой истории Неонии.
@@ -8533,6 +8514,7 @@ if telegram_login_valid or remembered_data:
             with st.container(border=True):
                 st.markdown("**📅 Встречи**")
                 render_today_meetings_compact(int(telegram_id))
+                render_neola_calendar_voice_reminder(int(telegram_id))
 
             with st.container(border=True):
                 render_personal_tasks(int(telegram_id))

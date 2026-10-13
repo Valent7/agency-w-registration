@@ -1980,143 +1980,266 @@ def _meeting_word_ru(count):
     return "встреч"
 
 
-def _today_meeting_count(telegram_id):
-    """Считает сегодняшние встречи владельца; None означает, что календарь недоступен."""
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _neola_calendar_today_rows(telegram_id: int, msk_day: str) -> list[dict]:
+    """Calendar data is fetched only for the authenticated owner, and cached briefly."""
+    from agency_calendar import list_meetings
+    from datetime import date, time as dt_time
+    from neola_daily_brief import MOSCOW
+
+    day = date.fromisoformat(msk_day)
+    start_msk = datetime.combine(day, dt_time.min, tzinfo=MOSCOW)
+    end_msk = start_msk + timedelta(days=1)
+    return list_meetings(
+        int(telegram_id),
+        start_msk.astimezone(UTC_TZ),
+        end_msk.astimezone(UTC_TZ),
+    )
+
+
+def _neola_today_agenda(telegram_id: int, now: datetime | None = None) -> list[dict]:
+    from neola_daily_brief import MOSCOW, upcoming_meetings
+
+    now = now or datetime.now(UTC_TZ)
+    rows = _neola_calendar_today_rows(
+        int(telegram_id), now.astimezone(MOSCOW).date().isoformat()
+    )
+    return upcoming_meetings(rows, now)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _neola_cached_daily_speech(text: str) -> bytes | None:
+    # Memoize audio to avoid paid TTS calls on Streamlit reruns.
+    return _synthesize_speech(text)
+
+
+def _render_neola_voice_clip(
+    telegram_id: int,
+    text: str,
+    *,
+    kind: str,
+    stamp: str,
+    button_label: str,
+) -> bool:
+    """Autoplay once per device/day, retry on next gesture, always allow replay.
+
+    JavaScript is run only from this server-authored fixed template. Person names
+    are contained in the MP3 rather than interpolated into executable HTML.
+    """
+    st.caption(f"🎙 Неола: {text}")
     try:
-        from agency_calendar import list_meetings
-
-        now = datetime.now(BERLIN_TZ)
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
-        rows = list_meetings(
-            int(telegram_id),
-            day_start.astimezone(UTC_TZ),
-            day_end.astimezone(UTC_TZ),
+        speech = _neola_cached_daily_speech(text)
+    except Exception as exc:
+        speech = None
+        print(
+            f"[NeolaDailyVoice] kind={kind} synthesis_error={type(exc).__name__}",
+            flush=True,
         )
-        return len(rows)
-    except Exception:
-        return None
 
+    if not speech:
+        st.warning("Голос Неолы временно недоступен. Текст приветствия показан выше.")
+        return False
 
-def build_neola_daily_greeting(owner_name, meeting_count=None, onboarding_step=0):
-    """Короткое наставническое приветствие при первом входе за день."""
-    now = datetime.now(BERLIN_TZ)
-    name = str(owner_name or "").strip()
-    if now.hour < 12:
-        hello = "Доброе утро"
-    elif now.hour < 18:
-        hello = "Добрый день"
-    else:
-        hello = "Добрый вечер"
+    audio_b64 = base64.b64encode(speech).decode("ascii")
+    player_id = f"neola-speech-{int(telegram_id)}-{kind}"
+    storage_key = f"agency_w_neola_{kind}_{int(telegram_id)}"
+    template = """
+<div id="__ROOT__" style="margin:0.4rem 0 0.8rem;">
+  <button type="button" style="background:#31583e;color:#fff;border:1px solid #63876a;border-radius:12px;padding:0.65rem 1rem;font-weight:650;cursor:pointer;">▶ __LABEL__</button>
+  <span class="neola-status" aria-live="polite" style="margin-left:0.7rem;font-size:0.85rem;color:#b6c0c5;"></span>
+</div>
+<script>
+(() => {
+  const root = document.getElementById("__ROOT__");
+  if (!root) return;
+  const storeKey = __STORAGE_KEY__;
+  const stamp = __STAMP__;
+  const mediaSrc = "data:audio/mpeg;base64,__AUDIO__";
+  const registry = window.__agencyWNeolaVoicePlayers || (window.__agencyWNeolaVoicePlayers = {});
+  if (registry["__ROOT__"]) registry["__ROOT__"].dispose();
+  const button = root.querySelector("button");
+  const status = root.querySelector(".neola-status");
+  let audio = new Audio(mediaSrc);
+  audio.preload = "auto";
+  let isPlaying = false;
 
-    address = f", {name}" if name else ""
-    parts = [f"{hello}{address}."]
+  const playedToday = () => {
+    try { return window.localStorage.getItem(storeKey) === stamp; }
+    catch (_) { return false; }
+  };
+  const markPlayed = () => {
+    try { window.localStorage.setItem(storeKey, stamp); } catch (_) {}
+  };
 
-    if meeting_count is None:
-        parts.append("Загляните сегодня в календарь и проверьте встречи.")
-    elif int(meeting_count) > 0:
-        count = int(meeting_count)
-        parts.append(
-            f"Сегодня у вас запланировано {count} {_meeting_word_ru(count)}. "
-            "Загляните в календарь и проверьте время."
-        )
-    else:
-        motivations = (
-            "На сегодня встреч пока нет. Но сегодняшний рабочий ритм создаёт результат завтра.",
-            "На сегодня встреч пока нет. Как в тренировке, результат создаёт не один рывок, а повторяемые действия.",
-            "На сегодня встреч пока нет. Вспомните Эдисона: важна не одна попытка, а готовность продолжать искать решение.",
-            "На сегодня встреч пока нет. Спокойная последовательность сегодня готовит завтрашний результат.",
-        )
-        parts.append(motivations[now.toordinal() % len(motivations)])
-
-    parts.append(
-        "Вы строите своё настоящее. Без дисциплины и работы над собой трудно прийти к своей мечте."
+  const tryPlay = (force) => {
+    if (isPlaying) return;
+    // Never overlap a daily greeting with an appointment reminder.
+    const other = window.__agencyWNeolaActiveAudio;
+    if (other && other !== audio && !other.paused) {
+      if (!force) return;
+      other.pause();
+    }
+    if (!force && playedToday()) {
+      status.textContent = "Сегодня уже прослушано. Можно повторить.";
+      return;
+    }
+    if (force) audio.currentTime = 0;
+    window.__agencyWNeolaActiveAudio = audio;
+    const attempt = audio.play();
+    if (!attempt || typeof attempt.then !== "function") return;
+    attempt.then(() => {
+      isPlaying = true;
+      markPlayed();
+      status.textContent = "Неола говорит...";
+    }).catch(() => {
+      if (window.__agencyWNeolaActiveAudio === audio) {
+        window.__agencyWNeolaActiveAudio = null;
+      }
+      // Autoplay is forbidden until the user taps/clicks in some browsers.
+      status.textContent = "Для озвучивания нажмите кнопку.";
+    });
+  };
+  const onClick = (event) => {
+    event.stopPropagation();
+    tryPlay(true);
+  };
+  const onFirstGesture = (event) => {
+    if (root.contains(event.target)) return;
+    if (!playedToday()) tryPlay(false);
+  };
+  audio.addEventListener("ended", () => {
+    isPlaying = false;
+    if (window.__agencyWNeolaActiveAudio === audio) {
+      window.__agencyWNeolaActiveAudio = null;
+    }
+    status.textContent = "Прослушано. Можно повторить.";
+  });
+  audio.addEventListener("pause", () => {
+    isPlaying = false;
+    if (window.__agencyWNeolaActiveAudio === audio) {
+      window.__agencyWNeolaActiveAudio = null;
+    }
+  });
+  button.addEventListener("click", onClick);
+  document.addEventListener("pointerdown", onFirstGesture, true);
+  document.addEventListener("keydown", onFirstGesture, true);
+  registry["__ROOT__"] = {
+    dispose() {
+      button.removeEventListener("click", onClick);
+      document.removeEventListener("pointerdown", onFirstGesture, true);
+      document.removeEventListener("keydown", onFirstGesture, true);
+    },
+  };
+  if (!playedToday()) tryPlay(false);
+  else status.textContent = "Сегодня уже прослушано. Можно повторить.";
+})();
+</script>"""
+    # The only dynamic HTML is an escaped fixed label; JS values are JSON literals.
+    from html import escape as html_escape
+    markup = (
+        template.replace("__ROOT__", player_id)
+        .replace("__LABEL__", html_escape(str(button_label)))
+        .replace("__STORAGE_KEY__", json.dumps(storage_key))
+        .replace("__STAMP__", json.dumps(stamp))
+        .replace("__AUDIO__", audio_b64)
     )
+    st.html(markup, unsafe_allow_javascript=True)
+    return True
 
-    parts.append(
-        "Одна из ваших задач на сегодня — отработать 5 кандидатов, "
-        "которых подготовили Неония и Стагирит. "
-        "Если понадобится моя помощь — обращайтесь."
+
+def build_neola_daily_greeting(
+    owner_name, meeting_count=None, onboarding_step=0,
+    *, mood_text=None, agenda=None, calendar_available=True,
+):
+    """One spoken opening with exactly the same daily mood as «Мой день»."""
+    from neola_daily_brief import build_daily_brief, daily_mood_for_date
+
+    mood = mood_text or daily_mood_for_date(datetime.now(BERLIN_TZ).date())
+    if agenda is None:
+        agenda = []
+        # Keep compatibility with older callers that only know the count.
+        if meeting_count and calendar_available:
+            return (
+                build_daily_brief(owner_name, motto=mood, meetings=[], calendar_available=False)
+                + f" Сегодня по прежним данным {int(meeting_count)} встреч. Проверьте их точное время."
+            )
+    return build_daily_brief(
+        owner_name, motto=mood, meetings=agenda,
+        calendar_available=calendar_available,
     )
-    return " ".join(parts)
 
 
 def render_neola_daily_greeting(telegram_id, owner_name, onboarding_step=0):
-    """Один раз за день озвучивает наставническое приветствие.
+    """Speak greeting, daily mood and next meetings; allow manual replay on any rerun."""
+    from neola_daily_brief import daily_mood_for_date
 
-    Автозапуск пробуется сразу. Если браузер блокирует звук без жеста пользователя,
-    приветствие запускается при первом клике/касании/нажатии клавиши в Агентстве.
-    """
     today = datetime.now(BERLIN_TZ).date().isoformat()
-    session_key = f"neola_daily_greeting_rendered_{int(telegram_id)}"
-    if st.session_state.get(session_key) == today:
-        return False
+    cache_key = f"neola_daily_brief_{int(telegram_id)}"
+    cached = st.session_state.get(cache_key)
+    if not isinstance(cached, dict) or cached.get("today") != today:
+        try:
+            agenda = _neola_today_agenda(int(telegram_id))
+            calendar_available = True
+        except Exception as exc:
+            agenda = []
+            calendar_available = False
+            print(
+                f"[NeolaDailyVoice] calendar_error={type(exc).__name__}",
+                flush=True,
+            )
+        text = build_neola_daily_greeting(
+            owner_name,
+            onboarding_step=onboarding_step,
+            mood_text=daily_mood_for_date(datetime.now(BERLIN_TZ).date()),
+            agenda=agenda,
+            calendar_available=calendar_available,
+        )
+        cached = {"today": today, "text": text}
+        st.session_state[cache_key] = cached
 
-    meeting_count = _today_meeting_count(telegram_id)
-    text = build_neola_daily_greeting(
-        owner_name,
-        meeting_count=meeting_count,
-        onboarding_step=onboarding_step,
+    return _render_neola_voice_clip(
+        int(telegram_id), str(cached["text"]),
+        kind="daily_greeting", stamp=today,
+        button_label="Послушать приветствие и план дня",
     )
 
+
+@st.fragment(run_every="5m")
+def render_neola_calendar_voice_reminder(telegram_id: int) -> None:
+    """Reminder up to 60 minutes before a meeting while «День» is open.
+
+    Closing the browser stops checks; this is not an external alarm service.
+    """
+    from neola_daily_brief import next_hour_reminder
+
+    now = datetime.now(UTC_TZ)
     try:
-        speech = _synthesize_speech(text)
-    except Exception:
-        speech = None
+        agenda = _neola_today_agenda(int(telegram_id), now)
+    except Exception as exc:
+        print(f"[NeolaMeetingReminder] calendar_error={type(exc).__name__}", flush=True)
+        return
+    upcoming = next_hour_reminder(agenda, now=now)
+    if upcoming is None:
+        return
 
-    # Видимое короткое сообщение остаётся полезным, даже если браузер запретил autoplay.
-    st.caption(f"🎙 Неола: {text}")
+    meeting_id, generated_text = upcoming
+    meeting = next((item for item in agenda if item["id"] == meeting_id), None)
+    if not meeting:
+        return
+    meeting_stamp = f"{meeting['id']}:{meeting['start_utc'].isoformat()}"
+    reminder_key = f"neola_spoken_reminder_{int(telegram_id)}_{meeting_stamp}"
+    text = st.session_state.get(reminder_key)
+    if not isinstance(text, str) or not text:
+        text = generated_text
+        st.session_state[reminder_key] = text
 
-    if speech:
-        audio_b64 = base64.b64encode(speech).decode("ascii")
-        storage_key = f"agency_w_neola_daily_greeting_{int(telegram_id)}"
-        st.html(
-            f"""
-            <script>
-            (() => {{
-              const storageKey = {json.dumps(storage_key)};
-              const today = {json.dumps(today)};
-              try {{
-                if (localStorage.getItem(storageKey) === today) return;
-              }} catch (_) {{}}
-
-              const audio = new Audio("data:audio/mpeg;base64,{audio_b64}");
-              audio.preload = "auto";
-
-              const markPlayed = () => {{
-                try {{ localStorage.setItem(storageKey, today); }} catch (_) {{}}
-                cleanup();
-              }};
-
-              const tryPlay = () => {{
-                const promise = audio.play();
-                if (promise && typeof promise.then === "function") {{
-                  promise.then(markPlayed).catch(() => {{
-                    // Браузер ждёт первый пользовательский жест.
-                  }});
-                }}
-              }};
-
-              const onGesture = () => tryPlay();
-              const cleanup = () => {{
-                window.removeEventListener("pointerdown", onGesture, true);
-                window.removeEventListener("keydown", onGesture, true);
-                window.removeEventListener("touchstart", onGesture, true);
-              }};
-
-              window.addEventListener("pointerdown", onGesture, true);
-              window.addEventListener("keydown", onGesture, true);
-              window.addEventListener("touchstart", onGesture, true);
-              audio.addEventListener("ended", cleanup, {{ once: true }});
-              tryPlay();
-            }})();
-            </script>
-            """,
-            unsafe_allow_javascript=True,
-        )
-
-    st.session_state[session_key] = today
-    return True
+    _render_neola_voice_clip(
+        int(telegram_id), text,
+        kind=f"meeting_{hashlib.sha256(meeting_stamp.encode()).hexdigest()[:16]}",
+        stamp=meeting_stamp,
+        button_label="Послушать напоминание о встрече",
+    )
 
 
 def _neola_system_prompt(owner_name, ui_context, activation, member):
