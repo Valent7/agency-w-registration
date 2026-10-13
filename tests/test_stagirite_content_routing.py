@@ -33,6 +33,7 @@ NS = {
     "CONTENT_MASTER_CORE": "You are a responsible copywriter.",
     "_load_stagirite_settings": lambda owner_id: {"zoom_link": "https://us06web.zoom.us/j/987654321?pwd=SECRET"},
     "_make_plan": lambda intents, count, **kwargs: [],
+    "_meeting_count_from_text": lambda text: 1,
     "_generate_content": lambda ask_openai_fn, ask_claude_fn, owner_id, owner_name, assignment: {
         "text": "⏰ Через 30 минут встречаемся в ZOOM на встрече «Вопросы — Ответы». Ссылка в кабинете Агентства W.",
         "master_engine": "test",
