@@ -49,9 +49,11 @@ class NeonaRealtimeTests(unittest.TestCase):
     def test_targeted_scan_rejects_unapproved_contact_without_network_read(self):
         client = FakeClient()
         config = SimpleNamespace()
-        with patch.object(core, "load_config", return_value=config), \\
-             patch.object(core, "_allowed_contacts", return_value={123: {"message_id": 5}}), \\
-             patch.object(core, "_load_partner_lifecycle_map", return_value={}):
+        with (
+            patch.object(core, "load_config", return_value=config),
+            patch.object(core, "_allowed_contacts", return_value={123: {"message_id": 5}}),
+            patch.object(core, "_load_partner_lifecycle_map", return_value={}),
+        ):
             result = asyncio.run(
                 core.sync_owner_once(
                     101, "Test", client=client,
