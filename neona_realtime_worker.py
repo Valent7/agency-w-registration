@@ -80,17 +80,19 @@ class RealtimePilots:
 
     def _run_thread(self, owner_id: int, owner_name: str) -> None:
         while True:
+            reconnect_delay = 30
             try:
                 asyncio.run(self._listen(owner_id, owner_name))
             except Exception as exc:
                 self._set_ready(owner_id, False)
+                reconnect_delay += core._flood_wait_seconds(exc)
                 print(
-                    f"[NeonaRealtime] owner={owner_id} listener_error={type(exc).__name__}: {exc}",
+                    f"[NeonaRealtime] owner={owner_id} listener_error={type(exc).__name__}: {exc} "
+                    f"reconnect_delay={reconnect_delay}s",
                     flush=True,
                 )
             # A failed listener hands the account back to ordinary polling.
-            # Respect Telegram's explicit FloodWait even on initial connection.
-            time.sleep(core._flood_wait_seconds(exc) + 30 if 'exc' in locals() else 30)
+            time.sleep(reconnect_delay)
 
     async def _listen(self, owner_id: int, owner_name: str) -> None:
         config = core.load_config()
