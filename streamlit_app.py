@@ -6295,18 +6295,15 @@ def _load_instagram_connection(owner_telegram_id: int) -> dict | None:
 
 
 def _instagram_connect_state(owner_telegram_id: int, owner_name: str) -> str:
-    key = str(st.secrets.get("FERNET_KEY") or "").strip()
+    # This is an authenticated owner assertion, not the Instagram OAuth state.
+    # Render creates the final encrypted state using its OWN Fernet key before
+    # redirecting to Instagram. Supabase secret is shared by both applications.
+    from instagram_auth_handoff import create_signed_handoff
+
+    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "").strip()
     if not key:
-        raise RuntimeError("FERNET_KEY не найден в Streamlit Secrets.")
-    payload = {
-        "owner_id": int(owner_telegram_id),
-        "owner_name": str(owner_name or "").strip(),
-        "purpose": "agency_w_instagram_connect",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    return Fernet(key.encode("utf-8")).encrypt(
-        json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    ).decode("utf-8")
+        raise RuntimeError("Не найден общий ключ авторизации Агентства.")
+    return create_signed_handoff(int(owner_telegram_id), owner_name, key)
 
 
 def _instagram_connect_url(owner_telegram_id: int, owner_name: str) -> str:
@@ -6321,19 +6318,10 @@ def _instagram_connect_url(owner_telegram_id: int, owner_name: str) -> str:
     if not client_id or not redirect_uri:
         raise RuntimeError("OAuth Instagram ещё не настроен на сервере Агентства W.")
     state = _instagram_connect_state(owner_telegram_id, owner_name)
-    params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": (
-            "instagram_business_basic,"
-            "instagram_business_manage_messages,"
-            "instagram_business_manage_comments"
-        ),
-        "state": state,
-        "force_reauth": "true",
-    }
-    return "https://www.instagram.com/oauth/authorize?" + urlencode(params)
+    # Start OAuth via Render, which validates this signed assertion and
+    # creates an encrypted callback state with its own Fernet key. Direct
+    # Instagram authorization from Streamlit used a potentially different key.
+    return f"{base_url}/instagram/connect?" + urlencode({"state": state})
 
 
 def _render_connected_channel_card(title: str, caption: str, label: str):
