@@ -8,6 +8,7 @@ on:
       - "streamlit_app.py"
       - "tests/test_instagram_oauth_repair.py"
       - "tests/test_instagram_auth_handoff.py"
+      - "tests/test_instagram_native_identity.py"
       - ".github/workflows/instagram-oauth-repair.yml"
   workflow_dispatch:
 
@@ -26,8 +27,9 @@ jobs:
       - name: Install read-only mock test dependencies
         run: python -m pip install requests cryptography
       - name: Compile webhook and interface without executing them
-        run: python -m py_compile instagram_webhook.py instagram_auth_tools.py instagram_auth_handoff.py streamlit_app.py tests/test_instagram_oauth_repair.py tests/test_instagram_auth_handoff.py
+        run: python -m py_compile instagram_webhook.py instagram_auth_tools.py instagram_auth_handoff.py streamlit_app.py tests/test_instagram_oauth_repair.py tests/test_instagram_auth_handoff.py tests/test_instagram_native_identity.py
       - name: Offline OAuth, provider-verified account identity and Direct mapping
         run: |
           python -m unittest discover -s tests -p "test_instagram_oauth_repair.py" -v
           python -m unittest discover -s tests -p "test_instagram_auth_handoff.py" -v
+          python -m unittest discover -s tests -p "test_instagram_native_identity.py" -v
