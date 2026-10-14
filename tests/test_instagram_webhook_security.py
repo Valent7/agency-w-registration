@@ -163,7 +163,7 @@ class InstagramWebhookHandlerTests(unittest.TestCase):
     def test_private_message_logging_removed(self):
         # This regression is deliberately limited to Instagram. Another
         # integration in the same module has unrelated legacy logging.
-        start = SOURCE.index('def _process_instagram_message(')
+        start = SOURCE.index('def _build_neona_draft(')
         end = SOURCE.index('def _process_instagram_payload(', start)
         instagram = SOURCE[start:end]
         self.assertNotIn('"incoming": text', instagram)
