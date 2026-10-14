@@ -6371,9 +6371,73 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
         suffix = f" · @{username}" if username else ""
         _render_connected_channel_card(
             "Instagram",
-            "Профессиональный аккаунт подключён. Неона может работать с Direct и комментариями к Reels и постам.",
-            f"✅ Instagram подключён{suffix}",
+            "Авторизация Instagram сохранена. Ответы Неоны в Direct нужно проверять отдельно.",
+            f"✅ Instagram авторизован{suffix}",
         )
+        st.caption(
+            "Зелёный статус означает, что аккаунт записан в Агентстве W. "
+            "Он сам по себе НЕ подтверждает получение сообщений Direct."
+        )
+        with st.expander("🔎 Проверить подключение и Direct", expanded=True):
+            recorded_id = str(connection.get("instagram_account_id") or "").strip()
+            st.write(f"**Сохранённый аккаунт:** @{username or 'не определён'}")
+            st.caption(f"Instagram ID: {recorded_id or 'отсутствует'}")
+            diagnostic_key = f"instagram_diagnostic_{int(owner_telegram_id)}"
+            if st.button(
+                "🔎 Сверить аккаунт с Instagram",
+                key=f"instagram_diag_check_{int(owner_telegram_id)}",
+                use_container_width=True,
+            ):
+                try:
+                    service_url = str(
+                        st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or ""
+                    ).strip().rstrip("/")
+                    if not service_url:
+                        raise RuntimeError("Не задан сервис Instagram.")
+                    signed_state = _instagram_connect_state(
+                        int(owner_telegram_id), owner_name
+                    )
+                    with st.spinner("Проверяем, какой аккаунт действительно авторизован..."):
+                        response = requests.post(
+                            f"{service_url}/instagram/diagnose",
+                            json={"state": signed_state},
+                            timeout=40,
+                        )
+                    response.raise_for_status()
+                    st.session_state[diagnostic_key] = response.json()
+                except (requests.RequestException, RuntimeError, ValueError) as exc:
+                    st.session_state[diagnostic_key] = {
+                        "error": "Проверка не выполнена: " + type(exc).__name__
+                    }
+            diagnostic = st.session_state.get(diagnostic_key)
+            if isinstance(diagnostic, dict):
+                if diagnostic.get("error"):
+                    st.warning(str(diagnostic["error"]))
+                elif not diagnostic.get("connected"):
+                    st.error("Instagram-аккаунт не найден в базе Агентства. Подключите его заново.")
+                elif diagnostic.get("identity_verified"):
+                    actual_handle = str(diagnostic.get("provider_username") or "").strip()
+                    st.success(
+                        "Instagram подтвердил, что сохранённый токен относится "
+                        f"к аккаунту @{actual_handle or username or 'без имени'}."
+                    )
+                    st.info(
+                        "Личность аккаунта подтверждена, но это ещё не проверка "
+                        "доставки и отправки сообщений Direct. "
+                        "Если сообщения не получают ответов, сообщите нам время "
+                        "последнего входящего сообщения."
+                    )
+                elif diagnostic.get("reason") == "different_account":
+                    st.error(
+                        "Сохранённый Instagram ID не соответствует аккаунту, "
+                        "который подтверждает Instagram. Обновите подключение "
+                        "через правильный аккаунт."
+                    )
+                else:
+                    st.warning(
+                        "Instagram пока не подтвердил действительность подключения. "
+                        "Попробуйте обновить разрешения и авторизацию."
+                    )
         with st.expander("Разрешения Instagram", expanded=comments_state == "subscription_warning"):
             st.caption(
                 "Если Instagram подключали до появления центра комментариев, "
