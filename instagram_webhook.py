@@ -14,6 +14,7 @@ from urllib.parse import quote, urlencode
 import requests
 from functools import lru_cache
 from instagram_auth_tools import exchange_long_lived_ig_token, fetch_instagram_profile
+from instagram_auth_handoff import verify_signed_handoff
 from cryptography.fernet import Fernet, InvalidToken
 
 from starlette.applications import Starlette
@@ -443,15 +444,27 @@ def _decode_instagram_state(state: str) -> dict:
     state = str(state or "").strip()
     if not state:
         raise RuntimeError("Missing Instagram OAuth state")
-    try:
-        raw = _instagram_cipher().decrypt(state.encode("utf-8"), ttl=15 * 60)
-        payload = json.loads(raw.decode("utf-8"))
-    except InvalidToken as exc:
-        raise RuntimeError("Instagram authorization link expired or is invalid") from exc
-    except Exception as exc:
-        raise RuntimeError("Invalid Instagram authorization state") from exc
+    if state.startswith("h1."):
+        # Streamlit signs its authenticated owner using the Supabase key common
+        # to both apps. Render will mint the encrypted provider OAuth state.
+        try:
+            payload = verify_signed_handoff(
+                state, os.getenv("SUPABASE_SECRET_KEY", "")
+            )
+        except ValueError as exc:
+            raise RuntimeError("Instagram authorization request could not be verified") from exc
+    else:
+        try:
+            raw = _instagram_cipher().decrypt(state.encode("utf-8"), ttl=60 * 60)
+            payload = json.loads(raw.decode("utf-8"))
+        except InvalidToken as exc:
+            raise RuntimeError("Instagram authorization link expired or is invalid") from exc
+        except Exception as exc:
+            raise RuntimeError("Invalid Instagram authorization state") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("Invalid Instagram authorization state")
+    if payload.get("purpose") != "agency_w_instagram_connect":
+        raise RuntimeError("Invalid Instagram authorization purpose")
     owner_id = str(payload.get("owner_id") or "").strip()
     if not owner_id.isdigit():
         raise RuntimeError("Instagram authorization has no valid Agency W owner")
@@ -783,7 +796,13 @@ async def instagram_connect(request: Request):
     try:
         settings = _instagram_oauth_settings()
         state = str(request.query_params.get("state") or "").strip()
-        _decode_instagram_state(state)
+        payload = _decode_instagram_state(state)
+        if state.startswith("h1."):
+            # This state is issued by the SAME Render worker handling callback,
+            # so its Fernet key always matches. Never expose the signing secret.
+            state = _instagram_cipher().encrypt(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).decode("utf-8")
         params = {
             "client_id": settings["INSTAGRAM_APP_ID"],
             "redirect_uri": settings["INSTAGRAM_OAUTH_REDIRECT_URI"],
