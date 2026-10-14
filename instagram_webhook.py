@@ -498,7 +498,8 @@ def _instagram_connection_by_account_id(instagram_account_id: str) -> dict | Non
 @lru_cache(maxsize=2)
 def _fetch_verified_legacy_instagram_account_id(token: str) -> str:
     # Cache only successful provider checks; temporary failures must be retried.
-    return fetch_instagram_profile(token)["id"]
+    profile = fetch_instagram_profile(token)
+    return str(profile.get("user_id") or profile.get("id") or "").strip()
 
 
 def _verified_legacy_instagram_account_id(token: str) -> str:
@@ -602,6 +603,8 @@ def _ensure_fresh_instagram_token(connection: dict) -> dict:
 def _resolve_instagram_connection(recipient_id: str) -> dict:
     connection = _instagram_connection_by_account_id(recipient_id)
     if connection:
+        if not str(connection.get("access_token") or "").strip():
+            raise RuntimeError("No usable Instagram access token for this connected account")
         return _ensure_fresh_instagram_token(connection)
     fallback = _fallback_instagram_connection(recipient_id)
     if fallback:
@@ -663,7 +666,7 @@ def _subscribe_instagram_webhooks(
 
     response = requests.post(
         f"https://graph.instagram.com/{INSTAGRAM_API_VERSION}/"
-        f"{account_id}/subscribed_apps",
+        "me/subscribed_apps",
         headers={"Authorization": f"Bearer {token}"},
         data={"subscribed_fields": "messages,comments"},
         timeout=30,
@@ -770,14 +773,17 @@ async def instagram_connection_diagnostics(request: Request):
                 headers={"Cache-Control": "no-store"},
             )
 
-        verified = bool(profile["id"] == saved_id)
+        # Native user_id matches Direct webhooks. 'id' is only app-scoped.
+        native_id = str(profile.get("user_id") or "").strip()
+        verified = bool(native_id and native_id == saved_id)
         return JSONResponse(
             {
                 "connected": True, "identity_verified": verified,
                 "username": saved_username,
                 "account_id": saved_id,
                 "provider_username": str(profile.get("username") or ""),
-                "provider_account_id": str(profile["id"]),
+                "provider_account_id": native_id,
+                "provider_scoped_id": str(profile.get("id") or ""),
                 "reason": "ok" if verified else "different_account",
                 "direct_replies_verified": False,  # identity alone is not a DM round-trip
             },
@@ -870,9 +876,22 @@ async def instagram_oauth_callback(request: Request):
         expires_in = long_data.get("expires_in")
 
         profile = fetch_instagram_profile(access_token)
-        instagram_account_id = str(profile.get("id") or short_data.get("user_id") or "").strip()
-        if not instagram_account_id:
-            raise RuntimeError("Instagram account id was not returned")
+        # Instagram Login /me.id is app-scoped and can differ from the ID in
+        # webhook entry.id / messaging recipient.id. /me.user_id is the
+        # native professional account ID needed to map Direct to the owner.
+        instagram_account_id = str(
+            profile.get("user_id") or short_data.get("user_id") or ""
+        ).strip()
+        if not instagram_account_id.isdigit():
+            raise RuntimeError(
+                "Instagram did not provide a native user_id for Direct. "
+                "Please reconnect your professional Instagram account."
+            )
+        print(
+            "INSTAGRAM_OAUTH_NATIVE_ID_VERIFIED:",
+            {"owner_id": int(state_payload["owner_id"]), "native_id": instagram_account_id},
+            flush=True,
+        )
 
         owner_id = int(state_payload["owner_id"])
         owner_name = str(state_payload.get("owner_name") or "").strip()
@@ -1295,7 +1314,9 @@ def _send_instagram_text(
     access_token: str | None = None,
 ) -> dict:
     """Send one text reply using the token belonging to this Agency W owner."""
-    token = str(access_token or INSTAGRAM_ACCESS_TOKEN or "").strip()
+    # No silent fallback to a DIFFERENT owner's global token. Every outgoing
+    # message must carry the verified account's own token.
+    token = str(access_token or "").strip()
     if not token:
         raise RuntimeError("Missing Instagram access token")
 
