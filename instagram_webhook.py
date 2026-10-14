@@ -483,14 +483,15 @@ def _instagram_connection_by_account_id(instagram_account_id: str) -> dict | Non
 
 
 @lru_cache(maxsize=2)
-def _verified_legacy_instagram_account_id(token: str) -> str:
-    """Resolve old ENV-only account by Instagram's own signed token identity.
+def _fetch_verified_legacy_instagram_account_id(token: str) -> str:
+    # Cache only successful provider checks; temporary failures must be retried.
+    return fetch_instagram_profile(token)["id"]
 
-    Unlike the former wildcard fallback, this can never assign an unknown
-    partner's Instagram Direct to the Director merely because a token exists.
-    """
+
+def _verified_legacy_instagram_account_id(token: str) -> str:
+    """Allow legacy owner routing only after a verified Meta account match."""
     try:
-        return fetch_instagram_profile(token)["id"]
+        return _fetch_verified_legacy_instagram_account_id(token)
     except (RuntimeError, requests.RequestException) as exc:
         print(
             "INSTAGRAM_LEGACY_IDENTITY_CHECK_ERROR:",
