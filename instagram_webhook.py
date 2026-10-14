@@ -15,6 +15,11 @@ import requests
 from functools import lru_cache
 from instagram_auth_tools import exchange_long_lived_ig_token, fetch_instagram_profile
 from instagram_auth_handoff import verify_signed_handoff
+from instagram_webhook_security import (
+    MAX_WEBHOOK_BYTES,
+    valid_instagram_signature,
+    safe_instagram_event_summary,
+)
 from cryptography.fernet import Fernet, InvalidToken
 
 from starlette.applications import Starlette
@@ -2112,14 +2117,13 @@ def _build_neona_draft(event: dict) -> None:
 
     reply_text = _polish_instagram_reply(str(reply or ""), owner_name)
 
+    # Never write a partner's private conversation text to infrastructure logs.
     print(
         "INSTAGRAM_NEONA_DRAFT:",
         {
-            "sender_id": event["sender_id"],
-            "incoming": text,
-            "draft": reply_text,
+            "received_chars": len(text),
+            "draft_chars": len(reply_text),
             "stage": str(new_stage or "idle"),
-            "mid": message_id,
         },
         flush=True,
     )
@@ -2164,11 +2168,7 @@ def _build_neona_draft(event: dict) -> None:
 
     print(
         "INSTAGRAM_NEONA_SENT:",
-        {
-            "recipient_id": event["sender_id"],
-            "message_id": sent_message_id,
-            "reply": reply_text,
-        },
+        {"sent": bool(sent_message_id), "reply_chars": len(reply_text)},
         flush=True,
     )
 
@@ -2690,16 +2690,42 @@ async def vk_webhook_receive(request: Request):
 
 
 async def instagram_webhook_receive(request: Request):
+    # Verify the exact bytes received from Meta BEFORE parsing or dispatching.
+    # Public POSTs without a genuine Meta signature could otherwise impersonate
+    # Instagram users and trigger Neona to send messages.
+    if not INSTAGRAM_APP_SECRET:
+        print("INSTAGRAM_WEBHOOK_SECURITY: missing_app_secret", flush=True)
+        return PlainTextResponse("Webhook configuration unavailable", status_code=503)
+
+    if request.headers.get("content-length", "").isdigit():
+        if int(request.headers["content-length"]) > MAX_WEBHOOK_BYTES:
+            return PlainTextResponse("Payload too large", status_code=413)
     try:
-        payload = await request.json()
+        raw_body = await request.body()
     except Exception:
         return PlainTextResponse("Bad Request", status_code=400)
+    if len(raw_body) > MAX_WEBHOOK_BYTES:
+        return PlainTextResponse("Payload too large", status_code=413)
 
-    if not isinstance(payload, dict):
+    signature = request.headers.get("x-hub-signature-256", "")
+    if not valid_instagram_signature(raw_body, signature, INSTAGRAM_APP_SECRET):
+        # Do not log the signature, body, token, or caller-supplied identifiers.
+        print("INSTAGRAM_WEBHOOK_SECURITY: invalid_signature", flush=True)
+        return PlainTextResponse("Forbidden", status_code=403)
+
+    try:
+        payload = json.loads(raw_body)
+    except (ValueError, UnicodeError, TypeError):
         return PlainTextResponse("Bad Request", status_code=400)
 
-    # Keep the proven webhook acknowledgement fast. Neona works after the 200 response.
-    print("INSTAGRAM_WEBHOOK_EVENT:", payload, flush=True)
+    if not isinstance(payload, dict) or payload.get("object") != "instagram":
+        return PlainTextResponse("Bad Request", status_code=400)
+
+    print(
+        "INSTAGRAM_WEBHOOK_EVENT:",
+        safe_instagram_event_summary(payload),
+        flush=True,
+    )
     return PlainTextResponse(
         "EVENT_RECEIVED",
         status_code=200,
