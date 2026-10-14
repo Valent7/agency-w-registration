@@ -2837,6 +2837,75 @@ def _catch_up_recent_instagram_comment_replies() -> None:
     )
 
 
+def _migrate_native_instagram_account_id(row: dict, token: str) -> dict:
+    """Safely repair old /me.id rows from verified /me.user_id.
+
+    The token is already bound to this owner's row. No account is mapped from
+    an unverified webhook ID, and no other owner's connection is overwritten.
+    This runs on startup before new Direct messages are processed.
+    """
+    current = dict(row or {})
+    old_id = str(current.get("instagram_account_id") or "").strip()
+    owner_text = str(current.get("owner_telegram_id") or "").strip()
+    if not old_id or not owner_text.isdigit() or not str(token or "").strip():
+        return current
+    try:
+        profile = fetch_instagram_profile(token)
+        native_id = str(profile.get("user_id") or "").strip()
+        if not native_id.isdigit():
+            print(
+                "INSTAGRAM_NATIVE_ID_MISSING:",
+                {"owner_id": int(owner_text), "old_id": old_id},
+                flush=True,
+            )
+            return current
+        if native_id == old_id:
+            return current
+
+        existing = _sb_get(
+            "agency_instagram_connections",
+            {
+                "instagram_account_id": f"eq.{native_id}",
+                "status": "eq.connected",
+                "select": "owner_telegram_id,instagram_account_id",
+                "limit": 2,
+            },
+        )
+        if any(str(r.get("owner_telegram_id")) != owner_text for r in existing):
+            print(
+                "INSTAGRAM_NATIVE_ID_CONFLICT:",
+                {"owner_id": int(owner_text), "native_id": native_id},
+                flush=True,
+            )
+            return current
+
+        _sb_patch(
+            "agency_instagram_connections",
+            {
+                "owner_telegram_id": f"eq.{int(owner_text)}",
+                "instagram_account_id": f"eq.{old_id}",
+                "status": "eq.connected",
+            },
+            {
+                "instagram_account_id": native_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        current["instagram_account_id"] = native_id
+        print(
+            "INSTAGRAM_NATIVE_ID_MIGRATED:",
+            {"owner_id": int(owner_text), "old_id": old_id, "native_id": native_id},
+            flush=True,
+        )
+    except (RuntimeError, requests.RequestException, ValueError) as exc:
+        print(
+            "INSTAGRAM_NATIVE_ID_MIGRATION_ERROR:",
+            {"owner_id": owner_text, "type": type(exc).__name__, "detail": str(exc)[:200]},
+            flush=True,
+        )
+    return current
+
+
 def _restore_instagram_subscriptions_on_startup() -> None:
     """Idempotently restore comments/messages webhook subscriptions after deploys."""
     try:
@@ -2889,9 +2958,11 @@ def _restore_instagram_subscriptions_on_startup() -> None:
                 continue
             row["access_token"] = token
             row = _ensure_fresh_instagram_token(row)
+            token = str(row.get("access_token") or "").strip()
+            row = _migrate_native_instagram_account_id(row, token)
             _subscribe_instagram_webhooks(
                 str(row.get("instagram_account_id") or ""),
-                str(row.get("access_token") or ""),
+                token,
             )
             restored += 1
         except Exception as exc:
