@@ -680,6 +680,86 @@ async def instagram_oauth_config(request: Request):
         )
 
 
+async def instagram_connection_diagnostics(request: Request):
+    """Read-only identity check bound to an authenticated Agency W owner.
+
+    A green card means a DB row exists; it does not mean Direct webhooks work.
+    Never return the token, session secret, or unrelated partners' records.
+    """
+    try:
+        body = await request.json()
+        signed = str((body or {}).get("state") or "").strip()
+        state = _decode_instagram_state(signed)
+        if state.get("purpose") != "agency_w_instagram_connect":
+            return JSONResponse({"error": "Неверное назначение авторизации."}, status_code=403)
+        owner_id = int(state["owner_id"])
+        rows = _sb_get(
+            "agency_instagram_connections",
+            {
+                "owner_telegram_id": f"eq.{owner_id}",
+                "status": "eq.connected",
+                "select": "*",
+                "limit": 1,
+            },
+        )
+        if not rows:
+            return JSONResponse(
+                {"connected": False, "identity_verified": False, "reason": "no_record"},
+                headers={"Cache-Control": "no-store"},
+            )
+
+        row = dict(rows[0])
+        saved_id = str(row.get("instagram_account_id") or "").strip()
+        saved_username = str(row.get("instagram_username") or "").strip()
+        token = _decrypt_instagram_secret(row.get("access_token_encrypted") or "")
+        if not token:
+            return JSONResponse(
+                {
+                    "connected": True, "identity_verified": False,
+                    "username": saved_username, "account_id": saved_id,
+                    "reason": "missing_token",
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            profile = fetch_instagram_profile(token)
+        except (RuntimeError, requests.RequestException) as exc:
+            print(
+                "INSTAGRAM_DIAG_PROFILE_CHECK_ERROR:",
+                {"owner_id": owner_id, "type": type(exc).__name__},
+                flush=True,
+            )
+            return JSONResponse(
+                {
+                    "connected": True, "identity_verified": False,
+                    "username": saved_username, "account_id": saved_id,
+                    "reason": "token_check_failed",
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+
+        verified = bool(profile["id"] == saved_id)
+        return JSONResponse(
+            {
+                "connected": True, "identity_verified": verified,
+                "username": saved_username,
+                "account_id": saved_id,
+                "provider_username": str(profile.get("username") or ""),
+                "provider_account_id": str(profile["id"]),
+                "reason": "ok" if verified else "different_account",
+                "direct_replies_verified": False,  # identity alone is not a DM round-trip
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception as exc:
+        print("INSTAGRAM_DIAG_ERROR:", type(exc).__name__, flush=True)
+        return JSONResponse(
+            {"error": "Не удалось проверить Instagram. Повторите позже."},
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+
+
 async def instagram_connect(request: Request):
     try:
         settings = _instagram_oauth_settings()
@@ -2759,6 +2839,7 @@ routes = [
     Route("/instagram/oauth-config", instagram_oauth_config, methods=["GET"]),
     Route("/instagram/connect", instagram_connect, methods=["GET"]),
     Route("/instagram/callback", instagram_oauth_callback, methods=["GET"]),
+    Route("/instagram/diagnose", instagram_connection_diagnostics, methods=["POST"]),
     Route("/instagram/comments/draft", instagram_comment_draft, methods=["POST"]),
     Route("/instagram/comments/reply", instagram_comment_reply, methods=["POST"]),
     Route("/facebook/connect", facebook_connect, methods=["GET"]),
