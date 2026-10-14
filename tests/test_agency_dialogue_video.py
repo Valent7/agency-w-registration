@@ -108,8 +108,10 @@ class DialogueVideoTests(unittest.TestCase):
                 {"voice_id": "ru_voice_female_2", "name": "Женский", "language": "Russian"},
             ]}
         }
-        with patch("agency_dialogue_video.requests.get", side_effect=[avatars, voices]) as get, \\
-             patch("agency_dialogue_video.requests.post") as post:
+        with (
+            patch("agency_dialogue_video.requests.get", side_effect=[avatars, voices]) as get,
+            patch("agency_dialogue_video.requests.post") as post,
+        ):
             result = list_heygen_catalog("key")
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["avatars"]), 2)
