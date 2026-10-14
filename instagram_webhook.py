@@ -502,20 +502,33 @@ def _verified_legacy_instagram_account_id(token: str) -> str:
 
 
 def _fallback_instagram_connection(recipient_id: str) -> dict | None:
-    """Legacy fallback ONLY if Meta confirms the token owns recipient_id.
+    """Route only an explicitly bound legacy Instagram account to its owner.
 
-    When newer partners connect, old ENV-only Agency W accounts must not silently
-    stop receiving messages. Exact provider-ID verification prevents leakage.
+    Meta's /me endpoint can reject a previously valid legacy token with
+    IGApiException 100. This must not disable the ONLY pre-existing Agency W
+    account when a newer partner connects. Operators may specify the exact
+    provider account ID via INSTAGRAM_LEGACY_ACCOUNT_ID, but no other account
+    (including other partners) can ever be routed by this fallback.
+
+    The sender account ID also must match the token's permissions when the
+    actual /messages POST occurs; we never attempt a send during lookup.
     """
-    if not (INSTAGRAM_OWNER_ID.isdigit() and INSTAGRAM_ACCESS_TOKEN):
+    recipient = str(recipient_id or "").strip()
+    if not (recipient.isdigit() and INSTAGRAM_OWNER_ID.isdigit() and INSTAGRAM_ACCESS_TOKEN):
         return None
-    verified_id = _verified_legacy_instagram_account_id(INSTAGRAM_ACCESS_TOKEN)
-    if verified_id != str(recipient_id or "").strip():
-        return None
+    explicitly_bound_id = str(os.getenv("INSTAGRAM_LEGACY_ACCOUNT_ID") or "").strip()
+    if explicitly_bound_id:
+        if not explicitly_bound_id.isdigit() or recipient != explicitly_bound_id:
+            return None
+        confirmed_id = explicitly_bound_id
+    else:
+        confirmed_id = _verified_legacy_instagram_account_id(INSTAGRAM_ACCESS_TOKEN)
+        if not confirmed_id or recipient != confirmed_id:
+            return None
     return {
         "owner_telegram_id": int(INSTAGRAM_OWNER_ID),
         "owner_name": INSTAGRAM_OWNER_NAME,
-        "instagram_account_id": verified_id,
+        "instagram_account_id": confirmed_id,
         "instagram_username": "",
         "access_token": INSTAGRAM_ACCESS_TOKEN,
         "status": "fallback_env",
@@ -579,6 +592,11 @@ def _resolve_instagram_connection(recipient_id: str) -> dict:
         return _ensure_fresh_instagram_token(connection)
     fallback = _fallback_instagram_connection(recipient_id)
     if fallback:
+        print(
+            "INSTAGRAM_LEGACY_ACCOUNT_EXACT_MATCH:",
+            {"recipient_id": str(recipient_id), "owner_id": fallback["owner_telegram_id"]},
+            flush=True,
+        )
         return fallback
     raise RuntimeError(
         f"No Agency W Instagram connection found for recipient account {recipient_id}"
