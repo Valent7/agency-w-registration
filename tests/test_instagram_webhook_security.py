@@ -161,10 +161,16 @@ class InstagramWebhookHandlerTests(unittest.TestCase):
         self.assertFalse(jobs)
 
     def test_private_message_logging_removed(self):
-        self.assertNotIn('"incoming": text', SOURCE)
-        self.assertNotIn('"draft": reply_text', SOURCE)
-        self.assertNotIn('"reply": reply_text', SOURCE)
-        self.assertNotIn('print("INSTAGRAM_WEBHOOK_EVENT:", payload', SOURCE)
+        # This regression is deliberately limited to Instagram. Another
+        # integration in the same module has unrelated legacy logging.
+        start = SOURCE.index('def _process_instagram_message(')
+        end = SOURCE.index('def _process_instagram_payload(', start)
+        instagram = SOURCE[start:end]
+        self.assertNotIn('"incoming": text', instagram)
+        self.assertNotIn('"draft": reply_text', instagram)
+        self.assertNotIn('"reply": reply_text', instagram)
+        webhook = SOURCE[SOURCE.index('async def instagram_webhook_receive('):]
+        self.assertNotIn('print("INSTAGRAM_WEBHOOK_EVENT:", payload', webhook)
 
 
 if __name__ == "__main__":
