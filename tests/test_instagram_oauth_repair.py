@@ -79,10 +79,12 @@ class InstagramTokenExchangeTests(unittest.TestCase):
     def test_profile_identification_needs_provider_id(self):
         session = Mock()
         session.get.return_value = http_response(
-            True, 200, {"id": "1784141234", "username": "AgencyExample"}
+            True, 200, {"id": "38544174561840129", "user_id": "1784141234", "username": "AgencyExample"}
         )
         result = fetch_instagram_profile("fake-token", session=session)
-        self.assertEqual(result["id"], "1784141234")
+        self.assertEqual(result["id"], "38544174561840129")
+        self.assertEqual(result["user_id"], "1784141234")
+        self.assertIn("user_id", session.get.call_args.kwargs["params"]["fields"])
         session.get.assert_called_once()
         self.assertIn("access_token", session.get.call_args.kwargs["params"])
 
@@ -129,7 +131,8 @@ class InstagramDirectIdentityTests(unittest.TestCase):
             }],
             "_decrypt_instagram_secret": lambda token: "dummy-token",
             "fetch_instagram_profile": lambda token: {
-                "id": "1784141234", "username": "AgencyExample"
+                "id": "38544174561840129", "user_id": "1784141234",
+                "username": "AgencyExample"
             },
             "JSONResponse": JsonResult,
             "Request": object,  # Starlette annotation, not needed for offline test.
@@ -169,7 +172,8 @@ class InstagramDirectIdentityTests(unittest.TestCase):
     def test_database_mapping_always_wins_over_legacy(self):
         env = self.ns()
         env["_instagram_connection_by_account_id"] = lambda identifier: {
-            "instagram_account_id": identifier, "owner_telegram_id": 777
+            "instagram_account_id": identifier, "owner_telegram_id": 777,
+            "access_token": "verified-owner-777-token"
         }
         result = env["_resolve_instagram_connection"]("1784141234")
         self.assertEqual(result["owner_telegram_id"], 777)
@@ -187,7 +191,8 @@ class InstagramDirectIdentityTests(unittest.TestCase):
     def test_diag_finds_wrong_saved_account_without_reassignment(self):
         env = self.ns()
         env["fetch_instagram_profile"] = lambda token: {
-            "id": "1784149999", "username": "AnotherAccount"
+            "id": "38544174561840129", "user_id": "1784149999",
+            "username": "AnotherAccount"
         }
         request = SimpleNamespace(json=lambda: asyncio.sleep(0, result={"state": "signed"}))
         result = asyncio.run(env["instagram_connection_diagnostics"](request))

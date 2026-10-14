@@ -498,7 +498,8 @@ def _instagram_connection_by_account_id(instagram_account_id: str) -> dict | Non
 @lru_cache(maxsize=2)
 def _fetch_verified_legacy_instagram_account_id(token: str) -> str:
     # Cache only successful provider checks; temporary failures must be retried.
-    return fetch_instagram_profile(token)["id"]
+    profile = fetch_instagram_profile(token)
+    return str(profile.get("user_id") or profile.get("id") or "").strip()
 
 
 def _verified_legacy_instagram_account_id(token: str) -> str:
@@ -602,6 +603,8 @@ def _ensure_fresh_instagram_token(connection: dict) -> dict:
 def _resolve_instagram_connection(recipient_id: str) -> dict:
     connection = _instagram_connection_by_account_id(recipient_id)
     if connection:
+        if not str(connection.get("access_token") or "").strip():
+            raise RuntimeError("No usable Instagram access token for this connected account")
         return _ensure_fresh_instagram_token(connection)
     fallback = _fallback_instagram_connection(recipient_id)
     if fallback:
@@ -663,7 +666,7 @@ def _subscribe_instagram_webhooks(
 
     response = requests.post(
         f"https://graph.instagram.com/{INSTAGRAM_API_VERSION}/"
-        f"{account_id}/subscribed_apps",
+        "me/subscribed_apps",
         headers={"Authorization": f"Bearer {token}"},
         data={"subscribed_fields": "messages,comments"},
         timeout=30,
@@ -770,14 +773,17 @@ async def instagram_connection_diagnostics(request: Request):
                 headers={"Cache-Control": "no-store"},
             )
 
-        verified = bool(profile["id"] == saved_id)
+        # Native user_id matches Direct webhooks. 'id' is only app-scoped.
+        native_id = str(profile.get("user_id") or "").strip()
+        verified = bool(native_id and native_id == saved_id)
         return JSONResponse(
             {
                 "connected": True, "identity_verified": verified,
                 "username": saved_username,
                 "account_id": saved_id,
                 "provider_username": str(profile.get("username") or ""),
-                "provider_account_id": str(profile["id"]),
+                "provider_account_id": native_id,
+                "provider_scoped_id": str(profile.get("id") or ""),
                 "reason": "ok" if verified else "different_account",
                 "direct_replies_verified": False,  # identity alone is not a DM round-trip
             },
@@ -870,9 +876,22 @@ async def instagram_oauth_callback(request: Request):
         expires_in = long_data.get("expires_in")
 
         profile = fetch_instagram_profile(access_token)
-        instagram_account_id = str(profile.get("id") or short_data.get("user_id") or "").strip()
-        if not instagram_account_id:
-            raise RuntimeError("Instagram account id was not returned")
+        # Instagram Login /me.id is app-scoped and can differ from the ID in
+        # webhook entry.id / messaging recipient.id. /me.user_id is the
+        # native professional account ID needed to map Direct to the owner.
+        instagram_account_id = str(
+            profile.get("user_id") or short_data.get("user_id") or ""
+        ).strip()
+        if not instagram_account_id.isdigit():
+            raise RuntimeError(
+                "Instagram did not provide a native user_id for Direct. "
+                "Please reconnect your professional Instagram account."
+            )
+        print(
+            "INSTAGRAM_OAUTH_NATIVE_ID_VERIFIED:",
+            {"owner_id": int(state_payload["owner_id"]), "native_id": instagram_account_id},
+            flush=True,
+        )
 
         owner_id = int(state_payload["owner_id"])
         owner_name = str(state_payload.get("owner_name") or "").strip()
@@ -1295,7 +1314,9 @@ def _send_instagram_text(
     access_token: str | None = None,
 ) -> dict:
     """Send one text reply using the token belonging to this Agency W owner."""
-    token = str(access_token or INSTAGRAM_ACCESS_TOKEN or "").strip()
+    # No silent fallback to a DIFFERENT owner's global token. Every outgoing
+    # message must carry the verified account's own token.
+    token = str(access_token or "").strip()
     if not token:
         raise RuntimeError("Missing Instagram access token")
 
@@ -2816,6 +2837,75 @@ def _catch_up_recent_instagram_comment_replies() -> None:
     )
 
 
+def _migrate_native_instagram_account_id(row: dict, token: str) -> dict:
+    """Safely repair old /me.id rows from verified /me.user_id.
+
+    The token is already bound to this owner's row. No account is mapped from
+    an unverified webhook ID, and no other owner's connection is overwritten.
+    This runs on startup before new Direct messages are processed.
+    """
+    current = dict(row or {})
+    old_id = str(current.get("instagram_account_id") or "").strip()
+    owner_text = str(current.get("owner_telegram_id") or "").strip()
+    if not old_id or not owner_text.isdigit() or not str(token or "").strip():
+        return current
+    try:
+        profile = fetch_instagram_profile(token)
+        native_id = str(profile.get("user_id") or "").strip()
+        if not native_id.isdigit():
+            print(
+                "INSTAGRAM_NATIVE_ID_MISSING:",
+                {"owner_id": int(owner_text), "old_id": old_id},
+                flush=True,
+            )
+            return current
+        if native_id == old_id:
+            return current
+
+        existing = _sb_get(
+            "agency_instagram_connections",
+            {
+                "instagram_account_id": f"eq.{native_id}",
+                "status": "eq.connected",
+                "select": "owner_telegram_id,instagram_account_id",
+                "limit": 2,
+            },
+        )
+        if any(str(r.get("owner_telegram_id")) != owner_text for r in existing):
+            print(
+                "INSTAGRAM_NATIVE_ID_CONFLICT:",
+                {"owner_id": int(owner_text), "native_id": native_id},
+                flush=True,
+            )
+            return current
+
+        _sb_patch(
+            "agency_instagram_connections",
+            {
+                "owner_telegram_id": f"eq.{int(owner_text)}",
+                "instagram_account_id": f"eq.{old_id}",
+                "status": "eq.connected",
+            },
+            {
+                "instagram_account_id": native_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        current["instagram_account_id"] = native_id
+        print(
+            "INSTAGRAM_NATIVE_ID_MIGRATED:",
+            {"owner_id": int(owner_text), "old_id": old_id, "native_id": native_id},
+            flush=True,
+        )
+    except (RuntimeError, requests.RequestException, ValueError) as exc:
+        print(
+            "INSTAGRAM_NATIVE_ID_MIGRATION_ERROR:",
+            {"owner_id": owner_text, "type": type(exc).__name__, "detail": str(exc)[:200]},
+            flush=True,
+        )
+    return current
+
+
 def _restore_instagram_subscriptions_on_startup() -> None:
     """Idempotently restore comments/messages webhook subscriptions after deploys."""
     try:
@@ -2835,28 +2925,6 @@ def _restore_instagram_subscriptions_on_startup() -> None:
         )
         return
 
-    # Diagnostic only: IDs are provider/account references, not access tokens.
-    # This exposes whether a successful OAuth callback saved the SAME
-    # Instagram account ID as the incoming Direct webhook recipient.
-    print(
-        "INSTAGRAM_ACCOUNT_MAPPING_AUDIT:",
-        {
-            "accounts": [
-                {
-                    "owner_id": raw.get("owner_telegram_id"),
-                    "account_id": str(raw.get("instagram_account_id") or ""),
-                    "status": str(raw.get("status") or ""),
-                }
-                for raw in rows or []
-            ],
-            "legacy_owner_configured": bool(INSTAGRAM_OWNER_ID.isdigit()),
-            "legacy_token_configured": bool(INSTAGRAM_ACCESS_TOKEN),
-            "legacy_account_id_configured": bool(
-                str(os.getenv("INSTAGRAM_LEGACY_ACCOUNT_ID") or "").strip()
-            ),
-        },
-        flush=True,
-    )
     restored = 0
     for raw_row in rows or []:
         try:
@@ -2868,9 +2936,11 @@ def _restore_instagram_subscriptions_on_startup() -> None:
                 continue
             row["access_token"] = token
             row = _ensure_fresh_instagram_token(row)
+            token = str(row.get("access_token") or "").strip()
+            row = _migrate_native_instagram_account_id(row, token)
             _subscribe_instagram_webhooks(
                 str(row.get("instagram_account_id") or ""),
-                str(row.get("access_token") or ""),
+                token,
             )
             restored += 1
         except Exception as exc:
