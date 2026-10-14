@@ -130,6 +130,7 @@ class InstagramDirectIdentityTests(unittest.TestCase):
                 "id": "1784141234", "username": "AgencyExample"
             },
             "JSONResponse": JsonResult,
+            "Request": object,  # Starlette annotation, not needed for offline test.
             "requests": SimpleNamespace(RequestException=RuntimeError),
         }
         exec(compile(ast.Module(body=FUNCTIONS, type_ignores=[]), "instagram_webhook.py", "exec"), env)
