@@ -1,0 +1,26 @@
+name: Instagram Direct security regression
+on:
+  pull_request:
+    paths:
+      - "instagram_webhook.py"
+      - "instagram_webhook_security.py"
+      - "tests/test_instagram_webhook_security.py"
+      - ".github/workflows/instagram-webhook-security.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-webhook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax check of webhook service and standalone verifier
+        run: python -m py_compile instagram_webhook.py instagram_webhook_security.py tests/test_instagram_webhook_security.py
+      - name: Test valid signed events and block spoofing without sending messages
+        run: python -m unittest discover -s tests -p "test_instagram_webhook_security.py" -v
