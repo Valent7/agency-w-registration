@@ -12,6 +12,8 @@ from urllib.request import Request as UrlRequest, urlopen
 from urllib.parse import quote, urlencode
 
 import requests
+from functools import lru_cache
+from instagram_auth_tools import exchange_long_lived_ig_token, fetch_instagram_profile
 from cryptography.fernet import Fernet, InvalidToken
 
 from starlette.applications import Starlette
@@ -480,28 +482,39 @@ def _instagram_connection_by_account_id(instagram_account_id: str) -> dict | Non
     return row
 
 
-def _fallback_instagram_connection(recipient_id: str) -> dict | None:
-    """Keep the proven single-account setup working only until migration starts.
+@lru_cache(maxsize=2)
+def _verified_legacy_instagram_account_id(token: str) -> str:
+    """Resolve old ENV-only account by Instagram's own signed token identity.
 
-    Once at least one DB-backed Instagram connection exists, unknown recipient IDs
-    are never routed to the Director. This prevents cross-partner dialog leakage.
+    Unlike the former wildcard fallback, this can never assign an unknown
+    partner's Instagram Direct to the Director merely because a token exists.
     """
-    if not (INSTAGRAM_OWNER_ID and INSTAGRAM_ACCESS_TOKEN):
-        return None
     try:
-        existing = _sb_get(
-            "agency_instagram_connections",
-            {"status": "eq.connected", "select": "id", "limit": 1},
+        return fetch_instagram_profile(token)["id"]
+    except (RuntimeError, requests.RequestException) as exc:
+        print(
+            "INSTAGRAM_LEGACY_IDENTITY_CHECK_ERROR:",
+            type(exc).__name__,
+            flush=True,
         )
-        if existing:
-            return None
-    except Exception:
-        # Before the migration table is created, preserve today's working mode.
-        pass
+        return ""
+
+
+def _fallback_instagram_connection(recipient_id: str) -> dict | None:
+    """Legacy fallback ONLY if Meta confirms the token owns recipient_id.
+
+    When newer partners connect, old ENV-only Agency W accounts must not silently
+    stop receiving messages. Exact provider-ID verification prevents leakage.
+    """
+    if not (INSTAGRAM_OWNER_ID.isdigit() and INSTAGRAM_ACCESS_TOKEN):
+        return None
+    verified_id = _verified_legacy_instagram_account_id(INSTAGRAM_ACCESS_TOKEN)
+    if verified_id != str(recipient_id or "").strip():
+        return None
     return {
         "owner_telegram_id": int(INSTAGRAM_OWNER_ID),
         "owner_name": INSTAGRAM_OWNER_NAME,
-        "instagram_account_id": str(recipient_id or "").strip(),
+        "instagram_account_id": verified_id,
         "instagram_username": "",
         "access_token": INSTAGRAM_ACCESS_TOKEN,
         "status": "fallback_env",
@@ -730,38 +743,15 @@ async def instagram_oauth_callback(request: Request):
         if not short_token:
             raise RuntimeError("Instagram did not return an access token")
 
-        long_response = requests.get(
-            "https://graph.instagram.com/access_token",
-            params={
-                "grant_type": "ig_exchange_token",
-                "client_secret": settings["INSTAGRAM_APP_SECRET"],
-                "access_token": short_token,
-            },
-            timeout=30,
+        # Meta still documents GET for this endpoint. Some accounts explicitly
+        # reject its method; the helper tries form-POST only for that exact case.
+        long_data = exchange_long_lived_ig_token(
+            short_token, settings["INSTAGRAM_APP_SECRET"]
         )
-        if not long_response.ok:
-            raise RuntimeError(
-                f"Instagram long-lived token HTTP {long_response.status_code}: "
-                f"{long_response.text[:800]}"
-            )
-        long_data = long_response.json()
         access_token = str(long_data.get("access_token") or short_token).strip()
         expires_in = long_data.get("expires_in")
 
-        profile_response = requests.get(
-            "https://graph.instagram.com/me",
-            params={
-                "fields": "id,username,account_type",
-                "access_token": access_token,
-            },
-            timeout=30,
-        )
-        if not profile_response.ok:
-            raise RuntimeError(
-                f"Instagram profile HTTP {profile_response.status_code}: "
-                f"{profile_response.text[:800]}"
-            )
-        profile = profile_response.json()
+        profile = fetch_instagram_profile(access_token)
         instagram_account_id = str(profile.get("id") or short_data.get("user_id") or "").strip()
         if not instagram_account_id:
             raise RuntimeError("Instagram account id was not returned")
