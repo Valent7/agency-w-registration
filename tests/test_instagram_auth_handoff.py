@@ -8,6 +8,7 @@ import os
 import re
 import time
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse, urlencode
 
@@ -84,7 +85,7 @@ class InstagramServerIssuedStateTests(unittest.TestCase):
     def test_oauth_state_created_and_decrypted_with_same_backend_key(self):
         env = self._backend()
         signed = create_signed_handoff(123, "Эльза", KEY)
-        with unittest.mock.patch.dict(
+        with patch.dict(
             os.environ, {"SUPABASE_SECRET_KEY": KEY}
         ):
             query = SimpleNamespace(query_params={"state": signed})
@@ -102,7 +103,7 @@ class InstagramServerIssuedStateTests(unittest.TestCase):
     def test_invalid_owner_handoff_never_redirects_to_meta(self):
         env = self._backend()
         signed = create_signed_handoff(101, "A", KEY)
-        with unittest.mock.patch.dict(
+        with patch.dict(
             os.environ, {"SUPABASE_SECRET_KEY": KEY + "wrong"}
         ):
             result = __import__("asyncio").run(
