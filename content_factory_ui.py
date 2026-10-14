@@ -16,6 +16,7 @@ from pathlib import Path
 import requests
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+from agency_dialogue_video import normalise_dialogue_turns, dialogue_errors, dialogue_text
 
 
 PROFESSIONAL_PORTRAITS = {
@@ -1379,11 +1380,12 @@ def _json_from_answer(answer):
 def _normalise_item(item, index):
     item = item if isinstance(item, dict) else {}
     fmt = _clean_text(item.get("format") or "post", 30).lower()
-    if fmt not in {"reel", "post", "carousel"}:
+    if fmt not in {"reel", "post", "carousel", "dialogue"}:
         fmt = "post"
     item_id = _clean_text(item.get("id"), 80) or f"{fmt}_{index + 1}"
     scenes = item.get("scenes") if isinstance(item.get("scenes"), list) else []
     slides = item.get("slides") if isinstance(item.get("slides"), list) else []
+    dialogue = normalise_dialogue_turns(item.get("dialogue"))
     professionals = item.get("professionals") if isinstance(item.get("professionals"), list) else []
     return {
         "id": item_id,
@@ -1393,6 +1395,7 @@ def _normalise_item(item, index):
         "goal": _clean_text(item.get("goal"), 500),
         "hook": _clean_text(item.get("hook"), 500),
         "script": _clean_text(item.get("script"), 7000),
+        "dialogue": dialogue,
         "scenes": [_clean_text(value, 900) for value in scenes[:12]],
         "post_text": _clean_text(item.get("post_text"), 7000),
         "slides": [_clean_text(value, 1200) for value in slides[:12]],
@@ -1618,6 +1621,7 @@ FORMAT_LABELS = {
     "post": "Пост",
     "carousel": "Карусель",
     "reel": "Reels",
+    "dialogue": "🎭 ИИ-диалог",
 }
 
 
@@ -1746,6 +1750,7 @@ def _single_content_prompt(understanding):
     "hook": "хук для Reels или пустая строка",
     "script": "только произносимая речь Reels или пустая строка",
     "scenes": ["отдельные визуальные сцены только для Reels"],
+    "dialogue": [{{"speaker":"A","text":"первая реплика мужчины"}},{{"speaker":"B","text":"ответ женщины"}}],
     "post_text": "готовый текст поста или пустая строка",
     "slides": ["готовые тексты слайдов только для карусели"],
     "caption": "готовая подпись для публикации",
@@ -1756,6 +1761,27 @@ def _single_content_prompt(understanding):
 }}
 """.strip()
 
+    if content_format == "dialogue":
+        return common + """
+ДЛЯ ФОРМАТА «ИИ-ДИАЛОГ» (два говорящих героя на видеозвонке):
+- Строго один готовый драматический диалог на русском, 4–10 реплик.
+- Заполни поле dialogue массивом из объектов {"speaker":"A"|"B","text":"..."}.
+- Первым говорит A (мужчина), затем B (женщина), строго по очереди.
+- Каждая реплика содержит ТОЛЬКО речь персонажа, без имён, ремарок, описаний
+  кадров, сцен, движений и подсказок для ИИ.
+- На все реплики вместе 50–95 слов: один ролик примерно 25–40 секунд.
+- Мужчина задаёт живые, конкретные вопросы о рутине и потере времени.
+- Женщина не обещает доход, не перечисляет всё подряд, а естественно объясняет
+  практическую ценность Агентства W и возвращение человеку времени.
+- Последняя реплика должна мягко вовлечь зрителя: вопрос или предложение
+  узнать больше, без навязчивых гарантий.
+- Не копируй текст или голоса образца конкурента.
+- script и scenes оставь пустыми, формат строго "dialogue".
+- caption — короткая подпись; cta — одно действие.
+- Если нужно упомянуть сотрудников: Стагирит, Неония, Неона, Неола.
+- Виртуальный офис Агентства голубой с золотыми акцентами, реальные
+  интерьеры естественные. Сначала проблема человека, потом решение.
+"""
     if content_format == "post":
         return common + """
 
@@ -1836,6 +1862,10 @@ def _single_item_errors(item):
         errors.extend(_carousel_copy_errors({"slides": item.get("slides") or []}))
         if not _clean_text(item.get("caption"), 4000):
             errors.append("Нет подписи к карусели.")
+    elif content_format == "dialogue":
+        errors.extend(dialogue_errors(item.get("dialogue")))
+        if not _clean_text(item.get("caption"), 4000):
+            errors.append("Добавьте короткую подпись к ИИ-диалогу.")
     elif content_format == "reel":
         script = _clean_text(item.get("script"), 7000)
         word_count = len(re.findall(r"\b[\wЁёА-Яа-я-]+\b", script))
@@ -1929,7 +1959,7 @@ def _stagirite_review(package, item, ask_ai_fn):
 Проверь: соответствие задаче, ясность для незнакомого человека, сильный
 заголовок, логику, фактическую осторожность, отсутствие воды и один CTA.
 
-Если это Reels, дополнительно проверь:
+Если это Reels или формат «ИИ-диалог», дополнительно проверь:
 - есть ли у ролика одна ясная драматургическая дуга, а не перечень функций;
 - узнаёт ли зритель сначала себя и свою проблему;
 - есть ли образ, метафора или визуальный символ, если тема это позволяет;
@@ -1938,6 +1968,9 @@ def _stagirite_review(package, item, ask_ai_fn):
 - возвращает ли финал внимание к человеку, его времени, выбору или жизни;
 - не звучит ли CTA как навязчивая заявка, если владелец её прямо не просил;
 - если есть виртуальный офис, он голубой с золотыми акцентами.
+Если формат «ИИ-диалог», СОХРАНИ отдельный массив dialogue из 4–10 реплик:
+мужчина A и женщина B по очереди, без режиссёрских ремарок, 50–95 слов,
+два разных героя говорят естественно и не обещают гарантированный доход.
 
 Сам исправь все найденные недостатки. Не меняй выбранный человеком формат.
 
@@ -1985,6 +2018,8 @@ def _item_as_text(item):
         parts.extend(["", "Хук:", item["hook"]])
     if item.get("script"):
         parts.extend(["", "Текст речи:", item["script"]])
+    if item.get("dialogue"):
+        parts.extend(["", "Диалог двух героев:", dialogue_text(item["dialogue"])])
     if item.get("scenes"):
         parts.extend(["", "Сцены:", "\n".join(
             f"{index}. {value}" for index, value in enumerate(item["scenes"], 1)
@@ -2003,11 +2038,13 @@ def _item_as_text(item):
 
 
 def _item_label(item):
-    labels = {"reel": "🎬 Reels", "post": "📝 Пост", "carousel": "🖼️ Карусель"}
+    labels = {"reel": "🎬 Reels", "post": "📝 Пост", "carousel": "🖼️ Карусель", "dialogue": "🎭 ИИ-диалог"}
     return labels.get(item.get("format"), "Материал")
 
 
 def _item_source_text(item):
+    if item.get("format") == "dialogue":
+        return dialogue_text(item.get("dialogue") or [])
     if item.get("format") == "reel":
         return "\n\n".join(
             value for value in (item.get("hook"), item.get("script"), item.get("caption")) if value
@@ -2034,6 +2071,8 @@ def _package_as_text(package):
             parts.append("Хук: " + item["hook"])
         if item.get("script"):
             parts.append("Сценарий:\n" + item["script"])
+        if item.get("dialogue"):
+            parts.append("Диалог:\n" + dialogue_text(item["dialogue"]))
         if item.get("scenes"):
             parts.append("Сцены:\n- " + "\n- ".join(item["scenes"]))
         if item.get("post_text"):
@@ -2593,6 +2632,17 @@ def _render_item(
     approved = item.get("status") == "approved"
 
     st.markdown(f"### {format_label}: {item.get('title') or 'Новый материал'}")
+
+    if content_format == "dialogue":
+        from agency_dialogue_ui import render_dialogue_item
+        render_dialogue_item(
+            package, item, owner_id, ask_ai_fn, get_avatar_video_fn,
+            review_fn=_stagirite_review,
+            save_package_fn=_save_package,
+            download_video_fn=_download_video_bytes,
+            text_export_fn=_item_as_text,
+        )
+        return
 
     if not approved:
         st.info(
@@ -3300,7 +3350,7 @@ def render_content_factory(
         st.markdown("### 1. Что вы хотите создать?")
         format_choice = st.radio(
             "Формат",
-            options=["post", "carousel", "reel"],
+            options=["post", "carousel", "reel", "dialogue"],
             format_func=lambda value: FORMAT_LABELS[value],
             horizontal=True,
             key=f"cf2_format_{owner_id}",
@@ -3308,10 +3358,22 @@ def render_content_factory(
         )
 
         st.markdown("### 2. Расскажите задачу")
-        st.caption(
-            "Можно говорить как в обычном разговоре. Например: «Хочу Reels о том, "
-            "как предпринимателю перестать тратить вечер на переписку»."
-        )
+        if format_choice == "dialogue":
+            st.info(
+                "🎭 Новый режим: два говорящих персонажа, разные голоса, "
+                "чередование кадров как в видеовстрече. Сначала вы утверждаете "
+                "сценарий — только потом по вашей кнопке создаётся видео в HeyGen."
+            )
+            st.caption(
+                "Например: «Сделай короткий живой разговор мужчины и женщины "
+                "об Агентстве W. Мужчина удивляется, что женщина освободила "
+                "вечера от рутины благодаря ИИ. Финал — наше время для жизни»."
+            )
+        else:
+            st.caption(
+                "Можно говорить как в обычном разговоре. Например: «Хочу Reels о том, "
+                "как предпринимателю перестать тратить вечер на переписку»."
+            )
         if hasattr(st, "audio_input"):
             audio = st.audio_input(
                 "🎙 Нажмите микрофон и скажите задачу",
@@ -3338,6 +3400,8 @@ def render_content_factory(
         request_text = st.text_area(
             "Или напишите задачу",
             placeholder=(
+                "Например: диалог о свободном времени и ИИ-команде Агентства W"
+                if format_choice == "dialogue" else
                 "Например: Создай карусель для предпринимателей. Покажи, как пять "
                 "ИИ-профессионалов забирают повторяющиеся задачи и возвращают время."
             ),
