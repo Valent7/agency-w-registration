@@ -1,0 +1,31 @@
+name: Agency W AI-dialogue Reels tests
+on:
+  pull_request:
+    paths:
+      - "agency_dialogue_video.py"
+      - "agency_dialogue_ui.py"
+      - "content_factory_ui.py"
+      - "tests/test_agency_dialogue_*.py"
+      - ".github/workflows/agency-dialogue-reels.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: python -m pip install requests Pillow
+      - name: Compile dialogue and existing factory
+        run: python -m py_compile agency_dialogue_video.py agency_dialogue_ui.py content_factory_ui.py tests/test_agency_dialogue_video.py tests/test_agency_dialogue_ui.py
+      - name: Test one-job generation, safe approval and MP4 rendering
+        run: |
+          python -m unittest discover -s tests -p "test_agency_dialogue_video.py" -v
+          python -m unittest discover -s tests -p "test_agency_dialogue_ui.py" -v
