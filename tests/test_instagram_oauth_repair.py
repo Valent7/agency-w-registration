@@ -2,10 +2,11 @@
 import ast
 import asyncio
 import json
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from instagram_auth_tools import exchange_long_lived_ig_token, fetch_instagram_profile
 
@@ -110,6 +111,7 @@ class JsonResult:
 class InstagramDirectIdentityTests(unittest.TestCase):
     def ns(self):
         env = {
+            "os": os,
             "INSTAGRAM_OWNER_ID": "123",
             "INSTAGRAM_OWNER_NAME": "Тестовая владелица",
             "INSTAGRAM_ACCESS_TOKEN": "dummy-token",
@@ -144,6 +146,25 @@ class InstagramDirectIdentityTests(unittest.TestCase):
             env["_fallback_instagram_connection"]("1784141234")["owner_telegram_id"],
             123,
         )
+
+    def test_exact_operator_bound_legacy_owner_with_no_profile_api(self):
+        env = self.ns()
+        with patch.dict(
+            os.environ, {"INSTAGRAM_LEGACY_ACCOUNT_ID": "17841458786862089"}
+        ):
+            def no_network(token):
+                raise AssertionError("Do not call Meta /me for explicit legacy binding")
+            env["_verified_legacy_instagram_account_id"] = no_network
+            known = env["_fallback_instagram_connection"]("17841458786862089")
+            self.assertEqual(known["owner_telegram_id"], 123)
+            self.assertEqual(known["instagram_account_id"], "17841458786862089")
+            self.assertIsNone(env["_fallback_instagram_connection"]("178414999999"))
+            self.assertIsNone(env["_fallback_instagram_connection"](""))
+
+    def test_malformed_bound_id_blocks_fallback_even_if_profile_would_match(self):
+        env = self.ns()
+        with patch.dict(os.environ, {"INSTAGRAM_LEGACY_ACCOUNT_ID": "all-users"}):
+            self.assertIsNone(env["_fallback_instagram_connection"]("1784141234"))
 
     def test_database_mapping_always_wins_over_legacy(self):
         env = self.ns()
