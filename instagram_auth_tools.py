@@ -88,7 +88,10 @@ def fetch_instagram_profile(token: str, *, session=requests) -> dict:
     response = session.get(
         "https://graph.instagram.com/me",
         params={
-            "fields": "id,username,account_type",
+            # "id" is often app-scoped and does NOT match messaging webhook
+            # recipient.id. "user_id" identifies the Instagram professional
+            # account that receives Direct and comment webhooks.
+            "fields": "id,user_id,username,account_type",
             "access_token": token,
         },
         timeout=30,
@@ -103,6 +106,7 @@ def fetch_instagram_profile(token: str, *, session=requests) -> dict:
         raise RuntimeError("Instagram did not confirm the account identity.")
     return {
         "id": str(obj["id"]).strip(),
+        "user_id": str(obj.get("user_id") or "").strip(),
         "username": str(obj.get("username") or "").strip(),
         "account_type": str(obj.get("account_type") or "").strip(),
     }
