@@ -172,7 +172,8 @@ class InstagramDirectIdentityTests(unittest.TestCase):
     def test_database_mapping_always_wins_over_legacy(self):
         env = self.ns()
         env["_instagram_connection_by_account_id"] = lambda identifier: {
-            "instagram_account_id": identifier, "owner_telegram_id": 777
+            "instagram_account_id": identifier, "owner_telegram_id": 777,
+            "access_token": "verified-owner-777-token"
         }
         result = env["_resolve_instagram_connection"]("1784141234")
         self.assertEqual(result["owner_telegram_id"], 777)
