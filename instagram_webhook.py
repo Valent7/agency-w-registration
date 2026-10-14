@@ -2925,28 +2925,6 @@ def _restore_instagram_subscriptions_on_startup() -> None:
         )
         return
 
-    # Diagnostic only: IDs are provider/account references, not access tokens.
-    # This exposes whether a successful OAuth callback saved the SAME
-    # Instagram account ID as the incoming Direct webhook recipient.
-    print(
-        "INSTAGRAM_ACCOUNT_MAPPING_AUDIT:",
-        {
-            "accounts": [
-                {
-                    "owner_id": raw.get("owner_telegram_id"),
-                    "account_id": str(raw.get("instagram_account_id") or ""),
-                    "status": str(raw.get("status") or ""),
-                }
-                for raw in rows or []
-            ],
-            "legacy_owner_configured": bool(INSTAGRAM_OWNER_ID.isdigit()),
-            "legacy_token_configured": bool(INSTAGRAM_ACCESS_TOKEN),
-            "legacy_account_id_configured": bool(
-                str(os.getenv("INSTAGRAM_LEGACY_ACCOUNT_ID") or "").strip()
-            ),
-        },
-        flush=True,
-    )
     restored = 0
     for raw_row in rows or []:
         try:
