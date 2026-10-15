@@ -8,7 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from instagram_auth_tools import exchange_long_lived_ig_token, fetch_instagram_profile
+from instagram_auth_tools import (
+    exchange_long_lived_ig_token,
+    fetch_instagram_profile,
+    InstagramAccessNotApproved,
+)
 
 
 def http_response(ok: bool, status_code: int, body: dict):
@@ -71,10 +75,25 @@ class InstagramTokenExchangeTests(unittest.TestCase):
             False, 400,
             {"error": {"code": 100, "message": "Unsupported request - method type: post"}},
         )
-        with self.assertRaises(RuntimeError) as context:
+        with self.assertRaises(InstagramAccessNotApproved) as context:
             exchange_long_lived_ig_token("short", "top-secret", session=session)
+        self.assertIn("Instagram-тестировщика", str(context.exception))
+        self.assertIn("App Review", str(context.exception))
         self.assertNotIn("top-secret", str(context.exception))
+        self.assertEqual(session.get.call_count, 1)
         self.assertEqual(session.post.call_count, 1)
+
+    def test_other_long_token_error_does_not_claim_app_review(self):
+        session = Mock()
+        session.get.return_value = http_response(
+            False, 400, {"error": {"code": 100, "message": "Unsupported request - method type: get"}}
+        )
+        session.post.return_value = http_response(
+            False, 401, {"error": {"code": 190, "message": "Invalid OAuth token"}}
+        )
+        with self.assertRaises(RuntimeError) as context:
+            exchange_long_lived_ig_token("short", "secret", session=session)
+        self.assertNotIsInstance(context.exception, InstagramAccessNotApproved)
 
     def test_profile_identification_needs_provider_id(self):
         session = Mock()
@@ -87,6 +106,16 @@ class InstagramTokenExchangeTests(unittest.TestCase):
         self.assertIn("user_id", session.get.call_args.kwargs["params"]["fields"])
         session.get.assert_called_once()
         self.assertIn("access_token", session.get.call_args.kwargs["params"])
+
+
+class InstagramOAuthErrorPageTests(unittest.TestCase):
+    def test_meta_access_denied_is_explained_without_forcing_reconnect(self):
+        source = Path("instagram_webhook.py").read_text(encoding="utf-8")
+        self.assertIn("except InstagramAccessNotApproved:", source)
+        self.assertIn("INSTAGRAM_OAUTH_ACCESS_PENDING", source)
+        self.assertIn("Это не ошибка браузера", source)
+        self.assertIn("html_escape(str(exc))", source)
+        self.assertNotIn("f\"<p>{str(exc)}</p>\"", source)
 
 
 SOURCE = Path("instagram_webhook.py").read_text(encoding="utf-8")
