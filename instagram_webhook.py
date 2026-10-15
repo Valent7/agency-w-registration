@@ -13,7 +13,12 @@ from urllib.parse import quote, urlencode
 
 import requests
 from functools import lru_cache
-from instagram_auth_tools import exchange_long_lived_ig_token, fetch_instagram_profile
+from html import escape as html_escape
+from instagram_auth_tools import (
+    exchange_long_lived_ig_token,
+    fetch_instagram_profile,
+    InstagramAccessNotApproved,
+)
 from instagram_auth_handoff import verify_signed_handoff
 from instagram_webhook_security import (
     MAX_WEBHOOK_BYTES,
@@ -938,13 +943,40 @@ async def instagram_oauth_callback(request: Request):
             + ("ready" if comments_ready else "subscription_warning"),
             status_code=302,
         )
+    except InstagramAccessNotApproved:
+        # The one-time code worked but Meta denied extending its short token.
+        # Do not save the short token as a persistent successful connection.
+        print(
+            "INSTAGRAM_OAUTH_ACCESS_PENDING:",
+            "long_token_exchange_rejected_by_meta",
+            flush=True,
+        )
+        return _page(
+            "Agency W — Instagram",
+            "<h1>Instagram пока не подключён</h1>"
+            "<p>Instagram разрешил вход, но Meta не выдала Агентству W "
+            "долгосрочный токен. Это не ошибка браузера и не успешное подключение.</p>"
+            "<p><b>Проверьте в Meta for Developers:</b> доступ к "
+            "instagram_business_basic, роль Instagram-тестировщика для "
+            "этого аккаунта и принятие приглашения. Для подключения "
+            "партнёров без роли может потребоваться App Review "
+            "и расширенный доступ.</p>"
+            "<p>Не повторяйте авторизацию подряд. После изменения прав "
+            "начните новый вход из кабинета Агентства W.</p>",
+        )
     except Exception as exc:
-        print("INSTAGRAM_OAUTH_CALLBACK_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
+        # Errors can contain untrusted HTTP response strings; escape markup.
+        print(
+            "INSTAGRAM_OAUTH_CALLBACK_ERROR:",
+            type(exc).__name__,
+            flush=True,
+        )
         return _page(
             "Agency W — Instagram",
             "<h1>Instagram не подключён</h1>"
-            f"<p>{str(exc)}</p>"
-            "<p>Вернитесь в Агентство W и попробуйте ещё раз.</p>",
+            f"<p>{html_escape(str(exc))}</p>"
+            "<p>Вернитесь в Агентство W. Если ошибка повторяется, "
+            "пришлите скриншот без секретных данных.</p>",
         )
 
 
