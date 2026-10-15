@@ -8,7 +8,6 @@ import streamlit as st
 from cryptography.fernet import Fernet, InvalidToken
 from neola_partner_center import _is_agency_owner
 from instagram_manual_scout import (
-    google_profile_search_url,
     instagram_post_url,
     instagram_profile_url,
     instagram_username,
@@ -605,171 +604,152 @@ def _merge_comments(posts: list[dict], comments: list[dict]) -> list[dict]:
 
 
 def _render_instagram_manual_scout(owner_telegram_id: int, ask_openai_fn) -> None:
-    """Fallback with no third-party account token, Meta roles, scraping, or auto-DMs."""
+    """Owner-only acquaintance-first pilot. No IG API, scraping or automated posts."""
     owner_id = int(owner_telegram_id)
-    st.markdown("#### 🔎 Поиск клиентов без подключения Instagram")
+    st.markdown("#### 👥 Мои знакомые в Instagram")
     st.caption(
-        "Неония предлагает Instagram-профили по вашей целевой аудитории. "
-        "Вы самостоятельно проверяете их в Instagram, а Неона помогает "
-        "составить комментарий к публикации, которую вы выбрали. "
-        "Ни подписка Meta, ни ввод пароля Instagram не требуются."
+        "Укажите @username знакомого. Агентство откроет его профиль "
+        "напрямую в Instagram — без Google, Facebook Developer и Instagram API. "
+        "Проверить, что профиль принадлежит нужному человеку, необходимо самостоятельно."
     )
 
-    target = _target_audience_text(owner_id)
-    target_key = f"instagram_manual_target_{owner_id}"
-    if target_key not in st.session_state:
-        st.session_state[target_key] = ""
-    st.text_area(
-        "Кого ищем в Instagram?",
-        key=target_key,
-        placeholder="Например: русскоязычные предприниматели, эксперты и наставники",
-        height=75,
+    input_key = f"ig_known_username_{owner_id}"
+    selection_key = f"ig_known_selected_{owner_id}"
+    contacts_key = f"ig_known_contacts_{owner_id}"
+    st.session_state.setdefault(contacts_key, [])
+    st.session_state.setdefault(selection_key, "")
+    st.text_input(
+        "Instagram-имя знакомого или ссылка на профиль",
+        key=input_key,
+        placeholder="@username",
     )
-    chosen_target = str(st.session_state.get(target_key) or "").strip() or target
-    if target and not str(st.session_state.get(target_key) or "").strip():
-        st.caption("Для поиска будет использован сохранённый портрет целевой аудитории.")
-
-    if chosen_target:
-        st.link_button(
-            "🌐 Искать профили в браузере самостоятельно",
-            google_profile_search_url(chosen_target),
-            use_container_width=True,
-        )
-
-    manual_key = f"instagram_manual_input_{owner_id}"
-    st.text_area(
-        "Уже нашли профили? Вставьте @имена или ссылки — по одной в строку",
-        key=manual_key,
-        placeholder="@example\nhttps://www.instagram.com/example2/",
-        height=85,
-    )
-    manual_lines = str(st.session_state.get(manual_key) or "").splitlines()
-    manual_usernames = [
-        username for line in manual_lines
-        if (username := instagram_username(line))
-    ]
-
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    day_key = f"instagram_manual_day_{owner_id}"
-    seen_key = f"instagram_manual_seen_{owner_id}"
-    results_key = f"instagram_manual_results_{owner_id}"
-    if st.session_state.get(day_key) != day:
-        st.session_state[day_key] = day
-        st.session_state[seen_key] = []
-        st.session_state[results_key] = []
+    raw_name = str(st.session_state.get(input_key) or "").strip()
+    normalized = instagram_username(raw_name)
+    if raw_name and not normalized:
+        st.warning("Введите @username или ссылку на Instagram-профиль, например https://www.instagram.com/username/.")
 
     if st.button(
-        "🎯 Подобрать до 5 кандидатов",
-        key=f"instagram_manual_find_{owner_id}",
+        "🔎 Найти знакомого по username",
+        key=f"ig_known_open_{owner_id}",
+        disabled=not normalized,
         use_container_width=True,
         type="primary",
     ):
-        suggestions = list(manual_usernames)
-        if chosen_target:
-            try:
-                with st.spinner("Неония подбирает возможные профили по открытым поисковым результатам..."):
-                    suggestions.extend(_discover_usernames(
-                        ask_openai_fn, chosen_target, []
-                    ))
-            except Exception:
-                st.warning(
-                    "Поиск Неонии временно недоступен. Можно использовать "
-                    "ссылки, найденные самостоятельно в Instagram."
-                )
-        history = {str(x).casefold() for x in st.session_state.get(seen_key, [])}
-        unique = []
-        for proposed in suggestions:
-            username = instagram_username(proposed)
-            if not username or username.casefold() in history:
-                continue
-            history.add(username.casefold())
-            unique.append(username)
-            if len(unique) == 5:
-                break
-        st.session_state[results_key] = unique
-        st.session_state[seen_key] = sorted(history)
-        if not unique:
-            st.info(
-                "Новых подходящих имён в этом поиске нет. Уточните портрет "
-                "целевой аудитории или вставьте новые ссылки."
-            )
+        contacts = list(st.session_state.get(contacts_key) or [])
+        if normalized.casefold() not in {name.casefold() for name in contacts}:
+            contacts.append(normalized)
+        st.session_state[contacts_key] = contacts[-60:]
+        st.session_state[selection_key] = normalized
 
-    results = st.session_state.get(results_key) or []
-    if not results:
-        st.info(
-            "Начните с пяти возможных профилей. Пока вы их не откроете в Instagram, "
-            "их существование, актуальность и соответствие ЦА не подтверждены."
-        )
+    contacts = list(st.session_state.get(contacts_key) or [])
+    if not contacts:
+        st.info("Введите имя знакомого и нажмите «Найти знакомого по username».")
         return
 
-    st.caption(
-        f"Кандидатов для ручной проверки: {len(results)} из 5. "
-        "Поиск не читает чужие аккаунты и не рассылает сообщения."
+    active = str(st.session_state.get(selection_key) or "")
+    if active not in contacts:
+        active = contacts[-1]
+        st.session_state[selection_key] = active
+    if len(contacts) > 1:
+        st.selectbox(
+            "Кого из знакомых откроем?",
+            options=contacts,
+            format_func=lambda value: f"@{value}",
+            key=selection_key,
+        )
+        active = str(st.session_state[selection_key])
+
+    st.markdown(f"**Профиль: @{active}**")
+    st.link_button(
+        "↗️ Открыть профиль в Instagram",
+        instagram_profile_url(active),
+        use_container_width=True,
     )
-    for index, username in enumerate(results, 1):
-        with st.expander(f"{index}. @{username} — проверить профиль", expanded=False):
-            st.link_button(
-                "↗️ Открыть профиль в Instagram",
-                instagram_profile_url(username),
-                use_container_width=True,
-            )
-            st.selectbox(
-                "Мой результат проверки",
-                ["Найден (не проверен)", "Просмотрен", "Подходит", "Не подходит", "Есть ответ"],
-                key=f"instagram_manual_status_{owner_id}_{username.casefold()}",
-            )
-            st.caption(
-                "Никакой информации о профиле приложение автоматически не скачивает. "
-                "Проверку выполняете вы в Instagram."
-            )
-            post_key = f"instagram_manual_post_{owner_id}_{username.casefold()}"
-            note_key = f"instagram_manual_observation_{owner_id}_{username.casefold()}"
-            st.text_input(
-                "Ссылка на публикацию или Reels, которую вы открыли",
-                key=post_key,
-                placeholder="https://www.instagram.com/p/...",
-            )
-            raw_post = st.session_state.get(post_key) or ""
-            valid_post = instagram_post_url(raw_post)
-            if raw_post and not valid_post:
-                st.warning("Для комментария укажите настоящую ссылку на пост или Reels Instagram.")
-            elif valid_post:
-                st.link_button("↗️ Открыть публикацию", valid_post)
-            st.text_area(
-                "Что вы заметили в публикации? (Кратко, своими словами)",
-                key=note_key,
-                height=70,
-                placeholder="О чём автор пишет, какая мысль заинтересовала",
-            )
-            observation = str(st.session_state.get(note_key) or "").strip()
-            draft_key = f"instagram_manual_draft_{owner_id}_{username.casefold()}"
-            if st.button(
-                "✍️ Неона, предложи комментарий",
-                key=f"instagram_manual_draft_btn_{owner_id}_{username.casefold()}",
-                disabled=not valid_post or len(observation) < 12,
-            ):
-                try:
-                    system, user = suggested_comment_prompt(username, observation)
-                    draft = ask_openai_fn(system, user, use_web_search=False)
-                    st.session_state[draft_key] = str(draft or "").strip()[:1200]
-                    st.session_state[f"instagram_manual_edit_{owner_id}_{username.casefold()}"] = st.session_state[draft_key]
-                except Exception:
-                    st.error("Не получилось подготовить комментарий. Попробуйте позже.")
-            if st.session_state.get(draft_key):
-                st.text_area(
-                    "Проверьте и при желании исправьте текст перед ручной отправкой",
-                    value=st.session_state[draft_key],
-                    key=f"instagram_manual_edit_{owner_id}_{username.casefold()}",
-                    height=100,
-                )
-                st.caption(
-                    "Скопируйте отредактированный текст и самостоятельно "
-                    "отправьте его в Instagram. Агентство ничего не публикует."
-                )
     st.caption(
-        "Это тестовый режим: подбор, статусы и черновики в текущей сессии "
-        "могут исчезнуть после перезапуска. Никакой автоматической отправки, "
-        "скрытого сбора данных или доступа к Direct здесь нет."
+        "Это прямая ссылка по указанному имени, а не подтверждение существования "
+        "профиля или личности человека."
+    )
+
+    status_key = f"ig_known_verified_{owner_id}_{active.casefold()}"
+    confirmed = st.checkbox(
+        "Я открыла Instagram и убедилась, что это нужный знакомый",
+        key=status_key,
+    )
+    if not confirmed:
+        st.info("После проверки профиля отметьте галочку, чтобы перейти к публикации.")
+        return
+
+    st.markdown("##### ✍️ Комментарий Неоны")
+    st.caption(
+        "Откройте Reels, пост или карусель в Instagram. "
+        "Вставьте ссылку и содержание, которое вы действительно прочитали или посмотрели. "
+        "Неона не получает контент чужого профиля автоматически."
+    )
+    kind_key = f"ig_known_kind_{owner_id}_{active.casefold()}"
+    st.selectbox(
+        "Тип публикации",
+        ["Reels", "Пост", "Карусель"],
+        key=kind_key,
+    )
+    post_key = f"ig_known_post_{owner_id}_{active.casefold()}"
+    st.text_input(
+        "Ссылка на выбранную публикацию",
+        key=post_key,
+        placeholder="https://www.instagram.com/reel/... или https://www.instagram.com/p/...",
+    )
+    raw_post = str(st.session_state.get(post_key) or "").strip()
+    valid_post = instagram_post_url(raw_post)
+    if raw_post and not valid_post:
+        st.warning("Ссылка должна вести на Reels, пост или карусель в Instagram.")
+    elif valid_post:
+        st.link_button("↗️ Открыть выбранную публикацию", valid_post)
+
+    description_key = f"ig_known_observation_{owner_id}_{active.casefold()}"
+    st.text_area(
+        "Что говорится или показано в публикации?",
+        key=description_key,
+        placeholder="Вставьте текст подписи или кратко опишите главное своими словами.",
+        height=105,
+    )
+    observation = str(st.session_state.get(description_key) or "").strip()
+    draft_key = f"ig_known_draft_{owner_id}_{active.casefold()}"
+    edit_key = f"ig_known_edit_{owner_id}_{active.casefold()}"
+    if st.button(
+        "✨ Неона, напиши комментарий",
+        key=f"ig_known_draft_btn_{owner_id}_{active.casefold()}",
+        disabled=not valid_post or len(observation) < 12,
+        use_container_width=True,
+    ):
+        try:
+            system, user = suggested_comment_prompt(active, observation)
+            user += (
+                "\\nТип публикации (со слов владельца): "
+                + str(st.session_state.get(kind_key) or "публикация")
+                + ".\\nСсылка, предоставленная владельцем: "
+                + valid_post
+            )
+            with st.spinner("Неона готовит ответ по содержанию публикации..."):
+                draft = str(ask_openai_fn(system, user, use_web_search=False) or "").strip()
+            if not draft:
+                raise ValueError("Пустой комментарий")
+            st.session_state[draft_key] = draft[:1200]
+            st.session_state[edit_key] = st.session_state[draft_key]
+        except Exception:
+            st.error("Неона пока не смогла подготовить комментарий. Попробуйте позже.")
+
+    if st.session_state.get(draft_key):
+        st.text_area(
+            "Комментарий — проверьте, исправьте и скопируйте",
+            key=edit_key,
+            height=110,
+        )
+        st.caption(
+            "Отправка только вручную в Instagram. Агентство W не публикует "
+            "комментарии и не начинает переписку с человеком автоматически."
+        )
+    st.caption(
+        "Тестовая версия: список знакомых и тексты сохраняются только на время "
+        "этой сессии. После перезапуска они могут исчезнуть."
     )
 
 
