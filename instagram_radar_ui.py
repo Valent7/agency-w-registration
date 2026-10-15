@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 import requests
 import streamlit as st
 from cryptography.fernet import Fernet, InvalidToken
+from neola_partner_center import _is_agency_owner
 from instagram_manual_scout import (
     google_profile_search_url,
     instagram_post_url,
@@ -751,6 +752,7 @@ def _render_instagram_manual_scout(owner_telegram_id: int, ask_openai_fn) -> Non
                     system, user = suggested_comment_prompt(username, observation)
                     draft = ask_openai_fn(system, user, use_web_search=False)
                     st.session_state[draft_key] = str(draft or "").strip()[:1200]
+                    st.session_state[f"instagram_manual_edit_{owner_id}_{username.casefold()}"] = st.session_state[draft_key]
                 except Exception:
                     st.error("Не получилось подготовить комментарий. Попробуйте позже.")
             if st.session_state.get(draft_key):
@@ -783,9 +785,12 @@ def render_instagram_radar(
             return
 
     st.markdown("### 🌿 Instagram Radar")
-    _render_instagram_manual_scout(int(owner_telegram_id), ask_openai_fn)
-    st.divider()
-    st.caption("Официальный Instagram Radar через Meta — отдельный режим, доступен только при действующих разрешениях.")
+    # Private pilot: only Agency W's verified root owner sees the new flow.
+    # The existing official Radar remains unchanged for all other partners.
+    if _is_agency_owner(int(owner_telegram_id)):
+        _render_instagram_manual_scout(int(owner_telegram_id), ask_openai_fn)
+        st.divider()
+        st.caption("Официальный Instagram Radar через Meta — отдельный режим, доступен только при действующих разрешениях.")
     st.caption(
         "Неония находит подходящие профессиональные аккаунты, Radar проверяет их "
         "через официальный Instagram API и берёт свежие Reels/посты. "
