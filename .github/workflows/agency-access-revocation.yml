@@ -1,0 +1,19 @@
+name: Agency access revocation checks
+on:
+  pull_request:
+    paths:
+      - streamlit_app.py
+      - agency_access_control.py
+      - tests/test_agency_access_revocation.py
+      - .github/workflows/agency-access-revocation.yml
+  workflow_dispatch:
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m py_compile agency_access_control.py streamlit_app.py
+      - run: python -m unittest discover -s tests -p test_agency_access_revocation.py -v
