@@ -88,9 +88,24 @@ class InstagramManualScoutTests(unittest.TestCase):
         self.assertIn("Я открыла Instagram и убедилась", ui)
         self.assertIn("Отправка только вручную", ui)
 
+    def test_owner_can_request_comment_without_publication_url(self):
+        source = Path("instagram_radar_ui.py").read_text(encoding="utf-8")
+        ui = source[
+            source.index("def _render_instagram_manual_scout("):
+            source.index("def render_instagram_radar(")
+        ]
+        self.assertIn('disabled=len(observation) < 8 or invalid_post', ui)
+        self.assertIn('with st.expander("🔗 Ссылка на Reels, пост или карусель (необязательно)")', ui)
+        self.assertIn('valid_post = instagram_post_url(raw_post) if raw_post else ""', ui)
+        self.assertNotIn('disabled=not valid_post', ui)
+        self.assertIn('Неона не выбирает Reels чужого профиля автоматически', ui)
+        system, user = suggested_comment_prompt("@my.friend", "Улыбается в экран")
+        self.assertIn("Улыбается в экран", user)
+        self.assertIn("не выдумывай", system)
+
     def test_grounded_comment_requires_observation(self):
         with self.assertRaises(ValueError):
-            suggested_comment_prompt("@valid", "маловато")
+            suggested_comment_prompt("@valid", "мало")
         system, message = suggested_comment_prompt(
             "@valid", "Автор рассказал о важности свободного времени."
         )
