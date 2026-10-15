@@ -13,7 +13,9 @@ This file is a review packet and evidence checklist, **not a change to authentic
 - At least one administrator-owned account has produced working Instagram Direct responses in a previous test; this **does not establish approval for outside partner accounts**.
 - PR #13 merged; offline checks passed. **No evidence here of live partner onboarding or Meta approval**.
 - Meta Advanced Access / App Review for third-party Instagram professional accounts: **not yet approved**.
-- Project is under development and **not yet officially registered as a business**. Do not misstate legal status or submit invented registration data.
+- **User-confirmed product context (15 October 2026):** Agency W is a **free internal team tool used within the Neonexa project**, not a separately paid SaaS product. Team members pay no fee for Agency W. The user's prior German Gewerbeanmeldung is **closed**. Neither the current legal operator of Neonexa nor any legal/business registration for Agency W has been established; do not imply Agency W is a registered company or a fee-charging service.
+- Meta permissions would still cover **separate professional Instagram accounts owned by team members**; an internal/free tool does not automatically qualify for advanced access or bypass App Review. Never treat team membership as equivalent to an app role.
+- Screenshot evidence: Agency W's App Review verification asked to link a verified business portfolio, while the separately viewed 'Polesski Valentina' business security center said business verification was not currently required there. These views are not the same approval state; **the conflict remains unresolved**. Do not ask the owner to repeat screenshots already provided.
 
 Related internal checklist: [instagram_partner_launch.md](./instagram_partner_launch.md).
 
@@ -22,7 +24,7 @@ Related internal checklist: [instagram_partner_launch.md](./instagram_partner_la
 For the **Agency W-IG** app/product, record a dated screenshot of the following *without showing secrets*:
 
 1. **Instagram → API setup / Permissions and Features / App Review**: status of EACH of the three permissions (standard/test/advanced; requestable or blocked).
-2. **App Review / Requirements**: whether Meta requests Business Verification, Access Verification, Tech Provider status, verified domain, or other prerequisites *for this app*. Copy exact wording rather than inferring.
+2. **App Review / Requirements**: Meta's app-specific verification and Advanced Access blockers; don't conflate business portfolio linking with completed Business Verification. Meta announced on **9 October 2026** that separate *Tech Provider Access Verification* is retired, but Business Verification and App Review can still apply. Do not recommend an obsolete access-verification process.
 3. **Business Portfolio**: whether an actual business is linked to the application, portfolio verification status, and whose name is listed.
 4. **App Settings → Basic**: public app name, official contact, app domains, public Privacy Policy URL, Terms URL, data-deletion instructions URL, category, and icon. Check links as an unauthenticated user.
 5. **Instagram Business Login**: permitted redirect URI, scopes and correct Instagram professional test account roles.
@@ -40,7 +42,9 @@ For the **Agency W-IG** app/product, record a dated screenshot of the following 
 
 ## 3. Draft app description for Meta (English; validate against live UI)
 
-> Agency W is an in-development software service for Instagram professional-account owners. It helps an authorized account owner manage incoming Instagram direct messages and comments through an AI-assisted workflow called Neona. The account owner opens Instagram Login from their own Agency W cabinet and grants the permissions requested by Meta. Agency W binds the resulting Instagram account identifier to the correct signed-in Agency W owner so one customer's conversations are not attributed to another. The app uses data solely for the account owner's authorized communication workflow, with technical security checks and a way to request data deletion. Agency W does not request Instagram account passwords, does not send unsolicited bulk direct messages, and does not claim that third-party onboarding is live before Meta approves the required permissions.
+> Agency W is a free internal team productivity tool developed for participants in the Neonexa project. Team members do not pay to use Agency W. With each participating owner's explicit consent through Instagram Login, the tool is designed to help the owner of a professional Instagram account handle incoming Instagram Direct messages and comments using an AI-assisted assistant named Neona. Because team members own different Instagram accounts, permissions must be approved for accounts outside the application administrator's own test roles. The app identifies the account authorized by each owner and is designed to keep each owner's conversation data separate. Agency W does not request Instagram passwords and is not intended for unsolicited bulk Instagram Direct messages. This description does not claim that external account onboarding is currently approved or working.
+
+**Submission note:** Confirm which real individual/entity legally operates Agency W and Neonexa and controls the data before using this description in Meta. Neonexa is project context, **not proof of a registered legal company**.
 
 **Important:** this is a draft description, not a factual warranty of all privacy controls. Verify against deployed functionality, privacy policy, and Meta policy before copying.
 
@@ -117,8 +121,10 @@ Current server code defines **Privacy Policy**, **Terms** and **Data Deletion In
 
 **Product:** only after all three gates pass, enable partner-wide "Instagram available" messaging. All existing integrations stay unchanged until a separately reviewed change is approved.
 
-## 8. Immediate next action (owner screenshot)
+## 8. Next decision — without repeating owner screenshots
 
-Open **Meta for Developers → My Apps → Agency W-IG → Instagram → App Review / Permissions and Features**, and capture the page that lists access levels and any request-blocking banner. Then open the **Business Verification / Tech Provider** requirement page indicated by Meta. Share cropped screenshots without secrets. The next decision is driven by Meta's *actual* blocker, not speculation.
+**Known screenshot evidence already collected**: Agency W's Meta app is published; `instagram_business_basic`, `instagram_business_manage_messages`, and `instagram_business_manage_comments` are in a NOT SUBMITTED review request; Meta prompted connection of a *verified* business portfolio; existing 'Polesski Valentina' portfolio is shown as unverified, while its security center states that business verification is not required there. Do not request the same screenshot again.
 
-**Status on 15 October 2026:** preparation draft complete; Meta console evidence, legal verification route, publicly reachable policy pages, and real end-to-end reviewer videos remain pending. **Do not press Submit yet.**
+**Decision sequence:** (1) confirm whether Neonexa has a real existing legal operator/business portfolio that could legitimately manage this free team app, with that operator's express authorization; (2) otherwise clarify with Meta Support the app-specific verification route for a non-fee-charging team project **before** any new Gewerbe registration or change of app ownership; (3) maintain limited authorized tester-only use until Advanced Access is granted; (4) verify working professional-account OAuth, replies and comments after approval and fix any independent technical failures; (5) only then prepare truthful demo and final App Review submission.
+
+**Status on 15 October 2026:** documentation draft updated; legal operator, app-specific verification route, public privacy readiness and end-to-end reviewer video remain pending. **Do not press Submit yet. Do not change production connections or ask for redundant screenshots.**
