@@ -105,7 +105,7 @@ class InstagramManualScoutTests(unittest.TestCase):
 
     def test_grounded_comment_requires_observation(self):
         with self.assertRaises(ValueError):
-            suggested_comment_prompt("@valid", "маловато")
+            suggested_comment_prompt("@valid", "мало")
         system, message = suggested_comment_prompt(
             "@valid", "Автор рассказал о важности свободного времени."
         )
