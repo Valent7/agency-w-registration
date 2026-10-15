@@ -70,6 +70,24 @@ class InstagramManualScoutTests(unittest.TestCase):
                         render.index("_load_radar_connection("))
         self.assertIn("from neola_partner_center import _is_agency_owner", source)
 
+    def test_acquaintance_flow_has_no_broken_google_button(self):
+        source = Path("instagram_radar_ui.py").read_text(encoding="utf-8")
+        start = source.index("def _render_instagram_manual_scout(")
+        end = source.index("def render_instagram_radar(")
+        ui = source[start:end]
+        self.assertIn("Мои знакомые в Instagram", ui)
+        self.assertIn("Найти знакомого по username", ui)
+        self.assertIn("instagram_profile_url(active)", ui)
+        self.assertIn('"Reels", "Пост", "Карусель"', ui)
+        self.assertIn("instagram_post_url(raw_post)", ui)
+        self.assertIn("suggested_comment_prompt(active, observation)", ui)
+        self.assertIn("use_web_search=False", ui)
+        self.assertNotIn("Искать профили в браузере самостоятельно", ui)
+        self.assertNotIn("_discover_usernames(", ui)
+        self.assertNotIn("google_profile_search_url(", ui)
+        self.assertIn("Я открыла Instagram и убедилась", ui)
+        self.assertIn("Отправка только вручную", ui)
+
     def test_grounded_comment_requires_observation(self):
         with self.assertRaises(ValueError):
             suggested_comment_prompt("@valid", "маловато")
