@@ -7927,6 +7927,14 @@ if telegram_login_valid or remembered_data:
         )
         telegram_id = telegram_data.get("id", "")
 
+        # Owner-directed access revocation: execute before registration,
+        # trusted-device resume, activation or any Agency W tools.
+        # Telegram ID stays stable if the user renames their username.
+        from agency_access_control import is_agency_access_revoked
+        if is_agency_access_revoked(telegram_id):
+            st.error("Доступ к Агентству W для этой учётной записи закрыт.")
+            st.stop()
+
         # st.login возвращает пользователя на /oauth2callback -> главную страницу.
         # Если вход начат по партнёрской/VK/Instagram-ссылке, восстанавливаем
         # ref и awt из localStorage до первой записи нового участника в Supabase.
