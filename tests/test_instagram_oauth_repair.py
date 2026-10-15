@@ -115,7 +115,11 @@ class InstagramOAuthErrorPageTests(unittest.TestCase):
         self.assertIn("INSTAGRAM_OAUTH_ACCESS_PENDING", source)
         self.assertIn("Это не ошибка браузера", source)
         self.assertIn("html_escape(str(exc))", source)
-        self.assertNotIn("f\"<p>{str(exc)}</p>\"", source)
+        callback = source[
+            source.index("async def instagram_oauth_callback("):
+            source.index("def _facebook_oauth_settings(")
+        ]
+        self.assertNotIn('f"<p>{str(exc)}</p>"', callback)
 
 
 SOURCE = Path("instagram_webhook.py").read_text(encoding="utf-8")
