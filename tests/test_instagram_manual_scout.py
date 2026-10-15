@@ -1,5 +1,6 @@
 """No-network regression tests for Instagram manual scouting."""
 import unittest
+from pathlib import Path
 
 from instagram_manual_scout import (
     google_profile_search_url,
@@ -59,6 +60,15 @@ class InstagramManualScoutTests(unittest.TestCase):
         self.assertIn("https://www.google.com/search?", url)
         self.assertIn("site%3Ainstagram.com", url)
         self.assertNotIn("access_token", url)
+
+    def test_pilot_is_root_owner_only_and_precedes_meta_connection(self):
+        source = Path("instagram_radar_ui.py").read_text(encoding="utf-8")
+        render = source[source.index("def render_instagram_radar("):]
+        self.assertIn("if _is_agency_owner(int(owner_telegram_id)):", render)
+        self.assertIn("_render_instagram_manual_scout(int(owner_telegram_id), ask_openai_fn)", render)
+        self.assertLess(render.index("_render_instagram_manual_scout("),
+                        render.index("_load_radar_connection("))
+        self.assertIn("from neola_partner_center import _is_agency_owner", source)
 
     def test_grounded_comment_requires_observation(self):
         with self.assertRaises(ValueError):
