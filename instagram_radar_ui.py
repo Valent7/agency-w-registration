@@ -681,9 +681,9 @@ def _render_instagram_manual_scout(owner_telegram_id: int, ask_openai_fn) -> Non
 
     st.markdown("##### ✍️ Комментарий Неоны")
     st.caption(
-        "Откройте Reels, пост или карусель в Instagram. "
-        "Вставьте ссылку и содержание, которое вы действительно прочитали или посмотрели. "
-        "Неона не получает контент чужого профиля автоматически."
+        "Для комментария достаточно кратко описать увиденное — например, "
+        "«Улыбается в камеру». Ссылка на публикацию необязательна. "
+        "Без разрешения Meta Неона не выбирает Reels чужого профиля автоматически."
     )
     kind_key = f"ig_known_kind_{owner_id}_{active.casefold()}"
     st.selectbox(
@@ -691,43 +691,51 @@ def _render_instagram_manual_scout(owner_telegram_id: int, ask_openai_fn) -> Non
         ["Reels", "Пост", "Карусель"],
         key=kind_key,
     )
-    post_key = f"ig_known_post_{owner_id}_{active.casefold()}"
-    st.text_input(
-        "Ссылка на выбранную публикацию",
-        key=post_key,
-        placeholder="https://www.instagram.com/reel/... или https://www.instagram.com/p/...",
-    )
-    raw_post = str(st.session_state.get(post_key) or "").strip()
-    valid_post = instagram_post_url(raw_post)
-    if raw_post and not valid_post:
-        st.warning("Ссылка должна вести на Reels, пост или карусель в Instagram.")
-    elif valid_post:
-        st.link_button("↗️ Открыть выбранную публикацию", valid_post)
-
     description_key = f"ig_known_observation_{owner_id}_{active.casefold()}"
     st.text_area(
-        "Что говорится или показано в публикации?",
+        "Что показано в публикации? (Можно в двух-трёх словах)",
         key=description_key,
-        placeholder="Вставьте текст подписи или кратко опишите главное своими словами.",
+        placeholder="Например: Улыбается в экран",
         height=105,
     )
     observation = str(st.session_state.get(description_key) or "").strip()
+
+    # Link is supporting context only; it must not gate drafting from an
+    # owner-provided observation. The app does not fetch arbitrary IG posts.
+    post_key = f"ig_known_post_{owner_id}_{active.casefold()}"
+    with st.expander("🔗 Ссылка на Reels, пост или карусель (необязательно)"):
+        st.text_input(
+            "Ссылка, если хотите её сохранить",
+            key=post_key,
+            placeholder="https://www.instagram.com/reel/... или https://www.instagram.com/p/...",
+        )
+    raw_post = str(st.session_state.get(post_key) or "").strip()
+    valid_post = instagram_post_url(raw_post) if raw_post else ""
+    invalid_post = bool(raw_post and not valid_post)
+    if invalid_post:
+        st.warning("Ссылка некорректна. Исправьте или удалите её — тогда Неона сможет подготовить комментарий.")
+    elif valid_post:
+        st.link_button("↗️ Открыть выбранную публикацию", valid_post)
+    if len(observation) < 8:
+        st.caption("Опишите увиденное хотя бы несколькими словами, чтобы Неона не придумывала содержание.")
+
     draft_key = f"ig_known_draft_{owner_id}_{active.casefold()}"
     edit_key = f"ig_known_edit_{owner_id}_{active.casefold()}"
     if st.button(
         "✨ Неона, напиши комментарий",
         key=f"ig_known_draft_btn_{owner_id}_{active.casefold()}",
-        disabled=not valid_post or len(observation) < 12,
+        disabled=len(observation) < 8 or invalid_post,
         use_container_width=True,
     ):
         try:
             system, user = suggested_comment_prompt(active, observation)
-            user += (
-                "\\nТип публикации (со слов владельца): "
-                + str(st.session_state.get(kind_key) or "публикация")
-                + ".\\nСсылка, предоставленная владельцем: "
-                + valid_post
+            user += "\nТип публикации (со слов владельца): " + str(
+                st.session_state.get(kind_key) or "публикация"
             )
+            if valid_post:
+                user += "\nСсылка, предоставленная владельцем: " + valid_post
+            else:
+                user += "\nСсылка не предоставлена; не утверждай, что видела публикацию."
             with st.spinner("Неона готовит ответ по содержанию публикации..."):
                 draft = str(ask_openai_fn(system, user, use_web_search=False) or "").strip()
             if not draft:
