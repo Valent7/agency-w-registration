@@ -10,6 +10,30 @@ from __future__ import annotations
 import requests
 
 
+class InstagramAccessNotApproved(RuntimeError):
+    """Meta blocked issuing a long-lived Instagram token for this account.
+
+    The error is consistent with missing Instagram Tester role / Advanced Access
+    but is not conclusive proof of either. Never store a short-lived token as
+    if the owner were fully connected.
+    """
+
+
+def _unsupported_method_error(response: requests.Response, method: str) -> bool:
+    try:
+        obj = response.json()
+        error = obj.get("error") if isinstance(obj, dict) else None
+        return bool(
+            response.status_code == 400
+            and isinstance(error, dict)
+            and str(error.get("code")) == "100"
+            and "unsupported request" in str(error.get("message") or "").lower()
+            and f"method type: {method}" in str(error.get("message") or "").lower()
+        )
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _api_reason(response: requests.Response) -> str:
     try:
         obj = response.json()
@@ -71,6 +95,18 @@ def exchange_long_lived_ig_token(
             timeout=30,
         )
     if not response.ok:
+        # Both the documented GET and one form-POST fallback were rejected by
+        # Meta. This commonly happens for IG accounts without a tester role
+        # (or when the app lacks reviewed permissions); the exact platform
+        # policy must be confirmed in Meta, never guessed from HTTP 400 alone.
+        if _unsupported_method_error(response, "post"):
+            raise InstagramAccessNotApproved(
+                "Meta отклонила получение долгосрочного Instagram-токена. "
+                "Проверьте роль Instagram-тестировщика и принятие приглашения, "
+                "а для обычных партнёров — расширенный доступ и App Review "
+                "в настройках Agency W-IG. "
+                "Причина пока не подтверждена окончательно."
+            )
         raise RuntimeError("Instagram long-lived token: " + _api_reason(response))
 
     try:
