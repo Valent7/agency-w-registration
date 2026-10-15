@@ -838,6 +838,17 @@ async def instagram_connect(request: Request):
         )
 
 
+def _instagram_return_link(outcome: str) -> str:
+    """A safe link back to Agency W with a non-sensitive outcome indicator."""
+    base = (INSTAGRAM_AGENCY_RETURN_URL or "https://agency-w.streamlit.app/").strip()
+    separator = "&" if "?" in base else "?"
+    url = base + separator + urlencode({"instagram": outcome})
+    return (
+        '<p><a href="' + html_escape(url, quote=True) + '">'
+        '← Вернуться в Агентство W</a></p>'
+    )
+
+
 async def instagram_oauth_callback(request: Request):
     error = str(request.query_params.get("error") or "").strip()
     error_description = str(request.query_params.get("error_description") or "").strip()
@@ -845,7 +856,8 @@ async def instagram_oauth_callback(request: Request):
         return _page(
             "Agency W — Instagram",
             "<h1>Подключение Instagram отменено</h1>"
-            f"<p>{error_description or error}</p>",
+            f"<p>{html_escape(error_description or error)}</p>"
+            + _instagram_return_link("cancelled"),
         )
 
     try:
@@ -962,7 +974,8 @@ async def instagram_oauth_callback(request: Request):
             "партнёров без роли может потребоваться App Review "
             "и расширенный доступ.</p>"
             "<p>Не повторяйте авторизацию подряд. После изменения прав "
-            "начните новый вход из кабинета Агентства W.</p>",
+            "начните новый вход из кабинета Агентства W.</p>"
+            + _instagram_return_link("access_pending"),
         )
     except Exception as exc:
         # Errors can contain untrusted HTTP response strings; escape markup.
@@ -976,7 +989,8 @@ async def instagram_oauth_callback(request: Request):
             "<h1>Instagram не подключён</h1>"
             f"<p>{html_escape(str(exc))}</p>"
             "<p>Вернитесь в Агентство W. Если ошибка повторяется, "
-            "пришлите скриншот без секретных данных.</p>",
+            "пришлите скриншот без секретных данных.</p>"
+            + _instagram_return_link("error"),
         )
 
 
