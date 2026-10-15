@@ -6347,6 +6347,7 @@ def _render_connected_channel_card(title: str, caption: str, label: str):
 def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool:
     connection = _load_instagram_connection(int(owner_telegram_id))
     comments_state = str(st.query_params.get("comments") or "").strip()
+    instagram_result = str(st.query_params.get("instagram") or "").strip()
     if comments_state == "ready":
         st.success("✅ Instagram Direct и комментарии подключены.")
     elif comments_state == "subscription_warning":
@@ -6443,14 +6444,38 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
                 st.caption(f"Обновление разрешений пока недоступно: {exc}")
         return True
 
-    if str(st.query_params.get("instagram") or "").strip() == "connected":
-        st.info("Instagram авторизован. Обновите страницу, если статус ещё не стал зелёным.")
+    if instagram_result == "access_pending":
+        st.warning(
+            "Meta пока не разрешила завершить подключение этого Instagram-аккаунта. "
+            "Согласие в Instagram получено, но рабочий токен для Неоны не выдан. "
+            "Не нужно повторять подключение несколько раз подряд."
+        )
+        st.caption(
+            "Агентство W проверяет разрешения Meta для сторонних аккаунтов. "
+            "Пока доступен ограниченный тест; регистрация в Facebook "
+            "Developer обычному партнёру не требуется."
+        )
+    elif instagram_result == "error":
+        st.warning(
+            "Instagram пока не подключился. Попробуйте позже или "
+            "сообщите команде Агентства W текст ошибки."
+        )
+    elif instagram_result == "cancelled":
+        st.info("Подключение Instagram отменено. Данные аккаунта не изменены.")
+    elif instagram_result == "connected":
+        st.info(
+            "Разрешение Instagram получено. Проверяем сохранённое подключение; "
+            "обновите страницу, если статус ещё не стал зелёным."
+        )
 
     with st.container(border=True):
         st.markdown("**Instagram**")
         st.caption(
-            "Подключите профессиональный аккаунт один раз. После этого Неона сможет "
-            "работать с входящими сообщениями Direct и готовить ответы на комментарии."
+            "Подключайте профессиональный Instagram-аккаунт напрямую, "
+            "без Facebook Developer. После разрешения Meta Неона сможет "
+            "отвечать в Direct и готовить ответы на комментарии. "
+            "Для новых сторонних аккаунтов доступ пока может быть ограничен "
+            "до завершения проверки приложения Meta."
         )
         try:
             connect_url = _instagram_connect_url(owner_telegram_id, owner_name)
