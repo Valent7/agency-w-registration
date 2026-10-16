@@ -15,6 +15,7 @@ from typing import Any
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
+from agency_outro import append_agency_outro
 
 SPEAKER_LABELS = {"A": "Мужчина", "B": "Женщина"}
 SPEAKER_ALIASES = {
@@ -367,4 +368,5 @@ def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None) 
                 "Не удалось наложить оформление видеозвонка на MP4. "
                 + result.stderr.decode("utf-8", errors="ignore")[-600:]
             )
-        return out.read_bytes()
+        brand_logo = logo_path or (Path(__file__).resolve().parent / "assets" / "agency_w_icon.png")
+        return append_agency_outro(out.read_bytes(), logo_path=brand_logo, size=(720, 1280))
