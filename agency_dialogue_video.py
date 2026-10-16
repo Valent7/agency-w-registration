@@ -349,11 +349,11 @@ def list_heygen_catalog(api_key: str) -> dict:
         return {
             "ok": True,
             "avatars": [
-                {"id": str(a.get("avatar_id") or "").strip(), "name": str(a.get("avatar_name") or a.get("name") or "Персонаж")[:90], "gender": str(a.get("gender") or a.get("avatar_gender") or "").strip(), "default_voice_id": str(a.get("default_voice_id") or "").strip()}
+                {"id": str(a.get("avatar_id") or "").strip(), "name": str(a.get("avatar_name") or a.get("name") or "Персонаж")[:90], "gender": str(a.get("gender") or a.get("avatar_gender") or "").strip(), "default_voice_id": str(a.get("default_voice_id") or "").strip(), "is_private": a.get("is_public") is False or str(a.get("type") or "").lower() == "private"}
                 for a in avatars if isinstance(a, dict) and a.get("avatar_id")
             ],
             "voices": [
-                {"id": str(v.get("voice_id") or "").strip(), "name": str(v.get("name") or "Голос")[:90],
+                {"id": str(v.get("voice_id") or "").strip(), "name": str(v.get("name") or "Голос")[:90], "is_private": str(v.get("type") or "").lower() == "private",
                  "language": str(v.get("language") or v.get("language_code") or "")[:60],
                  "gender": str(v.get("gender") or "")[:32]}
                 for v in voices if isinstance(v, dict) and v.get("voice_id")
