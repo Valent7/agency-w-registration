@@ -1091,7 +1091,7 @@ def _render_vertical_frame(image_bytes, output_path, logo_path=None):
     frame.save(output_path, "JPEG", quality=94, optimize=True)
 
 
-def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta):
+def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta, title=''):
     """Собирает 1080x1920 MP4: сцены + голос + субтитры + знак W."""
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
@@ -1196,7 +1196,7 @@ def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta):
         final_bytes = final_path.read_bytes()
         if not final_bytes:
             raise RuntimeError("Готовый Reels получился пустым.")
-        return append_agency_outro(final_bytes, logo_path=logo_path, size=(1080, 1920))
+        return append_agency_outro(final_bytes, logo_path=logo_path, size=(1080, 1920), title=title)
 
 
 def _download_runway_videos(video_urls):
@@ -1210,7 +1210,7 @@ def _download_runway_videos(video_urls):
     return clips
 
 
-def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
+def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta, title=''):
     """Собирает живые сцены Runway, голос, субтитры, знак и доступную музыку."""
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
@@ -1361,7 +1361,7 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
         final_bytes = final_path.read_bytes()
         if not final_bytes:
             raise RuntimeError("Готовый живой Reels получился пустым.")
-        return append_agency_outro(final_bytes, logo_path=logo_path, size=(1080, 1920))
+        return append_agency_outro(final_bytes, logo_path=logo_path, size=(1080, 1920), title=title)
 
 
 def _json_from_answer(answer):
