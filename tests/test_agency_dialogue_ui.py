@@ -29,6 +29,13 @@ class DialogueFactoryRouteTests(unittest.TestCase):
         self.assertIn('_assemble_animated_reel(', CODE)
         self.assertIn('create_avatar_video_fn(item.get("script") or "")', CODE)
 
+    def test_partner_ui_does_not_require_ids(self):
+        self.assertIn("suggest_dialogue_cast(catalog, preferred=previous)", UI)
+        self.assertIn("🎭 Изменить героев или голоса (необязательно)", UI)
+        self.assertNotIn('st.text_input(\n                "Аватар HeyGen (ID)"', UI)
+        self.assertIn("st.selectbox(", UI)
+        self.assertIn("list_heygen_catalog(api_key)", UI)
+
     def test_approvals_separate_from_payment_and_publication(self):
         self.assertIn('if not approved:', UI)
         self.assertIn('review_fn(package, item, ask_ai_fn)', UI)
