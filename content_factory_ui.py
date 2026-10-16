@@ -2405,6 +2405,7 @@ def _render_legacy_item(
                                     narration_video,
                                     reel_state.get("spoken_text") or "",
                                     item.get("cta") or "",
+                                    title=item.get("title") or item.get("hook") or "",
                                 )
                                 reel_state["status"] = "ready"
                             st.success("✅ Готовый Reels собран.")
@@ -3131,6 +3132,7 @@ def _render_item(
                                 narration_video,
                                 reel_state.get("spoken_text") or "",
                                 item.get("cta") or "",
+                                title=item.get("title") or item.get("hook") or "",
                             )
                         reel_state["status"] = "ready"
                         reel_state.pop("error", None)
@@ -3230,6 +3232,7 @@ def _render_item(
                             narration_video,
                             reel_state.get("spoken_text") or "",
                             item.get("cta") or "",
+                            title=item.get("title") or item.get("hook") or "",
                         )
                         reel_state["status"] = "ready"
                         reel_state.pop("error", None)
