@@ -245,7 +245,7 @@ def voice_ready_text(text: str) -> str:
     """Keep visible brand W but pronounce it correctly in Russian audio."""
     import re
 
-    return re.sub(r"(?<!\\w)W(?!\\w)", "дабл-ю", str(text or ""))
+    return re.sub(r"(?<!\w)W(?!\w)", "дабл-ю", str(text or ""))
 
 
 def build_heygen_dialogue_payload(
