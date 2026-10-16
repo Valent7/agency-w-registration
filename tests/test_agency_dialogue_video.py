@@ -18,6 +18,7 @@ from agency_dialogue_video import (
     create_dialogue_video, dialogue_errors, dialogue_text, normalise_dialogue_turns,
     parse_dialogue_editor, validate_cast, list_heygen_catalog,
     suggest_dialogue_cast, suggest_partner_dialogue_cast, partner_dialogue_catalog,
+    duration_warning, estimate_dialogue_seconds,
 )
 
 TURNS = [
@@ -47,6 +48,43 @@ class DialogueVideoTests(unittest.TestCase):
     def test_cast_two_distinct_voices_and_actors(self):
         self.assertEqual(validate_cast(CAST), [])
         self.assertTrue(validate_cast({"A": CAST["A"], "B": CAST["A"]}))
+
+    def test_under_one_minute_and_both_orientation_options(self):
+        self.assertLess(estimate_dialogue_seconds(TURNS), 60)
+        landscape = build_heygen_dialogue_payload(
+            TURNS, CAST, is_test=True, aspect_ratio="16:9",
+        )
+        self.assertEqual(landscape["dimension"], {"width": 1280, "height": 720})
+        with self.assertRaises(ValueError):
+            build_heygen_dialogue_payload(
+                TURNS, CAST, aspect_ratio="1:1",
+            )
+        long_script = [
+            {"speaker": t["speaker"], "text": (t["text"] + " ") * 12}
+            for t in TURNS
+        ]
+        self.assertTrue(duration_warning(long_script))
+        with patch("agency_dialogue_video.requests.post") as post:
+            result = create_dialogue_video(
+                "key", long_script, CAST, aspect_ratio="16:9",
+            )
+            self.assertFalse(result["ok"])
+            post.assert_not_called()
+
+    def test_landscape_brand_cards_contain_real_logo(self):
+        with tempfile.TemporaryDirectory() as folder:
+            logo = Path(folder) / "crest.png"
+            Image.new("RGBA", (64, 64), (17, 234, 200, 255)).save(logo)
+            with self._mock_branded_template():
+                opening = Image.open(io.BytesIO(render_agency_intro(
+                    "Зачем мне Агентство W?", logo, size=(1280, 720),
+                )))
+                closing = Image.open(io.BytesIO(render_agency_outro(
+                    logo, size=(1280, 720),
+                )))
+            self.assertEqual(opening.size, (1280, 720))
+            self.assertEqual(closing.size, (1280, 720))
+            self.assertNotEqual(opening.tobytes(), closing.tobytes())
 
     def test_payload_single_job_with_four_alternating_scenes(self):
         request = build_heygen_dialogue_payload(TURNS, CAST, is_test=True)
