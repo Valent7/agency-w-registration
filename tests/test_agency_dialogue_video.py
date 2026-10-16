@@ -19,6 +19,7 @@ from agency_dialogue_video import (
     parse_dialogue_editor, validate_cast, list_heygen_catalog,
     suggest_dialogue_cast, suggest_partner_dialogue_cast, partner_dialogue_catalog,
     duration_warning, estimate_dialogue_seconds,
+    voice_ready_text,
 )
 
 TURNS = [
@@ -48,6 +49,17 @@ class DialogueVideoTests(unittest.TestCase):
     def test_cast_two_distinct_voices_and_actors(self):
         self.assertEqual(validate_cast(CAST), [])
         self.assertTrue(validate_cast({"A": CAST["A"], "B": CAST["A"]}))
+
+    def test_brand_name_is_said_dabbl_u_but_script_still_says_w(self):
+        source = "Зачем мне Агентство W? Я работаю в Агентстве W."
+        self.assertIn("Агентство дабл-ю", voice_ready_text(source))
+        self.assertIn("Агентстве дабл-ю", voice_ready_text(source))
+        self.assertIn("Агентство W", source)
+        edited = [{"speaker": x["speaker"], "text": x["text"]} for x in TURNS]
+        edited[0]["text"] = "Зачем мне Агентство W?"
+        payload = build_heygen_dialogue_payload(edited, CAST)
+        self.assertIn("дабл-ю", payload["video_inputs"][0]["voice"]["input_text"])
+        self.assertEqual(edited[0]["text"], "Зачем мне Агентство W?")
 
     def test_under_one_minute_and_both_orientation_options(self):
         self.assertLess(estimate_dialogue_seconds(TURNS), 60)
@@ -319,6 +331,32 @@ class DialogueVideoTests(unittest.TestCase):
             )
             self.assertIn("audio", media.stdout)
             self.assertIn("video", media.stdout)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg unavailable")
+    def test_landscape_mp4_from_existing_audio(self):
+        with tempfile.TemporaryDirectory() as folder:
+            raw = Path(folder) / "source.mp4"
+            subprocess.run([
+                shutil.which("ffmpeg"), "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=12:d=0.65",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.65",
+                "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", str(raw)
+            ], check=True, timeout=30)
+            with self._mock_branded_template():
+                output = assemble_dialogue_mp4(
+                    raw.read_bytes(), title="Как найти партнёра?",
+                    aspect_ratio="16:9",
+                )
+            dest = Path(folder) / "out.mp4"
+            dest.write_bytes(output)
+            probe = subprocess.run([
+                shutil.which("ffprobe"), "-v", "error",
+                "-show_entries", "stream=codec_type,width,height",
+                "-of", "csv=p=0", str(dest),
+            ], capture_output=True, text=True, check=True, timeout=10)
+            self.assertIn("1280,720", probe.stdout)
+            self.assertIn("audio", probe.stdout)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg unavailable")
     def test_export_preserves_audio_and_expected_aspect_ratio(self):
