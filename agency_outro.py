@@ -152,7 +152,9 @@ def render_agency_intro(
     total = sum(heights) + max(0, len(lines) - 1) * gap
     if total > px(300):
         raise ValueError("Слишком длинное название — сократите заголовок.")
-    top = px(708) - total / 2
+    # Optical center of the calm gap between the original crest and lower waves.
+    # Keep the title centered as its wording and line count change per film.
+    top = px(625) - total / 2
     for index, line in enumerate(lines):
         bounds = draw.textbbox((0, 0), line, font=font)
         line_width = bounds[2] - bounds[0]
