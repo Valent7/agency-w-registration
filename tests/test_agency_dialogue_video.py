@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PIL import Image
-from agency_outro import OUTRO_SECONDS, render_agency_outro, append_agency_outro
+from agency_outro import INTRO_SECONDS, OUTRO_SECONDS, render_agency_intro, render_agency_outro, append_agency_outro
 
 from agency_dialogue_video import (
     _call_overlay, assemble_dialogue_mp4, build_heygen_dialogue_payload,
@@ -184,7 +184,11 @@ class DialogueVideoTests(unittest.TestCase):
             self.assertEqual(frame.size, (720, 1280))
             # Exact arbitrary color from the supplied logo is present at its center.
             self.assertEqual(frame.convert("RGB").getpixel((360, 257)), (17, 234, 200))
-            self.assertEqual(OUTRO_SECONDS, 3.0)
+            self.assertEqual(OUTRO_SECONDS, 2.0)
+            self.assertEqual(INTRO_SECONDS, 2.0)
+            opener = Image.open(io.BytesIO(render_agency_intro('Зачем мне Агентство W?', logo)))
+            self.assertEqual(opener.size, (720, 1280))
+            self.assertEqual(opener.convert('RGB').getpixel((360, 257)), (17, 234, 200))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg unavailable")
     def test_brand_is_after_complete_video_and_preserves_audio(self):
@@ -205,7 +209,7 @@ class DialogueVideoTests(unittest.TestCase):
             )
             branded = folder / "branded.mp4"
             branded.write_bytes(append_agency_outro(
-                source.read_bytes(), logo_path=logo, size=(720, 1280)
+                source.read_bytes(), logo_path=logo, size=(720, 1280), title='Где искать партнёров?'
             ))
             def duration(path):
                 result = subprocess.run(
@@ -215,7 +219,7 @@ class DialogueVideoTests(unittest.TestCase):
                     capture_output=True, text=True, check=True, timeout=10,
                 )
                 return float(result.stdout.strip())
-            self.assertAlmostEqual(duration(branded) - duration(source), 3.0, delta=0.25)
+            self.assertAlmostEqual(duration(branded) - duration(source), 4.0, delta=0.25)
             media = subprocess.run(
                 [shutil.which("ffprobe"), "-v", "error",
                  "-show_entries", "stream=codec_type",
