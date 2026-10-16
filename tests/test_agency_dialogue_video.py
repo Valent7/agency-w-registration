@@ -16,6 +16,7 @@ from agency_dialogue_video import (
     _call_overlay, assemble_dialogue_mp4, build_heygen_dialogue_payload,
     create_dialogue_video, dialogue_errors, dialogue_text, normalise_dialogue_turns,
     parse_dialogue_editor, validate_cast, list_heygen_catalog,
+    suggest_dialogue_cast,
 )
 
 TURNS = [
@@ -117,6 +118,54 @@ class DialogueVideoTests(unittest.TestCase):
         self.assertEqual(len(result["avatars"]), 2)
         self.assertEqual(get.call_count, 2)
         post.assert_not_called()
+
+    def test_automatic_cast_selects_two_russian_gender_matched_voices(self):
+        catalog = {
+            "avatars": [
+                {"id": "female_person", "name": "Анна", "gender": "female"},
+                {"id": "male_person", "name": "Андрей", "gender": "male"},
+                {"id": "unknown", "name": "Кто-то", "gender": ""},
+            ],
+            "voices": [
+                {"id": "female_ru", "name": "Русская женщина", "gender": "female", "language": "Russian"},
+                {"id": "male_en", "name": "English male", "gender": "male", "language": "English"},
+                {"id": "male_ru", "name": "Русский мужчина", "gender": "male", "language": "ru-RU"},
+            ],
+        }
+        cast = suggest_dialogue_cast(catalog)
+        self.assertEqual(
+            cast, {"A": {"avatar_id": "male_person", "voice_id": "male_ru"},
+                   "B": {"avatar_id": "female_person", "voice_id": "female_ru"}}
+        )
+        self.assertEqual(validate_cast(cast), [])
+
+    def test_autocast_refuses_to_guess_gender_or_language(self):
+        catalog = {
+            "avatars": [{"id": "mystery", "name": "Model", "gender": ""}],
+            "voices": [{"id": "english", "name": "English", "gender": "male", "language": "English"}],
+        }
+        cast = suggest_dialogue_cast(catalog)
+        self.assertTrue(validate_cast(cast))
+        self.assertFalse(cast["A"]["avatar_id"])
+        self.assertFalse(cast["B"]["voice_id"])
+
+    def test_automatic_cast_respects_saved_valid_characters(self):
+        catalog = {
+            "avatars": [
+                {"id": "m1", "name": "Первый", "gender": "male"},
+                {"id": "m2", "name": "Второй", "gender": "male"},
+                {"id": "f1", "name": "Первая", "gender": "female"},
+            ],
+            "voices": [
+                {"id": "mv", "name": "Рус", "gender": "male", "language": "Russian"},
+                {"id": "fv", "name": "Рус", "gender": "female", "language": "Russian"},
+            ],
+        }
+        cast = suggest_dialogue_cast(
+            catalog, {"A": {"avatar_id": "m2", "voice_id": "mv"}}
+        )
+        self.assertEqual(cast["A"]["avatar_id"], "m2")
+        self.assertEqual(cast["B"]["voice_id"], "fv")
 
     def test_call_overlay_is_png(self):
         img = Image.open(io.BytesIO(_call_overlay()))
