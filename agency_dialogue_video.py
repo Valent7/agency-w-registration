@@ -241,6 +241,13 @@ def duration_warning(turns: list[dict], max_seconds: int = 60) -> str:
     )
 
 
+def voice_ready_text(text: str) -> str:
+    """Keep visible brand W but pronounce it correctly in Russian audio."""
+    import re
+
+    return re.sub(r"(?<!\\w)W(?!\\w)", "дабл-ю", str(text or ""))
+
+
 def build_heygen_dialogue_payload(
     turns: list[dict[str, str]],
     cast: dict,
@@ -269,7 +276,7 @@ def build_heygen_dialogue_payload(
             },
             "voice": {
                 "type": "text",
-                "input_text": turn["text"],
+                "input_text": voice_ready_text(turn["text"]),
                 "voice_id": str(actor["voice_id"]).strip(),
                 "speed": 1.0,
             },
