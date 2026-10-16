@@ -183,7 +183,7 @@ class DialogueVideoTests(unittest.TestCase):
             frame = Image.open(io.BytesIO(render_agency_outro(logo)))
             self.assertEqual(frame.size, (720, 1280))
             # Exact arbitrary color from the supplied logo is present at its center.
-            self.assertEqual(frame.convert("RGB").getpixel((360, 460)), (17, 234, 200))
+            self.assertEqual(frame.convert("RGB").getpixel((360, 257)), (17, 234, 200))
             self.assertEqual(OUTRO_SECONDS, 3.0)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg unavailable")
