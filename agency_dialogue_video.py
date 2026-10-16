@@ -116,6 +116,69 @@ def validate_cast(cast: dict) -> list[str]:
     return errors
 
 
+def _gender(value: Any) -> str:
+    """Accept both HeyGen avatar and voice gender spellings."""
+    value = str(value or "").strip().lower()
+    if value in ("male", "man", "мужчина"):
+        return "male"
+    if value in ("female", "woman", "женщина"):
+        return "female"
+    return ""
+
+
+def _russian_voice(item: dict) -> bool:
+    """Never silently assign an English-only voice to Russian dialogue."""
+    language = str(item.get("language") or "").strip().lower().replace("_", "-")
+    return (
+        language in ("ru", "ru-ru", "russian", "русский", "русская")
+        or language.startswith(("ru-", "russian "))
+        or "русск" in language
+    )
+
+
+def suggest_dialogue_cast(catalog: dict, preferred: dict | None = None) -> dict:
+    """Read-only, deterministic first-choice cast: Russian male + Russian female.
+
+    Do not guess a gender when HeyGen omits it. In that situation the caller
+    displays a friendly configuration error rather than starting a paid job.
+    """
+    preferred = preferred or {}
+    result: dict[str, dict[str, str]] = {}
+    avatars = catalog.get("avatars") or []
+    voices = catalog.get("voices") or []
+    for speaker, wanted in (("A", "male"), ("B", "female")):
+        a_options = sorted(
+            (a for a in avatars if _gender(a.get("gender")) == wanted and a.get("id")),
+            key=lambda a: (str(a.get("name") or "").casefold(), str(a["id"])),
+        )
+        v_options = sorted(
+            (v for v in voices if _gender(v.get("gender")) == wanted
+             and _russian_voice(v) and v.get("id")),
+            key=lambda v: (str(v.get("name") or "").casefold(), str(v["id"])),
+        )
+        previous = preferred.get(speaker) or {}
+        avatar = next(
+            (a for a in a_options if a["id"] == previous.get("avatar_id")),
+            a_options[0] if a_options else None,
+        )
+        voice = next(
+            (v for v in v_options if v["id"] == previous.get("voice_id")),
+            None,
+        )
+        if voice is None and avatar:
+            voice = next(
+                (v for v in v_options if v["id"] == avatar.get("default_voice_id")),
+                None,
+            )
+        if voice is None:
+            voice = v_options[0] if v_options else None
+        result[speaker] = {
+            "avatar_id": avatar["id"] if avatar else "",
+            "voice_id": voice["id"] if voice else "",
+        }
+    return result
+
+
 def build_heygen_dialogue_payload(
     turns: list[dict[str, str]],
     cast: dict,
@@ -218,7 +281,7 @@ def list_heygen_catalog(api_key: str) -> dict:
         return {
             "ok": True,
             "avatars": [
-                {"id": str(a.get("avatar_id") or "").strip(), "name": str(a.get("avatar_name") or a.get("name") or "Персонаж")[:90]}
+                {"id": str(a.get("avatar_id") or "").strip(), "name": str(a.get("avatar_name") or a.get("name") or "Персонаж")[:90], "gender": str(a.get("gender") or a.get("avatar_gender") or "").strip(), "default_voice_id": str(a.get("default_voice_id") or "").strip()}
                 for a in avatars if isinstance(a, dict) and a.get("avatar_id")
             ],
             "voices": [

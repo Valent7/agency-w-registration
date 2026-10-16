@@ -14,6 +14,7 @@ from agency_dialogue_video import (
     dialogue_errors,
     dialogue_text,
     list_heygen_catalog,
+    suggest_dialogue_cast,
     parse_dialogue_editor,
     validate_cast,
 )
@@ -50,92 +51,125 @@ def _cast_defaults(item: dict) -> dict:
 
 
 def _cast_controls(prefix: str, item: dict) -> dict:
-    st.markdown("#### Два персонажа и два голоса")
+    """Ordinary users never need to copy HeyGen avatar/voice IDs."""
+    st.markdown("#### 🎭 Герои и голоса")
     st.caption(
-        "Женщина может использовать готовый аватар и голос Неоны. "
-        "Для мужчины выберите другого аватара с мужским голосом. "
-        "Сценарий не отправляется в HeyGen до вашего нажатия «Создать»."
+        "Агентство само подбирает мужчину, женщину и два русскоязычных голоса. "
+        "Выбор героев не запускает видео и не расходует средства."
     )
-    defaults = _cast_defaults(item)
-    for speaker in ("A", "B"):
-        for field in ("avatar_id", "voice_id"):
-            key = f"{prefix}_{speaker}_{field}"
-            if key not in st.session_state:
-                st.session_state[key] = defaults[speaker][field]
-
+    previous = _cast_defaults(item)
     api_key = _secret("HEYGEN_API_KEY", "HEYGEN_KEY")
+    if not api_key:
+        st.error(
+            "Создание видео пока не подключено администратором Агентства. "
+            "Не требуется регистрироваться в HeyGen самостоятельно."
+        )
+        return {"A": {"avatar_id": "", "voice_id": ""},
+                "B": {"avatar_id": "", "voice_id": ""}}
+
     catalog_key = f"{prefix}_catalog"
-    if st.button("🔎 Загрузить аватары и голоса из HeyGen", key=f"{prefix}_load_catalog"):
-        with st.spinner("Запрашиваем каталог HeyGen. Видео не создаётся..."):
+    if catalog_key not in st.session_state:
+        with st.spinner("Подбираем героев и голоса из HeyGen без оплаты..."):
             st.session_state[catalog_key] = list_heygen_catalog(api_key)
-        st.rerun()
+    catalog = st.session_state[catalog_key]
+    if not isinstance(catalog, dict) or not catalog.get("ok"):
+        st.warning(
+            "Пока не получилось загрузить персонажей и голоса. "
+            "Администратор может проверить подключение HeyGen, "
+            "а участникам не нужно искать технические ID."
+        )
+        if isinstance(catalog, dict) and catalog.get("error"):
+            st.caption(str(catalog["error"]))
+        if st.button("🔄 Обновить каталог HeyGen", key=f"{prefix}_retry_catalog"):
+            st.session_state.pop(catalog_key, None)
+            st.rerun()
+        return {"A": {"avatar_id": "", "voice_id": ""},
+                "B": {"avatar_id": "", "voice_id": ""}}
 
-    catalog = st.session_state.get(catalog_key)
-    if isinstance(catalog, dict) and not catalog.get("ok"):
-        st.warning(str(catalog.get("error") or "Каталог пока недоступен."))
-    elif isinstance(catalog, dict):
-        avatars = catalog.get("avatars") or []
-        voices = catalog.get("voices") or []
-        if avatars and voices:
-            with st.expander("🎭 Выбрать персонажей и голоса из каталога", expanded=True):
-                st.caption(
-                    "Для русскоязычного ролика выбирайте русскоязычные голоса. "
-                    "Два разных аватара и два разных голоса обязательны."
-                )
-                avatar_labels = {
-                    a["id"]: (a["name"] + " · " + a["id"]) for a in avatars
-                }
-                voice_labels = {
-                    v["id"]: (
-                        v["name"] + " · " + v["language"] + " · " + v["gender"]
-                    ) for v in voices
-                }
-                avatar_ids = [""] + list(avatar_labels)
-                voice_ids = [""] + list(voice_labels)
-                a1, a2 = st.columns(2)
-                for speaker, col in (("A", a1), ("B", a2)):
-                    with col:
-                        st.selectbox(
-                            f"Персонаж: {SPEAKER_LABELS[speaker]}",
-                            options=avatar_ids,
-                            format_func=lambda v: avatar_labels.get(v, "Не менять"),
-                            key=f"{prefix}_catalog_{speaker}_avatar",
-                        )
-                        st.selectbox(
-                            f"Голос: {SPEAKER_LABELS[speaker]}",
-                            options=voice_ids,
-                            format_func=lambda v: voice_labels.get(v, "Не менять"),
-                            key=f"{prefix}_catalog_{speaker}_voice",
-                        )
-                if st.button("✅ Применить выбранные аватары и голоса", key=f"{prefix}_catalog_apply"):
-                    for speaker in ("A", "B"):
-                        for field, suffix in (("avatar_id", "avatar"), ("voice_id", "voice")):
-                            chosen = st.session_state.get(
-                                f"{prefix}_catalog_{speaker}_{suffix}", ""
-                            )
-                            if chosen:
-                                st.session_state[f"{prefix}_{speaker}_{field}"] = chosen
-                    st.rerun()
-        else:
-            st.info("Каталог пуст. ID персонажей и голосов можно указать вручную.")
+    avatars = catalog.get("avatars") or []
+    voices = catalog.get("voices") or []
+    suggested = suggest_dialogue_cast(catalog, preferred=previous)
+    cast = {"A": {}, "B": {}}
+    labels = {}
+    choices = {}
+    for speaker, gender in (("A", "male"), ("B", "female")):
+        for field in ("avatar_id", "voice_id"):
+            if field == "avatar_id":
+                entries = [a for a in avatars if str(a.get("gender") or "").lower() == gender]
+            else:
+                entries = [
+                    v for v in voices
+                    if str(v.get("gender") or "").lower() == gender
+                    and (
+                        str(v.get("language") or "").lower().strip().replace("_", "-")
+                        in ("ru", "ru-ru", "russian", "русский", "русская")
+                        or str(v.get("language") or "").lower().startswith(("ru-", "russian "))
+                        or "русск" in str(v.get("language") or "").lower()
+                    )
+                ]
+            entries = sorted(
+                [e for e in entries if e.get("id")],
+                key=lambda e: (str(e.get("name") or "").casefold(), str(e["id"])),
+            )
+            field_key = f"{prefix}_{speaker}_{field}"
+            valid_ids = [e["id"] for e in entries]
+            best = suggested[speaker][field]
+            # Streamlit persists deliberate user choices across reruns.
+            if field_key not in st.session_state or st.session_state[field_key] not in valid_ids:
+                st.session_state[field_key] = best if best in valid_ids else ""
+            cast[speaker][field] = st.session_state[field_key]
+            choices[(speaker, field)] = [""] + valid_ids
+            labels[(speaker, field)] = {
+                e["id"]: str(e.get("name") or "Без названия") for e in entries
+            }
 
-    left, right = st.columns(2)
-    cast = {}
-    for speaker, column in (("A", left), ("B", right)):
-        with column:
-            st.markdown(f"**{SPEAKER_LABELS[speaker]}**")
-            avatar_id = st.text_input(
-                "Аватар HeyGen (ID)",
-                key=f"{prefix}_{speaker}_avatar_id",
-                help="Можно выбрать из каталога HeyGen выше.",
-            )
-            voice_id = st.text_input(
-                "Голос HeyGen (ID)",
-                key=f"{prefix}_{speaker}_voice_id",
-                help="Для русского текста выберите голос, поддерживающий русский язык.",
-            )
-            cast[speaker] = {"avatar_id": avatar_id.strip(), "voice_id": voice_id.strip()}
-    return cast
+    if not validate_cast(cast):
+        st.success(
+            "✅ Мужчина: " + labels[("A", "avatar_id")].get(cast["A"]["avatar_id"], "готов")
+            + " · голос: " + labels[("A", "voice_id")].get(cast["A"]["voice_id"], "готов")
+            + "\n\n✅ Женщина: " + labels[("B", "avatar_id")].get(cast["B"]["avatar_id"], "готов")
+            + " · голос: " + labels[("B", "voice_id")].get(cast["B"]["voice_id"], "готов")
+        )
+    else:
+        st.warning(
+            "HeyGen пока не предоставил полную пару мужского и женского "
+            "персонажей с русскими голосами. Видео не будет запущено "
+            "с неподходящим голосом."
+        )
+    with st.expander("🎭 Изменить героев или голоса (необязательно)"):
+        # Reset before widgets are instantiated in this render, otherwise
+        # Streamlit raises when assigning to an already-rendered widget key.
+        if st.button("🔄 Подобрать автоматически", key=f"{prefix}_pick_auto"):
+            for speaker in ("A", "B"):
+                for field in ("avatar_id", "voice_id"):
+                    st.session_state[f"{prefix}_{speaker}_{field}"] = suggested[speaker][field]
+            st.rerun()
+        left, right = st.columns(2)
+        for speaker, col in (("A", left), ("B", right)):
+            with col:
+                st.markdown(f"**{SPEAKER_LABELS[speaker]}**")
+                for field, title in (("avatar_id", "Персонаж"), ("voice_id", "Русский голос")):
+                    field_key = f"{prefix}_{speaker}_{field}"
+                    options = choices[(speaker, field)]
+                    mapping = labels[(speaker, field)]
+                    st.selectbox(
+                        title,
+                        options=options,
+                        key=field_key,
+                        format_func=lambda value, m=mapping: m.get(value, "Выберите из списка"),
+                    )
+        st.caption(
+            "Технические ID скрыты. Если каталог не предлагает подходящего героя "
+            "или голос, обратитесь к администратору Агентства."
+        )
+    # The select boxes may have changed; re-read their current state.
+    return {
+        speaker: {
+            field: str(st.session_state.get(f"{prefix}_{speaker}_{field}") or "").strip()
+            for field in ("avatar_id", "voice_id")
+        }
+        for speaker in ("A", "B")
+    }
 
 
 def render_dialogue_item(
