@@ -13,6 +13,8 @@ from agency_dialogue_video import (
     create_dialogue_video,
     dialogue_errors,
     dialogue_text,
+    duration_warning,
+    estimate_dialogue_seconds,
     list_heygen_catalog,
     suggest_partner_dialogue_cast,
     partner_dialogue_catalog,
@@ -216,6 +218,36 @@ def _cast_controls(prefix: str, item: dict) -> dict:
     return cast
 
 
+def _rewrite_dialogue(item: dict, ask_ai_fn) -> list[dict[str, str]]:
+    """New text only: no paid images, video or external casting."""
+    from content_factory_ui import _json_from_answer
+
+    old = dialogue_text(item.get("dialogue") or [])
+    prompt = (
+        "Перепиши сценарий ИИ-диалога Агентства W понятным живым языком. "
+        "Сохрани тему, главную мысль и призыв. Герои говорят попеременно: "
+        "A — собеседник, B — представитель Агентства. Если B рассказывает "
+        "о своей работе, используй 'Я помогаю', не третье лицо. "
+        "Не придумывай доходность и гарантии. "
+        "Всего 60–105 русских слов, длительность речи до 56 секунд. "
+        "Верни только JSON вида "
+        "{\\\"dialogue\\\":[{\\\"speaker\\\":\\\"A\\\",\\\"text\\\":\\\"...\\\"},"
+        "{\\\"speaker\\\":\\\"B\\\",\\\"text\\\":\\\"...\\\"}]}. "
+        "Текущий текст: " + old
+    )
+    response = ask_ai_fn("Ты режиссёр коротких человеческих диалогов для Агентства W.", prompt)
+    data = _json_from_answer(response)
+    from agency_dialogue_video import normalise_dialogue_turns
+    turns = normalise_dialogue_turns(data.get("dialogue") or [])
+    errors = dialogue_errors(turns)
+    note = duration_warning(turns)
+    if note:
+        errors.append(note)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return turns
+
+
 def render_dialogue_item(
     package: dict,
     item: dict,
@@ -257,14 +289,46 @@ def render_dialogue_item(
             "Одно действие для зрителя",
             value=item.get("cta") or "", key=f"{prefix}_cta_r{revision}",
         )
+        item["aspect_ratio"] = st.radio(
+            "### 3. Размер видео",
+            options=["9:16", "16:9"],
+            format_func=lambda r: "9:16 — вертикальный Reels" if r == "9:16" else "16:9 — горизонтальный",
+            index=0 if item.get("aspect_ratio", "9:16") == "9:16" else 1,
+            horizontal=True, key=f"{prefix}_ratio_r{revision}",
+        )
+        try:
+            draft_turns = parse_dialogue_editor(text)
+            expected = estimate_dialogue_seconds(draft_turns)
+            st.caption(f"⏱ Ориентировочная длительность со заставками: {expected:.0f} из 60 секунд")
+            note = duration_warning(draft_turns)
+            if note:
+                st.warning(note)
+        except ValueError:
+            pass
+
+        edit_col, rewrite_col = st.columns(2)
+        edit_col.caption("✏️ Редактируйте слова прямо в поле выше.")
+        if rewrite_col.button("🔄 Переписать сценарий", key=f"{prefix}_rewrite_r{revision}", use_container_width=True):
+            try:
+                with st.spinner("Переписываем сценарий без платной генерации видео..."):
+                    item["dialogue"] = _rewrite_dialogue(item, ask_ai_fn)
+                item["status"] = "draft"
+                item["revision"] = revision + 1
+                save_package_fn(package)
+                st.rerun()
+            except (ValueError, TypeError) as exc:
+                st.error("Не удалось переписать: " + str(exc))
         if st.button(
-            "✅ Стагирит: проверить диалог и утвердить",
+            "✅ Утвердить сценарий",
             key=f"{prefix}_approve_r{revision}", type="primary",
             use_container_width=True,
         ):
             try:
                 turns = parse_dialogue_editor(text)
                 validation = dialogue_errors(turns)
+                timing = duration_warning(turns)
+                if timing:
+                    validation.append(timing)
                 if not item["title"].strip():
                     validation.append("Добавьте название ролика.")
                 if not item["cta"].strip():
@@ -279,6 +343,11 @@ def render_dialogue_item(
                 # but paid video generation remains gated by human approval.
                 with st.spinner("Стагирит проверяет реплики и смысл..."):
                     reviewed = review_fn(package, item, ask_ai_fn)
+                timing = duration_warning(reviewed.get("dialogue") or [])
+                if timing:
+                    st.warning(timing)
+                    return
+                reviewed["aspect_ratio"] = item.get("aspect_ratio") or "9:16"
                 item.clear()
                 item.update(reviewed)
                 package["status"] = "approved"
@@ -299,8 +368,8 @@ def render_dialogue_item(
             st.caption("Подпись к Reels: " + str(item["caption"]))
         st.caption("Действие зрителя: " + str(item.get("cta") or ""))
 
-    edit, export = st.columns(2)
-    if edit.button("✏️ Редактировать диалог", key=f"{prefix}_edit", use_container_width=True):
+    edit, rewrite, export = st.columns(3)
+    if edit.button("✏️ Редактировать", key=f"{prefix}_edit", use_container_width=True):
         item["status"] = "draft"
         item["revision"] = revision + 1
         item.pop("dialogue_video_id", None)
@@ -309,6 +378,20 @@ def render_dialogue_item(
         save_package_fn(package)
         st.session_state.pop(f"{prefix}_video", None)
         st.rerun()
+    if rewrite.button("🔄 Переписать", key=f"{prefix}_rewrite_approved", use_container_width=True):
+        try:
+            with st.spinner("Создаём новую версию сценария..."):
+                item["dialogue"] = _rewrite_dialogue(item, ask_ai_fn)
+            item["status"] = "draft"
+            item["revision"] = revision + 1
+            package["status"] = "draft"
+            item.pop("dialogue_video_id", None)
+            item.pop("dialogue_video_test", None)
+            save_package_fn(package)
+            st.session_state.pop(f"{prefix}_video", None)
+            st.rerun()
+        except (ValueError, TypeError) as exc:
+            st.error("Не получилось переписать: " + str(exc))
     export.download_button(
         "⬇️ Скачать сценарий",
         data=(text_export_fn(item) + "\n").encode("utf-8"),
@@ -316,6 +399,11 @@ def render_dialogue_item(
         key=f"{prefix}_script_file", use_container_width=True,
     )
 
+    aspect_ratio = item.get("aspect_ratio") or "9:16"
+    st.markdown("### 3. Размер видео")
+    st.info("📐 " + ("Вертикальный 9:16 (Reels)" if aspect_ratio == "9:16" else "Горизонтальный 16:9"))
+    st.caption(f"⏱ Примерная длительность: {estimate_dialogue_seconds(item.get('dialogue') or []):.0f} секунд, максимум 60.")
+    st.markdown("### 5. Утверждено — можно создать видео")
     st.markdown("### 🎬 Производство ИИ-диалога")
     st.caption(
         "HeyGen создаёт чередующиеся кадры с двумя говорящими аватарами. "
@@ -355,6 +443,9 @@ def render_dialogue_item(
             use_container_width=True,
         ):
             errors = dialogue_errors(item.get("dialogue")) + validate_cast(cast)
+            timing = duration_warning(item.get("dialogue") or [])
+            if timing:
+                errors.append(timing)
             if errors:
                 st.error("Проверьте настройки:\n- " + "\n- ".join(errors))
                 return
@@ -362,7 +453,7 @@ def render_dialogue_item(
             with st.spinner("HeyGen создаёт диалог двух героев..."):
                 result = create_dialogue_video(
                     api_key, item["dialogue"], cast,
-                    is_test=test_mode, title=item.get("title") or "Агентство W: диалог",
+                    is_test=test_mode, title=item.get("title") or "Агентство W: диалог", aspect_ratio=aspect_ratio,
                 )
             if not result.get("ok"):
                 st.error(str(result.get("error") or "HeyGen не запустил видео."))
@@ -372,6 +463,7 @@ def render_dialogue_item(
             item["dialogue_video_id"] = result["video_id"]
             item["dialogue_video_test"] = bool(test_mode)
             item["dialogue_cast"] = cast
+            item["aspect_ratio"] = aspect_ratio
             save_package_fn(package)
             st.rerun()
         return
@@ -397,7 +489,7 @@ def render_dialogue_item(
                         state["original_mp4"] = raw
                         logo = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
                         try:
-                            state["final_mp4"] = assemble_dialogue_mp4(raw, logo_path=logo, title=item.get('title') or '')
+                            state["final_mp4"] = assemble_dialogue_mp4(raw, logo_path=logo, title=item.get('title') or '', aspect_ratio=aspect_ratio)
                             state.pop("overlay_error", None)
                         except (OSError, RuntimeError, ValueError) as exc:
                             # Never make a successfully generated, paid video inaccessible.
@@ -430,7 +522,7 @@ def render_dialogue_item(
                 with st.spinner("Убираем светлые поля, сохраняем озвучку и заставки..."):
                     state["final_mp4"] = assemble_dialogue_mp4(
                         state["original_mp4"], logo_path=logo,
-                        title=item.get("title") or "", remove_pale_bars=True,
+                        title=item.get("title") or "", remove_pale_bars=True, aspect_ratio=aspect_ratio,
                     )
                 state.pop("overlay_error", None)
                 st.session_state[state_key] = state
