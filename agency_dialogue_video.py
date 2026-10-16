@@ -228,7 +228,7 @@ def estimate_dialogue_seconds(turns: list[dict]) -> float:
     """Estimate speech and allow four seconds for opening/closing cards."""
     import re
 
-    words = sum(len(re.findall(r"[\\wЁёА-Яа-я-]+", str(t.get("text") or ""))) for t in turns)
+    words = sum(len(re.findall(r"[\wЁёА-Яа-я-]+", str(t.get("text") or ""))) for t in turns)
     return 4.0 + words / 2.1
 
 
