@@ -180,6 +180,50 @@ def suggest_dialogue_cast(catalog: dict, preferred: dict | None = None) -> dict:
     return result
 
 
+AGENCY_CHARACTERS = (
+    "theo", "тео", "стагирит", "stagirit", "неона", "neona",
+    "неония", "neonia", "neoniya", "неола", "neola", "neoni",
+)
+PRESENTING_AGENT_NAMES = ("неона", "neona", "неония", "neonia", "neoniya", "neoni")
+
+
+def _is_agency_character(avatar: dict) -> bool:
+    """Reject staff AI characters from the potential partner's part."""
+    name = str(avatar.get("name") or "").strip().casefold()
+    return any(marker in name for marker in AGENCY_CHARACTERS)
+
+
+def _is_presenting_agent(avatar: dict) -> bool:
+    name = str(avatar.get("name") or "").strip().casefold()
+    return any(marker in name for marker in PRESENTING_AGENT_NAMES)
+
+
+def partner_dialogue_catalog(catalog: dict) -> dict:
+    """The viewer stands in for an ordinary person, not another W agent."""
+    avatars = catalog.get("avatars") or []
+    return {
+        "avatars": [
+            a for a in avatars
+            if (
+                (_gender(a.get("gender")) == "male" and not _is_agency_character(a))
+                or (_gender(a.get("gender")) == "female" and _is_presenting_agent(a))
+            )
+        ],
+        "voices": catalog.get("voices") or [],
+    }
+
+
+def suggest_partner_dialogue_cast(catalog: dict, preferred: dict | None = None) -> dict:
+    """Natural-looking man asks questions; Neona/Neonia answers.
+
+    A photorealistic HeyGen avatar is still a synthetic performer.
+    For an actual human recording, ingest user-supplied footage separately.
+    When the catalogue lacks a correct pair, return blanks, never silently
+    use Theo, Stagirit or another AI employee as the potential partner.
+    """
+    return suggest_dialogue_cast(partner_dialogue_catalog(catalog), preferred=preferred)
+
+
 def build_heygen_dialogue_payload(
     turns: list[dict[str, str]],
     cast: dict,
@@ -208,7 +252,7 @@ def build_heygen_dialogue_payload(
             },
             "background": {
                 "type": "color",
-                "value": "#142839" if speaker == "A" else "#E9E1D6",
+                "value": "#142839",  # no light/white letterbox backdrop
             },
         })
     return {
@@ -332,7 +376,7 @@ def _call_overlay(logo_path: Path | None = None) -> bytes:
     return output.getvalue()
 
 
-def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, title: str = '') -> bytes:
+def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, title: str = '', remove_pale_bars: bool = False) -> bytes:
     """Draw video-call chrome on existing spoken HeyGen video, preserving its audio.
 
     Avoid duration trimming so the final syllable is not cut off.
@@ -349,11 +393,23 @@ def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, 
         out = tmp / "agency_w_dialogue.mp4"
         raw.write_bytes(video_bytes)
         overlay.write_bytes(_call_overlay(logo_path))
+        # An optional repair for previously generated HeyGen videos whose
+        # speaking photos have pale padding *inside* the 9:16 canvas.
+        # Crop only on explicit request; a blanket crop would cut heads off
+        # perfectly composed video and could damage scenes without padding.
+        content_crop = (
+            "crop=iw:trunc(ih*0.74/2)*2:0:trunc(ih*0.13/2)*2,"
+            if remove_pale_bars else ""
+        )
+        video_filter = (
+            "[0:v]" + content_crop
+            + "scale=720:1280:force_original_aspect_ratio=increase,"
+            "crop=720:1280,fps=30[base];"
+            "[base][1:v]overlay=0:0:shortest=1[v]"
+        )
         cmd = [
             ffmpeg, "-y", "-i", str(raw), "-loop", "1", "-i", str(overlay),
-            "-filter_complex",
-            "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,fps=30[base];[base][1:v]overlay=0:0:shortest=1[v]",
+            "-filter_complex", video_filter,
             "-map", "[v]", "-map", "0:a:0",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",

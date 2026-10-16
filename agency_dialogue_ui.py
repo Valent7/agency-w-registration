@@ -14,7 +14,8 @@ from agency_dialogue_video import (
     dialogue_errors,
     dialogue_text,
     list_heygen_catalog,
-    suggest_dialogue_cast,
+    suggest_partner_dialogue_cast,
+    partner_dialogue_catalog,
     parse_dialogue_editor,
     validate_cast,
 )
@@ -51,11 +52,12 @@ def _cast_defaults(item: dict) -> dict:
 
 
 def _cast_controls(prefix: str, item: dict) -> dict:
-    """Ordinary users never need to copy HeyGen avatar/voice IDs."""
+    """A human-looking entrepreneur converses with Neona or Neonia."""
     st.markdown("#### 🎭 Герои и голоса")
     st.caption(
-        "Агентство само подбирает мужчину, женщину и два русскоязычных голоса. "
-        "Выбор героев не запускает видео и не расходует средства."
+        "Первый герой — обычный предприниматель, а не ИИ-сотрудник Агентства. "
+        "Второй герой — Неона или Неония. Голоса русские. "
+        "Подбор не запускает платное видео."
     )
     previous = _cast_defaults(item)
     api_key = _secret("HEYGEN_API_KEY", "HEYGEN_KEY")
@@ -86,9 +88,10 @@ def _cast_controls(prefix: str, item: dict) -> dict:
         return {"A": {"avatar_id": "", "voice_id": ""},
                 "B": {"avatar_id": "", "voice_id": ""}}
 
-    avatars = catalog.get("avatars") or []
-    voices = catalog.get("voices") or []
-    suggested = suggest_dialogue_cast(catalog, preferred=previous)
+    partner_catalog = partner_dialogue_catalog(catalog)
+    avatars = partner_catalog.get("avatars") or []
+    voices = partner_catalog.get("voices") or []
+    suggested = suggest_partner_dialogue_cast(catalog, preferred=previous)
     cast = {"A": {}, "B": {}}
     labels = {}
     choices = {}
@@ -132,9 +135,8 @@ def _cast_controls(prefix: str, item: dict) -> dict:
         )
     else:
         st.warning(
-            "HeyGen пока не предоставил полную пару мужского и женского "
-            "персонажей с русскими голосами. Видео не будет запущено "
-            "с неподходящим голосом."
+            "Не найдена подходящая пара: предприниматель и Неона/Неония с русскими голосами. "
+            "Не будем подменять предпринимателя Тео или другим ИИ-сотрудником."
         )
     with st.expander("🎭 Изменить героев или голоса (необязательно)"):
         # Reset before widgets are instantiated in this render, otherwise
@@ -147,7 +149,7 @@ def _cast_controls(prefix: str, item: dict) -> dict:
         left, right = st.columns(2)
         for speaker, col in (("A", left), ("B", right)):
             with col:
-                st.markdown(f"**{SPEAKER_LABELS[speaker]}**")
+                st.markdown("**Предприниматель (обычный человек)**" if speaker == "A" else "**Неона или Неония**")
                 for field, title in (("avatar_id", "Персонаж"), ("voice_id", "Русский голос")):
                     field_key = f"{prefix}_{speaker}_{field}"
                     options = choices[(speaker, field)]
@@ -376,6 +378,23 @@ def render_dialogue_item(
         )
     final = state.get("final_mp4")
     if final:
+        # Rebuild the already-paid HeyGen footage without placing another order.
+        if state.get("original_mp4") and st.button(
+            "🛠 Убрать белые поля и пересобрать без оплаты HeyGen",
+            key=f"{prefix}_repair_padding", use_container_width=True,
+        ):
+            logo = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
+            try:
+                with st.spinner("Убираем светлые поля, сохраняем озвучку и заставки..."):
+                    state["final_mp4"] = assemble_dialogue_mp4(
+                        state["original_mp4"], logo_path=logo,
+                        title=item.get("title") or "", remove_pale_bars=True,
+                    )
+                state.pop("overlay_error", None)
+                st.session_state[state_key] = state
+                st.rerun()
+            except (OSError, RuntimeError, ValueError) as exc:
+                st.error("Не удалось исправить кадр: " + str(exc))
         st.video(final)
         st.download_button(
             "⬇️ Скачать готовый ИИ-диалог MP4",

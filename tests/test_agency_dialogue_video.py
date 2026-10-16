@@ -17,7 +17,7 @@ from agency_dialogue_video import (
     _call_overlay, assemble_dialogue_mp4, build_heygen_dialogue_payload,
     create_dialogue_video, dialogue_errors, dialogue_text, normalise_dialogue_turns,
     parse_dialogue_editor, validate_cast, list_heygen_catalog,
-    suggest_dialogue_cast,
+    suggest_dialogue_cast, suggest_partner_dialogue_cast, partner_dialogue_catalog,
 )
 
 TURNS = [
@@ -167,6 +167,46 @@ class DialogueVideoTests(unittest.TestCase):
         )
         self.assertEqual(cast["A"]["avatar_id"], "m2")
         self.assertEqual(cast["B"]["voice_id"], "fv")
+
+    def test_partner_film_never_uses_theo_or_stagirit_as_customer(self):
+        catalog = {
+            "avatars": [
+                {"id": "theo", "name": "Theo", "gender": "Man"},
+                {"id": "stag", "name": "Стагирит", "gender": "Man"},
+                {"id": "human", "name": "Dante Office 1", "gender": "male"},
+                {"id": "neonia", "name": "Неония", "gender": "Woman"},
+                {"id": "other", "name": "Office Woman", "gender": "female"},
+            ],
+            "voices": [
+                {"id": "oleg", "name": "Олег", "gender": "male", "language": "Russian"},
+                {"id": "nadia", "name": "Надя", "gender": "female", "language": "Russian"},
+            ],
+        }
+        cast = suggest_partner_dialogue_cast(
+            catalog,
+            preferred={"A": {"avatar_id": "theo", "voice_id": "oleg"},
+                       "B": {"avatar_id": "other", "voice_id": "nadia"}},
+        )
+        self.assertEqual(cast["A"]["avatar_id"], "human")
+        self.assertEqual(cast["B"]["avatar_id"], "neonia")
+        self.assertEqual(validate_cast(cast), [])
+        self.assertEqual(len(partner_dialogue_catalog(catalog)["avatars"]), 2)
+
+    def test_partner_film_blocks_when_no_human_or_no_w_agent(self):
+        c = {
+            "avatars": [{"id": "theo", "name": "Theo", "gender": "male"},
+                        {"id": "other", "name": "Other Woman", "gender": "female"}],
+            "voices": [
+                {"id": "v1", "name": "Oleg", "gender": "male", "language": "Russian"},
+                {"id": "v2", "name": "Nadia", "gender": "female", "language": "Russian"},
+            ],
+        }
+        self.assertTrue(validate_cast(suggest_partner_dialogue_cast(c)))
+
+    def test_dialogue_both_scenes_have_dark_background(self):
+        payload = build_heygen_dialogue_payload(TURNS, CAST)
+        for v in payload["video_inputs"]:
+            self.assertEqual(v["background"]["value"], "#142839")
 
     def test_call_overlay_is_png(self):
         img = Image.open(io.BytesIO(_call_overlay()))

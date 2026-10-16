@@ -30,7 +30,9 @@ class DialogueFactoryRouteTests(unittest.TestCase):
         self.assertIn('create_avatar_video_fn(item.get("script") or "")', CODE)
 
     def test_partner_ui_does_not_require_ids(self):
-        self.assertIn("suggest_dialogue_cast(catalog, preferred=previous)", UI)
+        self.assertIn("suggest_partner_dialogue_cast(catalog, preferred=previous)", UI)
+        self.assertIn("partner_dialogue_catalog(catalog)", UI)
+        self.assertIn("Убрать белые поля и пересобрать без оплаты HeyGen", UI)
         self.assertIn("🎭 Изменить героев или голоса (необязательно)", UI)
         self.assertNotIn('st.text_input(\n                "Аватар HeyGen (ID)"', UI)
         self.assertIn("st.selectbox(", UI)
