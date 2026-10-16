@@ -173,22 +173,34 @@ class DialogueVideoTests(unittest.TestCase):
         self.assertEqual(img.size, (720, 1280))
         self.assertEqual(img.mode, "RGBA")
 
-    def test_end_card_uses_real_supplied_crest_and_cyrillic_text(self):
+    def _mock_branded_template(self):
+        # The approved image is normally loaded read-only from the owner's
+        # HeyGen Assets. Tests must never access paid or live endpoints.
+        bg = Image.new("RGB", (941, 1672), (12, 25, 48))
+        buf = io.BytesIO()
+        bg.save(buf, format="PNG")
+        return patch("agency_outro._fetch_template", return_value=buf.getvalue())
+
+    def test_approved_cards_are_9x16_and_title_changes_per_film(self):
         with tempfile.TemporaryDirectory() as folder:
             logo = Path(folder) / "original.png"
-            # No AI-generated substitute logo. Renderer must use this exact input.
-            original = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-            original.paste((17, 234, 200, 255), (22, 22, 42, 42))
-            original.save(logo)
-            frame = Image.open(io.BytesIO(render_agency_outro(logo)))
-            self.assertEqual(frame.size, (720, 1280))
-            # Exact arbitrary color from the supplied logo is present at its center.
-            self.assertEqual(frame.convert("RGB").getpixel((360, 257)), (17, 234, 200))
-            self.assertEqual(OUTRO_SECONDS, 2.0)
+            Image.new("RGBA", (64, 64), (17, 234, 200, 255)).save(logo)
+            with self._mock_branded_template():
+                end = Image.open(io.BytesIO(render_agency_outro(logo)))
+                first = Image.open(io.BytesIO(render_agency_intro(
+                    "Зачем мне Агентство W?", logo
+                )))
+                second = Image.open(io.BytesIO(render_agency_intro(
+                    "Не охваты, а партнёры!", logo
+                )))
+            self.assertEqual(end.size, (720, 1280))
+            self.assertEqual(first.size, (720, 1280))
             self.assertEqual(INTRO_SECONDS, 2.0)
-            opener = Image.open(io.BytesIO(render_agency_intro('Зачем мне Агентство W?', logo)))
-            self.assertEqual(opener.size, (720, 1280))
-            self.assertEqual(opener.convert('RGB').getpixel((360, 257)), (17, 234, 200))
+            self.assertEqual(OUTRO_SECONDS, 2.0)
+            self.assertNotEqual(first.tobytes(), second.tobytes())
+            self.assertEqual(end.getpixel((360, 900)), (12, 25, 48))
+            with self.assertRaises(ValueError):
+                render_agency_intro("", logo)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg unavailable")
     def test_brand_is_after_complete_video_and_preserves_audio(self):
@@ -208,9 +220,10 @@ class DialogueVideoTests(unittest.TestCase):
                 check=True, timeout=35,
             )
             branded = folder / "branded.mp4"
-            branded.write_bytes(append_agency_outro(
-                source.read_bytes(), logo_path=logo, size=(720, 1280), title='Где искать партнёров?'
-            ))
+            with self._mock_branded_template():
+                branded.write_bytes(append_agency_outro(
+                    source.read_bytes(), logo_path=logo, size=(720, 1280), title='Где искать партнёров?'
+                ))
             def duration(path):
                 result = subprocess.run(
                     [shutil.which("ffprobe"), "-v", "quiet",
@@ -243,7 +256,8 @@ class DialogueVideoTests(unittest.TestCase):
                 ],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30,
             )
-            rendered = assemble_dialogue_mp4(raw.read_bytes())
+            with self._mock_branded_template():
+                rendered = assemble_dialogue_mp4(raw.read_bytes(), title="Зачем мне Агентство W?")
             self.assertGreater(len(rendered), 2048)
             result = Path(folder) / "rendered.mp4"
             result.write_bytes(rendered)
