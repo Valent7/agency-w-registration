@@ -75,10 +75,58 @@ def _font(size: int, *, bold: bool = False):
     return ImageFont.load_default()
 
 
+def _wide_card(title: str, logo_path: Path, *, outro: bool, size: tuple[int, int]) -> bytes:
+    """Horizontal extension of approved W brand, using the original crest."""
+    if not Path(logo_path).is_file():
+        raise RuntimeError("Не найден оригинальный логотип Агентства W.")
+    width, height = size
+    source = OUTRO_TEMPLATE_URL if outro else INTRO_TEMPLATE_URL
+    with Image.open(BytesIO(_fetch_template(source))) as raw:
+        from PIL import ImageFilter
+        canvas = ImageOps.fit(
+            raw.convert("RGB"), size, Image.Resampling.LANCZOS,
+        ).filter(ImageFilter.GaussianBlur(radius=9))
+    veil = Image.new("RGBA", size, (2, 14, 31, 170))
+    canvas = Image.alpha_composite(canvas.convert("RGBA"), veil)
+    draw = ImageDraw.Draw(canvas)
+    with Image.open(logo_path) as original:
+        mark = original.convert("RGBA")
+        mark.thumbnail((int(height * 0.56), int(height * 0.56)))
+        canvas.alpha_composite(mark, (int(width * 0.11), (height-mark.height)//2))
+    draw = ImageDraw.Draw(canvas)
+    left = int(width * 0.45)
+    right = int(width * 0.95)
+    lines = (
+        ["Производство", "Контент-завода", "Агентства W"]
+        if outro else None
+    )
+    if not outro:
+        lines, _ = _fit_title(draw, title, right-left, 3, scale=1.0)
+    fonts = [_font(44 if outro else 47, bold=True) for _ in lines]
+    leading = 12
+    line_heights = [
+        draw.textbbox((0, 0), t, font=font)[3] - draw.textbbox((0, 0), t, font=font)[1]
+        for t, font in zip(lines, fonts)
+    ]
+    total_height = sum(line_heights) + (len(lines)-1)*leading + (54 if outro else 0)
+    y = (height-total_height)//2
+    for index, line in enumerate(lines):
+        draw.text((left, y), line, font=fonts[index], fill="#EAC374" if index == 0 else "#FFFFFF",
+                  stroke_width=1, stroke_fill="#071529")
+        y += line_heights[index] + leading
+    if outro:
+        draw.text((left, y+28), "Мы возвращаем человеку время", font=_font(23), fill="#D7E9F2")
+    result = BytesIO()
+    canvas.convert("RGB").save(result, "PNG")
+    return result.getvalue()
+
+
 def render_agency_outro(logo_path: Path, *, size=(720, 1280)) -> bytes:
     """Use the exact approved branded end slate, with no retyped text."""
     if not Path(logo_path).is_file():
         raise RuntimeError("Не найден оригинальный логотип Агентства W.")
+    if size[0] > size[1]:
+        return _wide_card("", logo_path, outro=True, size=size)
     image = _background(OUTRO_TEMPLATE_URL, size)
     output = BytesIO()
     image.save(output, format="PNG")
@@ -133,6 +181,8 @@ def render_agency_intro(
     title = str(title or "").strip()
     if not title:
         raise ValueError("Укажите название ролика — оно появится на первой заставке.")
+    if size[0] > size[1]:
+        return _wide_card(title, logo_path, outro=False, size=size)
     canvas = _background(INTRO_TEMPLATE_URL, size)
     draw = ImageDraw.Draw(canvas)
     width, height = size
