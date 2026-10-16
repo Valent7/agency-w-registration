@@ -82,7 +82,7 @@ def _fit_title(draw, title: str, max_width: int, max_lines: int, scale: float):
     """Build a legible, balanced 2–4 line headline without clipping letters."""
     import re
 
-    title = re.sub(r"\\s+", " ", str(title or "").strip())
+    title = re.sub(r"\s+", " ", str(title or "").strip())
     title = title or "Агентство W"
     # A two-second hook should be short. Long user-authored titles are
     # still displayed in full, but a smaller type is used when necessary.
