@@ -224,14 +224,44 @@ def suggest_partner_dialogue_cast(catalog: dict, preferred: dict | None = None) 
     return suggest_dialogue_cast(partner_dialogue_catalog(catalog), preferred=preferred)
 
 
+def estimate_dialogue_seconds(turns: list[dict]) -> float:
+    """Estimate speech and allow four seconds for opening/closing cards."""
+    import re
+
+    words = sum(len(re.findall(r"[\wЁёА-Яа-я-]+", str(t.get("text") or ""))) for t in turns)
+    return 4.0 + words / 2.1
+
+
+def duration_warning(turns: list[dict], max_seconds: int = 60) -> str:
+    seconds = estimate_dialogue_seconds(turns)
+    return (
+        f"Сценарий рассчитан примерно на {seconds:.0f} секунд. "
+        f"Сократите реплики, чтобы ролик был до {max_seconds} секунд."
+        if seconds > max_seconds else ""
+    )
+
+
+def voice_ready_text(text: str) -> str:
+    """Keep visible brand W but pronounce it correctly in Russian audio."""
+    import re
+
+    return re.sub(r"(?<!\w)W(?!\w)", "дабл-ю", str(text or ""))
+
+
 def build_heygen_dialogue_payload(
     turns: list[dict[str, str]],
     cast: dict,
     *,
     is_test: bool = True,
     title: str = "Агентство W — ИИ-диалог",
+    aspect_ratio: str = "9:16",
 ) -> dict:
+    if aspect_ratio not in ("9:16", "16:9"):
+        raise ValueError("Поддерживаются только форматы 9:16 и 16:9.")
     errors = dialogue_errors(turns) + validate_cast(cast)
+    note = duration_warning(turns)
+    if note:
+        errors.append(note)
     if errors:
         raise ValueError("\n".join(errors))
     video_inputs = []
@@ -246,7 +276,7 @@ def build_heygen_dialogue_payload(
             },
             "voice": {
                 "type": "text",
-                "input_text": turn["text"],
+                "input_text": voice_ready_text(turn["text"]),
                 "voice_id": str(actor["voice_id"]).strip(),
                 "speed": 1.0,
             },
@@ -257,7 +287,7 @@ def build_heygen_dialogue_payload(
         })
     return {
         "video_inputs": video_inputs,
-        "dimension": {"width": 720, "height": 1280},
+        "dimension": {"width": 720, "height": 1280} if aspect_ratio == "9:16" else {"width": 1280, "height": 720},
         "title": str(title or "")[:115],
         "test": bool(is_test),
         "caption": False,
@@ -275,12 +305,12 @@ def _api_error(response: requests.Response) -> str:
         return f"HeyGen HTTP {response.status_code}"
 
 
-def create_dialogue_video(api_key: str, turns: list[dict], cast: dict, *, is_test: bool = True, title: str = "") -> dict:
+def create_dialogue_video(api_key: str, turns: list[dict], cast: dict, *, is_test: bool = True, title: str = "", aspect_ratio: str = "9:16") -> dict:
     """Exactly one HeyGen generation request, NEVER per utterance."""
     if not str(api_key or "").strip():
         return {"ok": False, "error": "Не найден HEYGEN_API_KEY в Streamlit Secrets."}
     try:
-        payload = build_heygen_dialogue_payload(turns, cast, is_test=is_test, title=title)
+        payload = build_heygen_dialogue_payload(turns, cast, is_test=is_test, title=title, aspect_ratio=aspect_ratio)
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": str(exc)}
     try:
@@ -326,11 +356,11 @@ def list_heygen_catalog(api_key: str) -> dict:
         return {
             "ok": True,
             "avatars": [
-                {"id": str(a.get("avatar_id") or "").strip(), "name": str(a.get("avatar_name") or a.get("name") or "Персонаж")[:90], "gender": str(a.get("gender") or a.get("avatar_gender") or "").strip(), "default_voice_id": str(a.get("default_voice_id") or "").strip()}
+                {"id": str(a.get("avatar_id") or "").strip(), "name": str(a.get("avatar_name") or a.get("name") or "Персонаж")[:90], "gender": str(a.get("gender") or a.get("avatar_gender") or "").strip(), "default_voice_id": str(a.get("default_voice_id") or "").strip(), "is_private": a.get("is_public") is False or str(a.get("type") or "").lower() == "private"}
                 for a in avatars if isinstance(a, dict) and a.get("avatar_id")
             ],
             "voices": [
-                {"id": str(v.get("voice_id") or "").strip(), "name": str(v.get("name") or "Голос")[:90],
+                {"id": str(v.get("voice_id") or "").strip(), "name": str(v.get("name") or "Голос")[:90], "is_private": str(v.get("type") or "").lower() == "private",
                  "language": str(v.get("language") or v.get("language_code") or "")[:60],
                  "gender": str(v.get("gender") or "")[:32]}
                 for v in voices if isinstance(v, dict) and v.get("voice_id")
@@ -376,11 +406,33 @@ def _call_overlay(logo_path: Path | None = None) -> bytes:
     return output.getvalue()
 
 
-def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, title: str = '', remove_pale_bars: bool = False) -> bytes:
+def _horizontal_overlay(logo_path: Path | None = None) -> bytes:
+    """Quiet 16:9 conversation label, without pretend app controls."""
+    image = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((22, 22, 405, 83), radius=18, fill=(9, 25, 42, 195))
+    draw.text((40, 42), "Беседа • Агентство W", font=_font(25), fill=(255, 235, 205, 255))
+    if logo_path and logo_path.is_file():
+        try:
+            with Image.open(logo_path) as raw:
+                mark = raw.convert("RGBA")
+                mark.thumbnail((74, 74))
+                image.alpha_composite(mark, (1178, 18))
+        except (OSError, ValueError):
+            pass
+    output = BytesIO()
+    image.save(output, "PNG")
+    return output.getvalue()
+
+
+def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, title: str = '', remove_pale_bars: bool = False, aspect_ratio: str = "9:16") -> bytes:
     """Draw video-call chrome on existing spoken HeyGen video, preserving its audio.
 
     Avoid duration trimming so the final syllable is not cut off.
     """
+    if aspect_ratio not in ("9:16", "16:9"):
+        raise ValueError("Выберите формат 9:16 или 16:9.")
+    width, height = (720, 1280) if aspect_ratio == "9:16" else (1280, 720)
     if not video_bytes:
         raise ValueError("Видео HeyGen пустое.")
     ffmpeg = shutil.which("ffmpeg")
@@ -392,7 +444,7 @@ def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, 
         overlay = tmp / "ui.png"
         out = tmp / "agency_w_dialogue.mp4"
         raw.write_bytes(video_bytes)
-        overlay.write_bytes(_call_overlay(logo_path))
+        overlay.write_bytes(_call_overlay(logo_path) if aspect_ratio == "9:16" else _horizontal_overlay(logo_path))
         # An optional repair for previously generated HeyGen videos whose
         # speaking photos have pale padding *inside* the 9:16 canvas.
         # Crop only on explicit request; a blanket crop would cut heads off
@@ -403,8 +455,8 @@ def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, 
         )
         video_filter = (
             "[0:v]" + content_crop
-            + "scale=720:1280:force_original_aspect_ratio=increase,"
-            "crop=720:1280,fps=30[base];"
+            + f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},fps=30[base];"
             "[base][1:v]overlay=0:0:shortest=1[v]"
         )
         cmd = [
@@ -425,4 +477,4 @@ def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, 
                 + result.stderr.decode("utf-8", errors="ignore")[-600:]
             )
         brand_logo = logo_path or (Path(__file__).resolve().parent / "assets" / "agency_w_icon.png")
-        return append_agency_outro(out.read_bytes(), logo_path=brand_logo, size=(720, 1280), title=title)
+        return append_agency_outro(out.read_bytes(), logo_path=brand_logo, size=(width, height), title=title)
