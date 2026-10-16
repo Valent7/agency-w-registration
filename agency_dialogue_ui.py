@@ -353,7 +353,7 @@ def render_dialogue_item(
                         state["original_mp4"] = raw
                         logo = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
                         try:
-                            state["final_mp4"] = assemble_dialogue_mp4(raw, logo_path=logo)
+                            state["final_mp4"] = assemble_dialogue_mp4(raw, logo_path=logo, title=item.get('title') or '')
                             state.pop("overlay_error", None)
                         except (OSError, RuntimeError, ValueError) as exc:
                             # Never make a successfully generated, paid video inaccessible.
