@@ -11,10 +11,54 @@ import tempfile
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from functools import lru_cache
+import requests
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 INTRO_SECONDS = 2.0
 OUTRO_SECONDS = 2.0
+
+# These are the two user-approved 9:16 designs (uploaded to the owner's
+# HeyGen Assets workspace 2026-10-16). Do not substitute stock images.
+INTRO_TEMPLATE_URL = (
+    "https://dynamic.heygen.ai/image/"
+    "8c2d5a0b3c154c3b8827be15be0a7da4/original.png"
+)
+OUTRO_TEMPLATE_URL = (
+    "https://dynamic.heygen.ai/image/"
+    "c150a46d7f104170b6cf34017cd3e674/original.png"
+)
+
+
+@lru_cache(maxsize=2)
+def _fetch_template(url: str) -> bytes:
+    """Read approved background once per process; no paid video API requests."""
+    if url not in (INTRO_TEMPLATE_URL, OUTRO_TEMPLATE_URL):
+        raise ValueError("Недопустимый адрес фирменного шаблона.")
+    try:
+        response = requests.get(url, timeout=35)
+        response.raise_for_status()
+        content = response.content
+        with Image.open(BytesIO(content)) as image:
+            image.verify()
+        return content
+    except (requests.RequestException, OSError, ValueError) as exc:
+        raise RuntimeError(
+            "Фирменный шаблон Агентства W недоступен. "
+            "Видео не собираем с чужой заставкой; попробуйте позже."
+        ) from exc
+
+
+def _background(url: str, size: tuple[int, int]) -> Image.Image:
+    """Preserve the approved blue/gold artwork, center crop to exact 9:16."""
+    if abs(size[0] * 16 - size[1] * 9) > 24:
+        raise ValueError("Формат фирменной заставки должен быть 9:16.")
+    with Image.open(BytesIO(_fetch_template(url))) as src:
+        return ImageOps.fit(
+            src.convert("RGB"), size,
+            method=Image.Resampling.LANCZOS, centering=(0.5, 0.5),
+        )
+
 
 
 def _font(size: int, *, bold: bool = False):
@@ -32,50 +76,13 @@ def _font(size: int, *, bold: bool = False):
 
 
 def render_agency_outro(logo_path: Path, *, size=(720, 1280)) -> bytes:
-    """Brand end card with the EXACT original crest; no generated letter W."""
+    """Use the exact approved branded end slate, with no retyped text."""
     if not Path(logo_path).is_file():
         raise RuntimeError("Не найден оригинальный логотип Агентства W.")
-    width, height = size
-    if width < 320 or height < 550:
-        raise ValueError("Некорректный размер вертикального видео.")
-    image = Image.new("RGB", size, "black")
-    draw = ImageDraw.Draw(image)
-    # Keep the original logo's dark matte seamless; add the brand's deep blue
-    # below it, with restrained gold separators.
-    for y in range(height):
-        amount = max(0.0, min(1.0, (y / height - 0.53) / 0.47))
-        draw.line(
-            (0, y, width, y),
-            fill=(round(5 * amount), round(32 * amount), round(51 * amount)),
-        )
-    scale = width / 720.0
-
-    def px(v):
-        return round(v * scale)
-
-    draw.line((px(78), px(155), width - px(78), px(155)),
-              fill="#A88A43", width=max(2, px(2)))
-    draw.line((px(145), px(1123), width - px(145), px(1123)),
-              fill="#A88A43", width=max(2, px(2)))
-    with Image.open(logo_path) as original:
-        logo = original.convert("RGBA")
-        logo.thumbnail((px(425), px(425)), Image.Resampling.LANCZOS)
-        image.paste(logo, ((width - logo.width) // 2, px(225)), logo)
-
-    draw = ImageDraw.Draw(image)
-
-    def center(line, y, font, color):
-        bounds = draw.textbbox((0, 0), line, font=font)
-        draw.text(((width - (bounds[2] - bounds[0])) / 2, px(y)),
-                  line, font=font, fill=color)
-
-    center("Производство", 790, _font(px(43), bold=True), "#E8C173")
-    center("Контент-завода", 855, _font(px(43), bold=True), "#E8C173")
-    center("Агентства W", 945, _font(px(48), bold=True), "#FFFFFF")
-    center("Мы возвращаем человеку время", 1052, _font(px(24)), "#C8E1EA")
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
+    image = _background(OUTRO_TEMPLATE_URL, size)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 def _fit_title(draw, title: str, max_width: int, max_lines: int, scale: float):
@@ -120,43 +127,45 @@ def _fit_title(draw, title: str, max_width: int, max_lines: int, scale: float):
 def render_agency_intro(
     title: str, logo_path: Path, *, size=(720, 1280)
 ) -> bytes:
-    """Readable vertical hook over the authentic Agency W golden crest."""
-    # Inherit the color system, logo and safe margins of the outro.
-    canvas = Image.open(BytesIO(render_agency_outro(logo_path, size=size))).convert("RGB")
+    """Put each film's editable title into the EMPTY central area."""
+    if not Path(logo_path).is_file():
+        raise RuntimeError("Не найден оригинальный логотип Агентства W.")
+    title = str(title or "").strip()
+    if not title:
+        raise ValueError("Укажите название ролика — оно появится на первой заставке.")
+    canvas = _background(INTRO_TEMPLATE_URL, size)
     draw = ImageDraw.Draw(canvas)
     width, height = size
     scale = width / 720.0
     px = lambda v: round(v * scale)
-    # Cover outro-specific typography, retaining the authentic logo above.
-    draw.rectangle((0, px(750), width, height), fill=(2, 16, 27))
-    draw.line((px(90), px(740), width - px(90), px(740)),
-              fill="#E8C173", width=max(2, px(3)))
-    lines, font = _fit_title(draw, title, width - px(90), max_lines=4, scale=scale)
-    # Keep a generous optical center and line spacing; never squish letters.
+    lines, font = _fit_title(
+        draw, title, width - px(92), max_lines=4, scale=scale,
+    )
+    # The original template was deliberately authored without text here.
+    # Keep every word readable within the calm area between the real crest
+    # and the blue/gold waves at the bottom.
+    gap = px(17)
     heights = []
     for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        heights.append(bbox[3] - bbox[1])
-    gap = px(18)
+        b = draw.textbbox((0, 0), line, font=font)
+        heights.append(b[3] - b[1])
     total = sum(heights) + max(0, len(lines) - 1) * gap
-    if total > px(305):
-        raise ValueError("Заголовок слишком длинный для читабельной заставки.")
-    top = px(912) - total / 2
-    for i, line in enumerate(lines):
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_width = bbox[2] - bbox[0]
+    if total > px(300):
+        raise ValueError("Слишком длинное название — сократите заголовок.")
+    top = px(708) - total / 2
+    for index, line in enumerate(lines):
+        bounds = draw.textbbox((0, 0), line, font=font)
+        line_width = bounds[2] - bounds[0]
         draw.text(
-            ((width - line_width) / 2, top - bbox[1]),
+            ((width - line_width) / 2, top - bounds[1]),
             line, font=font,
-            fill=("#F5D38B" if i == 0 else "#FFFFFF"),
-            stroke_width=max(1, px(2)), stroke_fill="#1A2130",
+            fill="#FFE2A3" if index == 0 else "#FFFFFF",
+            stroke_width=max(2, px(3)), stroke_fill="#071729",
         )
-        top += heights[i] + gap
-    draw.line((px(110), px(1102), width - px(110), px(1102)),
-              fill="#C39851", width=max(1, px(2)))
-    buffer = BytesIO()
-    canvas.save(buffer, format="PNG")
-    return buffer.getvalue()
+        top += heights[index] + gap
+    output = BytesIO()
+    canvas.save(output, format="PNG")
+    return output.getvalue()
 
 
 def _run_ffmpeg(command, target: Path, *, timeout: int = 450):
