@@ -31,12 +31,26 @@ class DialogueFactoryRouteTests(unittest.TestCase):
 
     def test_partner_ui_does_not_require_ids(self):
         self.assertIn("suggest_partner_dialogue_cast(catalog, preferred=previous)", UI)
-        self.assertIn("partner_dialogue_catalog(catalog)", UI)
+        self.assertIn("Мой аватар (загрузить)", UI)
+        self.assertIn("Мой голос (загрузить)", UI)
+        self.assertIn("Мой аватар в HeyGen", UI)
+        self.assertIn("Мой голос в HeyGen", UI)
         self.assertIn("Убрать белые поля и пересобрать без оплаты HeyGen", UI)
-        self.assertIn("🎭 Изменить героев или голоса (необязательно)", UI)
+        self.assertIn("🎭 Выбрать аватар и голос", UI)
         self.assertNotIn('st.text_input(\n                "Аватар HeyGen (ID)"', UI)
         self.assertIn("st.selectbox(", UI)
         self.assertIn("list_heygen_catalog(api_key)", UI)
+
+    def test_simplified_user_workflow_and_duration_controls(self):
+        self.assertIn("st.audio_input(", CODE)
+        self.assertIn("✨ Создать сценарий из моей идеи", CODE)
+        self.assertIn("Переписать сценарий", UI)
+        self.assertIn("✏️ Редактировать", UI)
+        self.assertIn("✅ Утвердить сценарий", UI)
+        self.assertIn('options=["9:16", "16:9"]', UI)
+        self.assertIn("duration_warning(", UI)
+        self.assertIn("aspect_ratio=aspect_ratio", UI)
+        self.assertIn('if not state.get("video_id"):', UI)
 
     def test_approvals_separate_from_payment_and_publication(self):
         self.assertIn('if not approved:', UI)
