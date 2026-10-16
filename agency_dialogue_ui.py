@@ -137,6 +137,13 @@ def _cast_controls(prefix: str, item: dict) -> dict:
             "с неподходящим голосом."
         )
     with st.expander("🎭 Изменить героев или голоса (необязательно)"):
+        # Reset before widgets are instantiated in this render, otherwise
+        # Streamlit raises when assigning to an already-rendered widget key.
+        if st.button("🔄 Подобрать автоматически", key=f"{prefix}_pick_auto"):
+            for speaker in ("A", "B"):
+                for field in ("avatar_id", "voice_id"):
+                    st.session_state[f"{prefix}_{speaker}_{field}"] = suggested[speaker][field]
+            st.rerun()
         left, right = st.columns(2)
         for speaker, col in (("A", left), ("B", right)):
             with col:
@@ -151,11 +158,6 @@ def _cast_controls(prefix: str, item: dict) -> dict:
                         key=field_key,
                         format_func=lambda value, m=mapping: m.get(value, "Выберите из списка"),
                     )
-        if st.button("🔄 Подобрать автоматически", key=f"{prefix}_pick_auto"):
-            for speaker in ("A", "B"):
-                for field in ("avatar_id", "voice_id"):
-                    st.session_state[f"{prefix}_{speaker}_{field}"] = suggested[speaker][field]
-            st.rerun()
         st.caption(
             "Технические ID скрыты. Если каталог не предлагает подходящего героя "
             "или голос, обратитесь к администратору Агентства."
