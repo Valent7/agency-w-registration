@@ -332,7 +332,7 @@ def _call_overlay(logo_path: Path | None = None) -> bytes:
     return output.getvalue()
 
 
-def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None) -> bytes:
+def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, title: str = '') -> bytes:
     """Draw video-call chrome on existing spoken HeyGen video, preserving its audio.
 
     Avoid duration trimming so the final syllable is not cut off.
@@ -369,4 +369,4 @@ def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None) 
                 + result.stderr.decode("utf-8", errors="ignore")[-600:]
             )
         brand_logo = logo_path or (Path(__file__).resolve().parent / "assets" / "agency_w_icon.png")
-        return append_agency_outro(out.read_bytes(), logo_path=brand_logo, size=(720, 1280))
+        return append_agency_outro(out.read_bytes(), logo_path=brand_logo, size=(720, 1280), title=title)
