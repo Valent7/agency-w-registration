@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - "agency_dialogue_video.py"
+      - "agency_outro.py"
       - "agency_dialogue_ui.py"
       - "content_factory_ui.py"
       - "tests/test_agency_dialogue_*.py"
@@ -27,7 +28,7 @@ jobs:
           sudo apt-get install -y -qq ffmpeg >/dev/null
           python -m pip install requests Pillow
       - name: Compile dialogue and existing factory
-        run: python -m py_compile agency_dialogue_video.py agency_dialogue_ui.py content_factory_ui.py tests/test_agency_dialogue_video.py tests/test_agency_dialogue_ui.py tests/test_agency_dialogue_editorial.py
+        run: python -m py_compile agency_outro.py agency_dialogue_video.py agency_dialogue_ui.py content_factory_ui.py tests/test_agency_dialogue_video.py tests/test_agency_dialogue_ui.py tests/test_agency_dialogue_editorial.py
       - name: Test one-job generation, safe approval and MP4 rendering
         run: |
           python -m unittest discover -s tests -p "test_agency_dialogue_video.py" -v

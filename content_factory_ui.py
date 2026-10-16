@@ -17,6 +17,7 @@ import requests
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from agency_dialogue_video import normalise_dialogue_turns, dialogue_errors, dialogue_text
+from agency_outro import append_agency_outro
 
 
 PROFESSIONAL_PORTRAITS = {
@@ -1195,7 +1196,7 @@ def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta):
         final_bytes = final_path.read_bytes()
         if not final_bytes:
             raise RuntimeError("Готовый Reels получился пустым.")
-        return final_bytes
+        return append_agency_outro(final_bytes, logo_path=logo_path, size=(1080, 1920))
 
 
 def _download_runway_videos(video_urls):
@@ -1360,7 +1361,7 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta):
         final_bytes = final_path.read_bytes()
         if not final_bytes:
             raise RuntimeError("Готовый живой Reels получился пустым.")
-        return final_bytes
+        return append_agency_outro(final_bytes, logo_path=logo_path, size=(1080, 1920))
 
 
 def _json_from_answer(answer):

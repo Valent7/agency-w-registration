@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PIL import Image
+from agency_outro import OUTRO_SECONDS, render_agency_outro, append_agency_outro
 
 from agency_dialogue_video import (
     _call_overlay, assemble_dialogue_mp4, build_heygen_dialogue_payload,
@@ -171,6 +172,58 @@ class DialogueVideoTests(unittest.TestCase):
         img = Image.open(io.BytesIO(_call_overlay()))
         self.assertEqual(img.size, (720, 1280))
         self.assertEqual(img.mode, "RGBA")
+
+    def test_end_card_uses_real_supplied_crest_and_cyrillic_text(self):
+        with tempfile.TemporaryDirectory() as folder:
+            logo = Path(folder) / "original.png"
+            # No AI-generated substitute logo. Renderer must use this exact input.
+            original = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            original.paste((17, 234, 200, 255), (22, 22, 42, 42))
+            original.save(logo)
+            frame = Image.open(io.BytesIO(render_agency_outro(logo)))
+            self.assertEqual(frame.size, (720, 1280))
+            # Exact arbitrary color from the supplied logo is present at its center.
+            self.assertEqual(frame.convert("RGB").getpixel((360, 257)), (17, 234, 200))
+            self.assertEqual(OUTRO_SECONDS, 3.0)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg unavailable")
+    def test_brand_is_after_complete_video_and_preserves_audio(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            source = folder / "original.mp4"
+            logo = folder / "logo.png"
+            Image.new("RGBA", (64, 64), (233, 180, 25, 255)).save(logo)
+            subprocess.run(
+                [
+                    shutil.which("ffmpeg"), "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=blue:s=360x640:r=30:d=1.1",
+                    "-f", "lavfi", "-i", "sine=frequency=600:duration=1.1",
+                    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(source),
+                ],
+                check=True, timeout=35,
+            )
+            branded = folder / "branded.mp4"
+            branded.write_bytes(append_agency_outro(
+                source.read_bytes(), logo_path=logo, size=(720, 1280)
+            ))
+            def duration(path):
+                result = subprocess.run(
+                    [shutil.which("ffprobe"), "-v", "quiet",
+                     "-show_entries", "format=duration",
+                     "-of", "default=nokey=1:noprint_wrappers=1", str(path)],
+                    capture_output=True, text=True, check=True, timeout=10,
+                )
+                return float(result.stdout.strip())
+            self.assertAlmostEqual(duration(branded) - duration(source), 3.0, delta=0.25)
+            media = subprocess.run(
+                [shutil.which("ffprobe"), "-v", "error",
+                 "-show_entries", "stream=codec_type",
+                 "-of", "csv=p=0", str(branded)],
+                capture_output=True, text=True, check=True, timeout=10,
+            )
+            self.assertIn("audio", media.stdout)
+            self.assertIn("video", media.stdout)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg unavailable")
     def test_export_preserves_audio_and_expected_aspect_ratio(self):
