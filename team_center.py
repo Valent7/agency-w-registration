@@ -11,6 +11,7 @@ import uuid
 
 import requests
 import streamlit as st
+from agency_access_control import is_agency_access_revoked
 
 from agency_publisher import (
     list_publisher_destinations,
@@ -338,7 +339,7 @@ def _format_dt(value: str | None) -> str:
 def _direct_partners(member_code: str) -> list[dict[str, Any]]:
     if not member_code:
         return []
-    return _get(
+    rows = _get(
         "agency_members",
         {
             "referrer_code": f"eq.{member_code}",
@@ -349,6 +350,7 @@ def _direct_partners(member_code: str) -> list[dict[str, Any]]:
             "order": "created_at.desc",
         },
     )
+    return [m for m in rows if not is_agency_access_revoked(m.get("telegram_id"))]
 
 
 def _member_by_telegram(
@@ -407,7 +409,10 @@ def _all_members() -> list[dict[str, Any]]:
                 "offset": offset,
             },
         )
-        rows.extend(batch)
+        rows.extend(
+            member for member in batch
+            if not is_agency_access_revoked(member.get("telegram_id"))
+        )
 
         if len(batch) < page:
             break
