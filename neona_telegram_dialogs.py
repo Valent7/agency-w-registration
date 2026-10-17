@@ -3672,6 +3672,9 @@ def _owners(config: Config) -> list[tuple[int, str]]:
             ids.append(int(row.get("telegram_id")))
         except (TypeError, ValueError):
             pass
+    # Revoked accounts must not run background Neona replies.
+    from agency_access_control import is_agency_access_revoked
+    ids = [id_ for id_ in ids if not is_agency_access_revoked(id_)]
     if not ids:
         return []
 

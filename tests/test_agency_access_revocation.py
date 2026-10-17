@@ -21,6 +21,21 @@ class AccessRevocationTests(unittest.TestCase):
         self.assertIn("if not is_agency_access_revoked(m.get(\"telegram_id\"))", team)
         self.assertIn("if not is_agency_access_revoked(member.get(\"telegram_id\"))", team)
 
+    def test_background_workers_skip_offboarded_accounts(self):
+        for file in (
+            "neona_telegram_dialogs.py",
+            "telegram_scout_worker.py",
+            "vk_scout_worker.py",
+            "team_telegram_delivery.py",
+        ):
+            code = Path(file).read_text(encoding="utf-8")
+            self.assertIn("is_agency_access_revoked", code, file)
+        neona = Path("neona_telegram_dialogs.py").read_text(encoding="utf-8")
+        self.assertLess(
+            neona.index("ids = [id_ for id_ in ids if not is_agency_access_revoked(id_)]"),
+            neona.index("    members = requests.get(", neona.index("def _owners(")),
+        )
+
     def test_guard_precedes_any_partner_registration(self):
         app = Path("streamlit_app.py").read_text(encoding="utf-8")
         start = app.index('telegram_id = telegram_data.get("id", "")')

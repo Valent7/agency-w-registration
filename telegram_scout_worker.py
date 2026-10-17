@@ -1497,6 +1497,10 @@ def process_cycle_once() -> dict[str, int]:
             owner_id = int(row.get("telegram_id"))
         except (TypeError, ValueError):
             continue
+        # A departing account must not remain in the auto-scout queue.
+        from agency_access_control import is_agency_access_revoked
+        if is_agency_access_revoked(owner_id):
+            continue
         session_string = _telegram_session_from_row(row)
         if not session_string:
             continue

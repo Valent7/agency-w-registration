@@ -275,10 +275,13 @@ def run_once() -> dict[str, int]:
     member_ids: list[int] = []
     member_by_id: dict[int, dict[str, Any]] = {}
 
+    from agency_access_control import is_agency_access_revoked
     for member in members:
         try:
             owner_id = int(member.get("telegram_id"))
         except (TypeError, ValueError):
+            continue
+        if is_agency_access_revoked(owner_id):
             continue
         member_code = str(member.get("member_code") or "").strip()
         if not member_code:
