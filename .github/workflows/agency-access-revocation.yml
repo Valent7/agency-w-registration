@@ -4,6 +4,8 @@ on:
     paths:
       - streamlit_app.py
       - agency_access_control.py
+      - neola_partner_center.py
+      - team_center.py
       - tests/test_agency_access_revocation.py
       - .github/workflows/agency-access-revocation.yml
   workflow_dispatch:
@@ -15,5 +17,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m py_compile agency_access_control.py streamlit_app.py
+      - run: python -m py_compile agency_access_control.py streamlit_app.py neola_partner_center.py team_center.py
       - run: python -m unittest discover -s tests -p test_agency_access_revocation.py -v

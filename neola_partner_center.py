@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+from agency_access_control import is_agency_access_revoked
 from neola_cabinet_map import NEOLA_MISSION, neola_cabinet_knowledge, neola_first_greeting
 
 
@@ -1486,12 +1487,18 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
     )
     is_root_owner = bool(current_member and _is_agency_owner(current_telegram_id))
 
-    visible = _visible_members_for_viewer(
-        members,
-        current_member,
-        current_member_code,
-        is_root_owner,
-    )
+    # Former partners stay in the registry for audit and historical referrals,
+    # but cannot be counted or shown as current teammates.
+    archived_members = [
+        member for member in members
+        if is_agency_access_revoked(member.get("telegram_id"))
+    ]
+    visible = [
+        member for member in _visible_members_for_viewer(
+            members, current_member, current_member_code, is_root_owner,
+        )
+        if not is_agency_access_revoked(member.get("telegram_id"))
+    ]
     visible_ids = {int(item.get("telegram_id") or 0) for item in visible}
     ids = sorted(visible_ids)
     activations = load_partner_activations(ids) if ids else []
@@ -1554,6 +1561,18 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
     c3.metric("Ждут подтверждения", waiting_count)
     c4.metric("Онбординг", onboarding_count)
     c5.metric("Требуют внимания", attention_count)
+
+    if is_root_owner and archived_members:
+        with st.expander(f"📦 Архив выбывших участников ({len(archived_members)})"):
+            st.caption(
+                "Не входят в действующий состав и статистику. "
+                "История регистрации сохранена; доступ к Агентству закрыт."
+            )
+            for former in archived_members:
+                st.write(
+                    f"{_member_display_name(former)} · "
+                    f"{str(former.get('member_code') or 'без кода')}"
+                )
 
     if not visible:
         if is_root_owner:
@@ -1638,7 +1657,10 @@ def render_partner_center(current_telegram_id, current_member_code, current_name
             inviter_name = _member_display_name(inviter)
             ref_code = str(member.get("referrer_code") or "").strip()
             member_code = str(member.get("member_code") or "").strip()
-            direct_children = len(children.get(member_code, []))
+            direct_children = len([
+                child for child in children.get(member_code, [])
+                if int(child.get("telegram_id") or 0) in visible_ids
+            ])
 
             if depth:
                 line_text = f"линия {int(depth)}"
