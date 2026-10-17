@@ -6,9 +6,20 @@ class AccessRevocationTests(unittest.TestCase):
     def test_revoke_specific_account(self):
         self.assertTrue(is_agency_access_revoked(291173537))
         self.assertTrue(is_agency_access_revoked("291173537"))
+        self.assertTrue(is_agency_access_revoked(6541575252))
+        self.assertTrue(is_agency_access_revoked("6541575252"))
         self.assertFalse(is_agency_access_revoked(291173538))
         self.assertFalse(is_agency_access_revoked("Aleksey_Balakin"))
         self.assertFalse(is_agency_access_revoked(None))
+
+    def test_former_partner_archived_not_counted_as_active(self):
+        center = Path("neola_partner_center.py").read_text(encoding="utf-8")
+        team = Path("team_center.py").read_text(encoding="utf-8")
+        self.assertIn("archived_members = [", center)
+        self.assertIn("if not is_agency_access_revoked(member.get(\"telegram_id\"))", center)
+        self.assertIn("📦 Архив выбывших участников", center)
+        self.assertIn("if not is_agency_access_revoked(m.get(\"telegram_id\"))", team)
+        self.assertIn("if not is_agency_access_revoked(member.get(\"telegram_id\"))", team)
 
     def test_guard_precedes_any_partner_registration(self):
         app = Path("streamlit_app.py").read_text(encoding="utf-8")
