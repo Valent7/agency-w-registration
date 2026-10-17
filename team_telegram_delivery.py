@@ -618,7 +618,11 @@ async def process_cycle_async() -> dict[str, int]:
         "errors": 0,
     }
 
+    from agency_access_control import is_agency_access_revoked
     for owner_id in sorted(owner_ids):
+        if is_agency_access_revoked(owner_id):
+            # Historical messages remain recorded, but no new dispatch occurs.
+            continue
         total["owners"] += 1
         stats = await process_owner_once(
             config,
