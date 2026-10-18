@@ -1,0 +1,31 @@
+name: Video cleanup supervised pilot
+on:
+  pull_request:
+    paths:
+      - "video_cleanup_pilot.py"
+      - "video_cleanup_pilot_ui.py"
+      - "content_factory_ui.py"
+      - "requirements.txt"
+      - "tests/test_video_cleanup_pilot.py"
+      - ".github/workflows/video-cleanup-pilot.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-owner-pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install video dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg >/dev/null
+          python -m pip install opencv-python-headless==4.12.0.88
+      - name: Syntax checks
+        run: python -m py_compile video_cleanup_pilot.py video_cleanup_pilot_ui.py content_factory_ui.py tests/test_video_cleanup_pilot.py
+      - name: Run private sample validation and real AV preview test
+        run: python -m unittest discover -s tests -p "test_video_cleanup_pilot.py" -v
