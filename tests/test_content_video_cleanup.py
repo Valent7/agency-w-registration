@@ -10,6 +10,9 @@ from pathlib import Path
 from content_video_cleanup import (
     VideoCleanupError,
     _delogo_filters,
+    _mask_regions,
+    sample_video_frames,
+    preview_mask_image,
     clean_user_video,
 )
 
@@ -107,6 +110,65 @@ class VideoCleanupTests(unittest.TestCase):
         self.assertEqual(both.count("delogo="), 2)
         self.assertEqual(_delogo_filters(720, 1280, "none", 82), "")
         self.assertEqual(_delogo_filters(720, 1280, "left", 82).count("delogo="), 1)
+
+    def test_preview_shows_real_source_frames_and_mask_regions(self):
+        from PIL import Image
+        from io import BytesIO
+
+        source = self._source()
+        samples = sample_video_frames(source, "test.mp4")
+        self.assertEqual(len(samples), 2)
+        original = Image.open(BytesIO(samples[0])).convert("RGB")
+        overlay = Image.open(BytesIO(preview_mask_image(
+            samples[0], "both", left_y_pct=25, right_y_pct=80,
+            mask_width_pct=40, mask_height_pct=12,
+        ))).convert("RGB")
+        self.assertEqual(original.size, overlay.size)
+        regions = _mask_regions(
+            original.width, original.height, "both",
+            left_y_pct=25, right_y_pct=80, mask_width_pct=40,
+            mask_height_pct=12,
+        )
+        self.assertEqual(len(regions), 2)
+        self.assertLess(regions[0][1], regions[1][1])
+        left_x, left_y, w, h = regions[0]
+        self.assertNotEqual(
+            original.getpixel((left_x + w // 2, left_y + h // 2)),
+            overlay.getpixel((left_x + w // 2, left_y + h // 2)),
+        )
+
+    def test_custom_left_and_right_positions_affect_export(self):
+        width, height = 320, 576
+        filt = _delogo_filters(
+            width, height, "both", 82, left_y_pct=22,
+            right_y_pct=85, mask_width_pct=45, mask_height_pct=14,
+        )
+        self.assertEqual(filt.count("delogo="), 2)
+        regions = _mask_regions(
+            width, height, "both", 82, left_y_pct=22,
+            right_y_pct=85, mask_width_pct=45, mask_height_pct=14,
+        )
+        self.assertNotEqual(regions[0][1], regions[1][1])
+        output, details = clean_user_video(
+            self._source(), mask_mode="both",
+            left_y_pct=22, right_y_pct=85,
+            mask_width_pct=45, mask_height_pct=14,
+        )
+        self.assertTrue(output)
+        self.assertEqual(details["mask_regions"], regions)
+
+    def test_mask_preview_controls_are_accessible_to_all_partners(self):
+        source = Path("content_video_cleanup_ui.py").read_text(encoding="utf-8")
+        self.assertIn("Слева: переместить рамку выше или ниже", source)
+        self.assertIn("Справа: переместить рамку выше или ниже", source)
+        self.assertIn("Ширина рамки", source)
+        self.assertIn("Высота рамки", source)
+        self.assertIn("Начало видео: красная зона", source)
+        self.assertIn("Середина видео: красная зона", source)
+        self.assertIn("sample_video_frames(", source)
+        self.assertIn("preview_mask_image(", source)
+        self.assertIn("left_y_pct=int(left_y)", source)
+        self.assertIn("right_y_pct=int(right_y)", source)
 
     def test_content_factory_keeps_original_generator_untouched(self):
         ui = Path("content_factory_ui.py").read_text(encoding="utf-8")
