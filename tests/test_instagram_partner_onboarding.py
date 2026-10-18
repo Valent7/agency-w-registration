@@ -49,6 +49,30 @@ class PartnerOnboardingTests(unittest.TestCase):
         self.assertIn('if connection:', ui)
         self.assertIn("Регистрация в Facebook", ui) if "Регистрация в Facebook" in ui else self.assertIn("Facebook", ui)
 
+    def test_unapproved_meta_signup_is_hidden_for_unconnected_partners(self):
+        start = UI.index("def render_instagram_connection(")
+        end = UI.index("def _load_instagram_comments(", start)
+        source = UI[start:end]
+        guard = "if not connection and not is_agency_owner(int(owner_telegram_id)):"
+        self.assertIn(guard, source)
+        self.assertLess(source.index(guard), source.index('comments_state ='))
+        self.assertLess(source.index("return False", source.index(guard)), source.index('comments_state ='))
+        # The existing connected account and Director diagnostics remain usable.
+        self.assertIn("if connection:", source)
+        self.assertIn("if is_agency_owner(int(owner_telegram_id)):", source)
+        self.assertIn("🔄 Обновить разрешения Instagram", source)
+
+    def test_no_dead_instagram_prompt_or_radar_for_unconnected_partners(self):
+        self.assertIn('if is_agency_owner(int(telegram_id)):', UI)
+        self.assertIn('neonia_options.insert(3, "📸 Instagram Radar")', UI)
+        self.assertNotIn('''"🌿 Stories Telegram",
+                        "📸 Instagram Radar",
+                        "🔎 Поиск чатов"''', UI)
+        self.assertIn('elif is_agency_owner(int(telegram_id)):', UI)
+        self.assertNotIn("Подключите профессиональный Instagram в блоке каналов", UI)
+        knowledge = Path("neola_cabinet_map.py").read_text(encoding="utf-8")
+        self.assertIn("Подключение Instagram для новых партнёров временно скрыто", knowledge)
+
     def test_launch_checklist_does_not_promise_access(self):
         for requirement in (
             "App Review",

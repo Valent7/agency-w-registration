@@ -6346,6 +6346,11 @@ def _render_connected_channel_card(title: str, caption: str, label: str):
 
 def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool:
     connection = _load_instagram_connection(int(owner_telegram_id))
+    # Meta App Review is not ready for unrestricted third-party accounts.
+    # Hide an inoperative signup CTA for partners, without touching their
+    # existing connections or the owner's already-working Direct integration.
+    if not connection and not is_agency_owner(int(owner_telegram_id)):
+        return False
     comments_state = str(st.query_params.get("comments") or "").strip()
     instagram_result = str(st.query_params.get("instagram") or "").strip()
     if comments_state == "ready":
@@ -6427,21 +6432,22 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
                         "Instagram пока не подтвердил действительность подключения. "
                         "Попробуйте обновить разрешения и авторизацию."
                     )
-        with st.expander("Разрешения Instagram", expanded=comments_state == "subscription_warning"):
-            st.caption(
-                "Если Instagram подключали до появления центра комментариев, "
-                "один раз обновите разрешения — Direct при этом не отключится."
-            )
-            try:
-                refresh_url = _instagram_connect_url(owner_telegram_id, owner_name)
-                safe_refresh_url = html.escape(refresh_url, quote=True)
-                st.markdown(
-                    f'<a href="{safe_refresh_url}" target="_blank" '
-                    'rel="noopener noreferrer">🔄 Обновить разрешения Instagram</a>',
-                    unsafe_allow_html=True,
+        if is_agency_owner(int(owner_telegram_id)):
+            with st.expander("Разрешения Instagram", expanded=comments_state == "subscription_warning"):
+                st.caption(
+                    "Если Instagram подключали до появления центра комментариев, "
+                    "один раз обновите разрешения — Direct при этом не отключится."
                 )
-            except Exception as exc:
-                st.caption(f"Обновление разрешений пока недоступно: {exc}")
+                try:
+                    refresh_url = _instagram_connect_url(owner_telegram_id, owner_name)
+                    safe_refresh_url = html.escape(refresh_url, quote=True)
+                    st.markdown(
+                        f'<a href="{safe_refresh_url}" target="_blank" '
+                        'rel="noopener noreferrer">🔄 Обновить разрешения Instagram</a>',
+                        unsafe_allow_html=True,
+                    )
+                except Exception as exc:
+                    st.caption(f"Обновление разрешений пока недоступно: {exc}")
         return True
 
     if instagram_result == "access_pending":
@@ -8836,11 +8842,14 @@ if telegram_login_valid or remembered_data:
                         "🎯 Определить мою целевую аудиторию",
                         "💙 Источники поиска VK",
                         "🌿 Stories Telegram",
-                        "📸 Instagram Radar",
                         "🔎 Поиск чатов",
                         "👥 Поиск контактов из чата",
                         "👥 Поиск контактов",
                     ]
+                    # Radar still leads to unapproved Meta OAuth for partners.
+                    # Keep the owner's diagnostic/manual pilot only.
+                    if is_agency_owner(int(telegram_id)):
+                        neonia_options.insert(3, "📸 Instagram Radar")
                     if talkback_mode:
                         accessible_neonia_labels = {
                             "🎯 Определить мою целевую аудиторию": "Определить мою целевую аудиторию",
@@ -10392,13 +10401,16 @@ if telegram_login_valid or remembered_data:
                             telegram_id,
                             first_name,
                         )
-                    else:
+                        st.divider()
+                    elif is_agency_owner(int(telegram_id)):
+                        # Only the Director can see Instagram setup diagnostics.
+                        # Partners without Meta access see no broken CTA.
                         st.markdown("### 📸 Instagram комментарии")
                         st.info(
-                            "Подключите профессиональный Instagram в блоке каналов, "
-                            "чтобы Неона получала комментарии к Reels и постам."
+                            "Комментарии станут доступны после разрешения Meta. "
+                            "Пока используйте уже работающие каналы."
                         )
-                    st.divider()
+                        st.divider()
 
                     # --------------------------------------------------
                     # Постоянный рабочий стол Telegram-диалогов Неоны.
