@@ -456,24 +456,225 @@ def _create_meeting(config, owner_id, owner_name, contact_id, first_name, userna
     return created, start, zoom_link, zoom_note
 
 
+def _explicit_meeting_slot(text: str, message_dt: datetime):
+    """Respect the LAST message: 'в понедельник в 12.00 МСК' is a new slot."""
+    day = core._detect_date(text, message_dt, "Europe/Moscow")
+    clock = core._detect_time(text)
+    if not (day and clock):
+        return None
+    try:
+        return datetime.fromisoformat(f"{day}T{clock}:00").replace(
+            tzinfo=core.MSK
+        ).astimezone(core.UTC)
+    except (TypeError, ValueError):
+        return None
+
+
+def _slot_within_policy(start_utc: datetime) -> bool:
+    """Never book past, weekend, or outside 10–20 Moscow with a 60m lead."""
+    now = datetime.now(core.UTC)
+    local = start_utc.astimezone(core.MSK)
+    minutes = int(getattr(core, "DURATION_MINUTES", 30))
+    end = local + timedelta(minutes=minutes)
+    return (
+        start_utc >= now + timedelta(minutes=60)
+        and local.weekday() < 5
+        and local.hour >= 10
+        and (end.hour < 20 or (end.hour == 20 and end.minute == 0))
+        and local.date() == end.date()
+    )
+
+
+def _explicit_confirmation(text: str) -> bool:
+    """Calendar booking requires confirmation, not a bare 'Zoom' or interest."""
+    value = re.sub(r"[^a-zа-яё0-9]+", " ", _norm(text)).strip()
+    return value in {
+        "да", "да конечно", "да всё верно", "всё верно", "верно",
+        "подтверждаю", "да подтверждаю", "подходит", "да подходит",
+        "согласен", "согласна", "договорились", "ок", "окей", "okay",
+    }
+
+
 def _schedule_reply_v2(
     config, owner_id, owner_name, contact_id, first_name, username,
     text, message_dt, stage, context, greet,
 ):
-    """Интерес → 3 слота МСК → выбор → формат → сразу запись."""
+    """Exact requested date/time → explicit confirmation → persisted booking."""
     context = dict(context or {})
     context["contact_timezone"] = "Europe/Moscow"
     prefix = f"{core._greeting(first_name)} " if greet else ""
     reason = str(context.get("meeting_reason") or "")
 
-    if stage not in {"awaiting_slot_choice", "collecting_meeting_details", "awaiting_confirmation"}:
+    proposed = _explicit_meeting_slot(text, message_dt)
+    detected_date = core._detect_date(text, message_dt, "Europe/Moscow")
+    detected_time = core._detect_time(text)
+    fmt_in_message = core._detect_format(text)
+
+    # The person's latest full request always overrides an older offered slot.
+    # Nothing is written to the calendar until they explicitly confirm.
+    if proposed is not None:
+        context.pop("offered_slots", None)
+        context["proposed_start_at"] = proposed.isoformat()
+        if fmt_in_message:
+            context["meeting_format"] = fmt_in_message
+        else:
+            context.pop("meeting_format", None)
+        if not _slot_within_policy(proposed):
+            context.pop("proposed_start_at", None)
+            return (
+                prefix + "Это время вне рабочего окна (понедельник–пятница, "
+                "10:00–20:00 МСК) или слишком близко. "
+                "Назовите, пожалуйста, другой день и время.",
+                "collecting_meeting_details", context,
+            )
+        if not context.get("meeting_format"):
+            return (
+                prefix + f"Вы предлагаете {_fmt_msk(proposed)}. "
+                "Какой формат выбираем: Zoom, Telegram или WhatsApp?",
+                "collecting_meeting_details", context,
+            )
+        try:
+            free = legacy._slot_free_with_buffer(
+                config, owner_id, proposed,
+                proposed + timedelta(minutes=int(getattr(core, "DURATION_MINUTES", 30))),
+            )
+        except Exception:
+            free = False
+        if not free:
+            context.pop("proposed_start_at", None)
+            return (
+                prefix + f"Проверила {_fmt_msk(proposed)} — пока не могу "
+                "подтвердить свободное время. Уточним другой вариант?",
+                "collecting_meeting_details", context,
+            )
+        context["meeting_confirmation_pending"] = True
+        return (
+            prefix + f"Правильно понимаю: {_fmt_msk(proposed)}, "
+            f"формат — {context['meeting_format']}? "
+            "Подтвердите, пожалуйста, именно эту дату и время.",
+            "awaiting_confirmation", context,
+        )
+
+    # Partial correction ('в понедельник' or 'в 12.00') must NOT silently
+    # confirm an old, different proposal. Ask for an unambiguous full slot.
+    if detected_date or detected_time:
+        if stage == "awaiting_slot_choice" and detected_time and not detected_date:
+            # A time alone is allowed only if it uniquely identifies a
+            # previously offered slot; all other partials need clarification.
+            raw_slots = context.get("offered_slots") or []
+            matching = []
+            for index, raw in enumerate(raw_slots):
+                try:
+                    local = datetime.fromisoformat(
+                        str(raw).replace("Z", "+00:00")
+                    ).astimezone(core.MSK)
+                    if local.strftime("%H:%M") == detected_time:
+                        matching.append(index)
+                except (TypeError, ValueError):
+                    pass
+            if len(matching) == 1:
+                selection = matching[0]
+                selected = str(raw_slots[selection])
+                context["proposed_start_at"] = selected
+                context.pop("offered_slots", None)
+                if fmt_in_message:
+                    context["meeting_format"] = fmt_in_message
+                stage = "collecting_meeting_details"
+            else:
+                context.pop("proposed_start_at", None)
+                return (
+                    prefix + "Уточните, пожалуйста, день и время полностью, "
+                    "например «в понедельник в 12:00 МСК».",
+                    "collecting_meeting_details", context,
+                )
+        else:
+            context.pop("proposed_start_at", None)
+            context.pop("offered_slots", None)
+            context.pop("meeting_confirmation_pending", None)
+            if fmt_in_message:
+                context["meeting_format"] = fmt_in_message
+            return (
+                prefix + "Уточните, пожалуйста, и день, и время встречи, "
+                "например «в понедельник в 12:00 МСК». "
+                "Предыдущий вариант не записываю.",
+                "collecting_meeting_details", context,
+            )
+
+    if stage not in {
+        "awaiting_slot_choice", "collecting_meeting_details", "awaiting_confirmation"
+    }:
         return _offer_slots(config, owner_id, owner_name, context, reason=reason, prefix=prefix)
+
+    if stage == "awaiting_confirmation":
+        if not _explicit_confirmation(text):
+            if _decline(text) or any(x in _norm(text) for x in (
+                "другое время", "не подходит", "неудобно", "отмен",
+            )):
+                context.pop("proposed_start_at", None)
+                context.pop("meeting_confirmation_pending", None)
+                context.pop("meeting_format", None)
+                return _offer_slots(config, owner_id, owner_name, context, prefix=prefix)
+            return (
+                prefix + "Я ещё не записывала встречу. "
+                "Подтвердите предложенные дату, время и формат словом «Подтверждаю» "
+                "или напишите другое время.",
+                "awaiting_confirmation", context,
+            )
+        raw = str(context.get("proposed_start_at") or "")
+        fmt = str(context.get("meeting_format") or "")
+        try:
+            start = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(core.UTC)
+        except (TypeError, ValueError):
+            start = None
+        if start is None or not _slot_within_policy(start) or fmt not in {
+            "Zoom", "Telegram", "WhatsApp"
+        }:
+            context.pop("proposed_start_at", None)
+            context.pop("meeting_confirmation_pending", None)
+            return (
+                prefix + "Не удалось подтвердить дату, время и формат. "
+                "Напишите, пожалуйста, удобные день и время заново.",
+                "collecting_meeting_details", context,
+            )
+        made = _create_meeting(
+            config, owner_id, owner_name, contact_id, first_name,
+            username, context, fmt
+        )
+        if made is None:
+            context.pop("proposed_start_at", None)
+            context.pop("meeting_confirmation_pending", None)
+            return (
+                prefix + "Пока мы согласовывали встречу, время стало занято. "
+                "Назовите, пожалуйста, другой удобный день и время.",
+                "collecting_meeting_details", context,
+            )
+        created, start, zoom_link, zoom_note = made
+        context.pop("meeting_confirmation_pending", None)
+        owner_forms = _owner_forms(owner_name)
+        if str(context.get("meeting_reason") or "") == "callback":
+            answer = (
+                f"Договорились. {owner_forms['nominative']} позвонит вам "
+                f"{_fmt_msk(start)}. Формат — {fmt}."
+            )
+        else:
+            answer = (
+                f"Договорились. Встреча с {owner_forms['instrumental']} "
+                f"записана на {_fmt_msk(start)}. Формат — {fmt}."
+            )
+        if fmt == "Zoom" and zoom_link:
+            answer += f" Ссылка Zoom: {zoom_link}."
+            if zoom_note:
+                answer += f" {zoom_note}"
+        farewell = (
+            "Хорошего вам дня!" if datetime.now(core.MSK).hour < 18
+            else "Хорошего вам вечера!"
+        )
+        return answer + " " + farewell, "scheduled", context
 
     if stage == "awaiting_slot_choice":
         slots = context.get("offered_slots") or []
         slots = slots if isinstance(slots, list) else []
         v = _norm(text)
-
         if any(x in v for x in (
             "не подходит", "не подходят", "ни один", "другие варианты",
             "другое время", "следующие варианты", "неудобно",
@@ -487,67 +688,50 @@ def _schedule_reply_v2(
                 except Exception:
                     pass
             return _offer_slots(config, owner_id, owner_name, context, after_utc=after, prefix=prefix)
-
         choice = _slot_choice(text, slots)
         if choice is None:
             return (
-                prefix + "Выберите, пожалуйста, один из предложенных вариантов — 1, 2 или 3.",
+                prefix + "Выберите, пожалуйста, предложенный вариант 1, 2 или 3 "
+                "либо напишите удобный день и время.",
                 "awaiting_slot_choice", context,
             )
-
         selected = str(slots[choice])
         context["proposed_start_at"] = selected
         context.pop("offered_slots", None)
-        fmt = core._detect_format(text)
-        if fmt:
-            context["meeting_format"] = fmt
-        else:
-            start = datetime.fromisoformat(selected.replace("Z", "+00:00")).astimezone(core.UTC)
-            return (
-                prefix + f"Отлично, выбрали {_fmt_msk(start)}. "
-                "Как вам удобнее встретиться — Zoom, Telegram или WhatsApp?",
-                "collecting_meeting_details", context,
-            )
+        if fmt_in_message:
+            context["meeting_format"] = fmt_in_message
 
-    if context.get("proposed_start_at"):
-        fmt = core._detect_format(text) or str(context.get("meeting_format") or "")
-        if fmt not in {"Zoom", "Telegram", "WhatsApp"}:
-            return (
-                prefix + "Как вам удобнее встретиться — Zoom, Telegram или WhatsApp?",
-                "collecting_meeting_details", context,
-            )
-
-        context["meeting_format"] = fmt
-        made = _create_meeting(
-            config, owner_id, owner_name, contact_id, first_name, username, context, fmt
+    # Slot selected or calendar already collecting details: format comes first,
+    # then a separate explicit 'yes' to the exact date and time.
+    raw = str(context.get("proposed_start_at") or "")
+    if not raw:
+        return _offer_slots(config, owner_id, owner_name, context, reason=reason, prefix=prefix)
+    try:
+        start = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(core.UTC)
+    except (ValueError, TypeError):
+        context.pop("proposed_start_at", None)
+        return _offer_slots(config, owner_id, owner_name, context, reason=reason, prefix=prefix)
+    if not _slot_within_policy(start):
+        context.pop("proposed_start_at", None)
+        return (
+            prefix + "Предыдущее время больше недоступно. "
+            "Назовите удобный день и время заново.",
+            "collecting_meeting_details", context,
         )
-        if made is None:
-            after = datetime.fromisoformat(
-                str(context["proposed_start_at"]).replace("Z", "+00:00")
-            ).astimezone(core.UTC) + timedelta(minutes=30)
-            context.pop("proposed_start_at", None)
-            context.pop("meeting_format", None)
-            reply, new_stage, context = _offer_slots(
-                config, owner_id, owner_name, context, after_utc=after, prefix=prefix
-            )
-            return "Пока мы выбирали формат, это время стало занято.\n" + reply, new_stage, context
-
-        created, start, zoom_link, zoom_note = made
-        owner_forms = _owner_forms(owner_name)
-        if str(context.get("meeting_reason") or "") == "callback":
-            answer = f"Договорились. {owner_forms['nominative']} позвонит вам {_fmt_msk(start)}. Формат — {fmt}."
-        else:
-            answer = f"Договорились. Встреча с {owner_forms['instrumental']} записана на {_fmt_msk(start)}. Формат — {fmt}."
-
-        if fmt == "Zoom" and zoom_link:
-            answer += f" Ссылка Zoom: {zoom_link}."
-            if zoom_note:
-                answer += f" {zoom_note}"
-
-        farewell = "Хорошего вам дня!" if datetime.now(core.MSK).hour < 18 else "Хорошего вам вечера!"
-        return answer + " " + farewell, "scheduled", context
-
-    return _offer_slots(config, owner_id, owner_name, context, reason=reason, prefix=prefix)
+    fmt = fmt_in_message or str(context.get("meeting_format") or "")
+    if fmt not in {"Zoom", "Telegram", "WhatsApp"}:
+        return (
+            prefix + f"Выбрали {_fmt_msk(start)}. "
+            "Какой формат удобнее — Zoom, Telegram или WhatsApp?",
+            "collecting_meeting_details", context,
+        )
+    context["meeting_format"] = fmt
+    context["meeting_confirmation_pending"] = True
+    return (
+        prefix + f"Проверим ещё раз: {_fmt_msk(start)}, формат — {fmt}. "
+        "Всё верно? Напишите «Подтверждаю», и я внесу встречу в календарь.",
+        "awaiting_confirmation", context,
+    )
 
 
 def _open_door_close():

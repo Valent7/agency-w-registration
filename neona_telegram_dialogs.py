@@ -1243,7 +1243,10 @@ def _detect_date(text: str, message_dt: datetime, tz_name: str | None) -> str | 
                 candidate = date(year + 1, month, day)
             return candidate.isoformat()
         except ValueError:
-            return None
+            # The user may have written an HH.MM time (e.g. 12.00),
+            # not a calendar date. Keep scanning for "понедельник",
+            # "завтра" and other valid weekday references.
+            pass
 
     for word, weekday in WEEKDAYS_RU.items():
         if word in lowered:
