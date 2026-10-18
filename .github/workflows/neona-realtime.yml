@@ -4,8 +4,10 @@ on:
     paths:
       - "neona_worker.py"
       - "neona_telegram_dialogs.py"
+      - "neona_dialog_policy_v2.py"
       - "neona_realtime_worker.py"
       - "tests/test_neona_realtime.py"
+      - "tests/test_neona_calendar_exact_time.py"
       - ".github/workflows/neona-realtime.yml"
   workflow_dispatch:
 
@@ -22,8 +24,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile changed Python modules
-        run: python -m py_compile neona_worker.py neona_telegram_dialogs.py neona_realtime_worker.py tests/test_neona_realtime.py
+        run: python -m py_compile neona_worker.py neona_telegram_dialogs.py neona_realtime_worker.py tests/test_neona_realtime.py neona_dialog_policy_v2.py tests/test_neona_calendar_exact_time.py
       - name: Install minimal runtime dependencies
         run: python -m pip install "telethon==1.44.0" requests cryptography
       - name: Offline realtime safety tests
         run: python -m unittest discover -s tests -p "test_neona_realtime.py" -v
+      - name: Exact calendar time and confirmation regression
+        run: python -m unittest discover -s tests -p "test_neona_calendar_exact_time.py" -v
