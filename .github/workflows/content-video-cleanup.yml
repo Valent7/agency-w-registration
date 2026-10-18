@@ -1,0 +1,33 @@
+name: Content factory video cleanup safety
+on:
+  pull_request:
+    paths:
+      - "content_video_cleanup.py"
+      - "content_video_cleanup_ui.py"
+      - "content_factory_ui.py"
+      - "tests/test_content_video_cleanup.py"
+      - ".github/workflows/content-video-cleanup.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install offline video test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg >/dev/null
+          python -m pip install requests pillow
+      - name: Compile modules without running Streamlit
+        run: |
+          python -m py_compile content_video_cleanup.py content_video_cleanup_ui.py content_factory_ui.py tests/test_content_video_cleanup.py
+      - name: Verify MP4 cleanup, original audio and isolation
+        run: python -m unittest discover -s tests -p "test_content_video_cleanup.py" -v
