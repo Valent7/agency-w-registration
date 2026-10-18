@@ -3327,6 +3327,11 @@ def render_content_factory(
     # Re-enable only after acceptance tests on both user-provided reference videos.
     st.session_state.pop(f"cf_mode_{owner_id}", None)
 
+    # Director-only isolated pilot: reproduce a previously accepted real-video method.
+    # This is NOT the unsafe generic delogo tool and is never shown to partners.
+    from video_cleanup_pilot_ui import render_owner_video_cleanup_pilot
+    render_owner_video_cleanup_pilot(owner_id)
+
     if not st.session_state.get(load_marker):
         latest = _load_latest_package(owner_id)
         if isinstance(latest, dict) and latest.get("workflow_version") == "single_v2":
