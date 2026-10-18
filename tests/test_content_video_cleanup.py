@@ -20,25 +20,21 @@ from content_video_cleanup import (
 class ContentFactoryNavigationTests(unittest.TestCase):
     """Prevent a hidden cleaner button in the unused legacy content factory."""
 
-    def test_active_render_content_factory_has_cleanup_entry_before_stage(self):
+    def test_unsafe_cleaner_is_not_exposed_to_partners(self):
         source = Path("content_factory_ui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         methods = {
             node.name: node for node in tree.body
             if isinstance(node, ast.FunctionDef)
         }
-        active = methods["render_content_factory"]
-        legacy = methods["_render_legacy_content_factory"]
-        active_code = ast.get_source_segment(source, active)
-        legacy_code = ast.get_source_segment(source, legacy)
-        self.assertIn('["✨ Создать контент", "🧹 Очистить видео"]', active_code)
-        self.assertIn('render_video_cleanup(owner_id)', active_code)
-        self.assertIn('if choice == "🧹 Очистить видео":', active_code)
-        self.assertNotIn('render_video_cleanup(owner_id)', legacy_code)
-        self.assertLess(
-            active_code.index('render_video_cleanup(owner_id)'),
-            active_code.index('if not st.session_state.get(load_marker):')
-        )
+        active_code = ast.get_source_segment(source, methods["render_content_factory"])
+        self.assertNotIn('render_video_cleanup(owner_id)', active_code)
+        self.assertNotIn('["✨ Создать контент", "🧹 Очистить видео"]', active_code)
+        self.assertNotIn('if choice == "🧹 Очистить видео":', active_code)
+        self.assertIn('st.session_state.pop(f"cf_mode_{owner_id}", None)', active_code)
+        # Existing factory remains; the cleanup prototype stays offline for rework.
+        self.assertIn('if stage == "start":', active_code)
+
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
@@ -173,9 +169,8 @@ class VideoCleanupTests(unittest.TestCase):
     def test_content_factory_keeps_original_generator_untouched(self):
         ui = Path("content_factory_ui.py").read_text(encoding="utf-8")
         cleaner = Path("content_video_cleanup_ui.py").read_text(encoding="utf-8")
-        self.assertIn('"✨ Создать контент", "🧹 Очистить видео"', ui)
-        self.assertIn("render_video_cleanup(owner_id)", ui)
-        self.assertIn("if choice == \"🧹 Очистить видео\":", ui)
+        self.assertNotIn('"✨ Создать контент", "🧹 Очистить видео"', ui)
+        self.assertNotIn("render_video_cleanup(owner_id)", ui)
         self.assertIn("st.download_button(", cleaner)
         self.assertIn("Это мой ролик или у меня есть разрешение", cleaner)
 
