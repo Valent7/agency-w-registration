@@ -1,4 +1,5 @@
 """Offline tests: Agency W clean-up never sends media to an external service."""
+import ast
 import json
 import shutil
 import subprocess
@@ -11,6 +12,30 @@ from content_video_cleanup import (
     _delogo_filters,
     clean_user_video,
 )
+
+
+class ContentFactoryNavigationTests(unittest.TestCase):
+    """Prevent a hidden cleaner button in the unused legacy content factory."""
+
+    def test_active_render_content_factory_has_cleanup_entry_before_stage(self):
+        source = Path("content_factory_ui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        methods = {
+            node.name: node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        active = methods["render_content_factory"]
+        legacy = methods["_render_legacy_content_factory"]
+        active_code = ast.get_source_segment(source, active)
+        legacy_code = ast.get_source_segment(source, legacy)
+        self.assertIn('["✨ Создать контент", "🧹 Очистить видео"]', active_code)
+        self.assertIn('render_video_cleanup(owner_id)', active_code)
+        self.assertIn('if choice == "🧹 Очистить видео":', active_code)
+        self.assertNotIn('render_video_cleanup(owner_id)', legacy_code)
+        self.assertLess(
+            active_code.index('render_video_cleanup(owner_id)'),
+            active_code.index('if not st.session_state.get(load_marker):')
+        )
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg unavailable")
