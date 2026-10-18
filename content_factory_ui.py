@@ -2471,18 +2471,6 @@ def _render_legacy_content_factory(
         "Разведчик W работает за кулисами и приносит лучшие рыночные идеи."
     )
 
-    # New independent tool: do not touch existing text/reel/dialogue stages.
-    from content_video_cleanup_ui import render_video_cleanup
-    choice = st.radio(
-        "Режим Контент-завода",
-        ["✨ Создать контент", "🧹 Очистить видео"],
-        horizontal=True,
-        key=f"cf_mode_{owner_id}",
-    )
-    if choice == "🧹 Очистить видео":
-        render_video_cleanup(owner_id)
-        return
-
     if not st.session_state.get(load_marker):
         latest = _load_latest_package(owner_id)
         if latest:
@@ -3333,6 +3321,18 @@ def render_content_factory(
         "Скажите задачу обычными словами. Завод подготовит профессиональный текст, "
         "Стагирит проверит его, а платные инструменты включатся только после утверждения."
     )
+
+    # New independent tool: do not touch existing text/reel/dialogue stages.
+    from content_video_cleanup_ui import render_video_cleanup
+    choice = st.radio(
+        "Режим Контент-завода",
+        ["✨ Создать контент", "🧹 Очистить видео"],
+        horizontal=True,
+        key=f"cf_mode_{owner_id}",
+    )
+    if choice == "🧹 Очистить видео":
+        render_video_cleanup(owner_id)
+        return
 
     if not st.session_state.get(load_marker):
         latest = _load_latest_package(owner_id)
