@@ -5,4 +5,3 @@ cryptography
 pillow
 pypdf
 openai
-opencv-python-headless==4.12.0.88

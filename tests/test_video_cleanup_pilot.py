@@ -16,10 +16,10 @@ class OwnerOnlyPilotTests(unittest.TestCase):
             make_test_preview(b"not the example")
         self.assertFalse(recognized_reference(b"wrong file"))
 
-    def test_active_factory_shows_owner_pilot_but_not_old_cleaner(self):
+    def test_production_factory_hides_pilot_during_recovery(self):
         factory = Path("content_factory_ui.py").read_text(encoding="utf-8")
         source = factory[factory.index("def render_content_factory("):]
-        self.assertIn("render_owner_video_cleanup_pilot(owner_id)", source)
+        self.assertNotIn("render_owner_video_cleanup_pilot(owner_id)", source)
         self.assertNotIn("render_video_cleanup(owner_id)", source)
         self.assertNotIn('["✨ Создать контент", "🧹 Очистить видео"]', source)
         ui = Path("video_cleanup_pilot_ui.py").read_text(encoding="utf-8")
