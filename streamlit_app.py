@@ -8329,6 +8329,16 @@ if telegram_login_valid or remembered_data:
 
         if main_section == "☀️ День":
             st.markdown("### ☀️ Мой день")
+            if st.button(
+                "📚 Открыть инструкции Агентства W",
+                key=f"agency_open_numbered_guides_{telegram_id}",
+                use_container_width=True,
+            ):
+                # Переход выполняется на следующем rerun, чтобы не менять
+                # уже созданный виджет главного меню в этом же цикле.
+                st.session_state["agency_open_main_section"] = "👥 Команда"
+                st.session_state[f"team_section_{int(telegram_id)}"] = "📚 Инструкции"
+                st.rerun()
 
             berlin_today = datetime.now(ZoneInfo("Europe/Berlin")).date()
             mood_of_the_day = daily_mood_for_date(berlin_today)
