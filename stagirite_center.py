@@ -5488,12 +5488,22 @@ def ensure_weekly_candidates_for_neona(
     # пересоздаётся. Только проверенные карточки нового источника сохраняются
     # в сегодняшней пятёрке, даже если старый день уже имел пять контактов.
     if not sequential_source:
+        # Старую непроверенную выдачу не называем подходящей ЦА. Но если
+        # владелец уже кого-то передал Неоне, сохраняем факт принятого решения.
+        old_approved = _normalize_int_ids(
+            today_info.get("legacy_approved_candidate_ids", [])
+        )
+        old_approved.extend(approved_ids)
+        today_info["legacy_approved_candidate_ids"] = list(dict.fromkeys(old_approved))
         candidate_ids = []
         approved_ids = []
 
     excluded_for_today = set(selected_all)
     excluded_for_today.update(previously_shown)
     excluded_for_today.update(candidate_ids)
+    excluded_for_today.update(
+        _normalize_int_ids(today_info.get("legacy_approved_candidate_ids", []))
+    )
 
     missing_count = max(0, daily_target - len(candidate_ids))
 
