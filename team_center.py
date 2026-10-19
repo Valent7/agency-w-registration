@@ -12,6 +12,7 @@ import uuid
 import requests
 import streamlit as st
 from agency_access_control import is_agency_access_revoked
+from agency_help_guides import render_builtin_instructions
 
 from agency_publisher import (
     list_publisher_destinations,
@@ -1781,9 +1782,15 @@ def _incoming_owner(
 def _render_instructions(
     owner_telegram_id: int,
 ) -> None:
-    referrer = _incoming_owner(owner_telegram_id)
-
     st.markdown("#### 📚 Инструкции")
+
+    # Общая библиотека всегда первая: не зависит от приглашений,
+    # подключения базы и существования индивидуальных материалов.
+    render_builtin_instructions()
+    st.divider()
+
+    # Общая школа показывается даже при сбое запроса к таблице наставников.
+    referrer = _incoming_owner(owner_telegram_id)
 
     # Инструкции от пригласившего Директора
     if referrer:

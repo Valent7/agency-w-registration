@@ -1,0 +1,28 @@
+name: Agency W numbered instructions checks
+on:
+  pull_request:
+    paths:
+      - "agency_help_guides.py"
+      - "team_center.py"
+      - "neola_cabinet_map.py"
+      - "neola_partner_center.py"
+      - "neola_realtime_voice.py"
+      - "streamlit_app.py"
+      - "tests/test_agency_numbered_guides.py"
+      - ".github/workflows/agency-numbered-instructions.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate-guides:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile updated modules
+        run: python -m py_compile agency_help_guides.py team_center.py neola_cabinet_map.py neola_partner_center.py neola_realtime_voice.py streamlit_app.py tests/test_agency_numbered_guides.py
+      - name: Test guide catalog
+        run: python -m unittest discover -s tests -p "test_agency_numbered_guides.py" -v

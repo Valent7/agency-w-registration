@@ -25,6 +25,7 @@ from agency_calendar import (
     render_today_meetings_compact,
 )
 from team_center import render_team_center
+from agency_help_guides import render_builtin_instructions
 from personal_tasks import render_personal_tasks
 from agency_diary import render_agency_diary
 from agency_results import render_agency_results
@@ -8329,6 +8330,20 @@ if telegram_login_valid or remembered_data:
 
         if main_section == "☀️ День":
             st.markdown("### ☀️ Мой день")
+            day_guides_key = f"agency_day_guides_visible_{telegram_id}"
+            if st.button(
+                "📚 Открыть инструкции Агентства W",
+                key=f"agency_open_numbered_guides_{telegram_id}",
+                use_container_width=True,
+            ):
+                st.session_state[day_guides_key] = not bool(
+                    st.session_state.get(day_guides_key, False)
+                )
+            if st.session_state.get(day_guides_key, False):
+                # Не требуем переходить через вложенную вкладку Streamlit:
+                # каталог раскрывается здесь, прямо на экране «Мой день».
+                render_builtin_instructions()
+                st.divider()
 
             berlin_today = datetime.now(ZoneInfo("Europe/Berlin")).date()
             mood_of_the_day = daily_mood_for_date(berlin_today)
