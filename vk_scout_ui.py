@@ -868,7 +868,7 @@ def _render_today_vk_candidates(
     if not assignments:
         st.info(
             "Сегодня активных карточек VK пока нет. Если источник уже добавлен, "
-            "фоновый VK Scout возьмёт следующих людей по порядку, без отбора по ЦА."
+            "фоновый VK Scout продолжит проверять доступные признаки потребности в освобождении времени. Пустые профили не попадают в рекомендации."
         )
         return
 
@@ -904,9 +904,18 @@ def _render_today_vk_candidates(
             if place:
                 meta.append(place)
             st.caption(" · ".join(meta))
-            st.write(
-                "**Почему сегодня:** следующий новый человек в очереди этого сообщества."
-            )
+            evidence = item.get("time_freedom_evidence") or queue_meta.get("time_freedom_evidence") or []
+            if evidence:
+                st.write("**Почему Неония выбрала человека:**")
+                for statement in evidence[:2]:
+                    st.caption(str(statement)[:350])
+                st.caption("Это признак возможного интереса, а не согласие на покупку или встречу.")
+            else:
+                st.warning(
+                    "Для этой карточки не сохранено подтверждение потребности. "
+                    "Она могла быть выдана по старым правилам. "
+                    "Не считайте её подтверждённым кандидатом ЦА."
+                )
 
             if profile_url:
                 st.link_button(
