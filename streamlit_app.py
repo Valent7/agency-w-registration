@@ -5321,6 +5321,12 @@ def prepare_candidates_for_stagirite(
                 break
 
     need = max(0, desired_count - len(selected_today))
+    # Режим источника выбирает владелец. Если личные контакты ещё остались,
+    # не подменяем их участниками чатов ради заполнения пятёрки.
+    if daily_source == "contacts" and any(
+        int(item["telegram_id"]) not in processed_ids for item in normalized_contacts
+    ):
+        need = 0
 
     # --------------------------------------------------------------
     # 2. Если выбран режим чатов — берём пятёрку сразу из чатов.
