@@ -12,6 +12,7 @@ import uuid
 import requests
 import streamlit as st
 from agency_access_control import is_agency_access_revoked
+from agency_help_guides import render_builtin_instructions
 
 from agency_publisher import (
     list_publisher_destinations,
@@ -1784,6 +1785,11 @@ def _render_instructions(
     referrer = _incoming_owner(owner_telegram_id)
 
     st.markdown("#### 📚 Инструкции")
+
+    # Общая библиотека всегда первая: не зависит от приглашений,
+    # подключения базы и существования индивидуальных материалов.
+    render_builtin_instructions()
+    st.divider()
 
     # Инструкции от пригласившего Директора
     if referrer:
