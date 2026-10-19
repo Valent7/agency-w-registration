@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from agency_core import agency_core_prompt
+from neonia_candidate_policy import TIME_FREEDOM_MISSION
 
 NEONIA_CORE = agency_core_prompt(
     "Неония",
@@ -73,6 +74,7 @@ def normalize_target_profile(raw: dict) -> dict:
 
     profile = {
         "project_name": text("project_name", 120) or "Проект владельца",
+        "agency_w_primary_goal": TIME_FREEDOM_MISSION,
         "portrait": text("portrait", 2200),
         "who_is_this": text("who_is_this", 1500),
         "current_situation": text("current_situation", 1500),
@@ -125,6 +127,14 @@ def analyze_owner_project_target_profile(
 
 ТВОЙ ЕДИНСТВЕННЫЙ РЕЗУЛЬТАТ — ЖИВОЙ ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ.
 
+ОБЩАЯ МИССИЯ АГЕНТСТВА W:
+{TIME_FREEDOM_MISSION}
+Главный акцент — освободить человеку время, а не продажа ИИ, MLM,
+криптовалюты, статуса или обещаний дохода. В центре портрета:
+какую рутину человек желает убрать и готов ли рассмотреть помощь ИИ.
+При этом точно отражай ВОЗМОЖНОСТИ КОНКРЕТНОГО проекта: если продукт
+не автоматизирует задачи, не приписывай ему такого свойства.
+
 Проект может быть любым. Нельзя использовать фиксированную ЦА Neonexa.
 Для каждого проекта заново пойми:
 - какую реальную пользу получает человек;
@@ -152,6 +162,10 @@ def analyze_owner_project_target_profile(
   из-за технологической тематики;
 - отличай интерес к теме от реальной потребности в предложении проекта;
 - признаки должны быть наблюдаемыми в конкретном публичном источнике, а не фантазиями о человеке;
+- не заявляй, что Неония видит чужие просмотры, клики, скачивание PDF, закрытые переписки,
+  подписки или использование продукта, если конкретный источник не раскрывает эти данные;
+- готовность передать рутину ИИ — не факт о конкретном человеке до проверки;
+- отделяй «возможные признаки для поиска» от «реально подтверждённой потребности»;
 - сильный кандидат должен иметь не только совпадение с портретом ЦА, но и публичный сигнал
   актуальной потребности/деловой задачи, связанной с предложением проекта.
 
@@ -211,6 +225,7 @@ def target_profile_for_analysis(profile: dict) -> str:
     profile = profile if isinstance(profile, dict) else {}
     payload = {
         "project_name": profile.get("project_name"),
+        "agency_w_primary_goal": TIME_FREEDOM_MISSION,
         "portrait": profile.get("portrait"),
         "who_is_this": profile.get("who_is_this"),
         "current_situation": profile.get("current_situation"),
@@ -238,6 +253,9 @@ def render_target_profile(profile: dict):
     profile = profile if isinstance(profile, dict) else {}
     st.markdown(f"## 🎯 Портрет вашей ЦА")
     st.caption(profile.get("project_name") or "Проект")
+    st.info("⏳ Главная миссия Агентства W: помочь человеку передать рутину ИИ и освободить время для настоящей жизни.")
+    if profile.get("agency_w_primary_goal") != TIME_FREEDOM_MISSION:
+        st.warning("Этот портрет создан до уточнения главного ориентира Агентства W. Для нового поиска рекомендуется повторить определение ЦА.")
 
     if profile.get("portrait"):
         st.success(profile["portrait"])
@@ -270,7 +288,8 @@ def render_target_profile(profile: dict):
 
     signals = profile.get("public_signals") or profile.get("telegram_signals") or []
     if signals:
-        with st.expander("🔍 Как Неония узнает такого человека в открытых источниках"):
+        with st.expander("🔍 Какие признаки Неония может проверить в доступных источниках"):
+            st.caption("Это ориентиры для проверки, а не доказательства о конкретном человеке. Неония не видит скрытые действия, просмотры и скачивания.")
             for item in signals:
                 st.write(f"• **{item.get('text', '')}**")
                 if item.get("reason"):
@@ -290,8 +309,9 @@ def render_target_profile(profile: dict):
                 st.write(f"• {item}")
 
     st.info(
-        "💡 Вот такого человека Неония будет искать не только среди контактов, "
-        "но и по подтверждённым публичным сигналам в подключённых источниках."
+        "💡 Портрет — ориентир, но не доказательство соответствия конкретного аккаунта. "
+        "В ежедневный список попадают только люди с подтверждённым признаком потребности "
+        "в освобождении времени и передаче рутины ИИ. Без данных — нет рекомендации."
     )
 
 
