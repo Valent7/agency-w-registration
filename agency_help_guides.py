@@ -195,7 +195,7 @@ def render_builtin_instructions() -> None:
         "даже без Неолы и независимо от материалов пригласившего Директора."
     )
     st.info(
-        "📍 Вы здесь: " + INSTRUCTIONS_ROUTE
+        "📍 Основной путь к каталогу: " + INSTRUCTIONS_ROUTE
         + "\n\nНеола поможет голосом: «Открой инструкцию № 03 и подскажи первый шаг»."
     )
     query = st.text_input(
