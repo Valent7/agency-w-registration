@@ -4827,8 +4827,8 @@ def build_no_data_candidate(source):
         "work_state_label": str(
             source.get("work_state_label") or "Можно начинать новый разговор"
         ),
-        "selection_blocked": bool(source.get("selection_blocked", False)),
-        "block_reason": str(source.get("block_reason") or ""),
+        "selection_blocked": True,
+        "block_reason": "Недостаточно данных о делегировании рутины ИИ.",
         "last_owner_outreach_at": str(
             source.get("last_owner_outreach_at") or ""
         ),
@@ -4845,14 +4845,14 @@ def build_no_data_candidate(source):
         "work_state_label": str(
             source.get("work_state_label") or "Можно начинать новый разговор"
         ),
-        "selection_blocked": bool(source.get("selection_blocked", False)),
-        "block_reason": str(source.get("block_reason") or ""),
+        "selection_blocked": True,
+        "block_reason": "Недостаточно данных о делегировании рутины ИИ.",
         "work_state": str(source.get("work_state") or "available"),
         "work_state_label": str(
             source.get("work_state_label") or "Можно начинать новый разговор"
         ),
-        "selection_blocked": bool(source.get("selection_blocked", False)),
-        "block_reason": str(source.get("block_reason") or ""),
+        "selection_blocked": True,
+        "block_reason": "Недостаточно данных о делегировании рутины ИИ.",
         "potential_interest": "неясно",
         "actuality": "активен сейчас",
         "warmth": "неясно",
@@ -4878,7 +4878,7 @@ def build_no_data_candidate(source):
         "score": 0,
         "confidence": "данных недостаточно",
         "reasons": ["Недостаточно содержательных данных для ИИ-анализа"],
-        "recommendation": "Решает владелец",
+        "recommendation": "Недостаточно данных",
         "status": "Проанализирован без OpenAI",
         "analysis_cost_mode": "local_no_ai",
         "analyzed_at": datetime.now(
@@ -4960,8 +4960,9 @@ def analyze_contacts_for_target_audience(
 Верни ТОЛЬКО JSON-массив без Markdown и пояснений.
 """
 
+    system_prompt += "\n\n" + BUSINESS_GATE_RULES
     request = (
-        "ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ — ТОЛЬКО ОРИЕНТИР:\n"
+        "ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ — ГЛАВНЫЙ ОРИЕНТИР:\n"
         f"{passport_analysis}\n\n"
         "ОЧЕРЕДНЫЕ КОНТАКТЫ ДЛЯ ХАРАКТЕРИСТИКИ:\n"
         f"{json.dumps(contact_contexts, ensure_ascii=False)}"
@@ -5029,6 +5030,14 @@ def analyze_contacts_for_target_audience(
             "средний": 50,
             "низкий": 25,
         }[potential_interest]
+        compatibility_score, validated_rec, real_evidence, gate_reason = apply_business_gate(
+            item, compatibility_score,
+            pass_recommendation="Решает владелец",
+            reject_recommendation="Недостаточно данных",
+            source_context=source,
+        )
+        if not real_evidence:
+            potential_interest = "низкий"
 
         normalized.append(
             {
@@ -5052,8 +5061,11 @@ def analyze_contacts_for_target_audience(
                 "work_state_label": str(
                     source.get("work_state_label") or "Можно начинать новый разговор"
                 ),
-                "selection_blocked": bool(source.get("selection_blocked", False)),
-                "block_reason": str(source.get("block_reason") or ""),
+                "selection_blocked": bool(source.get("selection_blocked", False)) or not bool(real_evidence),
+                "block_reason": str(source.get("block_reason") or "") or (gate_reason if not real_evidence else ""),
+                "business_evidence": real_evidence,
+                "business_relevant": bool(real_evidence),
+                "business_gate_reason": gate_reason,
                 "last_owner_outreach_at": str(
                     source.get("last_owner_outreach_at") or ""
                 ),
@@ -5082,10 +5094,8 @@ def analyze_contacts_for_target_audience(
                 "segment": potential_interest.capitalize() + " потенциальный интерес",
                 "score": compatibility_score,
                 "confidence": "аналитическая оценка",
-                "reasons": [
-                    str(item.get("short_portrait") or "Данных пока немного.")[:300]
-                ],
-                "recommendation": "Решает владелец",
+                "reasons": real_evidence or [gate_reason],
+                "recommendation": validated_rec,
                 "status": "Проанализирован",
                 "analysis_cost_mode": "openai",
                 "analyzed_at": datetime.now(
@@ -5119,14 +5129,14 @@ def analyze_contacts_for_target_audience(
                 "work_state_label": str(
                     source.get("work_state_label") or "Можно начинать новый разговор"
                 ),
-                "selection_blocked": bool(source.get("selection_blocked", False)),
-                "block_reason": str(source.get("block_reason") or ""),
+                "selection_blocked": True,
+                "block_reason": "Нет проверяемого признака делегирования рутины ИИ.",
                 "last_owner_outreach_at": str(
                     source.get("last_owner_outreach_at") or ""
                 ),
                 "cooldown_until": str(source.get("cooldown_until") or ""),
-                "potential_interest": "средний",
-                "actuality": "активен сейчас",
+                "potential_interest": "неясно",
+                "actuality": "неясно",
                 "warmth": "холодный",
                 "obstacles": ["мало данных"],
                 "short_portrait": "Недостаточно данных для уверенной характеристики.",
@@ -5135,8 +5145,8 @@ def analyze_contacts_for_target_audience(
                 "project_name": "",
                 "project_url": "",
                 "project_evidence": "",
-                "segment": "Средний потенциальный интерес",
-                "score": 50,
+                "segment": "Недостаточно данных",
+                "score": 0,
                 "confidence": "низкая",
                 "reasons": ["Недостаточно данных"],
                 "recommendation": "Решает владелец",
