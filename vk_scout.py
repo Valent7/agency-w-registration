@@ -242,11 +242,11 @@ def search_vk_communities(
         for value in (
             queries
             or (
-                "сетевой маркетинг",
-                "MLM бизнес",
+                "автоматизация бизнеса",
+                "искусственный интеллект для бизнеса",
                 "предприниматели",
-                "поиск партнеров бизнес",
-                "ИИ для бизнеса",
+                "делегирование задач",
+                "оптимизация бизнес процессов",
             )
         )
         if str(value or "").strip()
@@ -259,6 +259,8 @@ def search_vk_communities(
     }
 
     discovered: dict[int, dict[str, Any]] = {}
+    api_errors: list[str] = []
+    successful_queries = 0
     for query in search_queries:
         try:
             response = _vk_api(
@@ -266,8 +268,10 @@ def search_vk_communities(
                 q=query,
                 count=20,
             )
-        except Exception:
+        except Exception as exc:
+            api_errors.append(f"{query}: {exc}")
             continue
+        successful_queries += 1
         response = response if isinstance(response, dict) else {}
         search_items = response.get("items") or []
         ids = []
@@ -349,6 +353,11 @@ def search_vk_communities(
             str(item.get("name") or "").casefold(),
         )
     )
+    if not results and api_errors and successful_queries == 0:
+        raise VKScoutError(
+            "VK не разрешил поиск сообществ. Проверьте подключение VK Scout "
+            "и права VK API. Подробности: " + "; ".join(api_errors[:2])
+        )
     return results[:limit]
 
 
