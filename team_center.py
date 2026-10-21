@@ -1781,8 +1781,6 @@ def _incoming_owner(
 def _render_instructions(
     owner_telegram_id: int,
 ) -> None:
-    referrer = _incoming_owner(owner_telegram_id)
-
     st.markdown("#### 📚 Инструкции")
 
     from team_starter_guides import TEAM_STARTER_GUIDES
@@ -1791,6 +1789,13 @@ def _render_instructions(
         with st.expander(f"№ {number} — {title}"):
             for index, step in enumerate(steps, 1):
                 st.markdown(f"**Шаг {index}.** {step}")
+
+    # Библиотека инструкций доступна даже при сбое базы партнёров.
+    try:
+        referrer = _incoming_owner(owner_telegram_id)
+    except Exception as exc:
+        referrer = None
+        st.warning("Инструкции Директора временно недоступны. Общие инструкции выше продолжают работать.")
 
     # Инструкции от пригласившего Директора
     if referrer:
