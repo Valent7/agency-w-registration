@@ -1496,10 +1496,17 @@ def render_vk_sources(
                 owner_id,
                 limit=10,
             )
+            st.session_state[f"{discovery_key}_searched"] = True
         except Exception as exc:
             st.error(f"Не удалось выполнить поиск сообществ VK: {exc}")
 
     discovered = st.session_state.get(discovery_key, [])
+    if st.session_state.get(f"{discovery_key}_searched") and not discovered:
+        st.info(
+            "Новых подходящих открытых сообществ не найдено. "
+            "Проверьте подключение VK Scout или добавьте известное "
+            "сообщество по ссылке вручную."
+        )
     if isinstance(discovered, list) and discovered:
         for item in discovered:
             if not isinstance(item, dict):
