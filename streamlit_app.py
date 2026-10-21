@@ -12594,13 +12594,14 @@ if telegram_login_valid or remembered_data:
                                             )
 
                                             if chosen_magnet != selected_magnet:
-                                                st.caption(
-                                                    "Вы выбрали другой магнит. "
-                                                    "Нажмите «✨ Переписать», "
-                                                    "и Неона создаст новый текст под него."
-                                                )
+                                                st.caption("Неона готовит новый текст по выбранной теме.")
 
-                                        if rewrite_for_magnet:
+                                        # Смена темы сразу создаёт новый черновик.
+                                        # «Переписать» остаётся для повтора на той же теме.
+                                        if not draft.get("sent") and (
+                                            rewrite_for_magnet
+                                            or chosen_magnet != selected_magnet
+                                        ):
                                             with st.spinner(
                                                 "Неона переписывает сообщение "
                                                 "под выбранный магнит..."
