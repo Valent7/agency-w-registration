@@ -1785,6 +1785,13 @@ def _render_instructions(
 
     st.markdown("#### 📚 Инструкции")
 
+    from team_starter_guides import TEAM_STARTER_GUIDES
+    st.markdown("##### 📖 Пошаговые инструкции для новичков")
+    for number, title, steps in TEAM_STARTER_GUIDES:
+        with st.expander(f"№ {number} — {title}"):
+            for index, step in enumerate(steps, 1):
+                st.markdown(f"**Шаг {index}.** {step}")
+
     # Инструкции от пригласившего Директора
     if referrer:
         incoming = _get(
