@@ -446,10 +446,10 @@ def neola_cabinet_knowledge() -> str:
         "Если реальная кнопка отличается от текста, уточни, что видно на экране.",
     ]
     for number, title, steps in TEAM_STARTER_GUIDES:
-        catalog.append(f"\\n## Инструкция №{number}: {title}")
+        catalog.append(f"\n## Инструкция №{number}: {title}")
         for index, step in enumerate(steps, 1):
             catalog.append(f"Шаг {index}. {step}")
 
-    return "\\n\\n".join(
-        [NEOLA_MISSION, NEOLA_CABINET_MAP, NEOLA_DAY1_ROUTE, "\\n".join(catalog)]
+    return "\n\n".join(
+        [NEOLA_MISSION, NEOLA_CABINET_MAP, NEOLA_DAY1_ROUTE, "\n".join(catalog)]
     )
