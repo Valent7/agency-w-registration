@@ -11,7 +11,8 @@ import streamlit as st
 from neola_cabinet_map import NEOLA_MISSION, neola_cabinet_knowledge
 
 
-REALTIME_MODEL = "gpt-realtime-2.1-mini"
+REALTIME_MODEL = "gpt-realtime"  # Более сильная голосовая модель для наставника
+REALTIME_FALLBACK_MODEL = "gpt-realtime-2.1-mini"
 REALTIME_VOICE = "marin"
 # Даем партнёру достаточно времени прочитать экран и нажать кнопку.
 # После установления WebRTC-сессии истечение client secret разговор не прерывает.
@@ -323,6 +324,22 @@ def create_realtime_client_secret(
         json=body,
         timeout=30,
     )
+
+    if not response.ok and response.status_code in (400, 404, 422):
+        # Если основная модель недоступна для этого API-ключа,
+        # сохраняем рабочий голосовой режим на прежней модели.
+        print("[Neola Realtime] primary model unavailable; trying fallback", flush=True)
+        body["session"]["model"] = REALTIME_FALLBACK_MODEL
+        response = requests.post(
+            "https://api.openai.com/v1/realtime/client_secrets",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "OpenAI-Safety-Identifier": _privacy_safe_user_id(telegram_id),
+            },
+            json=body,
+            timeout=30,
+        )
 
     if not response.ok:
         raise RuntimeError(_realtime_error_for_user(response))
