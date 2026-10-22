@@ -434,4 +434,22 @@ NEOLA_DAY1_ROUTE = r"""
 
 
 def neola_cabinet_knowledge() -> str:
-    return f"{NEOLA_MISSION}\n\n{NEOLA_CABINET_MAP}\n\n{NEOLA_DAY1_ROUTE}"
+    """Единый источник инструкций для текстовой и живой голосовой Неолы."""
+    from team_starter_guides import TEAM_STARTER_GUIDES
+
+    catalog = [
+        "# АКТУАЛЬНЫЕ НУМЕРОВАННЫЕ ИНСТРУКЦИИ АГЕНТСТВА W",
+        "Инструкции открываются: «👥 Команда» → «🧰 Инструменты команды» → «📚 Инструкции».",
+        "Ты знаешь их содержание. Если партнёр просит инструкцию по номеру или теме,",
+        "назови номер, помоги найти её в кабинете и объясняй строго по одному шагу.",
+        "Не отправляй человека искать инструкцию самостоятельно, если можешь объяснить шаг голосом.",
+        "Если реальная кнопка отличается от текста, уточни, что видно на экране.",
+    ]
+    for number, title, steps in TEAM_STARTER_GUIDES:
+        catalog.append(f"\\n## Инструкция №{number}: {title}")
+        for index, step in enumerate(steps, 1):
+            catalog.append(f"Шаг {index}. {step}")
+
+    return "\\n\\n".join(
+        [NEOLA_MISSION, NEOLA_CABINET_MAP, NEOLA_DAY1_ROUTE, "\\n".join(catalog)]
+    )
