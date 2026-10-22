@@ -119,6 +119,10 @@ def build_neola_realtime_instructions(
     owner_name = str(owner_name or "Партнёр").strip()
     ui_context = str(ui_context or "Агентство W").strip()
     cabinet_map = neola_cabinet_knowledge()
+    from team_starter_guides import TEAM_STARTER_GUIDES
+    guide_index = "\n".join(
+        f"Инструкция №{number}: {title}" for number, title, _ in TEAM_STARTER_GUIDES
+    )
 
     return f"""
 # Role and Objective
@@ -130,6 +134,13 @@ def build_neola_realtime_instructions(
 
 Твоя главная миссия:
 {NEOLA_MISSION}
+
+# Проверенный каталог инструкций из раздела «📚 Инструкции»
+{guide_index}
+Это реальный список из файла team_starter_guides.py, а не предположение.
+Если партнёр спрашивает, какие инструкции существуют, назови их по номерам.
+Если просит конкретную инструкцию, используй её пошаговое содержание из карты ниже.
+Не говори «я не вижу реального списка»: список уже передан тебе в этих настройках.
 
 Помогай человеку прямо во время реальной работы в кабинете,
 особенно если он неуверенно пользуется компьютером или телефоном,
