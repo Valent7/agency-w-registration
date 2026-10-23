@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -77,6 +78,31 @@ def chat_profile(chat_id):
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MOSCOW = ZoneInfo("Europe/Moscow")
+# Trial safety: volatile per-process limits. Real billing caps belong in the API project.
+AI_MAX_REQUESTS_PER_GROUP_PER_DAY = 50
+AI_MAX_REQUESTS_PER_USER_10_MIN = 8
+AI_DAILY_COUNTS = defaultdict(int)
+AI_USER_TIMES = defaultdict(deque)
+AI_BUDGET_LOCK = asyncio.Lock()
+
+async def reserve_ai_request(chat_id, user_id):
+    """Limit cost exposure. A reset/redeploy clears counters; billing controls remain essential."""
+    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    day_key = (str(chat_id), now.date().isoformat())
+    user_key = (str(chat_id), str(user_id))
+    async with AI_BUDGET_LOCK:
+        old = AI_USER_TIMES[user_key]
+        from datetime import timedelta as _delta
+        while old and now - old[0] > _delta(minutes=10):
+            old.popleft()
+        if AI_DAILY_COUNTS[day_key] >= AI_MAX_REQUESTS_PER_GROUP_PER_DAY:
+            return False
+        if len(old) >= AI_MAX_REQUESTS_PER_USER_10_MIN:
+            return False
+        old.append(now)
+        AI_DAILY_COUNTS[day_key] += 1
+        return True
+
 
 INTRO = (
     "Здравствуйте, дорогие участники! 🌷\n\n"
@@ -398,8 +424,14 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         if question is None:
             return {"ok":True}
         try:
-            answer = await reply_ai(question, profile_for_chat) if OPENAI_KEY else initial_time_answer(
-                question, str(chat_id) == WREMYA_CHAT_ID)
+            if OPENAI_KEY:
+                if not await reserve_ai_request(chat_id, user_id):
+                    await send(chat_id, "Небольшая пауза 🌿 Для экономии бюджета ИИ установлено ограничение запросов. "
+                                      "Попробуйте позднее.", reply_to=msg.get("message_id"))
+                    return {"ok":True}
+                answer = await reply_ai(question, profile_for_chat)
+            else:
+                answer = initial_time_answer(question, str(chat_id) == WREMYA_CHAT_ID)
             await send(chat_id, answer, reply_to=msg.get("message_id"))
         except Exception:
             log.warning("Direct question failed without exposing message data")
@@ -426,16 +458,28 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if str(chat_id) not in ALLOWED_CHATS:
         return {"ok":True}
     profile = chat_profile(chat_id)
-    if command == "/ask":
+    if command in ("/ask", "/testai"):
         if not profile:
             await send(chat_id, "Группа подключена, но её тема не задана в Render. "
                        "Попросите администратора настроить эту группу. 🌷")
-        elif not argument:
+        elif command == "/testai" and not await is_chat_admin(chat_id, user_id):
+            return {"ok":True}
+        elif command == "/testai" and not OPENAI_KEY:
+            await send(chat_id, "Мой языковой интеллект пока не подключён. Добавьте OPENAI_API_KEY "
+                       "в Environment моего отдельного сервиса Render. Не публикуйте ключ в чате.")
+        elif command == "/ask" and not argument:
             await send(chat_id, "Напишите вопрос после команды /ask. Например: "
-                 "/ask Почему нам кажется, что время летит?")
+                 "/ask@OraWremyaBot_bot Почему нам кажется, что время летит?")
         else:
             try:
-                await send(chat_id, await reply_ai(argument, profile))
+                if not OPENAI_KEY:
+                    await send(chat_id, "Пока мой языковой интеллект не подключён. 🌷")
+                elif not await reserve_ai_request(chat_id, user_id):
+                    await send(chat_id, "Дневной или личный пробный лимит обращений к ИИ исчерпан. 🌿")
+                else:
+                    query = ("Представься как Ора и в двух предложениях расскажи, что такое время."
+                             if command == "/testai" else argument)
+                    await send(chat_id, await reply_ai(query, profile))
             except Exception:
                 log.exception("LLM unavailable")
                 await send(chat_id, "Пока не могу получить проверенный ответ. "
@@ -491,7 +535,7 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
             await send(chat_id, "В этот день регулярных встреч не запланировано.")
     elif command in ("/help", "/status"):
         await send(chat_id, "Ора — тестовый режим. /id — номер чата; /intro — приветствие; "
-          "/ask вопрос — общение с ИИ. В WREMYA также доступны /weekend, /preview, /meeting, /poll. "
+          "/ask вопрос — общение с ИИ; /testai — проверка ИИ администратором. В WREMYA также доступны /weekend, /preview, /meeting, /poll. "
           + ("Тема чата настроена. " if profile else "Тема этого чата пока НЕ настроена. ")
           + "Автоматические публикации отключены. "
           + ("ИИ подключён." if OPENAI_KEY else "ИИ пока не подключён."))
