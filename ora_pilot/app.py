@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
+import jwt
+from jwt import PyJWKClient
 
 logging.basicConfig(level=logging.INFO)
 # httpx logs the full Telegram Bot API URL, including the secret bot token.
@@ -209,6 +211,114 @@ def health():
        "configured_chat_count":sum(1 for cid in ALLOWED_CHATS if chat_profile(cid)),
        "ai_configured":bool(OPENAI_KEY),
        "automatic_posts":False}
+
+# Rotation works before the language model has its own API key.
+# With OPENAI_API_KEY, Ora creates a fresh, original post each week.
+WEEKEND_VARIANTS = [
+    WEEKEND_POST,
+    (
+        "😄 НЕПРИЧЁСАННЫЕ МЫСЛИ\n"
+        "Пятница — день, когда будильник на завтра не нужен, "
+        "а рабочие чаты почему-то об этом не знают. 🍁\n\n"
+        "План на выходные: ничего не делать. "
+        "Реальность: сделать всё, что не успел за пять рабочих дней. "
+        "Так и получается: выходные есть, а выхода из дел — нет!\n\n"
+        "Нам нужны деньги, цели и работа. Но прекрасные мгновения "
+        "не пересылаются из понедельника в воскресенье одной кнопкой.\n\n"
+        "💬 Что вы выберете завтра: ещё один список дел или маленькую прогулку "
+        "без телефона?\n\nВаша Ора 💛"
+    ),
+    (
+        "😄 НЕПРИЧЁСАННЫЕ МЫСЛИ\n"
+        "Вечер пятницы. Спрашиваю у человека: «Как собираетесь отдыхать?»\n"
+        "— «Сейчас только закончу один проект, проверю две таблицы "
+        "и отвечу трём людям...»\n"
+        "Воскресенье подслушало разговор и потихоньку ушло. 🍂\n\n"
+        "Мы умеем считать доходы, просмотры и подписчиков. "
+        "А часы, когда мы просто были рядом с родными, почему-то не считаем.\n\n"
+        "💬 Предлагаю на выходных необычный отчёт: "
+        "три счастливых момента и ни одного рабочего KPI. Согласны?\n\n"
+        "Ваша Ора 💛"
+    ),
+    (
+        "😄 НЕПРИЧЁСАННЫЕ МЫСЛИ\n"
+        "Пятница — удивительное изобретение человечества. "
+        "Всю неделю мы торопимся, чтобы к ней успеть. "
+        "А когда она наступает, начинаем торопиться, чтобы не потерять выходные! 😄\n\n"
+        "У телефона — зарядка 100%. У человека — 12%. "
+        "Возможно, завтра стоит поменять приоритеты местами?\n\n"
+        "Работа даёт средства для жизни. "
+        "Но сама жизнь — это ещё и вкус яблока, осенний воздух, "
+        "смех близких и возможность никуда не спешить.\n\n"
+        "💬 Какие полчаса вы подарите в выходные самому дорогому человеку? "
+        "Даже если это вы сами. 💛\n\nВаша Ора"
+    )
+]
+
+async def fresh_weekend_post():
+    if not OPENAI_KEY:
+        week = datetime.now(ZoneInfo("Europe/Berlin")).isocalendar().week
+        return WEEKEND_VARIANTS[(week - 43) % len(WEEKEND_VARIANTS)]
+    try:
+        prompt = (
+            "Создай совершенно новый короткий оригинальный вечерний пост на русском "
+            "для Telegram-чата «ВРЕМЯ / WREMYA», рубрика «НЕПРИЧЁСАННЫЕ МЫСЛИ». "
+            "Сейчас пятница, впереди выходные. Юмор умный, человечный, добродушный, "
+            "с забавным поворотом; НЕ имитируй конкретных писателей или артистов. "
+            "Обдумай, как работа, бизнес, переписка и вечная гонка за деньгами "
+            "съедают жизнь, хотя деньги нужны. Призови прожить хотя бы небольшой "
+            "момент с близкими, на прогулке или без телефона. Заверши небанальным "
+            "вопросом, который мотивирует людей ответить. До 170 слов, "
+            "без повторов и рекламных обещаний. Не добавляй непроверенные факты. "
+            "Начни с «😄 НЕПРИЧЁСАННЫЕ МЫСЛИ», закончи «Ваша Ора 💛»."
+        )
+        async with httpx.AsyncClient(timeout=50) as client:
+            response = await client.post("https://api.openai.com/v1/chat/completions",
+                headers={"Authorization":"Bearer " + OPENAI_KEY},
+                json={"model":OPENAI_MODEL, "messages":[{"role":"user","content":prompt}],
+                      "temperature":0.85, "max_tokens":600})
+            if response.status_code != 200:
+                raise RuntimeError("AI service unavailable")
+            candidate = response.json()["choices"][0]["message"]["content"].strip()
+            if 80 <= len(candidate) <= 3500:
+                return candidate
+    except Exception:
+        log.warning("Weekend generation unavailable; using approved original fallback")
+    week = datetime.now(ZoneInfo("Europe/Berlin")).isocalendar().week
+    return WEEKEND_VARIANTS[(week - 43) % len(WEEKEND_VARIANTS)]
+
+def verify_github_schedule(authorization):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401)
+    token = authorization[7:].strip()
+    try:
+        key = PyJWKClient("https://token.actions.githubusercontent.com/.well-known/jwks",
+                         cache_jwk_set=True, lifespan=3600).get_signing_key_from_jwt(token).key
+        claims = jwt.decode(token, key, algorithms=["RS256"],
+            audience="ora-wremya-pilot.onrender.com",
+            issuer="https://token.actions.githubusercontent.com",
+            options={"require":["iss","aud","exp","iat"]})
+    except (jwt.PyJWTError, ValueError, OSError, TimeoutError):
+        raise HTTPException(status_code=403, detail="Schedule authentication failed") from None
+    allowed_workflow = ("Valent7/agency-w-registration/.github/workflows/"
+                        "ora-friday.yml@refs/heads/main")
+    if (claims.get("repository") != "Valent7/agency-w-registration"
+        or claims.get("workflow_ref") != allowed_workflow
+        or claims.get("ref") != "refs/heads/main"
+        or claims.get("event_name") != "schedule"
+        or str(claims.get("run_attempt")) != "1"):
+        raise HTTPException(status_code=403, detail="Not an authorized scheduled run")
+
+@app.post("/schedule/weekend")
+async def scheduled_weekend(authorization: str | None = Header(None)):
+    verify_github_schedule(authorization)
+    berlin = datetime.now(ZoneInfo("Europe/Berlin"))
+    if berlin.weekday() != 4 or not (18 <= berlin.hour <= 23):
+        raise HTTPException(status_code=409, detail="Not Friday evening in Berlin")
+    if WREMYA_CHAT_ID not in ALLOWED_CHATS:
+        raise HTTPException(status_code=409, detail="WREMYA chat not configured")
+    await send(int(WREMYA_CHAT_ID), await fresh_weekend_post())
+    return {"ok":True,"published_in":"WREMYA","date":berlin.date().isoformat()}
 
 @app.post("/telegram/webhook")
 async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(None)):
