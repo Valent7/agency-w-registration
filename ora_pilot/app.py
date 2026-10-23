@@ -144,8 +144,11 @@ async def telegram(method, payload):
             raise RuntimeError("Telegram rejected request")
         return data["result"]
 
-async def send(chat_id, text):
-    return await telegram("sendMessage", {"chat_id":chat_id, "text":text[:4096]})
+async def send(chat_id, text, reply_to=None):
+    payload = {"chat_id":chat_id, "text":text[:4096]}
+    if reply_to:
+        payload["reply_parameters"] = {"message_id":reply_to, "allow_sending_without_reply":True}
+    return await telegram("sendMessage", payload)
 
 async def is_chat_admin(chat_id, user_id):
     try:
@@ -185,7 +188,7 @@ async def lifespan(app):
     if TOKEN_VALID and SECRET and BASE_URL:
         try:
             await telegram("setWebhook", {"url":BASE_URL + "/telegram/webhook",
-                 "secret_token":SECRET,"allowed_updates":["message"]})
+                 "secret_token":SECRET,"allowed_updates":["message","edited_message"]})
             log.info("Telegram webhook registered")
         except Exception as exc:
             # Never log exception details: URLs can contain Telegram bearer token.
@@ -320,17 +323,87 @@ async def scheduled_weekend(authorization: str | None = Header(None)):
     await send(int(WREMYA_CHAT_ID), await fresh_weekend_post())
     return {"ok":True,"published_in":"WREMYA","date":berlin.date().isoformat()}
 
+ORA_USERNAME = "orawremyabot_bot"
+
+def called_ora(message):
+    """Respond to a direct human call, not every message in busy group chats."""
+    text = str(message.get("text") or "").strip()
+    if not text:
+        return None
+    replied_to = (message.get("reply_to_message") or {}).get("from") or {}
+    replied_to_ora = str(replied_to.get("username", "")).lower() == ORA_USERNAME
+    handle_pattern = r"@orawremyabot_bot\b"
+    mentioned = re.search(handle_pattern, text, flags=re.IGNORECASE)
+    name_prefix = re.match(
+        r"^\s*(?:привет(?:ствую)?[\s,!.:-]+|здравствуй(?:те)?[\s,!.:-]+|добрый\s+(?:вечер|день|утро)[\s,!.:-]+)?(?:ора|ora)\b[\s,!.:;—-]*",
+        text, flags=re.IGNORECASE)
+    if not replied_to_ora and not mentioned and not name_prefix:
+        return None
+    clean = re.sub(handle_pattern, "", text, flags=re.IGNORECASE).strip()
+    if name_prefix:
+        clean = clean[name_prefix.end():].strip()
+    return clean or "Привет!"
+
+def initial_time_answer(question, is_wremya):
+    """A small, fact-checked editorial fallback; never pretend it is freeform AI."""
+    lower = question.casefold().replace("ё","е")
+    if not is_wremya:
+        return ("Здравствуйте! 🌷 Я услышала вас, но мой языковой интеллект ещё подключается. "
+                "Пока могу отвечать на вопросы из подготовленной базы чата.")
+    if (("что" in lower or "объясни" in lower or "значит" in lower or "расскажи" in lower)
+        and "время" in lower):
+        return (
+            "Здравствуйте! 🌷 Представьте два события: рассвет и закат. "
+            "Время позволяет нам сказать, какое произошло раньше и сколько длился промежуток между ними. "
+            "В физике время — величина, с помощью которой описывают порядок и длительность событий. "
+            "Часы измеряют время, но не создают его.\n\n"
+            "И ещё удивительный факт: по теории относительности Эйнштейна скорость движения "
+            "и сила гравитации влияют на измеряемую длительность промежутков времени. "
+            "Стивен Хокинг объяснял это в «Краткой истории времени».\n\n"
+            "💭 А для вас время ощущается быстрее в работе или в минуты радости?"
+        )
+    if "быстр" in lower and "врем" in lower:
+        return ("⏳ По часам минута всегда 60 секунд, но переживается по-разному. "
+                "Когда мы увлечены, меньше замечаем течение времени, "
+                "а ожидание может казаться бесконечным. Это восприятие, а не изменение физических часов.\n\n"
+                "А когда у вас время будто летит?")
+    return ("Я услышала ваш вопрос. 🌷 Пока мой языковой интеллект не подключён, "
+            "и у меня есть только короткая подготовленная база о времени. "
+            "Не хочу выдумывать ответ. Можно уточнить, о каком аспекте времени вы спрашиваете?")
+
 @app.post("/telegram/webhook")
 async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(None)):
     if not SECRET or not hmac.compare_digest(SECRET, x_telegram_bot_api_secret_token or ""):
         raise HTTPException(status_code=403)
     update = await request.json()
-    msg = update.get("message") or {}
+    msg = update.get("message") or update.get("edited_message") or {}
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     user_id = (msg.get("from") or {}).get("id")
     text = (msg.get("text") or "").strip()
-    if not chat_id or not user_id or not text.startswith("/"):
+    if not chat_id or not user_id or not text:
+        return {"ok":True}
+    if (msg.get("from") or {}).get("is_bot"):
+        return {"ok":True}
+    # Telegram privacy mode may hide plain-text group messages until disabled in BotFather.
+    # Never answer general chat traffic unless a human clearly calls Ora by name,
+    # mentions the bot username, or replies to one of its messages.
+    if not text.startswith("/"):
+        if chat.get("type") not in ("group", "supergroup"):
+            return {"ok":True}
+        profile_for_chat = chat_profile(chat_id)
+        if str(chat_id) not in ALLOWED_CHATS or not profile_for_chat:
+            return {"ok":True}
+        question = called_ora(msg)
+        if question is None:
+            return {"ok":True}
+        try:
+            answer = await reply_ai(question, profile_for_chat) if OPENAI_KEY else initial_time_answer(
+                question, str(chat_id) == WREMYA_CHAT_ID)
+            await send(chat_id, answer, reply_to=msg.get("message_id"))
+        except Exception:
+            log.warning("Direct question failed without exposing message data")
+            await send(chat_id, "Я получила ваш вопрос, но сейчас не могу ответить. Попробуйте ещё раз. 🌷")
         return {"ok":True}
     command, _, argument = text.partition(" ")
     command = command.split("@", 1)[0].lower()
