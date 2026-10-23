@@ -244,16 +244,34 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if not await is_chat_admin(chat_id, user_id):
         return {"ok":True}
     if command == "/intro":
-        await send(chat_id, INTRO)
+        if not profile:
+            await send(chat_id, "Чтобы представить меня участникам, сначала настройте тему этого чата в Render. 🌷")
+        elif str(chat_id) == WREMYA_CHAT_ID:
+            await send(chat_id, INTRO)
+        else:
+            await send(chat_id, f"Здравствуйте, дорогие участники сообщества «{profile['name']}»! 🌷\n\n"
+                "Меня зовут Ора. Я цифровой ИИ-сотрудник вашего чата.\n"
+                f"Наша тематика: {profile['topic']}\n\n"
+                "Готова обсуждать вопросы сообщества и помогать ориентироваться "
+                "в проверенных сведениях. Чем могу быть вам полезна?")
     elif command == "/preview":
-        await send(chat_id, POSTS.get(argument.lower(), 
-             "Выберите /preview science, /preview thought или /preview humor"))
+        if str(chat_id) == WREMYA_CHAT_ID:
+            await send(chat_id, POSTS.get(argument.lower(),
+                 "Выберите /preview science, /preview thought или /preview humor"))
+        else:
+            await send(chat_id, "Для этого сообщества отдельные публикации ещё не настроены.")
     elif command == "/poll":
+        if str(chat_id) != WREMYA_CHAT_ID:
+            await send(chat_id, "Опросы этого сообщества ещё не настроены.")
+            return {"ok":True}
         await telegram("sendPoll", {"chat_id":chat_id,
           "question":"⏳ Если бы у вас появился свободный час, на что бы вы его потратили?",
           "options":[{"text":v} for v in ["На близких ❤️","На отдых 🌿","На увлечение 🎨","На мечту ✨"]],
           "is_anonymous":True})
     elif command == "/meeting":
+        if str(chat_id) != WREMYA_CHAT_ID:
+            await send(chat_id, "Расписание встреч этого сообщества ещё не настроено.")
+            return {"ok":True}
         now = datetime.now(MOSCOW)
         if argument.lower() == "wednesday":
             now += timedelta(days=(2-now.weekday()) % 7)
@@ -267,8 +285,9 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
         else:
             await send(chat_id, "В этот день регулярных встреч не запланировано.")
     elif command in ("/help", "/status"):
-        await send(chat_id, "Ора — тестовый режим. Команды: /intro, "
-          "/preview science|thought|humor, /meeting wednesday, /poll, /ask вопрос. "
-          "Автоматические публикации отключены. "
+        await send(chat_id, "Ора — тестовый режим. /id — номер чата; /intro — приветствие; "
+          "/ask вопрос — общение с ИИ. В WREMYA также доступны /preview, /meeting, /poll. "
+          + ("Тема чата настроена. " if profile else "Тема этого чата пока НЕ настроена. ")
+          + "Автоматические публикации отключены. "
           + ("ИИ подключён." if OPENAI_KEY else "ИИ пока не подключён."))
     return {"ok":True}
