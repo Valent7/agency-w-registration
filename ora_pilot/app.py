@@ -3,6 +3,7 @@ import asyncio
 import hmac
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -11,8 +12,12 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs the full Telegram Bot API URL, including the secret bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("ora_pilot")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TOKEN_VALID = bool(re.fullmatch(r"[0-9]{5,15}:[A-Za-z0-9_-]{20,}", TOKEN))
 SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
 ALLOWED_CHAT = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
@@ -58,11 +63,12 @@ MEETINGS = {0:"Вопросы и ответы для участников Аге
             4:"Вопросы и ответы для участников Агентства W"}
 
 async def telegram(method, payload):
-    if not TOKEN:
-        raise RuntimeError("Telegram key has not been configured")
+    if not TOKEN_VALID:
+        raise RuntimeError("Telegram token missing or invalid; check Render Environment")
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post("https://api.telegram.org/bot" + TOKEN + "/" + method, json=payload)
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise RuntimeError("Telegram API rejected request with HTTP status " + str(response.status_code))
         data = response.json()
         if not data.get("ok"):
             raise RuntimeError("Telegram rejected request")
@@ -105,13 +111,14 @@ async def reply_ai(question):
 
 @asynccontextmanager
 async def lifespan(app):
-    if TOKEN and SECRET and BASE_URL:
+    if TOKEN_VALID and SECRET and BASE_URL:
         try:
             await telegram("setWebhook", {"url":BASE_URL + "/telegram/webhook",
                  "secret_token":SECRET,"allowed_updates":["message"]})
             log.info("Telegram webhook registered")
-        except Exception:
-            log.exception("Could not set Telegram webhook")
+        except Exception as exc:
+            # Never log exception details: URLs can contain Telegram bearer token.
+            log.warning("Telegram webhook not registered (%s); check secret values privately.", type(exc).__name__)
     else:
         log.warning("Telegram keys or URL missing; webhook inactive")
     yield
@@ -125,8 +132,8 @@ def home():
 @app.get("/health")
 def health():
     return {"service":"ora-telegram-pilot",
-       "telegram_configured":bool(TOKEN),
-       "webhook_configured":bool(TOKEN and SECRET and BASE_URL),
+       "telegram_configured":TOKEN_VALID,
+       "webhook_configured":bool(TOKEN_VALID and SECRET and BASE_URL),
        "chat_bound":bool(ALLOWED_CHAT),
        "ai_configured":bool(OPENAI_KEY),
        "automatic_posts":False}
