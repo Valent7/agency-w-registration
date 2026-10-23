@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 import jwt
 from jwt import PyJWKClient
 
@@ -418,8 +418,25 @@ def initial_time_answer(question, is_wremya):
             "и у меня есть только короткая подготовленная база о времени. "
             "Не хочу выдумывать ответ. Можно уточнить, о каком аспекте времени вы спрашиваете?")
 
+AI_IN_FLIGHT = asyncio.Semaphore(2)
+
+async def deliver_ai_response(chat_id, message_id, question, profile):
+    # Keep Telegram webhook fast even when advanced reasoning takes longer.
+    async with AI_IN_FLIGHT:
+        try:
+            answer = await reply_ai(question, profile)
+        except Exception:
+            log.warning("AI response failed without revealing chat text or keys")
+            answer = ("Сейчас мне не удалось получить ответ языковой модели. 🌷 "
+                      "Это техническая ошибка, а не ответ на ваш вопрос. Попробуйте позже.")
+        try:
+            await send(chat_id, answer, reply_to=message_id)
+        except Exception:
+            log.warning("Could not deliver AI reply to Telegram")
+
 @app.post("/telegram/webhook")
-async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(None)):
+async def webhook(request: Request, background_tasks: BackgroundTasks,
+                  x_telegram_bot_api_secret_token: str | None = Header(None)):
     if not SECRET or not hmac.compare_digest(SECRET, x_telegram_bot_api_secret_token or ""):
         raise HTTPException(status_code=403)
     update = await request.json()
@@ -450,10 +467,11 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
                     await send(chat_id, "Небольшая пауза 🌿 Для экономии бюджета ИИ установлено ограничение запросов. "
                                       "Попробуйте позднее.", reply_to=msg.get("message_id"))
                     return {"ok":True}
-                answer = await reply_ai(question, profile_for_chat)
+                background_tasks.add_task(deliver_ai_response, chat_id, msg.get("message_id"),
+                                          question, profile_for_chat)
             else:
                 answer = initial_time_answer(question, str(chat_id) == WREMYA_CHAT_ID)
-            await send(chat_id, answer, reply_to=msg.get("message_id"))
+                await send(chat_id, answer, reply_to=msg.get("message_id"))
         except Exception:
             log.warning("Direct question failed without exposing message data")
             await send(chat_id, "Я получила ваш вопрос, но сейчас не могу ответить. Попробуйте ещё раз. 🌷")
@@ -500,11 +518,9 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
                 else:
                     query = ("Представься как Ора и в двух предложениях расскажи, что такое время."
                              if command == "/testai" else argument)
-                    await send(chat_id, await reply_ai(query, profile))
-            except Exception:
-                log.exception("LLM unavailable")
-                await send(chat_id, "Пока не могу получить проверенный ответ. "
-                              "Не стану придумывать — попробуйте позднее.")
+                    background_tasks.add_task(deliver_ai_response, chat_id, msg.get("message_id"),
+                                              query, profile)
+
         return {"ok":True}
     if not await is_chat_admin(chat_id, user_id):
         return {"ok":True}
