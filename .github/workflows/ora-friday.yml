@@ -3,8 +3,8 @@ name: Ora - Friday reflections in WREMYA
 # Only a schedule runner. Agency W app code and deployments are not modified.
 on:
   schedule:
-    # 19:00 UTC Friday = 21:00 Berlin summer / 20:00 Berlin winter.
-    - cron: "0 19 * * 5"
+    # Friday 19:07 UTC = 21:07 Berlin summer / 20:07 Berlin winter.
+    - cron: "7 19 * * 5"
 
 permissions:
   contents: none
