@@ -76,10 +76,11 @@ def chat_profile(chat_id):
         return {"name":"ВРЕМЯ / WREMYA", "topic":"Время в физике, ценность времени, Стивен Хокинг, жизнь и цели, ИИ и освобождение от рутины."}
     return CHAT_PROFILES.get(str(chat_id))
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-6-astra")
+OPENAI_REASONING = "high"
 MOSCOW = ZoneInfo("Europe/Moscow")
 # Trial safety: volatile per-process limits. Real billing caps belong in the API project.
-AI_MAX_REQUESTS_PER_GROUP_PER_DAY = 50
+AI_MAX_REQUESTS_PER_GROUP_PER_DAY = 15
 AI_MAX_REQUESTS_PER_USER_10_MIN = 8
 AI_DAILY_COUNTS = defaultdict(int)
 AI_USER_TIMES = defaultdict(deque)
@@ -184,30 +185,57 @@ async def is_chat_admin(chat_id, user_id):
         log.warning("Cannot check administrator permissions")
         return False
 
-async def reply_ai(question, profile):
+async def openai_response(user_prompt, instruction, max_tokens=3200):
+    """Use GPT-6 Astra via the Responses API, keeping reasoning and visible text separate."""
     if not OPENAI_KEY:
-        return ("Мой ИИ-интеллект ещё не подключён. Пока я могу показать "
-                "тестовые публикации и календарь встреч. 🌷")
+        raise RuntimeError("OPENAI_API_KEY has not been configured")
+    payload = {
+        "model": OPENAI_MODEL,
+        "instructions": instruction,
+        "input": [{"role": "user", "content": user_prompt[:3000]}],
+        "reasoning": {"effort": OPENAI_REASONING},
+        "max_output_tokens": max_tokens,
+        "store": False,
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(110, connect=15)) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": "Bearer " + OPENAI_KEY,
+                     "Content-Type": "application/json"},
+            json=payload)
+        if response.status_code != 200:
+            # Do not echo API response body, project details, or a secret key.
+            log.warning("OpenAI API request failed with HTTP %s", response.status_code)
+            raise RuntimeError("OpenAI response could not be generated")
+        data = response.json()
+    outputs = []
+    for item in data.get("output", []):
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                    outputs.append(content["text"])
+    text = "\n".join(outputs).strip()
+    if not text:
+        log.warning("OpenAI response had no visible answer (status=%s)", data.get("status"))
+        raise RuntimeError("OpenAI response had no visible answer")
+    return text
+
+
+async def reply_ai(question, profile):
     instruction = (
         "Ты Ора, цифровой ИИ-сотрудник сообщества Telegram. "
         f"Название сообщества: {profile['name']}. Его тематика: {profile['topic']}. "
         "Не путай разные сообщества, их темы и календарь. "
         "Говори по-русски, тепло и содержательно, обычно 2–5 предложений. "
+        "Веди живой человеческий диалог, избегай шаблонных отписок. "
         "Не выдумывай данные, источники, научные доказательства и цитаты Хокинга. "
         "Различай научный факт, психологическое восприятие времени, философию и юмор. "
         "Если вопрос неопределённый, уточни сферу. Не давай персональных медицинских "
         "или инвестиционных рекомендаций. Ты ИИ, а не человек. "
-        "Не навязывай беседу. Никогда не утверждай, что проверила источник, если его не видела."
+        "Не навязывай беседу. Никогда не утверждай, что проверила источник, если его не видела. "
+        "Завершай содержательным уместным вопросом только когда он действительно продолжает разговор."
     )
-    async with httpx.AsyncClient(timeout=35) as client:
-        response = await client.post("https://api.openai.com/v1/chat/completions",
-            headers={"Authorization":"Bearer " + OPENAI_KEY},
-            json={"model":OPENAI_MODEL,
-                  "messages":[{"role":"system","content":instruction},
-                              {"role":"user","content":question[:1600]}],
-                  "max_tokens":450, "temperature":0.4})
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()[:3900]
+    return (await openai_response(question, instruction, max_tokens=3200))[:3900]
 
 @asynccontextmanager
 async def lifespan(app):
@@ -301,16 +329,9 @@ async def fresh_weekend_post():
             "без повторов и рекламных обещаний. Не добавляй непроверенные факты. "
             "Начни с «😄 НЕПРИЧЁСАННЫЕ МЫСЛИ», закончи «Ваша Ора 💛»."
         )
-        async with httpx.AsyncClient(timeout=50) as client:
-            response = await client.post("https://api.openai.com/v1/chat/completions",
-                headers={"Authorization":"Bearer " + OPENAI_KEY},
-                json={"model":OPENAI_MODEL, "messages":[{"role":"user","content":prompt}],
-                      "temperature":0.85, "max_tokens":600})
-            if response.status_code != 200:
-                raise RuntimeError("AI service unavailable")
-            candidate = response.json()["choices"][0]["message"]["content"].strip()
-            if 80 <= len(candidate) <= 3500:
-                return candidate
+        candidate = (await openai_response(prompt, "Ты Ора, самостоятельный редактор сообщества WREMYA. Пиши точно, с оригинальным добрым юмором, без утверждений о непроверенных фактах.", max_tokens=3000)).strip()
+        if 80 <= len(candidate) <= 3500:
+            return candidate
     except Exception:
         log.warning("Weekend generation unavailable; using approved original fallback")
     week = datetime.now(ZoneInfo("Europe/Berlin")).isocalendar().week
