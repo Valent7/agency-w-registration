@@ -1,6 +1,7 @@
 """Ora: isolated Telegram pilot. No automatic posting or group access until configured."""
 import asyncio
 import hmac
+import json
 import logging
 import os
 import re
@@ -41,6 +42,36 @@ def token_validation_issue(token: str) -> str:
 SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
 ALLOWED_CHAT = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
+EXTRA_CHAT_IDS = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", "")
+ALLOWED_CHATS = {v for v in [ALLOWED_CHAT, *re.split(r"[,;\s]+", EXTRA_CHAT_IDS)] if re.fullmatch(r"-?\d+", v or "")}
+WREMYA_CHAT_ID = "-1004303939698"
+
+def load_chat_profiles():
+    """Additional community topics supplied by owner in Render."""
+    raw = os.getenv("TELEGRAM_CHAT_PROFILES_JSON", "{}")
+    try:
+        profiles = json.loads(raw)
+        if not isinstance(profiles, dict):
+            return {}
+        clean = {}
+        for chat_id, profile in profiles.items():
+            if (isinstance(profile, dict) and re.fullmatch(r"-?\d+", str(chat_id))
+                and isinstance(profile.get("name"), str)
+                and isinstance(profile.get("topic"), str)
+                and profile["name"].strip() and profile["topic"].strip()):
+                clean[str(chat_id)] = {"name":profile["name"].strip()[:100],
+                                      "topic":profile["topic"].strip()[:450]}
+        return clean
+    except (ValueError, TypeError):
+        log.warning("Invalid chat profile JSON; extra groups remain unconfigured")
+        return {}
+
+CHAT_PROFILES = load_chat_profiles()
+
+def chat_profile(chat_id):
+    if str(chat_id) == WREMYA_CHAT_ID:
+        return {"name":"ВРЕМЯ / WREMYA", "topic":"Время в физике, ценность времени, Стивен Хокинг, жизнь и цели, ИИ и освобождение от рутины."}
+    return CHAT_PROFILES.get(str(chat_id))
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -105,14 +136,15 @@ async def is_chat_admin(chat_id, user_id):
         log.warning("Cannot check administrator permissions")
         return False
 
-async def reply_ai(question):
+async def reply_ai(question, profile):
     if not OPENAI_KEY:
         return ("Мой ИИ-интеллект ещё не подключён. Пока я могу показать "
                 "тестовые публикации и календарь встреч. 🌷")
     instruction = (
-        "Ты Ора, цифровой ИИ-сотрудник группы ВРЕМЯ / WREMYA. "
+        "Ты Ора, цифровой ИИ-сотрудник сообщества Telegram. "
+        f"Название сообщества: {profile['name']}. Его тематика: {profile['topic']}. "
+        "Не путай разные сообщества, их темы и календарь. "
         "Говори по-русски, тепло и содержательно, обычно 2–5 предложений. "
-        "Темы: время в физике, ценность времени, жизнь и цели, технологии и освобождение от рутины. "
         "Не выдумывай данные, источники, научные доказательства и цитаты Хокинга. "
         "Различай научный факт, психологическое восприятие времени, философию и юмор. "
         "Если вопрос неопределённый, уточни сферу. Не давай персональных медицинских "
@@ -155,7 +187,9 @@ def health():
     return {"service":"ora-telegram-pilot",
        "telegram_configured":TOKEN_VALID,
        "webhook_configured":bool(TOKEN_VALID and SECRET and BASE_URL),
-       "chat_bound":bool(ALLOWED_CHAT),
+       "chat_bound":bool(ALLOWED_CHATS),
+       "allowed_chat_count":len(ALLOWED_CHATS),
+       "configured_chat_count":sum(1 for cid in ALLOWED_CHATS if chat_profile(cid)),
        "ai_configured":bool(OPENAI_KEY),
        "automatic_posts":False}
 
@@ -185,18 +219,23 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
     if command == "/id":
         if await is_chat_admin(chat_id, user_id):
             await send(chat_id, "ID этой группы: " + str(chat_id) + "\n"
-                "Его следует указать только в настройках Render как TELEGRAM_ALLOWED_CHAT_ID.")
+                "Сохраните его в Render. Для дополнительных групп используйте "
+                "TELEGRAM_ALLOWED_CHAT_IDS; из чата сообщение можно удалить.")
         return {"ok":True}
     # Refuse all other traffic from unrelated groups.
-    if not ALLOWED_CHAT or ALLOWED_CHAT != str(chat_id):
+    if str(chat_id) not in ALLOWED_CHATS:
         return {"ok":True}
+    profile = chat_profile(chat_id)
     if command == "/ask":
-        if not argument:
+        if not profile:
+            await send(chat_id, "Группа подключена, но её тема не задана в Render. "
+                       "Попросите администратора настроить эту группу. 🌷")
+        elif not argument:
             await send(chat_id, "Напишите вопрос после команды /ask. Например: "
                  "/ask Почему нам кажется, что время летит?")
         else:
             try:
-                await send(chat_id, await reply_ai(argument))
+                await send(chat_id, await reply_ai(argument, profile))
             except Exception:
                 log.exception("LLM unavailable")
                 await send(chat_id, "Пока не могу получить проверенный ответ. "
