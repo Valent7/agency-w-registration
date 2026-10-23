@@ -18,6 +18,26 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("ora_pilot")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TOKEN_VALID = bool(re.fullmatch(r"[0-9]{5,15}:[A-Za-z0-9_-]{20,}", TOKEN))
+
+def token_validation_issue(token: str) -> str:
+    """Explain the error category without logging even part of a secret token."""
+    if not token:
+        return "missing_value"
+    if not token[0].isascii() or not token[0].isdigit():
+        return "unexpected_character_at_start"
+    if ":" not in token:
+        return "missing_colon"
+    ident, secret = token.split(":", 1)
+    if not ident.isascii() or not ident.isdigit():
+        return "invalid_numeric_part"
+    if not secret:
+        return "missing_part_after_colon"
+    if any(not (char.isascii() and (char.isalnum() or char in "_-")) for char in secret):
+        return "unexpected_character_in_secret"
+    if len(secret) < 20 or not (5 <= len(ident) <= 15):
+        return "unexpected_token_length"
+    return "valid_format"
+
 SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
 BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
 ALLOWED_CHAT = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
@@ -120,7 +140,8 @@ async def lifespan(app):
             # Never log exception details: URLs can contain Telegram bearer token.
             log.warning("Telegram webhook not registered (%s); check secret values privately.", type(exc).__name__)
     else:
-        log.warning("Telegram keys or URL missing; webhook inactive")
+        log.warning("Telegram webhook inactive: token_format=%s, secret_present=%s, base_url_present=%s",
+                    token_validation_issue(TOKEN), bool(SECRET), bool(BASE_URL))
     yield
 
 app = FastAPI(title="Ora - isolated Telegram pilot", lifespan=lifespan)
