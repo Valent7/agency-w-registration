@@ -520,7 +520,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
                              if command == "/testai" else argument)
                     background_tasks.add_task(deliver_ai_response, chat_id, msg.get("message_id"),
                                               query, profile)
-
+            except Exception:
+                log.warning("Could not queue an AI answer for this group")
+                await send(chat_id, "Не удалось подготовить ответ. Попробуйте ещё раз позднее. 🌷")
         return {"ok":True}
     if not await is_chat_admin(chat_id, user_id):
         return {"ok":True}
