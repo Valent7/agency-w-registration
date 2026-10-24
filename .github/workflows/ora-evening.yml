@@ -1,0 +1,47 @@
+name: Ora - 21:00 Moscow evening thoughts
+
+# Independent WREMYA bot; Agency W production is unchanged.
+on:
+  schedule:
+    - cron: "0 18 * * *"  # UTC+3 Moscow, so 21:00 every day
+  push:
+    paths:
+      - ".github/workflows/ora-evening.yml"
+
+permissions:
+  contents: none
+
+concurrency:
+  group: ora-evening-wremya
+  cancel-in-progress: false
+
+jobs:
+  evening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      id-token: write
+    steps:
+      - name: Wait until 21:00 Moscow for the initial 24 October edition
+        if: ${{ github.event_name == 'push' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not send the first test reflection earlier than 21:00 Moscow.
+          TARGET="$(date -u -d "$(date -u +%F) 18:00:00 UTC" +%s)"
+          CURRENT="$(date -u +%s)"
+          DELAY=$((TARGET-CURRENT))
+          if (( DELAY > 0 )); then sleep "$DELAY"; fi
+
+      - name: Ask Ora to publish 21:00 reflection
+        env:
+          ORA_EVENING_URL: https://ora-wremya-pilot.onrender.com/schedule/evening
+        shell: bash
+        run: |
+          set -euo pipefail
+          OIDC_JSON="$(curl --silent --show-error --fail --max-time 35 \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=ora-wremya-pilot.onrender.com")"
+          OIDC_TOKEN="$(printf "%s" "$OIDC_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          curl --silent --show-error --fail --max-time 240 \
+            -X POST -H "Authorization: Bearer ${OIDC_TOKEN}" "${ORA_EVENING_URL}"
