@@ -424,15 +424,18 @@ async def deliver_ai_response(chat_id, message_id, question, profile):
     # Keep Telegram webhook fast even when advanced reasoning takes longer.
     async with AI_IN_FLIGHT:
         try:
+            log.info("AI task started")
             answer = await reply_ai(question, profile)
+            log.info("AI reply generated successfully")
         except Exception:
             log.warning("AI response failed without revealing chat text or keys")
             answer = ("Сейчас мне не удалось получить ответ языковой модели. 🌷 "
                       "Это техническая ошибка, а не ответ на ваш вопрос. Попробуйте позже.")
         try:
             await send(chat_id, answer, reply_to=message_id)
-        except Exception:
-            log.warning("Could not deliver AI reply to Telegram")
+            log.info("Telegram AI reply delivered")
+        except Exception as exc:
+            log.warning("Could not deliver AI reply to Telegram (%s)", type(exc).__name__)
 
 @app.post("/telegram/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks,
@@ -446,8 +449,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
     user_id = (msg.get("from") or {}).get("id")
     text = (msg.get("text") or "").strip()
     if not chat_id or not user_id or not text:
+        log.info("Update ignored: text=%s chat=%s sender=%s", bool(text), bool(chat_id), bool(user_id))
         return {"ok":True}
     if (msg.get("from") or {}).get("is_bot"):
+        log.info("Update ignored: sent by another Telegram bot")
         return {"ok":True}
     # Telegram privacy mode may hide plain-text group messages until disabled in BotFather.
     # Never answer general chat traffic unless a human clearly calls Ora by name,
@@ -457,6 +462,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
             return {"ok":True}
         profile_for_chat = chat_profile(chat_id)
         if str(chat_id) not in ALLOWED_CHATS or not profile_for_chat:
+            log.info("Text ignored: unconfigured group")
             return {"ok":True}
         question = called_ora(msg)
         if question is None and str(chat_id) == WREMYA_CHAT_ID and os.getenv("ORA_PASSIVE_REPLY_ENABLED", "false") == "true":
@@ -464,7 +470,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
             if len(text) >= 8 and ("?" in text or any(t in text.casefold() for t in ("врем", "жизн", "рутин", "мечт", "хокинг", "работ", "бизнес"))):
                 question = text
         if question is None:
+            log.info("Text ignored: does not match current reply rules")
             return {"ok":True}
+        log.info("Telegram text accepted for reply; AI configured=%s", bool(OPENAI_KEY))
         try:
             if OPENAI_KEY:
                 if not await reserve_ai_request(chat_id, user_id):
@@ -473,6 +481,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
                     return {"ok":True}
                 background_tasks.add_task(deliver_ai_response, chat_id, msg.get("message_id"),
                                           question, profile_for_chat)
+                log.info("AI task queued for group response")
             else:
                 answer = initial_time_answer(question, str(chat_id) == WREMYA_CHAT_ID)
                 await send(chat_id, answer, reply_to=msg.get("message_id"))
@@ -501,6 +510,23 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
     if str(chat_id) not in ALLOWED_CHATS:
         return {"ok":True}
     profile = chat_profile(chat_id)
+    if command == "/diag":
+        if await is_chat_admin(chat_id, user_id):
+            try:
+                bot_info = await telegram("getMe", {})
+                privacy_off = bot_info.get("can_read_all_group_messages", False)
+                await send(chat_id, "🔧 Диагностика Оры\n" +
+                    ("✅ " if str(chat_id) in ALLOWED_CHATS else "❌ ") + "Группа привязана\n" +
+                    ("✅ " if OPENAI_KEY else "❌ ") + "Ключ ИИ настроен (работоспособность ещё проверяется)\n" +
+                    ("✅ " if privacy_off else "⚠️ ") + "Чтение сообщений группы: " +
+                    ("разрешено" if privacy_off else "Telegram не подтвердил доступ") + "\n" +
+                    ("✅ " if os.getenv("ORA_PASSIVE_REPLY_ENABLED", "false") == "true" else "❌ ") +
+                    "Ответы без обращения по имени включены\n" +
+                    "Для проверки самой языковой модели: /testai@OraWremyaBot_bot")
+            except Exception as exc:
+                log.warning("Diagnostic failed: %s", type(exc).__name__)
+                await send(chat_id, "Диагностика временно недоступна.")
+        return {"ok":True}
     if command in ("/ask", "/testai"):
         if not profile:
             await send(chat_id, "Группа подключена, но её тема не задана в Render. "
