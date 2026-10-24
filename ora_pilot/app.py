@@ -459,6 +459,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
         if str(chat_id) not in ALLOWED_CHATS or not profile_for_chat:
             return {"ok":True}
         question = called_ora(msg)
+        if question is None and str(chat_id) == WREMYA_CHAT_ID and os.getenv("ORA_PASSIVE_REPLY_ENABLED", "false") == "true":
+            # Telegram delivers these messages only after BotFather Group Privacy is disabled.
+            if len(text) >= 8 and ("?" in text or any(t in text.casefold() for t in ("врем", "жизн", "рутин", "мечт", "хокинг", "работ", "бизнес"))):
+                question = text
         if question is None:
             return {"ok":True}
         try:
