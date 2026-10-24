@@ -374,7 +374,7 @@ ORA_USERNAME = "orawremyabot_bot"
 
 def called_ora(message):
     """Respond to a direct human call, not every message in busy group chats."""
-    text = str(message.get("text") or "").strip()
+    text = str(message.get("text") or message.get("caption") or "").strip()
     if not text:
         return None
     replied_to = (message.get("reply_to_message") or {}).get("from") or {}
@@ -389,7 +389,17 @@ def called_ora(message):
     clean = re.sub(handle_pattern, "", text, flags=re.IGNORECASE).strip()
     if name_prefix:
         clean = clean[name_prefix.end():].strip()
-    return clean or "Привет!"
+    clean = clean or "Привет!"
+    if replied_to_ora:
+        # Telegram supplies the quoted parent text with a reply even after a restart.
+        source = message.get("reply_to_message") or {}
+        original = str(source.get("text") or source.get("caption") or "")[:1600]
+        if original:
+            return ("Ты ранее написала этому участнику: " + original
+                    + "\nТеперь участник ответил: " + clean
+                    + "\nПродолжи этот конкретный разговор; не проси прислать "
+                      "переписку, уже приведённую выше.")
+    return clean
 
 def initial_time_answer(question, is_wremya):
     """A small, fact-checked editorial fallback; never pretend it is freeform AI."""
@@ -459,9 +469,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     user_id = (msg.get("from") or {}).get("id")
-    text = (msg.get("text") or "").strip()
+    text = (msg.get("text") or msg.get("caption") or "").strip()
     if not chat_id or not user_id or not text:
-        log.info("Update ignored: text=%s chat=%s sender=%s", bool(text), bool(chat_id), bool(user_id))
+        log.info("Update ignored: text=%s chat=%s sender=%s has_reply=%s has_caption=%s has_photo=%s has_sticker=%s",
+                 bool(text), bool(chat_id), bool(user_id),
+                 bool(msg.get("reply_to_message")), bool(msg.get("caption")),
+                 bool(msg.get("photo")), bool(msg.get("sticker")))
         return {"ok":True}
     if (msg.get("from") or {}).get("is_bot"):
         log.info("Update ignored: sent by another Telegram bot")
