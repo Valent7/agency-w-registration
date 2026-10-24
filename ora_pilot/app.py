@@ -583,3 +583,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
           + "Автоматические публикации отключены. "
           + ("ИИ подключён." if OPENAI_KEY else "ИИ пока не подключён."))
     return {"ok":True}
+
+
+# Daily WREMYA reflections are implemented only in this isolated pilot service.
+from morning import attach_morning
+attach_morning(app, send=send, openai_response=openai_response,
+               allowed=ALLOWED_CHATS, chat_id=WREMYA_CHAT_ID)
