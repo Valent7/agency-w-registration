@@ -418,9 +418,12 @@ def initial_time_answer(question, is_wremya):
             "и у меня есть только короткая подготовленная база о времени. "
             "Не хочу выдумывать ответ. Можно уточнить, о каком аспекте времени вы спрашиваете?")
 
+# Recent conversations live only in process memory, never in logs or storage.
+RECENT_DIALOGUE = {}
+DIALOGUE_WINDOW_SECONDS = 12 * 60
 AI_IN_FLIGHT = asyncio.Semaphore(2)
 
-async def deliver_ai_response(chat_id, message_id, question, profile):
+async def deliver_ai_response(chat_id, message_id, question, profile, user_id=None, user_text=None):
     # Keep Telegram webhook fast even when advanced reasoning takes longer.
     async with AI_IN_FLIGHT:
         try:
@@ -434,6 +437,15 @@ async def deliver_ai_response(chat_id, message_id, question, profile):
         try:
             await send(chat_id, answer, reply_to=message_id)
             log.info("Telegram AI reply delivered")
+            if user_id is not None and user_text and "?" in answer[-300:]:
+                now = datetime.now(ZoneInfo("Europe/Berlin"))
+                key = (str(chat_id), str(user_id))
+                RECENT_DIALOGUE[key] = (now, user_text[:450], answer[-700:])
+                for old_key, value in list(RECENT_DIALOGUE.items()):
+                    if (now - value[0]).total_seconds() > DIALOGUE_WINDOW_SECONDS:
+                        RECENT_DIALOGUE.pop(old_key, None)
+                if len(RECENT_DIALOGUE) > 300:
+                    RECENT_DIALOGUE.pop(next(iter(RECENT_DIALOGUE)))
         except Exception as exc:
             log.warning("Could not deliver AI reply to Telegram (%s)", type(exc).__name__)
 
@@ -466,8 +478,21 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
             return {"ok":True}
         question = called_ora(msg)
         if question is None and str(chat_id) == WREMYA_CHAT_ID and os.getenv("ORA_PASSIVE_REPLY_ENABLED", "false") == "true":
-            # Telegram delivers these messages only after BotFather Group Privacy is disabled.
-            if len(text) >= 8 and ("?" in text or any(t in text.casefold() for t in ("врем", "жизн", "рутин", "мечт", "хокинг", "работ", "бизнес"))):
+            # Telegram delivers ordinary messages only after Group Privacy is disabled.
+            # The same participant can answer a recent question without naming Ora.
+            dialogue = RECENT_DIALOGUE.get((str(chat_id), str(user_id)))
+            now = datetime.now(ZoneInfo("Europe/Berlin"))
+            is_followup = (dialogue is not None
+                           and 4 <= len(text) <= 800
+                           and not text.lower().startswith(("http://", "https://"))
+                           and (now - dialogue[0]).total_seconds() <= DIALOGUE_WINDOW_SECONDS)
+            if is_followup:
+                question = ("Продолжи начатый разговор. Ранее участник сказал: "
+                            + dialogue[1] + "\nТвой последний ответ с вопросом: "
+                            + dialogue[2] + "\nНовый ответ участника: " + text
+                            + "\nОтветь по существу, без повторения прошлого.")
+                log.info("Recognized a short continuation of Ora conversation")
+            elif len(text) >= 8 and ("?" in text or any(t in text.casefold() for t in ("врем", "жизн", "рутин", "мечт", "хокинг", "работ", "бизнес"))):
                 question = text
         if question is None:
             log.info("Text ignored: does not match current reply rules")
@@ -480,7 +505,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
                                       "Попробуйте позднее.", reply_to=msg.get("message_id"))
                     return {"ok":True}
                 background_tasks.add_task(deliver_ai_response, chat_id, msg.get("message_id"),
-                                          question, profile_for_chat)
+                                          question, profile_for_chat, user_id, text)
                 log.info("AI task queued for group response")
             else:
                 answer = initial_time_answer(question, str(chat_id) == WREMYA_CHAT_ID)
