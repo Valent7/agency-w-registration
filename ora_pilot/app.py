@@ -653,3 +653,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
 from morning import attach_morning
 attach_morning(app, send=send, openai_response=openai_response,
                allowed=ALLOWED_CHATS, chat_id=WREMYA_CHAT_ID)
+
+
+# Independent 21:00 Moscow reflections (approved WREMYA pilot only).
+from evening import attach_evening
+attach_evening(app, send=send, openai_response=openai_response,
+               allowed=ALLOWED_CHATS, chat_id=WREMYA_CHAT_ID)
