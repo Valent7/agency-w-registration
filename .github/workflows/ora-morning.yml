@@ -1,0 +1,38 @@
+name: Ora - Morning reflections WREMYA
+
+# Isolated schedule: only the Ora Telegram service. Never modify Agency W.
+on:
+  schedule:
+    # Moscow stays at UTC+3 year round. 05:00 UTC == 08:00 MSK.
+    - cron: "0 5 * * *"
+  push:
+    # Launch once immediately when this workflow is first created on 2026-10-24.
+    # Backend rejects push launches on any other date.
+    paths:
+      - ".github/workflows/ora-morning.yml"
+
+permissions:
+  contents: none
+
+concurrency:
+  group: ora-morning-wremya
+  cancel-in-progress: false
+
+jobs:
+  reflection:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Ask Ora to send her original Morning Reflections
+        env:
+          ORA_MORNING_URL: https://ora-wremya-pilot.onrender.com/schedule/morning
+        shell: bash
+        run: |
+          set -euo pipefail
+          OIDC_JSON="$(curl --silent --show-error --fail --max-time 35 \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=ora-wremya-pilot.onrender.com")"
+          OIDC_TOKEN="$(printf "%s" "$OIDC_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+          curl --silent --show-error --fail --max-time 210 \
+            -X POST -H "Authorization: Bearer $OIDC_TOKEN" "$ORA_MORNING_URL"
