@@ -5430,7 +5430,7 @@ def ensure_weekly_candidates_for_neona(
     # запускается только по явному force_prepare=True (позже его вынесем
     # в фоновый worker и уберём ручную кнопку).
     sequential_source = (
-        str(today_info.get("source") or "") == "neonia_sequential_queue"
+        str(today_info.get("source") or "") == "neonia_time_freedom_v1"
     )
 
     if candidate_ids and sequential_source and not force_prepare:
@@ -5484,16 +5484,26 @@ def ensure_weekly_candidates_for_neona(
         result.get("selected_candidate_ids", [])
     )
 
-    # После перехода на последовательную очередь старая сегодняшняя партия,
-    # собранная по активности/ЦА, один раз заменяется новой очередью. Дальше
-    # source=neonia_sequential_queue фиксирует пятёрку до следующего дня.
+    # После введения проверки потребности прежняя последовательная партия
+    # пересоздаётся. Только проверенные карточки нового источника сохраняются
+    # в сегодняшней пятёрке, даже если старый день уже имел пять контактов.
     if not sequential_source:
+        # Старую непроверенную выдачу не называем подходящей ЦА. Но если
+        # владелец уже кого-то передал Неоне, сохраняем факт принятого решения.
+        old_approved = _normalize_int_ids(
+            today_info.get("legacy_approved_candidate_ids", [])
+        )
+        old_approved.extend(approved_ids)
+        today_info["legacy_approved_candidate_ids"] = list(dict.fromkeys(old_approved))
         candidate_ids = []
         approved_ids = []
 
     excluded_for_today = set(selected_all)
     excluded_for_today.update(previously_shown)
     excluded_for_today.update(candidate_ids)
+    excluded_for_today.update(
+        _normalize_int_ids(today_info.get("legacy_approved_candidate_ids", []))
+    )
 
     missing_count = max(0, daily_target - len(candidate_ids))
 
@@ -5558,7 +5568,7 @@ def ensure_weekly_candidates_for_neona(
         "approved_ids": approved_ids,
         "prepared_at": str(today_info.get("prepared_at") or now_iso),
         "last_topup_attempt_at": now_iso,
-        "source": "neonia_sequential_queue",
+        "source": "neonia_time_freedom_v1",
         "complete": len(merged_candidate_ids) >= daily_target,
     }
     if len(merged_candidate_ids) >= daily_target:
@@ -5589,8 +5599,9 @@ def ensure_weekly_candidates_for_neona(
         base_message = str(prepared.get("message") or "").strip()
         message = (
             f"Пока подготовлено {len(merged_candidate_ids)} из {daily_target}. "
-            "Стагирит не считает эту партию полной и продолжит добор новых "
-            "реальных Telegram-контактов."
+            "Пустые и неподтверждённые профили не заполняют пятёрку. "
+            "Стагирит продолжит поиск людей с реальными признаками интереса "
+            "к освобождению времени."
         )
         if base_message:
             message += " " + base_message
