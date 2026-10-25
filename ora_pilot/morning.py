@@ -1,5 +1,6 @@
 """Утренние «Мысли вслух» Оры. Только WREMYA, отдельный сервис."""
 import asyncio
+import editorial_calendar
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -78,7 +79,10 @@ def authenticate(authorization):
     return event
 
 async def compose(day, generate):
-    """One fresh daily thought, not a long lecture. Return text plus provenance."""
+    """Return the owner-ready dated editorial post, or legacy pilot fallback."""
+    reviewed = editorial_calendar.compose_entry(day)
+    if reviewed is not None:
+        return reviewed, "editorial-calendar"
     index = (day - FIRST_DAY).days % len(THEMES)
     title, fact = THEMES[index]
     prompt = (
@@ -143,6 +147,9 @@ def status():
     preview = PREVIEWS.get(day)
     return {
         "date": day.isoformat(),
+        "editorial_title": (editorial_calendar.get_entry(day) or {}).get("title"),
+        "editorial_chapter": (editorial_calendar.get_entry(day) or {}).get("chapter"),
+        "upcoming_titles": [{"date":e["date"],"title":e["title"],"chapter":e["chapter"]} for e in editorial_calendar.upcoming(day, 7)],
         "scheduled_time_msk": "08:00",
         "sent_in_current_process": bool(item),
         "sent_time_msk": item["sent_at"] if item else None,
