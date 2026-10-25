@@ -1,0 +1,30 @@
+name: Neonia time-freedom targeting checks
+on:
+  pull_request:
+    paths:
+      - "neonia_candidate_policy.py"
+      - "neonia_intelligence_v2.py"
+      - "streamlit_app.py"
+      - "stagirite_center.py"
+      - "telegram_scout_worker.py"
+      - "vk_scout.py"
+      - "vk_scout_ui.py"
+      - "tests/test_neonia_time_freedom.py"
+      - ".github/workflows/neonia-time-freedom.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-neonia:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile updated Python files
+        run: |
+          python -m py_compile neonia_candidate_policy.py neonia_intelligence_v2.py streamlit_app.py stagirite_center.py telegram_scout_worker.py vk_scout.py vk_scout_ui.py tests/test_neonia_time_freedom.py
+      - name: Verify evidence and mission gate
+        run: python -m unittest discover -s tests -p "test_neonia_time_freedom.py" -v

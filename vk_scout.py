@@ -17,7 +17,7 @@ import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
-from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
+from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate, assess_time_freedom_fit
 
 import requests
 
@@ -450,8 +450,10 @@ def _encode_vk_queue_assignment_meta(
     *,
     member_offset: int,
     total: int,
+    evidence: list[str] | None = None,
 ) -> str:
     data = {
+        "time_freedom_evidence": [str(x)[:300] for x in (evidence or [])[:2]],
         "community_id": int(source.get("community_id") or 0),
         "community_name": str(
             source.get("community_name")
@@ -1114,6 +1116,7 @@ def score_vk_candidates(
             score, _, business_evidence, business_gate_reason = apply_business_gate(
                 item,
                 score,
+                source_context=source,
             )
             # Сохраняем объяснение жёсткого бизнес-фильтра в уже существующие поля,
             # поэтому миграция Supabase не нужна.
@@ -1644,11 +1647,10 @@ def ensure_daily_vk_assignments(
     min_score: int = 0,
     reservation_days: int = 7,
 ) -> dict[str, Any]:
-    """Последовательная VK-очередь: одно сообщество -> 5 новых -> следующее.
+    """Очередь VK: отбор только после проверки публичного признака потребности.
 
-    ЦА и score больше не решают, кого показывать. Исключаем только технически
-    непригодные профили, уже показанных этому владельцу, партнёров Агентства W
-    и людей, которые сейчас закреплены за другим партнёром.
+    Сохранены отдельные источники, отсутствие повторов и право владельца выбрать
+    собеседника. Пустой статус или просто членство в группе не дают рекомендации.
     """
     owner_id = int(owner_id)
     limit = max(1, min(5, int(limit)))
@@ -1777,12 +1779,19 @@ def ensure_daily_vk_assignments(
                 if uid in global_used:
                     continue
 
+                fit = assess_time_freedom_fit(candidate)
+                if not fit["eligible"]:
+                    # Имя/фото/членство в сообществе не доказывают готовность
+                    # передать рутину искусственному интеллекту.
+                    continue
+
                 position = free_positions[0]
                 now = datetime.now(UTC)
                 fit_summary = _encode_vk_queue_assignment_meta(
                     source,
                     member_offset=candidate_offset,
                     total=total,
+                    evidence=fit["evidence"],
                 )
                 payload = {
                     "vk_user_id": uid,
@@ -2793,6 +2802,7 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
             "city_name": candidate.get("city_name"),
             "country_name": candidate.get("country_name"),
             "status_text": candidate.get("status_text"),
+            "time_freedom_evidence": vk_queue_assignment_meta(assignment).get("time_freedom_evidence") or [],
             "profile_url": vk_profile_url(candidate) if candidate else f"https://vk.com/id{uid}",
         })
     return result

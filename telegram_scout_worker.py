@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
-from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
+from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate, assess_time_freedom_fit
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -683,13 +683,13 @@ def _build_no_data_candidate(source: dict[str, Any]) -> dict[str, Any]:
         "activity_precision": str(source.get("activity_precision") or "unknown"),
         "work_state": str(source.get("work_state") or "available"),
         "work_state_label": str(source.get("work_state_label") or "Можно начинать новый разговор"),
-        # Единая политика Неонии: без подтверждённого бизнес-сигнала
+        # Без наблюдаемых признаков потребности в освобождении времени
         # контакт не попадает в рекомендованную холодную пятёрку.
         "selection_blocked": True,
-        "block_reason": "нет подтверждённой бизнес-релевантности",
+        "block_reason": "нет подтверждённого запроса на освобождение времени",
         "business_relevant": False,
         "business_evidence": [],
-        "business_gate_reason": "Недостаточно данных для подтверждения бизнес-релевантности.",
+        "business_gate_reason": "Недостаточно данных о готовности делегировать рутину ИИ.",
         "last_owner_outreach_at": str(source.get("last_owner_outreach_at") or ""),
         "cooldown_until": str(source.get("cooldown_until") or ""),
         "potential_interest": "неясно",
@@ -845,8 +845,9 @@ business_gate_reason — короткая причина решения.
             score,
             pass_recommendation="Решает владелец",
             reject_recommendation=None,
+            source_context=source,
         )
-        business_relevant = bool(item.get("business_relevant") is True and business_evidence)
+        business_relevant = bool(business_evidence)
         gate_blocked = not business_relevant
         if gate_blocked:
             # Даже высокий "потенциальный интерес" не может обойти бизнес-фильтр.
@@ -1331,6 +1332,10 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         if not old:
             continue
         if bool(old.get("selection_blocked")) or bool(old.get("telegram_warning")):
+            continue
+        # Исторические карточки, составленные до проверки миссии W, не
+        # должны автоматически возвращаться в новую ежедневную пятёрку.
+        if not assess_time_freedom_fit(old).get("eligible"):
             continue
         if str(old.get("status") or "") == "Отправлено":
             continue

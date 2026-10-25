@@ -102,7 +102,7 @@ from neonia_intelligence_v2 import (
     render_target_profile,
     target_profile_for_analysis,
 )
-from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
+from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate, assess_time_freedom_fit
 
 from neona_dialog_policy_v3 import (
     DialogError as NeonaDialogError,
@@ -2709,6 +2709,7 @@ Telegram-предупреждение scam/fake является основан�
             score,
             pass_recommendation=original_recommendation,
             reject_recommendation="Пока не подходит",
+            source_context=source,
         )
         recommendation = gated_recommendation or "Пока не подходит"
         if recommendation == "Пока не подходит" and business_gate_reason:
@@ -4826,8 +4827,8 @@ def build_no_data_candidate(source):
         "work_state_label": str(
             source.get("work_state_label") or "Можно начинать новый разговор"
         ),
-        "selection_blocked": bool(source.get("selection_blocked", False)),
-        "block_reason": str(source.get("block_reason") or ""),
+        "selection_blocked": True,
+        "block_reason": "Недостаточно данных о делегировании рутины ИИ.",
         "last_owner_outreach_at": str(
             source.get("last_owner_outreach_at") or ""
         ),
@@ -4844,14 +4845,14 @@ def build_no_data_candidate(source):
         "work_state_label": str(
             source.get("work_state_label") or "Можно начинать новый разговор"
         ),
-        "selection_blocked": bool(source.get("selection_blocked", False)),
-        "block_reason": str(source.get("block_reason") or ""),
+        "selection_blocked": True,
+        "block_reason": "Недостаточно данных о делегировании рутины ИИ.",
         "work_state": str(source.get("work_state") or "available"),
         "work_state_label": str(
             source.get("work_state_label") or "Можно начинать новый разговор"
         ),
-        "selection_blocked": bool(source.get("selection_blocked", False)),
-        "block_reason": str(source.get("block_reason") or ""),
+        "selection_blocked": True,
+        "block_reason": "Недостаточно данных о делегировании рутины ИИ.",
         "potential_interest": "неясно",
         "actuality": "активен сейчас",
         "warmth": "неясно",
@@ -4877,7 +4878,7 @@ def build_no_data_candidate(source):
         "score": 0,
         "confidence": "данных недостаточно",
         "reasons": ["Недостаточно содержательных данных для ИИ-анализа"],
-        "recommendation": "Решает владелец",
+        "recommendation": "Недостаточно данных",
         "status": "Проанализирован без OpenAI",
         "analysis_cost_mode": "local_no_ai",
         "analyzed_at": datetime.now(
@@ -4890,10 +4891,9 @@ def analyze_contacts_for_target_audience(
     passport_analysis,
     contact_contexts,
 ):
-    """Даёт краткую характеристику очередной партии контактов.
+    """Оценивает только наблюдаемые признаки; без них не рекомендует.
 
-    ЦА используется как ориентир для оценки потенциального интереса,
-    но Неония никого не исключает и не принимает решение за владельца.
+    Итоговое решение о разговоре всегда остаётся за владельцем.
     """
 
     system_prompt = """
@@ -4959,8 +4959,9 @@ def analyze_contacts_for_target_audience(
 Верни ТОЛЬКО JSON-массив без Markdown и пояснений.
 """
 
+    system_prompt += "\n\n" + BUSINESS_GATE_RULES
     request = (
-        "ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ — ТОЛЬКО ОРИЕНТИР:\n"
+        "ПОРТРЕТ ЦЕЛЕВОЙ АУДИТОРИИ — ГЛАВНЫЙ ОРИЕНТИР:\n"
         f"{passport_analysis}\n\n"
         "ОЧЕРЕДНЫЕ КОНТАКТЫ ДЛЯ ХАРАКТЕРИСТИКИ:\n"
         f"{json.dumps(contact_contexts, ensure_ascii=False)}"
@@ -5028,6 +5029,14 @@ def analyze_contacts_for_target_audience(
             "средний": 50,
             "низкий": 25,
         }[potential_interest]
+        compatibility_score, validated_rec, real_evidence, gate_reason = apply_business_gate(
+            item, compatibility_score,
+            pass_recommendation="Решает владелец",
+            reject_recommendation="Недостаточно данных",
+            source_context=source,
+        )
+        if not real_evidence:
+            potential_interest = "низкий"
 
         normalized.append(
             {
@@ -5051,8 +5060,11 @@ def analyze_contacts_for_target_audience(
                 "work_state_label": str(
                     source.get("work_state_label") or "Можно начинать новый разговор"
                 ),
-                "selection_blocked": bool(source.get("selection_blocked", False)),
-                "block_reason": str(source.get("block_reason") or ""),
+                "selection_blocked": bool(source.get("selection_blocked", False)) or not bool(real_evidence),
+                "block_reason": str(source.get("block_reason") or "") or (gate_reason if not real_evidence else ""),
+                "business_evidence": real_evidence,
+                "business_relevant": bool(real_evidence),
+                "business_gate_reason": gate_reason,
                 "last_owner_outreach_at": str(
                     source.get("last_owner_outreach_at") or ""
                 ),
@@ -5081,10 +5093,8 @@ def analyze_contacts_for_target_audience(
                 "segment": potential_interest.capitalize() + " потенциальный интерес",
                 "score": compatibility_score,
                 "confidence": "аналитическая оценка",
-                "reasons": [
-                    str(item.get("short_portrait") or "Данных пока немного.")[:300]
-                ],
-                "recommendation": "Решает владелец",
+                "reasons": real_evidence or [gate_reason],
+                "recommendation": validated_rec,
                 "status": "Проанализирован",
                 "analysis_cost_mode": "openai",
                 "analyzed_at": datetime.now(
@@ -5118,14 +5128,14 @@ def analyze_contacts_for_target_audience(
                 "work_state_label": str(
                     source.get("work_state_label") or "Можно начинать новый разговор"
                 ),
-                "selection_blocked": bool(source.get("selection_blocked", False)),
-                "block_reason": str(source.get("block_reason") or ""),
+                "selection_blocked": True,
+                "block_reason": "Нет проверяемого признака делегирования рутины ИИ.",
                 "last_owner_outreach_at": str(
                     source.get("last_owner_outreach_at") or ""
                 ),
                 "cooldown_until": str(source.get("cooldown_until") or ""),
-                "potential_interest": "средний",
-                "actuality": "активен сейчас",
+                "potential_interest": "неясно",
+                "actuality": "неясно",
                 "warmth": "холодный",
                 "obstacles": ["мало данных"],
                 "short_portrait": "Недостаточно данных для уверенной характеристики.",
@@ -5134,8 +5144,8 @@ def analyze_contacts_for_target_audience(
                 "project_name": "",
                 "project_url": "",
                 "project_evidence": "",
-                "segment": "Средний потенциальный интерес",
-                "score": 50,
+                "segment": "Недостаточно данных",
+                "score": 0,
                 "confidence": "низкая",
                 "reasons": ["Недостаточно данных"],
                 "recommendation": "Решает владелец",
@@ -5188,12 +5198,13 @@ def prepare_candidates_for_stagirite(
     reserve_target=50,
     exclude_ids=None,
 ):
-    """Последовательная очередь Неонии без повторов и без фильтра ЦА.
+    """Очередь Неонии с проверкой подтверждённой потребности в освобождении времени.
 
     Первый проход:
     1) личные Telegram-контакты;
     2) затем Telegram-группы/супергруппы по одной до конца;
-    3) один Telegram ID показывается владельцу только один раз.
+    3) один Telegram ID показывается владельцу только один раз;
+    4) пустые профили и неподтверждённый интерес не становятся рекомендациями.
     """
     owner_id = int(owner_id)
     desired_count = max(1, min(10, int(desired_count or 5)))
@@ -5271,18 +5282,50 @@ def prepare_candidates_for_stagirite(
         if int(item["telegram_id"]) not in processed_ids
     ]
 
-    if daily_source == "contacts":
-        for item in remaining_contacts[:desired_count]:
+    if daily_source == "contacts" and remaining_contacts:
+        # Профиль из телефонной книги содержит только имя и ID.
+        # Для оценки потребности действительно читаем доступное bio/контекст.
+        # Проверяем ограниченную партию, не запускаем тяжёлый поиск на каждом rerun.
+        contact_probe = remaining_contacts[:max(20, desired_count * 4)]
+        try:
+            context_rows = run_telegram_async(
+                fetch_telegram_contact_contexts(owner_id, contact_probe)
+            )
+        except Exception:
+            context_rows = []
+        context_by_id = {
+            int(row["telegram_id"]): row
+            for row in context_rows if isinstance(row, dict) and row.get("telegram_id")
+        }
+        for item in contact_probe:
+            cid = int(item["telegram_id"])
+            if cid not in context_by_id:
+                # Не помечаем как проверенный, если Telegram не вернул сведения.
+                continue
+            processed_ids.add(cid)
+            context = context_by_id[cid]
+            fit = assess_time_freedom_fit(context)
+            if not fit["eligible"] or bool(context.get("telegram_warning")):
+                continue
             candidate = {
                 **item,
                 "_queue_source_type": "telegram_contacts",
                 "_queue_source_name": "Личные контакты Telegram",
+                "_time_freedom_evidence": fit["evidence"],
+                "_time_freedom_reason": fit["reason"],
             }
             selected_today.append(candidate)
-            processed_ids.add(int(item["telegram_id"]))
             today_contact_count += 1
+            if len(selected_today) >= desired_count:
+                break
 
     need = max(0, desired_count - len(selected_today))
+    # Режим источника выбирает владелец. Если личные контакты ещё остались,
+    # не подменяем их участниками чатов ради заполнения пятёрки.
+    if daily_source == "contacts" and any(
+        int(item["telegram_id"]) not in processed_ids for item in normalized_contacts
+    ):
+        need = 0
 
     # --------------------------------------------------------------
     # 2. Если выбран режим чатов — берём пятёрку сразу из чатов.
@@ -5392,7 +5435,7 @@ def prepare_candidates_for_stagirite(
     active_chat = next_chat_after(current_chat_id)
     safety_pages = 0
 
-    while need > 0 and active_chat is not None and safety_pages < 100:
+    while need > 0 and active_chat is not None and safety_pages < 3:
         safety_pages += 1
         chat_id = int(active_chat["chat_id"])
         chat_key = str(chat_id)
@@ -5426,7 +5469,7 @@ def prepare_candidates_for_stagirite(
                     owner_id,
                     active_chat,
                     offset=offset,
-                    limit=200,
+                    limit=12,
                 )
             )
         except Exception as exc:
@@ -5440,6 +5483,19 @@ def prepare_candidates_for_stagirite(
             continue
 
         members = page.get("members") or []
+        try:
+            verified_rows = run_telegram_async(
+                fetch_chat_member_contexts(owner_id, active_chat, members)
+            ) if members else []
+        except Exception as exc:
+            # Не перескакиваем через непроверенную партию при ошибке доступа.
+            stats["error"] = f"Не удалось проверить контекст: {exc}"[:500]
+            chat_stats[chat_key] = stats
+            break
+        verified_by_id = {
+            int(row["telegram_id"]): row
+            for row in verified_rows if isinstance(row, dict) and row.get("telegram_id")
+        }
         next_offset = int(page.get("next_offset") or offset)
         scanned = int(page.get("scanned") or 0)
         exhausted_page = bool(page.get("exhausted"))
@@ -5471,15 +5527,25 @@ def prepare_candidates_for_stagirite(
                 stats["duplicates_skipped"] += 1
                 continue
 
+            context = verified_by_id.get(cid)
+            if not context:
+                # Отсутствие контекста НЕ означает соответствие целевой аудитории.
+                continue
+            processed_ids.add(cid)
+            fit = assess_time_freedom_fit(context)
+            if not fit["eligible"] or bool(context.get("telegram_warning")):
+                stats["quality_skipped"] = int(stats.get("quality_skipped") or 0) + 1
+                continue
             candidate = {
                 **member,
                 "_queue_source_type": "telegram_chat",
                 "_queue_source_name": str(
                     active_chat.get("title") or "Telegram-чат"
                 ),
+                "_time_freedom_evidence": fit["evidence"],
+                "_time_freedom_reason": fit["reason"],
             }
             selected_today.append(candidate)
-            processed_ids.add(cid)
             stats["shown"] += 1
             today_chat_count += 1
             chosen_from_page += 1
@@ -5541,8 +5607,8 @@ def prepare_candidates_for_stagirite(
             old_selected.append(cid)
     st.session_state[selected_key] = old_selected
 
-    # Карточки сегодняшней пятёрки нужны только для отображения и передачи
-    # следующему этапу. ЦА/интерес здесь намеренно не оцениваются.
+    # В рабочую пятёрку попадают только карточки с проверенной цитатой.
+    # Это сигнал готовности к разговору об экономии времени, но не к покупке.
     queue_cards = []
     for item in selected_today:
         source_type = str(
@@ -5561,17 +5627,20 @@ def prepare_candidates_for_stagirite(
                 **clean_item,
                 "source": source_name,
                 "source_type": source_type,
-                "segment": "Последовательная очередь",
-                "potential_interest": "не оценивается",
-                "actuality": "не оценивается",
+                "segment": "Освобождение времени с помощью ИИ",
+                "potential_interest": "требует уточнения в диалоге",
+                "actuality": "не подтверждена",
                 "warmth": "не оценивается",
-                "recommendation": "Выдан в ежедневной пятёрке",
-                "status": "Выдан Неонией",
+                "recommendation": "Владелец решает, начинать ли разговор",
+                "status": "Проверен по наблюдаемому признаку",
                 "owner_hint": (
-                    "Кандидат выдан по очереди. ЦА и интерес на этом этапе "
-                    "не оцениваются."
+                    "Найдена содержательная цитата о делегировании рутины. "
+                    "Это не доказательство готовности покупать или встречаться."
                 ),
-                "reasons": ["Следующий новый человек в очереди"],
+                "reasons": item.get("_time_freedom_evidence") or [],
+                "business_evidence": item.get("_time_freedom_evidence") or [],
+                "business_relevant": True,
+                "business_gate_reason": item.get("_time_freedom_reason") or "",
             }
         )
 
@@ -8386,7 +8455,10 @@ if telegram_login_valid or remembered_data:
                     except (TypeError, ValueError):
                         continue
                     is_new_queue_card = (
-                        str(item.get("segment") or "") == "Последовательная очередь"
+                        str(item.get("segment") or "") in {
+                            "Последовательная очередь",
+                            "Освобождение времени с помощью ИИ",
+                        }
                         or str(item.get("recommendation") or "")
                         == "Выдан в ежедневной пятёрке"
                     )
@@ -8707,6 +8779,11 @@ if telegram_login_valid or remembered_data:
                             details.append("источник: " + source)
                         if details:
                             st.caption(" · ".join(details))
+                        evidence = contact.get("business_evidence") or contact.get("reasons") or []
+                        for statement in evidence[:2]:
+                            st.caption("🔎 Основание: " + str(statement)[:350])
+                        if not evidence:
+                            st.caption("⚪ Подтверждение соответствия ЦА для этой карточки не сохранено.")
 
             _render_stagirite_day_list(
                 today_iso,
@@ -8922,13 +8999,15 @@ if telegram_login_valid or remembered_data:
                         ),
                         "👥 Поиск контактов из чата": (
                             "Выберите Telegram-группу, из которой Неония должна "
-                            "брать по 5 новых людей в ежедневную пятёрку. "
-                            "Повторов с личными контактами и другими чатами не будет."
+                            "проверять доступные признаки интереса к делегированию рутины ИИ "
+                            "и выдавать до пяти подходящих людей. "
+                            "Если данных недостаточно, список может быть короче пяти."
                         ),
                         "👥 Поиск контактов": (
                             "Здесь можно получить или вручную обновить исходный "
-                            "список личных Telegram-контактов. Ежедневная пятёрка "
-                            "формируется автоматически и без повторов."
+                            "список личных Telegram-контактов. Неония проверяет доступные "
+                            "данные и показывает только людей с признаками интереса "
+                            "к освобождению времени. Пятёрка может быть неполной."
                         ),
                         "🧠 Анализ 10 контактов": (
                             "Неония берёт следующие 10 ещё не проанализированных контактов, "
@@ -10174,8 +10253,9 @@ if telegram_login_valid or remembered_data:
                         st.markdown("### ✅ Сохранённый портрет ЦА")
                         render_target_profile(saved_profile)
                         st.caption(
-                            "Неония использует именно этот живой портрет "
-                            "при следующем анализе Telegram-контактов."
+                            "Главная задача Агентства W — находить людей, заинтересованных "
+                            "в освобождении времени за счёт делегирования рутины ИИ. "
+                            "В ежедневном списке требуются конкретные подтверждённые признаки."
                         )
                         st.divider()
                     elif isinstance(saved_profile, dict):
@@ -10261,7 +10341,8 @@ if telegram_login_valid or remembered_data:
                                     render_target_profile(profile)
                                     st.info(
                                         "Следующий шаг: открыть поиск контактов. "
-                                        "Неония будет сравнивать людей именно с этим портретом."
+                                        "Неония будет проверять доступные признаки интереса "
+                        "к освобождению времени и делегированию рутины ИИ."
                                     )
 
                 elif selected_agent == "Неона":
