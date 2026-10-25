@@ -123,7 +123,7 @@ async def process_action(action, user_id, chat_id, telegram, is_chat_admin,
         await telegram("sendMessage", {
             "chat_id": chat_id,
             "text": f"👀 ПРЕДПРОСМОТР — НЕ ОТПРАВЛЕНО В ГРУППУ\n"
-                    f"Источник текста: {'ИИ' if source == 'AI' else 'резервный текст'}\n\n"
+                    f"Источник текста: {('Авторский календарь' if source == 'editorial-calendar' else 'Ваш исправленный текст' if source == 'owner-edited' else 'ИИ' if source == 'AI' else 'резервный текст')}\n\n"
                     f"{text}",
             "reply_markup": keys([
                 [key("📣 Опубликовать", "ora:morning:publish")],
