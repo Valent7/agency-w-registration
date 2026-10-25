@@ -76,7 +76,7 @@ def _pilot_model_candidates(owner_id: int | None) -> list[str]:
 
 def _model_candidates() -> list[str]:
     """Качество по умолчанию, но с мягким fallback без поломки диалогов."""
-    requested = str(os.getenv("NEONA_DIALOG_MODEL") or "gpt-6.1-sol").strip()
+    requested = str(os.getenv("NEONA_DIALOG_MODEL") or "gpt-6-astra").strip()
     fallback = str(os.getenv("NEONA_DIALOG_FALLBACK_MODEL") or "gpt-6-luna").strip()
     result = []
     for item in (requested, fallback, "gpt-5-mini"):
