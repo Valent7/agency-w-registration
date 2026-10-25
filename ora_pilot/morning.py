@@ -1,4 +1,5 @@
 """Утренние «Мысли вслух» Оры. Только WREMYA, отдельный сервис."""
+import asyncio
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -12,7 +13,10 @@ MSK = ZoneInfo("Europe/Moscow")
 AUDIENCE = "ora-wremya-pilot.onrender.com"
 WORKFLOW = "Valent7/agency-w-registration/.github/workflows/ora-morning.yml@refs/heads/main"
 FIRST_DAY = datetime(2026, 10, 24, tzinfo=MSK).date()
-POSTED = set()
+POSTED = {}
+PREVIEWS = {}
+LAST_ATTEMPT = None
+PUBLISH_LOCK = asyncio.Lock()
 
 # Editorial, verifiable scientific starting points. They are not purported Hawking quotes.
 THEMES = [
@@ -74,64 +78,117 @@ def authenticate(authorization):
     return event
 
 async def compose(day, generate):
+    """One fresh daily thought, not a long lecture. Return text plus provenance."""
     index = (day - FIRST_DAY).days % len(THEMES)
     title, fact = THEMES[index]
-    # The first publication is carefully edited rather than an unverified first model output.
-    if day == FIRST_DAY:
-        return TODAY_POST
     prompt = (
-        f"Сегодня {day.isoformat()}. Рубрика Telegram WREMYA: «МЫСЛИ ВСЛУХ». "
-        "Напиши самостоятельное, красивое и ТЁПЛОЕ утреннее размышление по-русски, "
-        "НЕ УРОК и НЕ ЛЕКЦИЮ. Начни с «☀️ Доброе утро!» и «💭 МЫСЛИ ВСЛУХ | ВРЕМЯ». "
-        f"Сюжет сегодня: «{title}». Научная опора: {fact} "
-        "Отделяй научное объяснение по мотивам книги Стивена Хокинга "
-        "«Краткая история времени» от философских размышлений о жизни. "
-        "Никаких придуманных цитат, неточных дат, обещаний или назидания. "
-        "Около 130-190 слов, один понятный пример из обычной жизни, "
-        "добрый тон, свежий образ, вопрос для обсуждения в конце. "
-        "Не повторяй вчерашнюю мысль. В самом конце «Ваша Ора 💛». "
-        "Никаких призывов покупать, вступать или зарабатывать."
+        f"Сегодня {day.isoformat()}, рубрика «МЫСЛИ ВСЛУХ | ВРЕМЯ» сообщества WREMYA. "
+        f"Тема дня: {title}. Достоверная научная опора: {fact} "
+        "Напиши 75–110 СЛОВ по-русски. Не урок, не лекция, не научная простыня. "
+        "Начни с «☀️ Доброе утро!» и «💭 МЫСЛИ ВСЛУХ | ВРЕМЯ». "
+        "Далее 2–3 коротких абзаца: одна любопытная мысль о времени, "
+        "одно живое сравнение с обычной жизнью, один небанальный вопрос участникам. "
+        "Мысль должна быть самостоятельной, тёплой, мудрой, без морализаторства. "
+        "Отделяй научные факты Хокинга от собственных размышлений. "
+        "Не называй придуманную фразу цитатой Хокинга, не приписывай ему мысли "
+        "о финансах или счастье. Без рекламных обещаний, без длинных вступлений. "
+        "Заканчивай «Ваша Ора 💛»."
     )
     try:
         text = (await generate(
             prompt,
-            "Ты Ора, самостоятельный редактор WREMYA. Пиши как размышляющий собеседник. "
-            "Проверяемость фактов обязательна; если сомневаешься, не добавляй факт.",
-            max_tokens=1800
+            "Ты Ора — живой интеллектуальный собеседник сообщества WREMYA. "
+            "Пиши компактно и оригинально; научные тезисы проверяемы.",
+            max_tokens=1200
         )).strip()
-        if 250 <= len(text) <= 3300 and "МЫСЛИ ВСЛУХ" in text:
-            return text
+        count = len(text.split())
+        if 55 <= count <= 130 and "МЫСЛИ ВСЛУХ" in text and "?" in text:
+            return text, "AI"
+        log.warning("Morning generation rejected: words=%s", count)
     except Exception:
-        log.warning("Morning model response unavailable; using vetted reflection")
-    return (
-        f"☀️ Доброе утро!\n💭 МЫСЛИ ВСЛУХ | ВРЕМЯ\n\n"
-        f"Сегодня думаю о простом вопросе: {title.lower()} "
+        log.warning("Morning AI generation failed; using editorial backup")
+    # Clear attribution: this text was not created by the live model.
+    text = (
+        "☀️ Доброе утро!\n💭 МЫСЛИ ВСЛУХ | ВРЕМЯ\n\n"
+        f"Сегодня мне хочется поразмышлять: {title.lower()} "
         f"{fact}\n\n"
-        "Но какое отношение это имеет к нашей обычной жизни? "
-        "Наверное, самое важное — не путать календарь с прожитыми мгновениями. "
-        "Мы можем торопиться к цели и всё-таки находить время заметить родных, "
-        "природу и самих себя.\n\n"
-        "А что сегодня вы хотите заметить, вместо того чтобы проскочить мимо?\n\n"
+        "Учёные измеряют время часами. Но ни одни часы не подскажут, "
+        "когда нам пора отложить дела и услышать близкого человека. "
+        "Возможно, именно эти маленькие паузы помогают не пропустить жизнь.\n\n"
+        "А какой момент сегодня заслуживает вашего внимания?\n\n"
         "Ваша Ора 💛"
     )
+    return text, "backup"
+
+
+def status():
+    now = datetime.now(MSK)
+    day = now.date()
+    item = POSTED.get(day)
+    preview = PREVIEWS.get(day)
+    return {
+        "date": day.isoformat(),
+        "scheduled_time_msk": "08:00",
+        "sent_in_current_process": bool(item),
+        "sent_time_msk": item["sent_at"] if item else None,
+        "telegram_message_id": item["message_id"] if item else None,
+        "source": item["source"] if item else None,
+        "preview_available": bool(preview),
+        "last_attempt": LAST_ATTEMPT,
+        "note": "After a server restart, earlier delivery history is not preserved.",
+    }
+
+
+async def preview(day, generate):
+    if day not in PREVIEWS:
+        PREVIEWS.clear()  # Only the current day's preview is kept in memory.
+        PREVIEWS[day] = await compose(day, generate)
+    return PREVIEWS[day]
+
+
+async def publish(day, generate, send, chat_id, via="schedule", require_preview=False):
+    global LAST_ATTEMPT
+    async with PUBLISH_LOCK:
+        if day in POSTED:
+            return {"ok": True, "already_sent": True, "info": POSTED[day]}
+        if require_preview and day not in PREVIEWS:
+            return {"ok": False, "error": "Preview required"}
+        LAST_ATTEMPT = {"date": day.isoformat(), "via": via, "state": "generating"}
+        try:
+            post, source = await preview(day, generate)
+            LAST_ATTEMPT["state"] = "sending"
+            message = await send(int(chat_id), post)
+            item = {
+                "sent_at": datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S"),
+                "message_id": (message or {}).get("message_id"),
+                "source": source, "via": via,
+            }
+            POSTED[day] = item
+            LAST_ATTEMPT["state"] = "delivered"
+            log.info("Ora morning text delivered, date=%s source=%s via=%s message_id=%s",
+                     day.isoformat(), source, via, item["message_id"])
+            return {"ok": True, "published": True, "info": item}
+        except Exception as exc:
+            LAST_ATTEMPT["state"] = "failed"
+            log.warning("Morning publish failed: %s", type(exc).__name__)
+            raise
+
 
 def attach_morning(app, send, openai_response, allowed, chat_id):
+    @app.get("/health/morning")
+    async def morning_health():
+        # Public and secret-free runtime state, never disclose chat contents.
+        return status()
+
     @app.post("/schedule/morning")
     async def morning(authorization: str | None = Header(None)):
         event = authenticate(authorization)
         now = datetime.now(MSK)
         day = now.date()
-        # Do not send the initial Saturday post before the user-requested one-off launch.
         if event == "schedule" and not (7 <= now.hour <= 10):
-            raise HTTPException(status_code=409, detail="Not near morning Moscow time")
+            raise HTTPException(status_code=409, detail="Not morning Moscow time")
         if event == "push" and not (7 <= now.hour <= 23):
-            raise HTTPException(status_code=409, detail="Not yet time for the one-off post")
+            raise HTTPException(status_code=409, detail="Not an allowed one-time launch")
         if str(chat_id) not in allowed:
-            raise HTTPException(status_code=409, detail="WREMYA is not in allowed chats")
-        if day in POSTED:
-            return {"ok": True, "already_sent": True, "day": day.isoformat()}
-        post = await compose(day, openai_response)
-        await send(int(chat_id), post)
-        POSTED.add(day)
-        log.info("Ora morning reflections published for Moscow day %s", day.isoformat())
-        return {"ok": True, "published": True, "day": day.isoformat()}
+            raise HTTPException(status_code=409, detail="WREMYA not configured")
+        return await publish(day, openai_response, send, chat_id, via=event)
