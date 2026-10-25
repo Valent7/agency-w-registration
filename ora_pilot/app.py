@@ -551,10 +551,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
     argument = argument.strip()
     is_group = chat.get("type") in ("group", "supergroup")
     if not is_group:
-        if command in ("/start", "/help", "/ora"):
-            # Private Telegram menu: only verified administrators of WREMYA can publish.
+        if command in ("/start", "/help", "/ora", "/calendar") or (command == "/replace" and argument):
+            # All private admin functions require group permissions.
+            action = ("ora:calendar" if command == "/calendar" else
+                      "/replace " + argument if command == "/replace" else command)
             background_tasks.add_task(
-                control.process_action, command, user_id, chat_id,
+                control.process_action, action, user_id, chat_id,
                 telegram, is_chat_admin, openai_response, send)
         return {"ok":True}
     # An admin may discover a group ID before that group is bound to this service.
