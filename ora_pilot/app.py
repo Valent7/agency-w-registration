@@ -14,6 +14,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 import jwt
 from jwt import PyJWKClient
+import control
 
 logging.basicConfig(level=logging.INFO)
 # httpx logs the full Telegram Bot API URL, including the secret bot token.
@@ -465,6 +466,24 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
     if not SECRET or not hmac.compare_digest(SECRET, x_telegram_bot_api_secret_token or ""):
         raise HTTPException(status_code=403)
     update = await request.json()
+    callback = update.get("callback_query") or {}
+    if callback:
+        callback_id = callback.get("id")
+        if callback_id:
+            try:
+                await telegram("answerCallbackQuery", {"callback_query_id":callback_id})
+            except Exception:
+                log.warning("Could not acknowledge inline control action")
+        from_user = callback.get("from") or {}
+        owner_chat = ((callback.get("message") or {}).get("chat") or {})
+        action = callback.get("data") or ""
+        if (owner_chat.get("type") == "private"
+            and action in control.CONTROL_ACTIONS
+            and from_user.get("id")):
+            background_tasks.add_task(
+                control.process_action, action, from_user["id"], owner_chat.get("id"),
+                telegram, is_chat_admin, openai_response, send)
+        return {"ok":True}
     msg = update.get("message") or update.get("edited_message") or {}
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
@@ -532,10 +551,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks,
     argument = argument.strip()
     is_group = chat.get("type") in ("group", "supergroup")
     if not is_group:
-        if command in ("/start", "/help"):
-            await send(chat_id, "Здравствуйте! Я Ора. 🌷 Для тестирования добавьте меня в группу "
-                "и попросите её администратора написать /id. После привязки доступны "
-                "/intro, /preview science, /preview thought, /preview humor, /poll, /meeting и /ask.")
+        if command in ("/start", "/help", "/ora"):
+            # Private Telegram menu: only verified administrators of WREMYA can publish.
+            background_tasks.add_task(
+                control.process_action, command, user_id, chat_id,
+                telegram, is_chat_admin, openai_response, send)
         return {"ok":True}
     # An admin may discover a group ID before that group is bound to this service.
     if command == "/id":
