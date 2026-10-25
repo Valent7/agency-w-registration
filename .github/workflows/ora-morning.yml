@@ -5,6 +5,10 @@ on:
   schedule:
     # Moscow stays at UTC+3 year round. 05:00 UTC == 08:00 MSK.
     - cron: "0 5 * * *"
+    # Fallback requests if GitHub misses the top-of-hour event.
+    # Ora's server skips repeat publication for a day while running.
+    - cron: "7 5 * * *"
+    - cron: "19 5 * * *"
   push:
     # Launch once immediately when this workflow is first created on 2026-10-24.
     # Backend rejects push launches on any other date.
