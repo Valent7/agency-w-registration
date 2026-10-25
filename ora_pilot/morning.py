@@ -104,6 +104,21 @@ async def compose(day, generate):
         count = len(text.split())
         if 55 <= count <= 130 and "МЫСЛИ ВСЛУХ" in text and "?" in text:
             return text, "AI"
+        if count > 130 and "МЫСЛИ ВСЛУХ" in text:
+            try:
+                text = (await generate(
+                    "Перепиши этот черновик короче — ровно 75–110 русских слов. "
+                    "Сохрани научный факт и единственный вопрос, добавь человечности "
+                    "и убери всё повторяющееся. Не добавляй выдуманных цитат. "
+                    "Начало «☀️ Доброе утро!», рубрика «💭 МЫСЛИ ВСЛУХ | ВРЕМЯ», "
+                    "в конце «Ваша Ора 💛». Черновик:\\n" + text[:2700],
+                    "Ты Ора, редактор очень коротких, содержательных утренних мыслей.",
+                    max_tokens=900
+                )).strip()
+                if 55 <= len(text.split()) <= 130 and "МЫСЛИ ВСЛУХ" in text and "?" in text:
+                    return text, "AI"
+            except Exception:
+                log.warning("Morning concise revision unavailable")
         log.warning("Morning generation rejected: words=%s", count)
     except Exception:
         log.warning("Morning AI generation failed; using editorial backup")
