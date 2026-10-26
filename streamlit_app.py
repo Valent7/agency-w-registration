@@ -117,6 +117,7 @@ from workspace_persistence import (
     get_workspace_state_keys,
     hydrate_workspace_state_once,
     persist_workspace_if_changed,
+    persist_neonia_source_preference,
 )
 from person_card import render_person_card_2_0, render_neona_magnets_reference
 from scout_center import render_scout_center
@@ -9439,22 +9440,31 @@ if telegram_login_valid or remembered_data:
                                     st.session_state[
                                         progress_key
                                     ] = progress
-                                    saved = persist_workspace_if_changed(
-                                        telegram_id,
-                                        force=True,
-                                    )
-                                    if saved:
-                                        st.success(
-                                            "✅ Источник сохранён: "
-                                            + str(selected_chat.get("title") or "Без названия")
-                                            + ". Следующая пятёрка только отсюда; "
-                                            "личные контакты не подставляются. "
-                                            "Если участники недоступны, увидите причину."
+                                    try:
+                                        if not persist_workspace_if_changed(
+                                            telegram_id, force=True
+                                        ):
+                                            raise RuntimeError(
+                                                "Постоянное сохранение недоступно."
+                                            )
+                                        persist_neonia_source_preference(
+                                            telegram_id, "chats",
+                                            selected_chat_id=int(selected_chat_id),
+                                            selected_chat_title=str(
+                                                selected_chat.get("title") or ""
+                                            ),
+                                        )
+                                    except Exception as exc:
+                                        st.error(
+                                            "Источник НЕ сохранён на сервере: "
+                                            + str(exc)
                                         )
                                     else:
-                                        st.error(
-                                            "Выбор пока не сохранён на сервере. "
-                                            "Проверьте постоянное сохранение данных."
+                                        st.success(
+                                            "✅ Проверено в базе: ежедневная пятёрка "
+                                            "будет только из группы «"
+                                            + str(selected_chat.get("title") or "Без названия")
+                                            + "». Личные контакты не подставляются."
                                         )
 
                                 if st.button(
@@ -9464,17 +9474,17 @@ if telegram_login_valid or remembered_data:
                                         f"{telegram_id}"
                                     ),
                                 ):
-                                    st.session_state[
-                                        source_mode_key
-                                    ] = "contacts"
-                                    persist_workspace_if_changed(
-                                        telegram_id,
-                                        force=True,
-                                    )
-                                    st.success(
-                                        "Готово. Следующая новая пятёрка "
-                                        "будет снова из личных Telegram-контактов."
-                                    )
+                                    try:
+                                        persist_neonia_source_preference(
+                                            telegram_id, "contacts"
+                                        )
+                                    except Exception as exc:
+                                        st.error("Не удалось изменить источник: " + str(exc))
+                                    else:
+                                        st.success(
+                                            "✅ Проверено в базе: следующая пятёрка "
+                                            "будет из личных Telegram-контактов."
+                                        )
 
                                 st.caption(
                                     "Один Telegram ID выдаётся только один раз. "
@@ -9622,17 +9632,17 @@ if telegram_login_valid or remembered_data:
                                         f"{telegram_id}"
                                     ),
                                 ):
-                                    st.session_state[
-                                        source_mode_key
-                                    ] = "contacts"
-                                    persist_workspace_if_changed(
-                                        telegram_id,
-                                        force=True,
-                                    )
-                                    st.success(
-                                        "Готово. Следующая новая пятёрка "
-                                        "будет из личных Telegram-контактов."
-                                    )
+                                    try:
+                                        persist_neonia_source_preference(
+                                            telegram_id, "contacts"
+                                        )
+                                    except Exception as exc:
+                                        st.error("Не удалось изменить источник: " + str(exc))
+                                    else:
+                                        st.success(
+                                            "✅ Проверено в базе: следующая пятёрка "
+                                            "будет из личных Telegram-контактов."
+                                        )
 
                                 contacts_for_table = [
                                     {
