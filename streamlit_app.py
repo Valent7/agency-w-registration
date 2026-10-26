@@ -5356,7 +5356,16 @@ def prepare_candidates_for_stagirite(
 
     # Выбранный владельцем чат имеет приоритет. После его завершения Неония
     # продолжает по остальным доступным группам без повторов.
-    if selected_source_chat is not None:
+    if daily_source == "chats":
+        # The green button means THIS selected chat, not an arbitrary group.
+        # Missing/inaccessible group must be shown as an error; never switch
+        # silently back to contacts or another Telegram group.
+        eligible_chats = [
+            chat for chat in eligible_chats
+            if selected_source_chat is not None
+            and int(chat["chat_id"]) == selected_source_chat
+        ]
+    elif selected_source_chat is not None:
         eligible_chats.sort(
             key=lambda chat: (
                 0 if int(chat["chat_id"]) == selected_source_chat else 1
@@ -5430,9 +5439,14 @@ def prepare_candidates_for_stagirite(
                 )
             )
         except Exception as exc:
-            stats["completed"] = True
             stats["error"] = str(exc)[:500]
             chat_stats[chat_key] = stats
+            if daily_source == "chats":
+                # API failure is NOT an exhausted group. Do not silently move
+                # to personal contacts or mark all 12k members processed.
+                progress_state["error"] = str(exc)[:500]
+                break
+            stats["completed"] = True
             completed_chat_ids.add(chat_id)
             if current_chat_id == chat_id:
                 current_chat_id = None
@@ -5743,6 +5757,11 @@ def prepare_candidates_for_stagirite(
             or (daily_source == "chats" and (all_chats_completed or not eligible_chats))
         ),
         "source_mode": daily_source,
+        "source_chat_id": selected_source_chat if daily_source == "chats" else None,
+        "source_signature": (
+            f"chats:{selected_source_chat}" if daily_source == "chats"
+            and selected_source_chat is not None else "contacts"
+        ),
         "message": message,
         "progress": progress,
     }
@@ -9272,7 +9291,13 @@ if telegram_login_valid or remembered_data:
                                 if current_mode == "chats":
                                     st.success(
                                         "Сейчас источник ежедневной пятёрки: "
-                                        "Telegram-чаты."
+                                        + str(
+                                            next((c.get("title") for c in eligible_chats
+                                                  if int(c.get("chat_id")) == int(
+                                                      st.session_state.get(selected_chat_key) or 0)),
+                                                 "выбранный Telegram-чат")
+                                        )
+                                        + ". Личные контакты не используются."
                                     )
                                 else:
                                     st.caption(
@@ -9403,18 +9428,34 @@ if telegram_login_valid or remembered_data:
                                         selected_chat.get("title")
                                         or "Без названия"
                                     )
+                                    progress["source_type"] = "telegram_chat"
+                                    progress["source_name"] = (
+                                        "Telegram-чат: " + str(selected_chat.get("title") or "Без названия")
+                                    )
+                                    progress["source_mode"] = "chats"
+                                    progress["current_chat_id"] = int(selected_chat_id)
+                                    progress["today"] = 0
+                                    progress.pop("error", None)
                                     st.session_state[
                                         progress_key
                                     ] = progress
-                                    persist_workspace_if_changed(
+                                    saved = persist_workspace_if_changed(
                                         telegram_id,
                                         force=True,
                                     )
-                                    st.success(
-                                        "Готово. Следующая новая ежедневная "
-                                        "пятёрка будет собрана из выбранного чата. "
-                                        "Сегодняшняя уже готовая пятёрка не меняется."
-                                    )
+                                    if saved:
+                                        st.success(
+                                            "✅ Источник сохранён: "
+                                            + str(selected_chat.get("title") or "Без названия")
+                                            + ". Следующая пятёрка только отсюда; "
+                                            "личные контакты не подставляются. "
+                                            "Если участники недоступны, увидите причину."
+                                        )
+                                    else:
+                                        st.error(
+                                            "Выбор пока не сохранён на сервере. "
+                                            "Проверьте постоянное сохранение данных."
+                                        )
 
                                 if st.button(
                                     "📇 Вернуться к личным контактам",
