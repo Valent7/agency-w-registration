@@ -5266,6 +5266,12 @@ def get_recent_daily_candidates_for_stagirite(
         for offset in range(days)
     ]
     best: dict[str, dict[str, Any]] = {}
+    chosen_mode, chosen_chat_id = owner_source({
+        "daily_source_mode": st.session_state.get(
+            f"neonia_daily_source_mode_{owner_id}", "contacts"),
+        "selected_source_chat": st.session_state.get(
+            f"neonia_selected_source_chat_{owner_id}"),
+    })
 
     tasks, _ = _load_tasks(owner_id)
     for task in tasks:
@@ -5282,6 +5288,12 @@ def get_recent_daily_candidates_for_stagirite(
             for day_key in wanted:
                 info = batches.get(day_key)
                 if not isinstance(info, dict):
+                    continue
+                if day_key == today.isoformat() and not matches_daily_batch(
+                    info, chosen_mode, chosen_chat_id
+                ):
+                    # Historical personal cards must never masquerade as
+                    # today's batch from the explicitly selected group.
                     continue
                 current = best.get(day_key)
                 prepared_at = str(info.get("prepared_at") or "")
