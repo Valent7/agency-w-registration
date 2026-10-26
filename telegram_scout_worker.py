@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
+import neonia_chat_daily_worker
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -1213,11 +1214,14 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     owner_id = int(owner_id)
     state, _ = _workspace_state(owner_id)
 
-    # Workspace v7 uses the persistent sequential queue prepared by the app.
-    # Do not rebuild the same daily batch with the legacy activity ranking.
+    # v7+ source choices are persistent. When the owner clicks the green
+    # "every morning" button, the worker MUST fill the selected group-only
+    # queue instead of skipping this owner forever.
     try:
         if int(state.get("schema_version") or 0) >= 7:
-            return {"owner_id": owner_id, "status": "skip", "reason": "workspace_v7_queue"}
+            return neonia_chat_daily_worker.process(
+                owner_id, session_string, state, storage=__import__(__name__)
+            )
     except (TypeError, ValueError):
         pass
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
