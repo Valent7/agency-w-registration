@@ -9282,6 +9282,18 @@ if telegram_login_valid or remembered_data:
                                     int(selected_chat_id)
                                 ]
 
+                                source_flash_key = (
+                                    f"neonia_daily_source_saved_flash_{telegram_id}"
+                                )
+                                flash_group = st.session_state.pop(
+                                    source_flash_key, None
+                                )
+                                if flash_group:
+                                    st.success(
+                                        "✅ Проверено в базе: ежедневная пятёрка "
+                                        "только из группы «" + str(flash_group)
+                                        + "». Личные контакты не подставляются."
+                                    )
                                 current_mode = str(
                                     st.session_state.get(
                                         source_mode_key,
@@ -9460,12 +9472,14 @@ if telegram_login_valid or remembered_data:
                                             + str(exc)
                                         )
                                     else:
-                                        st.success(
-                                            "✅ Проверено в базе: ежедневная пятёрка "
-                                            "будет только из группы «"
-                                            + str(selected_chat.get("title") or "Без названия")
-                                            + "». Личные контакты не подставляются."
+                                        # Rebuild the whole Streamlit screen only AFTER
+                                        # the verified DB save. Otherwise the source
+                                        # label above this button stays stale until
+                                        # the next owner action (reported 26 Oct).
+                                        st.session_state[source_flash_key] = (
+                                            str(selected_chat.get("title") or "Без названия")
                                         )
+                                        st.rerun()
 
                                 if st.button(
                                     "📇 Вернуться к личным контактам",
