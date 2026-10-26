@@ -1,5 +1,6 @@
 import os
 import threading
+from stagirite_night_control import worker_forever as stagirite_night_worker_forever
 
 from neona_dialog_policy_v3 import worker_forever as neona_worker_forever
 from vk_scout_worker import worker_forever as vk_scout_worker_forever
@@ -30,6 +31,10 @@ def _run_telegram_scout():
 
 
 if __name__ == "__main__":
+    # Independent from Neona's dialogue loop and hourly Telegram Scout.
+    # UTC 21:00 -> 00:00 Moscow, followed by bounded night rechecks.
+    threading.Thread(target=stagirite_night_worker_forever,
+                     name="stagirite-night-watch",daemon=True).start()
     threading.Thread(target=_run_vk_scout, name="vk-scout-worker", daemon=True).start()
 
     if telegram_scout_worker_forever is not None:
