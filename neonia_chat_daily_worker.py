@@ -286,9 +286,13 @@ def process(owner_id,session_string,state,storage):
         saved=[x for x in storage._normalize_candidate_list(state.get("candidates",[]))
                if int(x["telegram_id"]) in cached
                and int(x.get("source_chat_id") or 0)==chat_id]
-        if saved and _write_daily_group_task(storage,owner_id,today,chat_id,saved):
-            return {"owner_id":owner_id,"status":"prepared",
-                    "count":len(saved),"source_chat_id":chat_id}
+        if saved:
+            _write_daily_group_task(storage,owner_id,today,chat_id,saved)
+            if len(saved)>=5:
+                return {"owner_id":owner_id,"status":"prepared",
+                        "count":len(saved),"source_chat_id":chat_id}
+            # A partial recovered batch must still be topped up, not frozen.
+            task,current=_daily_task_source(storage,owner_id,today)
     excluded=_from_history(state,storage,owner_id)
     # Avoid duplicating any already delivered same-source partial daily set.
     existing_cards=[]
@@ -308,6 +312,12 @@ def process(owner_id,session_string,state,storage):
                 "reason":"selected Telegram group cannot be enumerated",
                 "error_type":type(exc).__name__}
     if not cards and not existing_cards:
+        # Advance the cursor past previously seen/inaccessible participants;
+        # otherwise an owner in a 12k-member group can be stuck forever on
+        # the same 250 duplicate profiles every morning.
+        if scanned>0:
+            _persist_group_selection(storage,owner_id,mode,chat,[],
+                                     new_offset,scanned,exhausted)
         return {"owner_id":owner_id,"status":"empty",
                 "reason":"no accessible new members in selected chat",
                 "source_chat_id":chat_id}
