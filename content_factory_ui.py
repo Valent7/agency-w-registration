@@ -3317,6 +3317,10 @@ def render_content_factory(
     load_marker = f"content_factory_v2_loaded_{owner_id}"
 
     st.markdown("## 🏭 Контент-завод W")
+    from content_factory_autopilot_ui import render_content_autopilot
+    render_content_autopilot(owner_id, owner_name, target_profile=target_profile)
+
+    st.markdown("### Создать отдельный материал")
     st.caption(
         "Скажите задачу обычными словами. Завод подготовит профессиональный текст, "
         "Стагирит проверит его, а платные инструменты включатся только после утверждения."

@@ -1,0 +1,65 @@
+# Render Blueprint: select this file as the Blueprint Path.
+# Keep repository Root Directory empty; Docker paths below use the repo root.
+# Enter identical Supabase/encryption settings in both services and Streamlit.
+services:
+  - type: web
+    name: agency-w-content-connect
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    numInstances: 1
+    dockerfilePath: ./deploy/content-factory/Dockerfile
+    dockerContext: .
+    dockerCommand: >-
+      sh -c 'uvicorn content_factory_oauth:runtime_app --factory --host 0.0.0.0 --port "$PORT" --no-access-log'
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: CONTENT_FACTORY_FERNET_KEY
+        sync: false
+      - key: CONTENT_FACTORY_OAUTH_SIGNING_KEY
+        sync: false
+      - key: CONTENT_FACTORY_SERVICE_URL
+        sync: false
+      - key: CONTENT_FACTORY_RETURN_URL
+        value: https://agency-w.streamlit.app/
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
+      - key: THREADS_APP_ID
+        sync: false
+      - key: THREADS_APP_SECRET
+        sync: false
+
+  - type: worker
+    name: agency-w-content-worker
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    numInstances: 1
+    dockerfilePath: ./deploy/content-factory/Dockerfile
+    dockerContext: .
+    dockerCommand: python content_factory_worker.py --interval 60 --max-jobs 2
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: CONTENT_FACTORY_FERNET_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CONTENT_FACTORY_TEXT_MODEL
+        value: gpt-5-mini
+      - key: CONTENT_FACTORY_IMAGE_MODEL
+        value: gpt-image-1
+      - key: CONTENT_FACTORY_IMAGE_QUALITY
+        value: high
+      - key: CONTENT_FACTORY_SPEECH_MODEL
+        value: gpt-4o-mini-tts
+      - key: CONTENT_FACTORY_VOICE
+        value: alloy
