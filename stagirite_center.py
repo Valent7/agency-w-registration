@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+from neonia_daily_source import owner_source, source_signature, matches_daily_batch
 from PIL import Image, UnidentifiedImageError
 
 from agency_core import agency_core_prompt, mission_director_answer, mission_test_prompt
@@ -5429,9 +5430,41 @@ def ensure_weekly_candidates_for_neona(
     # Уже найденные 1–5 человек сразу доступны для работы. Тяжёлый добор
     # запускается только по явному force_prepare=True (позже его вынесем
     # в фоновый worker и уберём ручную кнопку).
+    owner_pref, owner_chat_id = owner_source({
+        "daily_source_mode": st.session_state.get(
+            f"neonia_daily_source_mode_{owner_id}", "contacts"),
+        "selected_source_chat": st.session_state.get(
+            f"neonia_selected_source_chat_{owner_id}"),
+    })
+    matches_preference = matches_daily_batch(
+        today_info, owner_pref, owner_chat_id
+    )
     sequential_source = (
         str(today_info.get("source") or "") == "neonia_sequential_queue"
+        and matches_preference
     )
+
+    # Never display yesterday's or today's PERSONAL queue as the newly
+    # selected Telegram group. It remains in historical records only.
+    if candidate_ids and not matches_preference:
+        candidate_ids = []
+        approved_ids = []
+        today_info = {}
+
+    if owner_pref == "chats" and not force_prepare and not sequential_source:
+        return {
+            "ok": True, "active": True,
+            "task_id": str(task.get("id") or ""),
+            "candidate_ids": [], "approved_ids": [],
+            "daily_target": daily_target,
+            "complete": False,
+            "message": (
+                "Источник: выбранная Telegram-группа. Новая пятёрка "
+                "подготавливается фоновым поиском. Старые личные контакты "
+                "не подставляются. Если Telegram ограничит список участников, "
+                "Неония покажет причину вместо чужих контактов."
+            ),
+        }
 
     if candidate_ids and sequential_source and not force_prepare:
         complete = len(candidate_ids) >= daily_target
@@ -5525,6 +5558,18 @@ def ensure_weekly_candidates_for_neona(
     if not isinstance(prepared, dict):
         prepared = {}
 
+    if owner_pref == "chats" and (
+        prepared.get("source_signature")
+        != source_signature(owner_pref, owner_chat_id)
+    ):
+        return {
+            "ok": False, "active": True,
+            "task_id": str(task.get("id") or ""),
+            "candidate_ids": [], "approved_ids": [],
+            "message": "Неония не подтвердила, что новые люди из выбранного чата. "
+                       "Чужие контакты не будут показаны.",
+        }
+
     merged_candidate_ids = list(candidate_ids)
     for contact_id in _normalize_int_ids(
         prepared.get("candidate_ids", [])
@@ -5559,6 +5604,9 @@ def ensure_weekly_candidates_for_neona(
         "prepared_at": str(today_info.get("prepared_at") or now_iso),
         "last_topup_attempt_at": now_iso,
         "source": "neonia_sequential_queue",
+        "source_signature": source_signature(owner_pref, owner_chat_id),
+        "source_mode": owner_pref,
+        "source_chat_id": owner_chat_id if owner_pref == "chats" else None,
         "complete": len(merged_candidate_ids) >= daily_target,
     }
     if len(merged_candidate_ids) >= daily_target:
