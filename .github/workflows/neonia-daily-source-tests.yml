@@ -1,0 +1,33 @@
+name: Neonia selected group daily source regression
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "neonia_chat_daily_worker.py"
+      - "neonia_daily_source.py"
+      - "telegram_scout_worker.py"
+      - "stagirite_center.py"
+      - "streamlit_app.py"
+      - "tests/test_neonia_daily_source.py"
+      - ".github/workflows/neonia-daily-source-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-selected-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install isolated worker requirements
+        run: pip install -r requirements_worker.txt
+      - name: Check touched Python files parse
+        run: python -m py_compile neonia_daily_source.py neonia_chat_daily_worker.py telegram_scout_worker.py stagirite_center.py streamlit_app.py
+      - name: Test exact selected chat and no fallback
+        run: python -m unittest discover -s tests -p 'test_neonia_daily_source.py' -v
