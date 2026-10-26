@@ -643,6 +643,123 @@ def _load_from_supabase(telegram_id):
     )
 
 
+def persist_neonia_source_preference(telegram_id, mode, selected_chat_id=None,
+                                    selected_chat_title=""):
+    """Atomically save and reread the owner's explicit choice, not just UI state.
+
+    Unlike a generic workspace snapshot, this updates only the two source
+    settings and their progress note against the latest encrypted snapshot.
+    A stale tab cannot silently overwrite a newer selection on click.
+    """
+    owner_id = int(telegram_id)
+    mode = str(mode or "").strip().lower()
+    if mode not in {"contacts", "chats"}:
+        raise ValueError("Неизвестный источник Неонии.")
+    chat_id = None
+    if mode == "chats":
+        try:
+            chat_id = int(selected_chat_id)
+        except (TypeError, ValueError):
+            raise ValueError("Сначала выберите Telegram-группу.")
+        if chat_id <= 0:
+            raise ValueError("Неверный ID группы.")
+
+    base = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+    key = str(st.secrets["SUPABASE_SECRET_KEY"])
+    headers = {
+        "apikey": key, "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+    }
+    url = base + "/rest/v1/agency_workspace_states"
+    for attempt in range(3):
+        response = requests.get(
+            url, headers=headers,
+            params={"telegram_id": f"eq.{owner_id}",
+                    "select": "encrypted_state,updated_at", "limit": 1},
+            timeout=30,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not rows:
+            raise RuntimeError("Рабочее пространство не найдено в базе.")
+        old = rows[0]
+        state = _decrypt_state(old.get("encrypted_state", ""))
+        if not isinstance(state, dict) or not state:
+            raise RuntimeError("Не удалось прочитать сохранённые настройки.")
+        if mode == "chats":
+            chats = state.get("chats") or []
+            allowed = {
+                int(chat.get("chat_id")) for chat in chats
+                if isinstance(chat, dict)
+                and str(chat.get("chat_id", "")).isdigit()
+                and chat.get("type") in {"Группа", "Супергруппа"}
+            }
+            if chat_id not in allowed:
+                raise RuntimeError(
+                    "Выбранная Telegram-группа отсутствует среди сохранённых. "
+                    "Обновите список групп."
+                )
+        state["daily_source_mode"] = mode
+        state["selected_source_chat"] = chat_id if mode == "chats" else None
+        progress = state.get("source_progress")
+        progress = dict(progress) if isinstance(progress, dict) else {}
+        progress["preferred_source_mode"] = mode
+        progress["source_mode"] = mode
+        progress["preferred_chat_id"] = chat_id if mode == "chats" else None
+        progress["preferred_chat_title"] = (
+            str(selected_chat_title or "")[:160] if mode == "chats" else ""
+        )
+        progress["source_type"] = (
+            "telegram_chat" if mode == "chats" else "telegram_contacts"
+        )
+        progress["source_name"] = (
+            "Telegram-чат: " + str(selected_chat_title or "")[:160]
+            if mode == "chats" else "Личные контакты Telegram"
+        )
+        progress["updated_at"] = datetime.now(
+            ZoneInfo("Europe/Berlin")).isoformat()
+        state["source_progress"] = progress
+        old_timestamp = str(old.get("updated_at") or "")
+        if not old_timestamp:
+            raise RuntimeError("У сохранённых данных нет версии updated_at.")
+        result = requests.patch(
+            url, headers={**headers, "Prefer": "return=representation"},
+            params={"telegram_id": f"eq.{owner_id}",
+                    "updated_at": f"eq.{old_timestamp}",
+                    "select": "telegram_id"},
+            json={
+                "encrypted_state": _encrypt_state(state),
+                "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+            },
+            timeout=30,
+        )
+        result.raise_for_status()
+        if not result.json():
+            continue
+        # Confirm an actual round-trip through Supabase.
+        verified = _load_from_supabase(owner_id)
+        if (str(verified.get("daily_source_mode") or "") != mode
+            or (mode == "chats" and
+                str(verified.get("selected_source_chat") or "") != str(chat_id))):
+            continue
+        keys = get_workspace_state_keys(owner_id)
+        st.session_state[keys["daily_source_mode"]] = mode
+        st.session_state[keys["selected_source_chat"]] = (
+            chat_id if mode == "chats" else None
+        )
+        st.session_state[keys["source_progress"]] = progress
+        st.session_state[f"agency_workspace_digest_{owner_id}"] = (
+            _state_digest(collect_workspace_state(owner_id))
+        )
+        st.session_state[f"agency_workspace_last_saved_{owner_id}"] = (
+            datetime.now(ZoneInfo("Europe/Berlin")).isoformat()
+        )
+        return True
+    raise RuntimeError(
+        "Источник не подтвердился в базе. Повторите сохранение."
+    )
+
+
 def hydrate_workspace_state_once(telegram_id):
     loaded_flag = (
         f"agency_workspace_loaded_{telegram_id}"
