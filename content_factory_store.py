@@ -167,6 +167,13 @@ def _extra(value: dict | None) -> dict:
 
 
 class _StoreBase:
+    def _verified_asset_bytes(self, asset, data):
+        if not isinstance(data, bytes) or not 0 < len(data) <= 100 * 1024 * 1024:
+            raise StoreError("Исходный медиафайл отсутствует или слишком велик.")
+        if type(asset.get("size")) is not int or len(data) != asset["size"] or hashlib.sha256(data).hexdigest() != asset.get("sha256"):
+            raise StoreError("Исходный медиафайл изменился. Создание видео остановлено.")
+        return data
+
     def _cipher(self) -> Fernet:
         try:
             if not self.fernet_key:
@@ -200,7 +207,7 @@ class _StoreBase:
             raise StoreError("Задание для сохранения медиа не найдено.")
         if not isinstance(data, bytes) or not data or len(data) > 100 * 1024 * 1024:
             raise StoreError("Нужен непустой медиафайл размером до 100 МБ.")
-        if mime_type not in {"image/jpeg", "image/png", "image/webp", "video/mp4", "audio/mpeg"}:
+        if mime_type not in {"image/jpeg", "image/png", "image/webp", "video/mp4", "audio/mpeg", "audio/mp4", "audio/wav"}:
             raise StoreError("Неподдерживаемый тип медиа.")
         filename = re.sub(r"[^A-Za-z0-9._-]", "_", Path(str(filename)).name)[:120] or "media"
         digest = hashlib.sha256(data).hexdigest()
@@ -456,6 +463,13 @@ class SQLiteStore(_StoreBase):
             result.append({**asset, "path": str(path), "url": f"{self.media_base_url}/{quote(storage_path, safe='/')}" if self.media_base_url else ""})
         return result
 
+    def read_asset(self, owner_id: int, asset: dict) -> bytes:
+        resolved = self.resolve_assets(owner_id, [asset])[0]
+        path = Path(resolved["path"])
+        if not 0 < path.stat().st_size <= 100 * 1024 * 1024:
+            raise StoreError("Исходный медиафайл слишком велик.")
+        return self._verified_asset_bytes(asset, path.read_bytes())
+
 
 class SupabaseStore(_StoreBase):
     """Service-role client. Browser sessions never receive this credential."""
@@ -603,6 +617,21 @@ class SupabaseStore(_StoreBase):
         asset = self._asset(owner_id, project_id, job_id, filename, data, mime_type)
         self._request("POST", f"/storage/v1/object/{self.bucket}/{quote(asset['storage_path'], safe='/')}", headers={"Content-Type": mime_type, "x-upsert": "true"}, data=data, raw=True)
         return asset
+
+    def read_asset(self, owner_id: int, asset: dict) -> bytes:
+        path = self._asset_path(owner_id, asset)
+        response = self._request("GET", f"/storage/v1/object/{self.bucket}/{quote(path, safe='/')}", raw=True, stream=True, allow_redirects=False)
+        try:
+            output = bytearray()
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                output.extend(chunk)
+                if len(output) > 100 * 1024 * 1024:
+                    raise StoreError("Исходный медиафайл слишком велик.")
+            return self._verified_asset_bytes(asset, bytes(output))
+        except requests.RequestException:
+            raise StoreError("Не удалось прочитать исходный медиафайл из хранилища.") from None
+        finally:
+            response.close()
 
     def resolve_assets(self, owner_id: int, assets: list[dict]) -> list[dict]:
         result = []

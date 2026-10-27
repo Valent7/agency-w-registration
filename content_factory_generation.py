@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import io
 import json
 import math
@@ -33,7 +34,50 @@ class GenerationError(RuntimeError):
 TEXT_LIMITS = {"instagram": 2200, "vk": 16000, "threads": 500, "telegram": 1024}
 FORMATS = {"post", "carousel", "reel"}
 _FIELDS = ("name", "product", "audience", "language", "tone", "goal", "website", "cta",
-           "facts", "examples", "visual_style", "avoid")
+           "facts", "examples", "visual_style", "avoid", "video_mode")
+
+
+def can_resume_video(production):
+    """Recognize durable inputs without authorizing another creation request."""
+    if not isinstance(production, dict) or type(production.get("version")) is not int or production["version"] != 1 or not isinstance(production.get("phase"), str) or production["phase"] not in {"inputs_ready", "clips", "complete"}:
+        return False
+    sources = production.get("raw_sources")
+    count = len(sources) if isinstance(sources, list) else 0
+    if not 4 <= count <= 6 or any(not isinstance(value, dict) or not value for value in sources):
+        return False
+    if not isinstance(production.get("speech_source"), dict) or not production["speech_source"]:
+        return False
+    if not isinstance(production.get("content"), dict):
+        return False
+    review = production["content"].get("quality_review")
+    if not isinstance(review, dict) or review.get("approved") is not True:
+        return False
+    try:
+        validate_content(production["content"], "reel", "vk")
+    except GenerationError:
+        return False
+    try:
+        if not math.isfinite(float(production["duration"])) or not 0.3 <= float(production["duration"]) <= 59.5:
+            return False
+    except (TypeError, ValueError, KeyError):
+        return False
+    seconds, tasks, clips = (production.get(key) for key in ("scene_seconds", "tasks", "clips"))
+    if any(not isinstance(value, list) or len(value) != count for value in (seconds, tasks, clips)):
+        return False
+    if any(type(value) is not int or not 2 <= value <= 10 for value in seconds):
+        return False
+    minimum_seconds = math.ceil((float(production["duration"]) + 0.35) / count)
+    if any(value < minimum_seconds for value in seconds):
+        return False
+    if any(value is not None and (not isinstance(value, str) or not value or len(value) > 200) for value in tasks):
+        return False
+    if any(value is not None and (not isinstance(value, dict) or not value) for value in clips):
+        return False
+    starting = production.get("starting_index")
+    if starting is not None and (type(starting) is not int or not 0 <= starting < count):
+        return False
+    failed = production.get("failed_indices", [])
+    return isinstance(failed, list) and all(type(index) is int and 0 <= index < count for index in failed)
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -254,10 +298,12 @@ class Generator:
     """Generate a single platform-specific deliverable with bounded paid calls."""
 
     supports_progress = True
+    supports_live_video_resume = True
 
     def __init__(self, api_key: str, text_model: str = "gpt-5", image_model: str = "gpt-image-2.5-sunburst",
                  speech_model: str = "gpt-4o-mini-tts", voice: str = "alloy", session=None,
-                 image_quality: str = "high", review_model: str | None = None):
+                 image_quality: str = "high", review_model: str | None = None,
+                 live_video_client_resolver=None):
         if image_quality not in {"low", "medium", "high", "auto"}:
             raise GenerationError("Качество изображения должно быть low, medium, high или auto.")
         self.api_key = str(api_key or "").strip()
@@ -267,6 +313,7 @@ class Generator:
         self.speech_model = speech_model
         self.voice = voice
         self.image_quality = image_quality
+        self.live_video_client_resolver = live_video_client_resolver
         self.session = session if session is not None else requests.Session()
 
     def _request(self, path: str, payload: dict):
@@ -405,11 +452,112 @@ class Generator:
         ]}]
         return validate_review(self._structured(instructions, visual_input, model=self.review_model, max_tokens=4000))
 
-    def generate(self, project, job, *, progress=None):
+    def _continue_live_video(self, project, state, client, *, report, save_production, save_source, load_source):
+        from content_factory_editorial import build_motion_prompt, validate_visual_plan
+        from content_factory_live_media import render_live_reel
+        from content_factory_live_video import LiveVideoError, LiveVideoPending, LiveVideoUncertain
+
+        if not can_resume_video(state):
+            raise GenerationError("Не удалось проверить сохранённые исходники живого видео.")
+        state = copy.deepcopy(state)
+        content = state["content"]
+        count = len(state["raw_sources"])
+        plan = validate_visual_plan(content.get("visual_plan"), frame_count=count)
+        custom_prompts = state.get("motion_prompts")
+        if custom_prompts is not None and (
+            not isinstance(custom_prompts, list) or len(custom_prompts) != count or any(
+                not isinstance(value, str) or not value.strip() or len(value.encode("utf-16-le")) // 2 > 1000
+                for value in custom_prompts
+            )
+        ):
+            raise GenerationError("Неверно сохранено описание движения живых сцен.")
+
+        def persist():
+            save_production(copy.deepcopy(state))
+
+        starting = state.get("starting_index")
+        if state.get("creation_uncertain") or (starting is not None and not state["tasks"][starting]):
+            raise LiveVideoUncertain("Видеосервис мог принять прошлую сцену. Проверьте её результат перед новым платным запуском.")
+        if state.get("failed_indices"):
+            raise LiveVideoError("Одна из живых сцен завершилась ошибкой. Повтор возможен после проверки материала.")
+        state["phase"] = "clips"
+        state["starting_index"] = None
+        for index in range(count):
+            if state["tasks"][index] or state["clips"][index]:
+                continue
+            report("video", f"Запускаем живую сцену {index + 1} из {count}.")
+            prompt = custom_prompts[index] if custom_prompts is not None else build_motion_prompt(
+                project, plan["frames"][index], plan["art_direction"], index=index, total=count,
+            )
+            source = load_source(state["raw_sources"][index])
+            state["starting_index"] = index
+            persist()  # A crash after this marker must never blindly repeat POST.
+            try:
+                task_id = client.create_scene(source, prompt, state["scene_seconds"][index])
+            except LiveVideoUncertain:
+                state["creation_uncertain"] = True
+                persist()
+                raise
+            except LiveVideoError:
+                state["starting_index"] = None
+                state["failed_indices"] = [index]
+                persist()
+                raise
+            if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
+                state["creation_uncertain"] = True
+                persist()
+                raise LiveVideoUncertain("Видеосервис не подтвердил номер созданной сцены. Повторный платный запуск остановлен.")
+            state["tasks"][index] = task_id.strip()
+            state["starting_index"] = None
+            persist()  # Persist this ID before attempting the next paid scene.
+
+        pending, failed = 0, []
+        for index, task_id in enumerate(state["tasks"]):
+            if state["clips"][index]:
+                continue
+            try:
+                status = client.task_status(task_id)
+                if status.get("status") == "succeeded":
+                    clip = client.download(status["url"])
+                    state["clips"][index] = save_source(f"live_scene_{index + 1:02d}.mp4", clip, "video/mp4")
+                    persist()
+                elif status.get("status") == "failed":
+                    failed.append(index)
+                else:
+                    pending += 1
+            except LiveVideoError as error:
+                if not getattr(error, "retryable", False):
+                    raise
+                pending += 1
+        if failed:
+            state["failed_indices"] = failed
+            persist()
+            raise LiveVideoError("Одна из живых сцен завершилась ошибкой. Готовые сцены сохранены; повторите только после проверки.")
+        if pending:
+            ready = sum(value is not None for value in state["clips"])
+            report("video", f"Видеосервис создаёт живые сцены. Готово {ready} из {count}.")
+            persist()
+            raise LiveVideoPending("Живые сцены ещё создаются. Завод проверит их автоматически.", retry_after=30)
+
+        report("video", "Собираем живые сцены с голосом и субтитрами.")
+        clips = [load_source(reference) for reference in state["clips"]]
+        speech = load_source(state["speech_source"])
+        video = render_live_reel(clips, speech, content["narration"], content["title"],
+                                 project["name"], project["brand_color"])
+        content["video_kind"] = "live"
+        state["phase"] = "complete"
+        state["content"] = content
+        persist()
+        report("saving", "Сохраняем готовое живое видео.")
+        return content, [{"data": video, "mime_type": "video/mp4", "filename": "live_reel.mp4"}]
+
+    def generate(self, project, job, *, progress=None, production=None,
+                 save_production=None, save_source=None, load_source=None):
         from content_factory_editorial import (
             PROJECT_LIMITS, EditorialError, build_image_prompt, build_visual_prompt, validate_visual_plan,
         )
         from content_factory_media import MediaError, render_slide, render_story_reel
+        from content_factory_live_media import LiveMediaError, speech_duration, scene_durations
         if not self.api_key:
             raise GenerationError("Ключ OpenAI не настроен.")
         if not isinstance(job.get("format"), str) or not isinstance(job.get("platform"), str) or job["format"] not in FORMATS or job["platform"] not in TEXT_LIMITS:
@@ -420,6 +568,10 @@ class Generator:
         if any(not clean_project[name] for name in ("name", "product", "audience")):
             raise GenerationError("Заполните название, продукт и аудиторию проекта.")
         clean_project["brand_color"] = _color(project.get("brand_color"))
+        mode = "live" if production else job.get("video_mode", project.get("video_mode", "illustrated"))
+        if mode not in {"live", "illustrated"}:
+            raise GenerationError("Выберите поддерживаемый режим создания видео.")
+        clean_project["video_mode"] = mode
         _font(36)
         if job["format"] == "reel" and not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
             raise GenerationError("Для производства видео нужны FFmpeg и ffprobe.")
@@ -430,6 +582,26 @@ class Generator:
 
         content = None
         try:
+            live_client = None
+            if job["format"] == "reel" and mode == "live":
+                if not callable(self.live_video_client_resolver):
+                    raise GenerationError("Живое видео пока не подключено. Завершите подключение видеосервиса в проекте.")
+                if not all(callable(callback) for callback in (save_production, save_source, load_source)):
+                    raise GenerationError("Для живого видео нужно постоянное защищённое хранилище исходников.")
+                live_client = self.live_video_client_resolver(project)
+                if live_client is None:
+                    raise GenerationError("Живое видео пока не подключено. Завершите подключение видеосервиса в проекте.")
+                if production:
+                    if not can_resume_video(production):
+                        raise GenerationError("Сохранённое создание живого видео требует проверки; новый платный запуск остановлен.")
+                    content = production["content"]
+                    snapshot = production.get("project") or clean_project
+                    return self._continue_live_video(snapshot, production, live_client, report=report,
+                                                     save_production=save_production, save_source=save_source, load_source=load_source)
+                preflight = live_client.preflight()
+                balance = preflight.get("credit_balance") if isinstance(preflight, dict) else None
+                if isinstance(balance, (int, float)) and balance <= 0:
+                    raise GenerationError("В видеосервисе недостаточно кредитов для создания живых сцен.")
             report("copy", "Автор готовит текст по вашей задаче.")
             content = self._copy(clean_project, job)
             report("proofread", "Корректор проверяет грамматику и точность формулировок.")
@@ -448,7 +620,17 @@ class Generator:
                 raise GenerationError("Стагирит остановил производство: текст требует доработки. "
                                       + "; ".join(review["issues"])[:600], draft=content)
 
-            frame_count = len(content["slides"]) if job["format"] == "carousel" else 4 if job["format"] == "reel" else 1
+            speech, duration = None, None
+            if live_client is not None:
+                report("video", "Записываем голос, чтобы точно рассчитать длительность живых сцен.")
+                speech = self._request("audio/speech", {
+                    "model": self.speech_model, "voice": self.voice,
+                    "input": content["narration"], "response_format": "mp3",
+                }).content
+                duration = speech_duration(speech)
+            frame_count = len(content["slides"]) if job["format"] == "carousel" else (
+                max(4, math.ceil((duration + 0.35) / 10)) if live_client is not None else 4
+            ) if job["format"] == "reel" else 1
             report("visual", "Арт-директор разрабатывает сюжет и единый стиль иллюстраций.")
             instructions, input_data = build_visual_prompt(clean_project, job, content, frame_count=frame_count)
             visual_plan = validate_visual_plan(self._structured(instructions, input_data), frame_count=frame_count)
@@ -482,12 +664,34 @@ class Generator:
                                          slide_number=f"{index + 1}/{len(artwork)}")
                     assets.append({"data": image, "mime_type": "image/jpeg", "filename": f"slide_{index + 1:02d}.jpg"})
             elif job["format"] == "reel":
+                if live_client is not None:
+                    seconds = scene_durations(duration, frame_count)
+                    if getattr(live_client, "model", "gen4.5") == "gen4_turbo":
+                        seconds = [5 if value <= 5 else 10 for value in seconds]
+                    raw_sources = []
+                    for index, image in enumerate(artwork):
+                        with Image.open(io.BytesIO(image)) as source:
+                            mime = Image.MIME.get(source.format, "image/png")
+                        extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(mime)
+                        if extension is None:
+                            raise GenerationError("Не удалось сохранить исходник живой сцены.")
+                        raw_sources.append(save_source(f"live_input_{index + 1:02d}.{extension}", image, mime))
+                    speech_source = save_source("live_narration.mp3", speech, "audio/mpeg")
+                    content["video_kind"] = "live"
+                    state = {"version": 1, "phase": "inputs_ready", "project": clean_project,
+                             "content": content, "raw_sources": raw_sources, "speech_source": speech_source,
+                             "duration": duration, "scene_seconds": seconds, "tasks": [None] * frame_count,
+                             "clips": [None] * frame_count, "failed_indices": [], "starting_index": None}
+                    save_production(copy.deepcopy(state))
+                    return self._continue_live_video(clean_project, state, live_client, report=report,
+                                                     save_production=save_production, save_source=save_source, load_source=load_source)
                 report("video", "Записываем озвучку и собираем сцены, движение и субтитры.")
                 speech = self._request("audio/speech", {
                     "model": self.speech_model, "voice": self.voice,
                     "input": content["narration"], "response_format": "mp3",
                 }).content
                 video = render_story_reel(artwork, speech, content["narration"], title, name, color)
+                content["video_kind"] = "illustrated"
                 assets.append({"data": video, "mime_type": "video/mp4", "filename": "reel.mp4"})
             else:
                 image = render_slide(artwork[0], title, name, color, layout="cover")
@@ -498,5 +702,5 @@ class Generator:
             if error.draft is None:
                 error.draft = content
             raise
-        except (EditorialError, MediaError) as error:
+        except (EditorialError, MediaError, LiveMediaError) as error:
             raise GenerationError(str(error), draft=content) from error

@@ -168,6 +168,65 @@ class FactoryBriefTests(unittest.TestCase):
         self.service.save_project(77, {"id": self.project["id"], "automation_enabled": True})
         self.assertEqual(self.store.get_job(77, revised["id"])["state"], "ready")
 
+    def test_live_video_mode_is_explicit_and_queued_intent_does_not_change(self):
+        self.assertEqual(validate_project({"name": "W", "product": "Команда", "audience": "Эксперты"})["video_mode"], "illustrated")
+        for invalid in ("slides", None, 1):
+            with self.subTest(invalid=invalid), self.assertRaises(FactoryError):
+                self.service.save_project(77, {"id": self.project["id"], "video_mode": invalid})
+        self.service.save_project(77, {"id": self.project["id"], "formats": ["post", "reel"], "video_mode": "live"})
+        live = self.create(content_format="reel", request_id="live-video-request-001")[0]
+        self.assertEqual(live["video_mode"], "live")
+        self.service.save_project(77, {"id": self.project["id"], "video_mode": "illustrated"})
+        self.assertEqual(self.store.get_job(77, live["id"])["video_mode"], "live")
+        with self.assertRaises(FactoryError):
+            self.create(content_format="reel", request_id="live-video-request-001")
+        illustrated = self.create(content_format="reel", request_id="live-video-request-002")[0]
+        self.assertEqual(illustrated["video_mode"], "illustrated")
+
+    def test_uncertain_paid_video_creation_cannot_be_retried_or_revised(self):
+        for number, production in enumerate((
+            {"version": 1, "starting_index": 0, "tasks": [None], "clips": [None]},
+            {"version": 1, "creation_uncertain": True, "tasks": ["known-task"], "clips": [None]},
+        )):
+            job = self.create(request_id=f"uncertain-video-{number}")[0]
+            self.store.update_job(77, job["id"], {"state": "failed", "content": {"text": "Сохранённый текст", "title": "Видео"}, "production": production})
+            with self.assertRaises(FactoryError):
+                self.service.retry(77, job["id"])
+            with self.assertRaises(FactoryError):
+                self.service.revise_material(77, job["id"], "Переделай движение героя", request_id=f"uncertain-revision-{number}")
+            self.assertEqual(self.store.get_job(77, job["id"])["production"], production)
+
+    def test_explicit_video_retry_only_restarts_known_failed_scenes(self):
+        job = self.create(request_id="failed-scene-request")[0]
+        production = {"version": 1, "phase": "clips", "raw_sources": [{"source": "preserved"}],
+                      "speech_source": {"speech": "preserved"}, "starting_index": None,
+                      "tasks": ["completed-task", "pending-task", "failed-task"],
+                      "clips": [{"clip": "already-paid"}, None, None], "failed_indices": [2]}
+        self.store.update_job(77, job["id"], {"state": "failed", "production": production,
+            "checkpoint": {"pipeline_version": 2, "generation_started": self.now.isoformat()},
+            "content": {"text": "Проверенный текст", "title": "Видео"}})
+        retried = self.service.retry(77, job["id"])
+        self.assertEqual(retried["state"], "queued")
+        self.assertNotIn("generation_started", retried["checkpoint"])
+        saved = retried["production"]
+        self.assertEqual(saved["tasks"], ["completed-task", "pending-task", None])
+        self.assertEqual(saved["clips"], [{"clip": "already-paid"}, None, None])
+        self.assertEqual(saved["raw_sources"], production["raw_sources"])
+        self.assertEqual(saved["speech_source"], production["speech_source"])
+        self.assertEqual(saved["failed_indices"], [])
+        self.assertEqual(saved["phase"], "inputs_ready")
+
+    def test_resuming_calendar_does_not_send_incomplete_live_video_to_publishing(self):
+        job = self.create(request_id="paused-video-request")[0]
+        production = {"version": 1, "phase": "inputs_ready", "tasks": ["paid-task"], "clips": [None]}
+        self.store.update_job(77, job["id"], {"state": "paused", "production": production,
+            "checkpoint": {"pipeline_version": 2, "generation_started": self.now.isoformat()},
+            "content": {"text": "Проверенный текст", "title": "Видео"}})
+        self.service.save_project(77, {"id": self.project["id"], "automation_enabled": True})
+        saved = self.store.get_job(77, job["id"])
+        self.assertEqual(saved["state"], "queued")
+        self.assertEqual(saved["production"], production)
+
 
 if __name__ == "__main__":
     unittest.main()

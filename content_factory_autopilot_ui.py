@@ -27,6 +27,7 @@ STATES = {
     "paused": "На паузе",
 }
 _NEW = "__new_project__"
+VIDEO_MODES = {"live": "Живое видео: люди и действия", "illustrated": "Ролик из иллюстраций"}
 
 
 def _runtime():
@@ -97,6 +98,7 @@ def _seed_project(target_profile=None):
         "examples": "",
         "visual_style": "",
         "avoid": "",
+        "video_mode": "live",
         "platforms": list(PLATFORMS),
         "formats": list(FORMATS),
         "timezone": "Europe/Berlin",
@@ -115,9 +117,61 @@ def _action_error(action, exc):
     st.error(f"{action}: {detail}")
 
 
+def _server_video_secret():
+    try:
+        return str(st.secrets.get("RUNWAYML_API_SECRET") or "").strip()
+    except Exception:
+        return ""
+
+
+def _prepare_video_capabilities(owner_id, project, capabilities):
+    """Transfer an already-configured server secret without exposing it."""
+    result = dict(capabilities)
+    try:
+        from content_factory_runtime import sync_live_video_connection, get_live_video_capabilities
+        sync_live_video_connection(owner_id, project["id"], _server_video_secret() or None)
+        result.update(get_live_video_capabilities(owner_id, project["id"]))
+    except Exception:
+        result["live_video_configured"] = False
+        result["live_video_connection_storage"] = False
+    return result
+
+
+def _video_connection_form(owner_id, project, capabilities):
+    if not project:
+        return
+    key = f"cf_auto_{owner_id}_{project['id']}_video_connection"
+    if st.session_state.pop(key + "_clear", False):
+        st.session_state[key + "_key"] = ""
+    with st.expander("Подключение живого видео", expanded=False):
+        if capabilities.get("live_video_configured"):
+            st.caption("Подключение видеосервиса настроено. Доступ и остаток средств проверяются при создании ролика.")
+        else:
+            st.caption("Для сцен с настоящим движением подключите видеосервис Runway. Если он уже настроен в Агентстве, подключение переносится автоматически.")
+        st.caption("Создание живых сцен оплачивается отдельно от сервера Render и генерации текста.")
+        if not capabilities.get("live_video_connection_storage"):
+            st.caption("Защищённое подключение видеосервиса должен завершить администратор Агентства.")
+            return
+        with st.form(key + "_form"):
+            api_key = st.text_input("Ключ видеосервиса", type="password", key=key + "_key",
+                                    help="Введите ключ Runway из своего кабинета сервиса. Сохранённый ключ здесь не отображается.")
+            saved = st.form_submit_button("Сохранить подключение видео")
+        if saved:
+            try:
+                from content_factory_runtime import save_live_video_connection
+                save_live_video_connection(owner_id, project["id"], api_key)
+                st.session_state[key + "_clear"] = True
+                st.session_state[f"cf_auto_{owner_id}_notice"] = "Подключение живого видео сохранено."
+                st.rerun()
+            except Exception as exc:
+                _action_error("Не удалось подключить видео", exc)
+
+
 def _project_form(owner_id, project, service, target_profile):
     existing = bool(project)
     values = {**_seed_project(target_profile), **(project or {})}
+    if existing and "video_mode" not in project:
+        values["video_mode"] = "illustrated"
     key = f"cf_auto_{owner_id}_{values.get('id') or 'new'}"
     st.caption("Расскажите о своём проекте один раз. ИИ будет опираться на эти настройки при подготовке каждого материала.")
     with st.form(key + "_project_form"):
@@ -138,6 +192,7 @@ def _project_form(owner_id, project, service, target_profile):
         brand_color = st.color_picker("Цвет оформления", value=values["brand_color"], key=key + "_color")
         platforms = st.multiselect("Площадки", list(PLATFORMS), default=values["platforms"], format_func=PLATFORMS.get, key=key + "_platforms")
         formats = st.multiselect("Форматы", list(FORMATS), default=values["formats"], format_func=FORMATS.get, key=key + "_formats")
+        video_mode = st.selectbox("Как создавать видео", list(VIDEO_MODES), index=list(VIDEO_MODES).index(values["video_mode"]), format_func=VIDEO_MODES.get, key=key + "_video_mode")
         timezone = st.text_input("Часовой пояс расписания", value=values["timezone"], help="Например: Europe/Berlin или Europe/Moscow. Время публикаций учитывает переход на летнее и зимнее время.", key=key + "_timezone")
         publish_times = st.text_input("Время публикаций", value=", ".join(values["publish_times"]), help="В местном времени проекта, через запятую: 10:00, 18:30. Каждый слот создаёт материал для каждой выбранной площадки.", key=key + "_times")
         left, right = st.columns(2)
@@ -152,6 +207,7 @@ def _project_form(owner_id, project, service, target_profile):
             "website": website, "language": language, "tone": tone, "cta": cta,
             "brand_color": brand_color, "platforms": platforms, "formats": formats,
             "facts": facts, "examples": examples, "visual_style": visual_style, "avoid": avoid,
+            "video_mode": video_mode,
             "timezone": timezone, "publish_times": [part.strip() for part in publish_times.split(",") if part.strip()],
             "plan_days": int(days), "max_daily_generations": int(daily_limit),
             "review_required": review, "automation_enabled": automatic,
@@ -186,9 +242,16 @@ def _create_material(owner_id, project, store, service, capabilities):
         st.info("Создание станет доступно после подключения ИИ-сервиса администратором.")
     with st.form(key + "_form"):
         topic = st.text_area("Ваша задача", placeholder="Например: покажи предпринимателю, как освободить вечер от повторяющихся задач. Объясни на конкретном примере и пригласи обсудить его задачу.", max_chars=6000, height=120, key=key + "_topic")
-        content_format = st.radio("Формат материала", formats, format_func=FORMATS.get, horizontal=True, key=key + "_format") if formats else None
+        live_mode = project.get("video_mode", "illustrated") == "live"
+        format_label = lambda value: ("Живое видео" if live_mode else "Ролик из иллюстраций") if value == "reel" else FORMATS.get(value, value)
+        content_format = st.radio("Формат материала", formats, format_func=format_label, horizontal=True, key=key + "_format") if formats else None
         selected = st.multiselect("Где разместить", platforms, default=platforms, format_func=PLATFORMS.get, key=key + "_platforms")
-        submitted = st.form_submit_button("Создать материал", type="primary", width="stretch", disabled=not (platforms and formats and capabilities.get("ai_configured")))
+        live_missing = live_mode and content_format == "reel" and not capabilities.get("live_video_configured")
+        if live_mode and content_format == "reel":
+            st.caption("Завод создаст сцены с настоящим движением. Работа видеосервиса оплачивается отдельно от Render и генерации текста.")
+        submitted = st.form_submit_button("Создать материал", type="primary", width="stretch", disabled=not (platforms and formats and capabilities.get("ai_configured")) or live_missing)
+    if live_missing:
+        st.info("Для живого видео подключите видеосервис: «Проект → Подключение живого видео». Ролик из картинок вместо него не создаётся.")
     if project.get("review_required"):
         st.caption("Перед публикацией завод дождётся вашего утверждения во вкладке «Материалы».")
     elif project.get("automation_enabled"):
@@ -196,9 +259,11 @@ def _create_material(owner_id, project, store, service, capabilities):
     else:
         st.caption("Автопилот на паузе: завод подготовит материал и сохранит его здесь. Для публикации включите автопилот во вкладке «Проект».")
     if submitted:
+        if live_missing:
+            return
         # Reusing the ID for the same submitted brief protects a double click,
         # a rerun, or retry after an ambiguous storage response from duplication.
-        fingerprint = sha256(repr((topic.strip(), content_format, sorted(selected))).encode()).hexdigest()
+        fingerprint = sha256(repr((topic.strip(), content_format, sorted(selected), project.get("video_mode", "illustrated") if content_format == "reel" else None)).encode()).hexdigest()
         pending = st.session_state.get(key + "_request")
         if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
             pending = {"id": uuid.uuid4().hex, "fingerprint": fingerprint}
@@ -401,6 +466,9 @@ def _materials(owner_id, project, jobs, store, service):
         content = job.get("content") or {}
         key = f"cf_auto_{owner_id}_{project['id']}_{job['id']}"
         title = content.get("title") or job.get("topic") or FORMATS.get(job.get("format"), "Материал")
+        if job.get("format") == "reel":
+            video_label = "Живое видео" if content.get("video_kind") == "live" else "Ролик из иллюстраций"
+            title = f"{video_label}: {title}"
         label = f"{PLATFORMS.get(job.get('platform'), job.get('platform'))} · {title} · {STATES.get(state, state)}"
         with st.expander(label, expanded=state in {"ready", "failed", "needs_connection", "reconcile"}):
             st.caption(_local_time(job.get("scheduled_at"), project.get("timezone", "Europe/Berlin")))
@@ -505,6 +573,8 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
             st.session_state[selection_key] = options[0]
         selected = st.selectbox("Проект", options, format_func=labels.get, key=selection_key)
         project = next((item for item in projects if item["id"] == selected), None)
+        if project:
+            capabilities = _prepare_video_capabilities(owner_id, project, capabilities)
         jobs = []
         if project:
             try:
@@ -528,6 +598,7 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
         project_tab, accounts_tab, calendar_tab, materials_tab = st.tabs(["Проект", "Площадки", "Календарь", "Материалы"])
         with project_tab:
             _project_form(owner_id, project, service, target_profile)
+            _video_connection_form(owner_id, project, capabilities)
         with accounts_tab:
             _connections(owner_id, project, store, capabilities)
         with calendar_tab:

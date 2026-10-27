@@ -192,5 +192,9 @@ GRANT EXECUTE ON FUNCTION public.content_factory_reserve_generation(bigint, uuid
 -- only when a social network needs to fetch the current publication asset.
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES ('content-factory-media', 'content-factory-media', false, 104857600,
-    ARRAY['image/jpeg','image/png','image/webp','video/mp4','audio/mpeg'])
+    ARRAY['image/jpeg','image/png','image/webp','video/mp4','audio/mpeg','audio/mp4','audio/wav'])
 ON CONFLICT (id) DO UPDATE SET public = false;
+
+UPDATE storage.buckets
+SET allowed_mime_types = ARRAY(SELECT DISTINCT unnest(coalesce(allowed_mime_types, ARRAY[]::text[]) || ARRAY['audio/mp4','audio/wav']))
+WHERE id = 'content-factory-media' AND allowed_mime_types IS NOT NULL;

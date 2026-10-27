@@ -5,7 +5,7 @@ import unittest
 
 from content_factory_editorial import (
     EditorialError, build_copy_prompt, build_image_prompt, build_image_review_prompt, build_review_prompt,
-    build_proofread_prompt, build_visual_prompt, validate_review, validate_visual_plan,
+    build_proofread_prompt, build_visual_prompt, build_motion_prompt, validate_review, validate_visual_plan,
 )
 
 
@@ -167,6 +167,26 @@ class ReviewGateTests(unittest.TestCase):
 
 
 class VisualPlanTests(unittest.TestCase):
+    def test_live_motion_brief_fits_provider_unicode_limit_and_preserves_action(self):
+        frame = {**FRAME, "subject": "Человек закрывает ноутбук, встаёт и подходит к семье. " + "🙂" * 900}
+        prompt = build_motion_prompt(PROJECT, frame, "Единый домашний интерьер.", index=0, total=4)
+        self.assertLessEqual(len(prompt.encode("utf-16-le")) // 2, 1000)
+        self.assertIn("Человек закрывает ноутбук", prompt)
+        self.assertIn("physical action", prompt)
+        self.assertNotIn("never-include-this", prompt)
+        with self.assertRaises(EditorialError):
+            build_motion_prompt(PROJECT, FRAME, "Стиль", index=4, total=4)
+
+    def test_live_visual_plan_requests_start_frames_for_physical_actions(self):
+        project = {**PROJECT, "video_mode": "live"}
+        system, payload = build_visual_prompt(project, {**JOB, "format": "reel"}, CONTENT, frame_count=4)
+        self.assertEqual(json.loads(payload)["project"]["video_mode"], "live")
+        self.assertIn("физическое действие", system)
+        self.assertIn("начало действия", system)
+        image_prompt = build_image_prompt(project, FRAME, "Натуральная фотография.", total=4)
+        self.assertIn("START FRAME", image_prompt)
+        self.assertIn("beginning", image_prompt)
+
     def test_series_brief_uses_the_content_and_shared_art_direction(self):
         content = {**CONTENT, "slides": ["Глина", "Форма", "Обжиг"]}
         system, user = build_visual_prompt(PROJECT, {**JOB, "format": "carousel"}, content, frame_count=3)

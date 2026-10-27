@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 from content_factory_channels import PublishError, PublishPending, PublishUncertain, publish
 from content_factory_core import ContentFactoryService, iso, timestamp, utc_now
+from content_factory_live_video import LiveVideoPending, LiveVideoError, LiveVideoUncertain
+from content_factory_live_media import LiveMediaError
 from agency_access_control import is_agency_access_revoked
 
 LOG = logging.getLogger(__name__)
@@ -66,6 +68,21 @@ class Worker:
             except PauseRequested as error:
                 self._finish(job, state=error.state, error="")
                 result["pending"] += 1
+            except LiveVideoPending as error:
+                self._finish(job, state="queued", available_at=iso(self.clock() + timedelta(seconds=error.retry_after)), error="")
+                result["pending"] += 1
+            except LiveVideoError as error:
+                fresh = self.store.get_job(job["owner_id"], job["id"]) or job
+                production = dict(fresh.get("production") or {})
+                if isinstance(error, LiveVideoUncertain):
+                    production["creation_uncertain"] = True
+                if error.retryable and production and not isinstance(error, LiveVideoUncertain):
+                    self._finish(job, state="queued", production=production, available_at=iso(self.clock() + timedelta(seconds=60)), error=str(error))
+                    result["pending"] += 1
+                else:
+                    self._finish(job, state="failed", production=production, error=str(error), progress={"stage": "failed", "message": "Живое видео требует внимания. Откройте материал, чтобы посмотреть причину."})
+                    result["failed"] += 1
+                    result["errors"].append(str(error))
             except PublishPending as error:
                 self._finish(job, state="scheduled", available_at=iso(self.clock() + timedelta(seconds=max(15, min(int(error.retry_after), 3600)))), error="")
                 result["pending"] += 1
@@ -97,7 +114,7 @@ class Worker:
                 # in the URL. Providers/store supply their own sanitized messages.
                 from content_factory_generation import GenerationError
                 from content_factory_store import StoreError
-                message = str(error) if isinstance(error, (GenerationError, StoreError, ValueError)) else (
+                message = str(error) if isinstance(error, (GenerationError, StoreError, LiveMediaError, ValueError)) else (
                     "Обработка прервана. Проверьте настройки и состояние материала. " + type(error).__name__
                 )
                 fresh = self.store.get_job(job["owner_id"], job["id"]) or job
@@ -215,15 +232,16 @@ class Worker:
 
     def _generate(self, job, project):
         checkpoint = dict(job.get("checkpoint") or {})
-        if checkpoint.get("generation_started"):
+        production = job.get("production")
+        live_resume = getattr(self.generator, "supports_live_video_resume", False) is True and self.generator.can_resume_video(production)
+        if checkpoint.get("generation_started") and not live_resume:
             raise ValueError("Прошлая генерация прервалась. Автоматический повтор остановлен; проверьте материал и повторите вручную.")
         if self.generator is None:
             raise ValueError("Не подключён ИИ для создания материалов.")
         local_now = timestamp(self.clock()).astimezone(ZoneInfo(project["timezone"]))
-        reserved = self.store.reserve_generation(
+        reserved = bool(checkpoint.get("generation_started")) or self.store.reserve_generation(
             job["owner_id"], job["project_id"], f"{job['id']}:{job['attempts']}",
-            local_now.date().isoformat(), int(project.get("max_daily_generations", 6)),
-        )
+            local_now.date().isoformat(), int(project.get("max_daily_generations", 6)))
         if not reserved:
             tomorrow = datetime.combine(local_now.date() + timedelta(days=1), datetime.min.time(), tzinfo=local_now.tzinfo)
             self._finish(job, available_at=iso(tomorrow), error="Дневной лимит создания материалов достигнут.")
@@ -241,7 +259,29 @@ class Worker:
         def progress(value):
             self._update(job, progress=dict(value))
 
-        if getattr(self.generator, "supports_progress", False) is True:
+        def save_production(value):
+            import copy
+            if len(json.dumps(value, ensure_ascii=False, allow_nan=False)) > 256000:
+                raise ValueError("Состояние создания видео превышает допустимый размер.")
+            changes = {"production": copy.deepcopy(value)}
+            if isinstance(value.get("content"), dict):
+                changes["content"] = copy.deepcopy(value["content"])
+            self._update(job, **changes)
+
+        def save_source(filename, data, mime_type):
+            return self.store.put_asset(job["owner_id"], job["project_id"], job["id"], filename, data, mime_type)
+
+        def load_source(asset):
+            from pathlib import PurePosixPath
+            parts = PurePosixPath(str(asset.get("storage_path") or "")).parts
+            if len(parts) < 4 or parts[:3] != (str(job["owner_id"]), job["project_id"], job["id"]):
+                raise ValueError("Исходный файл не принадлежит этому материалу.")
+            return self.store.read_asset(job["owner_id"], asset)
+
+        if getattr(self.generator, "supports_live_video_resume", False) is True:
+            content, generated_assets = self.generator.generate(project, request, progress=progress, production=production,
+                save_production=save_production, save_source=save_source, load_source=load_source)
+        elif getattr(self.generator, "supports_progress", False) is True:
             content, generated_assets = self.generator.generate(project, request, progress=progress)
         else:
             content, generated_assets = self.generator.generate(project, request)

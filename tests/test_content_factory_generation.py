@@ -1,5 +1,6 @@
 """Offline AI-provider contracts plus a real audio/video rendering check."""
 import base64
+import copy
 import io
 import json
 import shutil
@@ -458,6 +459,169 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual((video_stream["width"], video_stream["height"]), (1080, 1920))
         self.assertEqual(video_stream["codec_name"], "h264")
         self.assertGreaterEqual(float(media["format"]["duration"]), 1.4)
+
+
+class LiveGenerationTests(unittest.TestCase):
+    def setUp(self):
+        self.sources = {}
+        self.snapshots = []
+        self.session = Mock()
+        self.client = Mock()
+        self.client.model = "gen4.5"
+        self.client.preflight.return_value = {"key_valid": True, "credit_balance": 1000}
+        self.client.create_scene.side_effect = [f"task-{i}" for i in range(4)]
+        self.client.task_status.return_value = {"status": "pending"}
+        self.client.download.side_effect = lambda url: url.rsplit("/", 1)[-1].encode()
+        self.generator = Generator("test-provider-key", session=self.session,
+                                   live_video_client_resolver=lambda project: self.client)
+        self.job = {"platform": "vk", "format": "reel", "video_mode": "live", "topic": "Вечер в мастерской"}
+        self.content = dict(POST, format="reel", narration=" ".join(["керамика"] * 50),
+                            quality_review={"approved": True, "issues": [], "brief_feedback": "Готово"},
+                            visual_plan=visual_plan(4))
+
+    def save_source(self, name, data, mime):
+        self.sources[name] = data
+        return {"storage_path": name, "mime_type": mime}
+
+    def load_source(self, ref):
+        return self.sources[ref["storage_path"]]
+
+    def save_production(self, value):
+        self.snapshots.append(copy.deepcopy(value))
+
+    def state(self, *, tasks=None):
+        images = [self.save_source(f"image-{i}", artwork(), "image/png") for i in range(4)]
+        speech = self.save_source("speech", b"speech", "audio/mpeg")
+        return {"version": 1, "phase": "inputs_ready", "content": copy.deepcopy(self.content),
+                "raw_sources": images, "speech_source": speech, "duration": 37.0,
+                "scene_seconds": [10] * 4, "tasks": tasks or [None] * 4,
+                "clips": [None] * 4, "failed_indices": [], "starting_index": None}
+
+    def run_generation(self, **kwargs):
+        return self.generator.generate(PROJECT, self.job, save_production=self.save_production,
+                                       save_source=self.save_source, load_source=self.load_source, **kwargs)
+
+    def test_live_job_is_created_once_then_resumes_without_copy_images_or_speech(self):
+        from content_factory_live_video import LiveVideoPending
+        reel = {k: self.content[k] for k in ("title", "text", "narration")}
+        self.session.post.side_effect = [copy_response(reel), copy_response(reel), review_response(),
+                                        response(content=b"speech"), copy_response(visual_plan(4))] + [
+            reply for _ in range(4) for reply in (image_response(), review_response())
+        ]
+        def create(image, prompt, duration):
+            saved = self.snapshots[-1]
+            index = saved["starting_index"]
+            self.assertIsNone(saved["tasks"][index])
+            self.assertTrue(all(saved["tasks"][j] for j in range(index)))
+            self.assertEqual(duration, 10)
+            self.assertIn("physical action", prompt)
+            return f"task-{index}"
+        self.client.create_scene.side_effect = create
+        with patch("content_factory_live_media.speech_duration", return_value=37.0):
+            with self.assertRaises(LiveVideoPending):
+                self.run_generation()
+        state = self.snapshots[-1]
+        self.assertEqual(state["tasks"], [f"task-{i}" for i in range(4)])
+        self.assertIsNone(state["starting_index"])
+        self.assertEqual(len(self.sources), 5)
+        self.assertEqual(self.session.post.call_count, 13)
+        self.assertEqual(requested_paths(self.session)[3], "audio/speech")
+        self.assertEqual(self.client.create_scene.call_count, 4)
+        self.client.task_status.side_effect = lambda task: {"status": "succeeded", "url": "https://public.invalid/" + task}
+        with patch("content_factory_live_media.render_live_reel", return_value=b"moving-video") as render:
+            content, assets = self.run_generation(production=state)
+        self.assertEqual(content["video_kind"], "live")
+        self.assertEqual(assets[0]["data"], b"moving-video")
+        self.assertEqual(render.call_args.args[0], [f"task-{i}".encode() for i in range(4)])
+        self.assertEqual(render.call_args.args[1], b"speech")
+        self.assertEqual(self.session.post.call_count, 13)
+        self.assertEqual(self.client.create_scene.call_count, 4)
+        self.assertEqual(self.client.preflight.call_count, 1)
+        self.assertEqual(self.snapshots[-1]["phase"], "complete")
+
+    def test_resume_known_task_does_not_recreate_it_after_uncertain_ack_marker(self):
+        from content_factory_live_video import LiveVideoUncertain
+        state = self.state()
+        state["starting_index"] = 0
+        with self.assertRaises(LiveVideoUncertain):
+            self.run_generation(production=state)
+        self.client.create_scene.assert_not_called()
+        self.session.post.assert_not_called()
+        self.client.preflight.assert_not_called()
+
+    def test_creation_timeout_persists_uncertainty_and_cannot_auto_resend(self):
+        from content_factory_live_video import LiveVideoUncertain
+        self.client.create_scene.side_effect = LiveVideoUncertain("Ответ создания не подтверждён")
+        with self.assertRaises(LiveVideoUncertain):
+            self.run_generation(production=self.state())
+        state = self.snapshots[-1]
+        self.assertTrue(state["creation_uncertain"])
+        self.assertEqual(state["starting_index"], 0)
+        self.assertEqual(self.client.create_scene.call_count, 1)
+        with self.assertRaises(LiveVideoUncertain):
+            self.run_generation(production=state)
+        self.assertEqual(self.client.create_scene.call_count, 1)
+        self.session.post.assert_not_called()
+
+    def test_failed_scenes_are_retained_and_explicit_retry_recreates_only_failed_index(self):
+        from content_factory_live_video import LiveVideoError
+        state = self.state(tasks=[f"task-{i}" for i in range(4)])
+        self.client.task_status.side_effect = lambda task: ({"status": "failed"} if task == "task-1" else
+            {"status": "succeeded", "url": "https://public.invalid/" + task})
+        with self.assertRaises(LiveVideoError):
+            self.run_generation(production=state)
+        saved = self.snapshots[-1]
+        self.assertEqual(saved["failed_indices"], [1])
+        self.assertEqual([v is not None for v in saved["clips"]], [True, False, True, True])
+        self.client.create_scene.assert_not_called()
+        saved["tasks"][1], saved["failed_indices"] = None, []
+        self.client.create_scene.side_effect = ["replacement-1"]
+        self.client.task_status.side_effect = lambda task: {"status": "succeeded", "url": "https://public.invalid/" + task}
+        with patch("content_factory_live_media.render_live_reel", return_value=b"moving-video"):
+            self.run_generation(production=saved)
+        self.client.create_scene.assert_called_once()
+        self.session.post.assert_not_called()
+        self.assertEqual(self.snapshots[-1]["tasks"], ["task-0", "replacement-1", "task-2", "task-3"])
+
+    def test_read_status_failures_defer_without_another_paid_order(self):
+        from content_factory_live_video import LiveVideoError, LiveVideoPending
+        self.client.task_status.side_effect = LiveVideoError("Временно недоступно", retryable=True)
+        with self.assertRaises(LiveVideoPending):
+            self.run_generation(production=self.state(tasks=[f"task-{i}" for i in range(4)]))
+        self.client.create_scene.assert_not_called()
+        self.session.post.assert_not_called()
+        self.assertEqual(self.snapshots[-1]["tasks"], [f"task-{i}" for i in range(4)])
+
+    def test_live_intent_never_falls_back_to_stills_when_provider_or_state_is_missing(self):
+        self.generator.live_video_client_resolver = None
+        with self.assertRaisesRegex(GenerationError, "не подключено"):
+            self.run_generation()
+        self.session.post.assert_not_called()
+        self.generator.live_video_client_resolver = lambda project: self.client
+        with self.assertRaisesRegex(GenerationError, "требует проверки"):
+            self.run_generation(production={"version": 1})
+        self.session.post.assert_not_called()
+        self.client.create_scene.assert_not_called()
+
+    def test_source_movie_audio_and_specific_actions_are_preserved_on_seeded_resume(self):
+        state = self.state(tasks=[f"task-{i}" for i in range(4)])
+        state["motion_prompts"] = ["Person closes laptop" + str(i) for i in range(4)]
+        state["tasks"] = [None] * 4
+        self.client.task_status.side_effect = lambda task: {"status": "succeeded", "url": "https://public.invalid/" + task}
+        with patch("content_factory_live_media.render_live_reel", return_value=b"moving-video") as render:
+            self.run_generation(production=state)
+        self.assertEqual([call.args[1] for call in self.client.create_scene.call_args_list], state["motion_prompts"])
+        self.assertEqual(render.call_args.args[1:4], (b"speech", self.content["narration"], self.content["title"]))
+        self.session.post.assert_not_called()
+
+    def test_malformed_resume_contract_is_rejected_before_paid_scene_creation(self):
+        from content_factory_generation import can_resume_video
+        state = self.state()
+        self.assertTrue(can_resume_video(state))
+        for changes in ({"content": {"quality_review": "wrong"}}, {"tasks": []},
+                        {"version": True}, {"phase": []}, {"scene_seconds": [True] * 4}):
+            with self.subTest(changes=changes):
+                self.assertFalse(can_resume_video({**state, **changes}))
 
 
 if __name__ == "__main__":

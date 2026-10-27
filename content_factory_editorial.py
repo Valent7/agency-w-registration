@@ -20,7 +20,7 @@ PROJECT_LIMITS = {
     "name": 120, "product": 6000, "audience": 3000, "language": 80,
     "tone": 1000, "goal": 2000, "website": 500, "cta": 500,
     "facts": 6000, "examples": 6000, "visual_style": 2000, "avoid": 2000,
-    "brand_color": 7,
+    "brand_color": 7, "video_mode": 20,
 }
 
 
@@ -307,6 +307,16 @@ def build_visual_prompt(project: dict, job: dict, content: dict, *, frame_count:
     )
     payload = {"project": _project_context(project), **context,
                "content": _content_context(content), "frame_count": count}
+    if project.get("video_mode") == "live" and context["format"] == "reel":
+        instructions += (
+            " Это исходники для настоящего сюжетного видео с движущимися людьми и предметами. "
+            "Выбери фотореалистичную живую съёмку. В subject каждой сцены задай одно видимое "
+            "физическое действие с начальным состоянием и результатом: человек закрывает ноутбук, "
+            "встаёт, берёт вещь, подходит к близким или выполняет уместное для продукта действие. "
+            "Неподвижная поза, одно моргание, дыхание или движение камеры не заменяют действие. "
+            "Исходный кадр показывает начало действия, чтобы видеогенератор смог его продолжить. "
+            "Сцены должны развивать одну историю и сохранять внешность людей, одежду и обстановку."
+        )
     return instructions, _json(payload)
 
 
@@ -355,7 +365,34 @@ def build_image_prompt(project: dict, frame: dict, art_direction: str, *, index:
             "avoid": context["avoid"], "frame_number": index + 1, "frame_total": count,
             "art_direction": checked["art_direction"], "frame": checked["frames"][0],
         })
+        + ("\nThis is the START FRAME for a live-action film shot. Show the beginning of the "
+           "specified physical action, before its outcome. Use believable photographic people "
+           "and locations, not a flat illustrated card or finished-motion montage."
+           if context["video_mode"] == "live" else "")
     )
+
+
+def build_motion_prompt(project: dict, frame: dict, art_direction: str, *, index: int = 0,
+                        total: int = 4) -> str:
+    """Describe meaningful physical movement within Runway's 1000-unit limit."""
+    checked = validate_visual_plan({"art_direction": art_direction, "frames": [frame]}, frame_count=1)
+    count = _frame_count(total)
+    if type(index) is not int or not 0 <= index < count:
+        raise EditorialError("Неверный номер живой сцены.")
+    _project_context(project)
+    subject = checked["frames"][0]["subject"]
+    prefix = (
+        f"Live-action film shot {index + 1} of {count}. Continue the supplied start frame. "
+        "Show meaningful visible physical action from its beginning to its outcome, "
+        "rather than a static pose, only breathing, blinking, a zoom or camera pan. "
+        "Preserve people's identity, clothing, proportions, objects and location. "
+        "Natural body and object motion, believable physics, stable cinematic framing. "
+        "No morphing, extra fingers, new people, lettering, logos or watermarks. Action: "
+    )
+    result = prefix + subject
+    while len(result.encode("utf-16-le")) // 2 > 1000:
+        result = result[:-1]
+    return result.rstrip()
 
 
 def build_image_review_prompt(project: dict, job: dict, content: dict, frame: dict,

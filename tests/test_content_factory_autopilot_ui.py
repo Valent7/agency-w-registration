@@ -111,6 +111,51 @@ class AutopilotUiTests(unittest.TestCase):
         self.assertFalse(any("uncertain-1_retry" in (item.key or "") for item in app.button))
         self.assertFalse(any("uncertain-1_cancel" in (item.key or "") for item in app.button))
 
+    def test_legacy_project_keeps_illustrated_mode_until_owner_saves_a_change(self):
+        script = APP.replace("        self.actions = []", "        self.project.pop('video_mode', None)\n        self.actions = []", 1)
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.selectbox(key="cf_auto_77_project-1_video_mode").value, "illustrated")
+        self.assertIn("Ролик из иллюстраций", app.radio(key="cf_auto_77_project-1_brief_format").options)
+        next(item for item in app.button if item.label == "Сохранить проект").click().run()
+        self.assertEqual(app.session_state['_fake_store'].project['video_mode'], 'illustrated')
+
+    def test_missing_live_provider_blocks_live_creation_without_any_fallback(self):
+        script = APP.replace("self.connections = []", "self.connections = [{'platform':'vk','account_id':'123','display_name':'Моё сообщество'}]", 1)
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        app.radio(key="cf_auto_77_project-1_brief_format").set_value("reel").run()
+        self.assertFalse(app.exception)
+        self.assertTrue(next(item for item in app.button if item.label == "Создать материал").disabled)
+        self.assertTrue(any("Подключение живого видео" in item.value for item in app.info))
+        self.assertFalse(any(action[0] == 'create' for action in app.session_state['_fake_store'].actions))
+        # Old rendered examples stay accurately labelled even in a live project.
+        self.assertTrue(any('Ролик из иллюстраций:' in item.label for item in app.expander))
+
+    def test_server_video_secret_is_bridged_and_manual_password_is_cleared(self):
+        preparation = '''
+def remember_sync(owner, project, key=None):
+    st.session_state['_video_sync'] = (owner,project,key == 'synthetic-server-runway-key')
+    return True
+def remember_save(owner, project, key):
+    st.session_state['_video_save'] = (owner,project,key == 'synthetic-manual-video-key')
+'''
+        script = APP.replace("def process(store, owner_id, project_id):", preparation + "\ndef process(store, owner_id, project_id):", 1)
+        script = script.replace("with patch.object(ui, '_runtime',", "with patch.object(ui,'_server_video_secret',return_value='synthetic-server-runway-key'), patch('content_factory_runtime.sync_live_video_connection',side_effect=remember_sync), patch('content_factory_runtime.get_live_video_capabilities',return_value={'live_video_configured':True,'live_video_connection_storage':True}), patch('content_factory_runtime.save_live_video_connection',side_effect=remember_save), patch.object(ui, '_runtime',", 1)
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state['_video_sync'], (77,'project-1',True))
+        token_key = 'cf_auto_77_project-1_video_connection_key'
+        app.text_input(key=token_key).input('synthetic-manual-video-key')
+        next(item for item in app.button if item.label == 'Сохранить подключение видео').click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state['_video_save'], (77,'project-1',True))
+        self.assertEqual(app.text_input(key=token_key).value, '')
+        visible = ' '.join(str(item.value) for kind in (app.caption,app.markdown,app.info,app.success,app.error) for item in kind)
+        self.assertNotIn('synthetic-server-runway-key', visible)
+        self.assertNotIn('synthetic-manual-video-key', visible)
+        self.assertNotIn('gen4.5', visible)
+
     def test_brief_uses_connected_platforms_and_retries_same_request_id(self):
         script = APP.replace("        self.connections = []", "        self.connections = [{'platform':'vk','account_id':'123','display_name':'Сообщество'}]", 1)
         app = AppTest.from_string(script, default_timeout=15).run()

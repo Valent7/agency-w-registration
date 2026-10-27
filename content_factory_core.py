@@ -57,6 +57,10 @@ def validate_project(data):
         if not isinstance(value, str) or len(value) > limit or "\x00" in value:
             raise FactoryError(f"Поле «{labels[name]}» должно содержать текст до {limit} символов.")
         result[name] = value.strip()
+    video_mode = data.get("video_mode", "illustrated")
+    if not isinstance(video_mode, str) or video_mode not in {"live", "illustrated"}:
+        raise FactoryError("Выберите поддерживаемый способ создания видео.")
+    result["video_mode"] = video_mode
     if result["website"] and not re.fullmatch(r"https://[^\s/@]+(?:/[^\s]*)?", result["website"]):
         raise FactoryError("Ссылка проекта должна начинаться с https://.")
     for name, allowed in (("platforms", PLATFORMS), ("formats", FORMATS)):
@@ -142,7 +146,8 @@ class ContentFactoryService:
                     changes = {"state": "ready"}
                 elif project["automation_enabled"] and allowed and job["state"] == "paused":
                     state = "queued"
-                    if job.get("content"):
+                    incomplete = job.get("checkpoint", {}).get("pipeline_version") == 2 and job.get("checkpoint", {}).get("generation_complete") is not True
+                    if job.get("content") and not incomplete:
                         state = "ready" if (project["review_required"] or job.get("review_required")) and not job.get("checkpoint", {}).get("owner_approved") else "scheduled"
                     changes = {"state": state, "available_at": iso(max(self.clock(), timestamp(job["scheduled_at"]))) if state == "scheduled" else iso(self.clock())}
                 if changes:
@@ -164,6 +169,8 @@ class ContentFactoryService:
             raise FactoryError("Переработать можно подготовленный материал, который ещё не отправлен площадке.")
         if job.get("external_id") or job.get("checkpoint", {}).get("publish_started"):
             raise FactoryError("Материал уже передан площадке. Для новой публикации создайте отдельную задачу.")
+        if _uncertain_video_creation(job.get("production")):
+            raise FactoryError("Видеосервис мог принять прошлый заказ. Сначала проверьте его результат, чтобы не оплачивать повторно.")
         if not isinstance(feedback, str) or not 5 <= len(feedback.strip()) <= 3000 or "\x00" in feedback:
             raise FactoryError("Опишите, что изменить: от 5 до 3000 символов.")
         return self._create_material(
@@ -190,7 +197,8 @@ class ContentFactoryService:
             raise FactoryError("Сначала подключите выбранные площадки во вкладке «Площадки».")
         if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
             raise FactoryError("Не удалось определить задачу. Обновите страницу и повторите создание.")
-        fingerprint = sha256(json.dumps([topic, content_format, sorted(platforms), revision], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        video_mode = project.get("video_mode", "illustrated") if content_format == "reel" else None
+        fingerprint = sha256(json.dumps([topic, content_format, sorted(platforms), revision, video_mode], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         for previous in self.store.list_jobs(owner_id, project_id, limit=1000):
             if previous.get("request_id") == request_id and previous.get("request_fingerprint") != fingerprint:
                 raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
@@ -203,6 +211,7 @@ class ContentFactoryService:
                 "available_at": now, "state": "queued", "dedupe_key": key,
                 "topic": topic, "requested_by_owner": True, "request_id": request_id,
                 "request_fingerprint": fingerprint,
+                **({"video_mode": project.get("video_mode", "illustrated")} if content_format == "reel" else {}),
                 "content": {}, "assets": [], "checkpoint": {}, "error": "", "attempts": 0,
                 **(revision or {}),
             })
@@ -242,6 +251,7 @@ class ContentFactoryService:
                         "state": "queued", "dedupe_key": key,
                         "topic": f"{project['goal']}. Материал для {day.isoformat()}, {clock_text}. "
                                  f"Покажи конкретную пользу проекта «{project['name']}» для его аудитории.",
+                        **({"video_mode": project.get("video_mode", "illustrated")} if format_ == "reel" else {}),
                         "content": {}, "assets": [], "checkpoint": {}, "error": "", "attempts": 0,
                     }))
         return jobs
@@ -251,6 +261,8 @@ class ContentFactoryService:
         if job["state"] not in {"ready", "paused", "scheduled"} or not job.get("content"):
             raise FactoryError("Утвердить можно только подготовленный материал.")
         checkpoint = dict(job.get("checkpoint") or {})
+        if _uncertain_video_creation(job.get("production")):
+            raise FactoryError("Создание видео ещё не подтверждено. Сначала проверьте результат в видеосервисе.")
         review = job["content"].get("quality_review")
         if (isinstance(review, dict) and review.get("approved") is False) or (
             checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
@@ -290,9 +302,23 @@ class ContentFactoryService:
         checkpoint = dict(job.get("checkpoint") or {})
         if checkpoint.get("publish_started"):
             raise FactoryError("Результат отправки неизвестен. Сначала проверьте аккаунт: повтор может создать дубликат.")
+        production = copy.deepcopy(job.get("production"))
+        if _uncertain_video_creation(production):
+            raise FactoryError("Видеосервис мог принять прошлый заказ. Сначала проверьте его результат, чтобы не оплачивать повторно.")
+        production_changes = {}
+        if isinstance(production, dict) and production.get("failed_indices"):
+            failed = production["failed_indices"]
+            tasks, clips = production.get("tasks"), production.get("clips")
+            if (not isinstance(failed, list) or not isinstance(tasks, list) or not isinstance(clips, list)
+                    or len(tasks) != len(clips) or any(type(i) is not int or not 0 <= i < len(tasks) for i in failed)):
+                raise FactoryError("Не удалось проверить предыдущие сцены. Нужна проверка администратора.")
+            for index in failed:
+                tasks[index], clips[index] = None, None
+            production.update(phase="inputs_ready", starting_index=None, failed_indices=[], creation_uncertain=False)
+            production_changes["production"] = production
         review = (job.get("content") or {}).get("quality_review")
         incomplete = checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
-        regenerate = incomplete or (isinstance(review, dict) and review.get("approved") is False)
+        regenerate = incomplete or bool(production_changes) or (isinstance(review, dict) and review.get("approved") is False)
         # Retain already-created provider containers, but a deliberate retry may
         # start a failed generation again. It consumes a new daily reservation.
         checkpoint.pop("generation_started", None)
@@ -316,5 +342,21 @@ class ContentFactoryService:
             state = "paused"
         return self.store.update_job(owner_id, job_id, {
             "state": state, "checkpoint": checkpoint, "error": "",
+            **production_changes,
             "available_at": iso(max(timestamp(self.clock()), timestamp(job["scheduled_at"]))) if state == "scheduled" else iso(self.clock()),
         }, expected_updated_at=job.get("updated_at"))
+
+
+def _uncertain_video_creation(production):
+    if production is None:
+        return False
+    if not isinstance(production, dict):
+        return bool(production)
+    if production.get("creation_uncertain"):
+        return True
+    index = production.get("starting_index")
+    if index is None:
+        return False
+    tasks = production.get("tasks")
+    return (type(index) is not int or not isinstance(tasks, list) or not 0 <= index < len(tasks)
+            or not isinstance(tasks[index], str) or not tasks[index].strip())
