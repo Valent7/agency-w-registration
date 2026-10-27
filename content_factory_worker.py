@@ -236,7 +236,7 @@ class Worker:
                          self.store.list_jobs(job["owner_id"], job["project_id"], limit=50)
                          if item.get("content") and item["id"] != job["id"]][:10]
         request = dict(job)
-        if recent_titles:
+        if recent_titles and not job.get("requested_by_owner"):
             request["topic"] = str(job.get("topic") or "") + " Не повторяй недавние темы: " + "; ".join(recent_titles)
         def progress(value):
             self._update(job, progress=dict(value))

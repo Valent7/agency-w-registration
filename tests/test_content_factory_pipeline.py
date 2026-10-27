@@ -94,6 +94,19 @@ class FactoryPipelineTests(unittest.TestCase):
         self.assertEqual(self.worker.run_once()["published"], 0)
         self.publisher.assert_not_called()
 
+    def test_owner_topic_and_revision_are_not_overridden_by_recent_titles(self):
+        self.job(state="published", dedupe_key="previous", content={"title": "Вернуть вечер", "text": "Прошлый материал"})
+        self.job(dedupe_key="revision", requested_by_owner=True, topic="Вернуть вечер",
+                 revision_feedback="Сделать короче")
+        generator = Mock()
+        generator.supports_progress = False
+        generator.generate.return_value = ({"format": "post", "title": "Вернуть вечер", "text": "Новая версия"}, [])
+        self.worker.generator = generator
+        self.worker.run_once(101, self.project["id"])
+        request = generator.generate.call_args.args[1]
+        self.assertEqual(request["topic"], "Вернуть вечер")
+        self.assertEqual(request["revision_feedback"], "Сделать короче")
+
     def test_background_request_flag_does_not_allow_publication_while_paused(self):
         self.store.save_project(101, {**self.project, "automation_enabled": False})
         job = self.job(state="scheduled", requested_by_owner=True, content={"format": "post", "text": "Готовый текст"})
