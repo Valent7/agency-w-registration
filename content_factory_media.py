@@ -126,6 +126,21 @@ def _jpeg(image):
     return buffer.getvalue()
 
 
+def _slide_text_layout(draw, text, width, height, number):
+    """Shared geometry for initial composition and bounded lettering repairs."""
+    margin = round(width * 0.055)
+    padding = round(width * 0.034)
+    font, lines, line_height = _fit(
+        draw, text, width - 2 * (margin + padding), round(height * 0.34),
+        start=round(width * 0.059), minimum=max(24, round(width * 0.028)),
+    )
+    text_height = line_height * len(lines)
+    number_height = round(width * 0.040) if number else 0
+    panel_height = text_height + padding * 2 + number_height
+    top = height - margin - panel_height
+    return margin, padding, font, lines, line_height, text_height, top
+
+
 def render_slide(image_bytes, text, brand_name, brand_color, *, size=(1080, 1350),
                  slide_number="", layout="editorial"):
     """Compose readable text while retaining most of the commissioned artwork.
@@ -140,17 +155,9 @@ def render_slide(image_bytes, text, brand_name, brand_color, *, size=(1080, 1350
     if layout not in {"cover", "editorial", "clean"}:
         raise MediaError("Неизвестный вариант оформления слайда.")
     image = ImageOps.fit(_image(image_bytes), size, method=Image.Resampling.LANCZOS).convert("RGBA")
-    margin = round(width * 0.055)
-    padding = round(width * 0.034)
-    measure = ImageDraw.Draw(image)
-    font, lines, line_height = _fit(
-        measure, text, width - 2 * (margin + padding), round(height * 0.34),
-        start=round(width * 0.059), minimum=max(24, round(width * 0.028)),
+    margin, padding, font, lines, line_height, text_height, top = _slide_text_layout(
+        ImageDraw.Draw(image), text, width, height, number,
     )
-    text_height = line_height * len(lines)
-    number_height = round(width * 0.040) if number else 0
-    panel_height = text_height + padding * 2 + number_height
-    top = height - margin - panel_height
     overlay = Image.new("RGBA", size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     if layout == "cover":
@@ -179,6 +186,57 @@ def render_slide(image_bytes, text, brand_name, brand_color, *, size=(1080, 1350
                    top + padding + text_height + 5), number, font=number_font, fill=foreground)
     image = Image.alpha_composite(image, overlay)
     _brand(image, brand_name, color)
+    return _jpeg(image)
+
+
+def reletter_slide(image_bytes, previous_text, corrected_text, *, slide_number="", layout="editorial"):
+    """Repair lettering on a known, already composed slide without new artwork.
+
+    The caller must supply the exact previous text, number and layout used by
+    ``render_slide``. Only an opaque light panel can be recovered from the
+    flattened image. Its original bounds remain fixed even if the new wording
+    is shorter; a longer correction must fit inside its original text area.
+    Artwork and the brand badge outside that panel are never redrawn or resized.
+    """
+    if layout not in {"editorial", "clean"}:
+        raise MediaError("Исправить надпись без исходного изображения можно только на светлой карточке или светлом нижнем поле.")
+    previous_text, corrected_text = _text(previous_text, 700), _text(corrected_text, 700)
+    number = _text(slide_number, 20, empty=True)
+    image = _image(image_bytes)
+    if image.size != (1080, 1350):
+        raise MediaError("Для исправления надписи нужен готовый слайд размером 1080 × 1350.")
+    width, height = image.size
+    draw = ImageDraw.Draw(image)
+    margin, padding, _, _, _, old_text_height, top = _slide_text_layout(
+        draw, previous_text, width, height, number,
+    )
+    font, lines, line_height = _fit(
+        draw, corrected_text, width - 2 * (margin + padding), old_text_height,
+        start=round(width * 0.059), minimum=max(24, round(width * 0.028)),
+    )
+    # Initial editorial cards are translucent. A repair must be opaque, otherwise
+    # the old glyphs would remain visible through the replacement lettering.
+    background, foreground = (250, 250, 247), "#161B24"
+    if layout == "clean":
+        # The accent is already flattened into the image and its color is not
+        # part of this repair contract. Preserve that exact existing strip.
+        accent_box = (margin + padding, top + padding - 10,
+                      margin + padding + round(width * 0.08) + 1, top + padding - 5)
+        accent = image.crop(accent_box)
+        draw.rectangle((0, top, width, height), fill=background)
+        image.paste(accent, accent_box[:2])
+    else:
+        draw.rounded_rectangle((margin, top, width - margin, height - margin),
+                               radius=round(width * 0.024), fill=background)
+    for index, line in enumerate(lines):
+        draw.text((margin + padding, top + padding - 5 + index * line_height),
+                  line, font=font, fill=foreground)
+    if number:
+        number_font = _font(max(20, round(width * 0.025)), bold=True)
+        label_width = draw.textlength(number, font=number_font)
+        draw.text((width - margin - padding - label_width,
+                   top + padding + old_text_height + 5), number,
+                  font=number_font, fill=foreground)
     return _jpeg(image)
 
 

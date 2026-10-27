@@ -359,6 +359,23 @@ class Generator:
         instructions, input_data = build_review_prompt(project, job, content)
         return validate_review(self._structured(instructions, input_data, model=self.review_model, max_tokens=4000))
 
+    def _proofread(self, project, job, content):
+        """Correct objective language defects before semantic review or paid media."""
+        from content_factory_editorial import build_proofread_prompt
+        instructions, input_data = build_proofread_prompt(project, job, content)
+        result = self._structured(instructions, input_data, model=self.review_model)
+        if isinstance(result, dict) and result.get("format", job["format"]) != job["format"]:
+            raise GenerationError("Корректор изменил формат материала; производство остановлено.")
+        corrected = validate_content(result, job["format"], job["platform"])
+        if job["format"] == "carousel":
+            original_slides = content.get("slides") or []
+            if len(corrected["slides"]) != len(original_slides):
+                raise GenerationError("Корректор изменил число слайдов; производство остановлено.")
+            if any(slide in original_slides and original_slides.index(slide) != index
+                   for index, slide in enumerate(corrected["slides"])):
+                raise GenerationError("Корректор переставил слайды; производство остановлено.")
+        return corrected
+
     def _illustration(self, prompt):
         data = self._json("images/generations", {
             "model": self.image_model, "n": 1, "size": "1024x1536", "quality": self.image_quality,
@@ -415,11 +432,15 @@ class Generator:
         try:
             report("copy", "Автор готовит текст по вашей задаче.")
             content = self._copy(clean_project, job)
+            report("proofread", "Корректор проверяет грамматику и точность формулировок.")
+            content = self._proofread(clean_project, job, content)
             report("review", "Стагирит проверяет смысл, факты и пользу текста.")
             review = self._review_copy(clean_project, job, content)
             if not review["approved"]:
                 report("copy", "Автор дорабатывает текст по замечаниям Стагирита.")
                 content = self._copy(clean_project, job, previous=content, review=review)
+                report("proofread", "Корректор проверяет исправленный текст.")
+                content = self._proofread(clean_project, job, content)
                 report("review", "Стагирит проверяет исправленный текст.")
                 review = self._review_copy(clean_project, job, content)
             content["quality_review"] = review

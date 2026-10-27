@@ -5,7 +5,7 @@ import unittest
 
 from content_factory_editorial import (
     EditorialError, build_copy_prompt, build_image_prompt, build_image_review_prompt, build_review_prompt,
-    build_visual_prompt, validate_review, validate_visual_plan,
+    build_proofread_prompt, build_visual_prompt, validate_review, validate_visual_plan,
 )
 
 
@@ -102,6 +102,27 @@ class CopyPromptTests(unittest.TestCase):
 
 
 class ReviewGateTests(unittest.TestCase):
+    def test_proofreader_receives_only_copy_and_must_preserve_structure_meaning_and_cta(self):
+        content = {**CONTENT, "slides": ["Начните с глины.", "На важное дела хватит времени.", "Узнайте о занятиях."],
+                   "quality_review": {"approved": True}, "visual_plan": {"secret": "excluded"}}
+        system, user = build_proofread_prompt(PROJECT, {**JOB, "format": "carousel"}, content)
+        payload = json.loads(user)
+        self.assertEqual(payload["content"]["slides"], content["slides"])
+        self.assertNotIn("quality_review", payload["content"])
+        self.assertNotIn("visual_plan", payload["content"])
+        self.assertNotIn("never-include-this", user)
+        self.assertIn("ровно 3 слайдов", system)
+        self.assertIn("не переставляй", system)
+        self.assertIn("Не меняй действие CTA", system)
+        self.assertIn("не полная стилистическая переработка", system)
+
+    def test_review_cannot_hide_an_objective_error_in_an_approved_stylistic_note(self):
+        system, _ = build_review_prompt(PROJECT, JOB, CONTENT)
+        self.assertIn("грамматику", system)
+        self.assertIn("точность словосочетаний", system)
+        self.assertIn("approved=false", system)
+        self.assertIn("Нельзя одобрить такой материал", system)
+
     def test_approval_and_specific_refusal_are_preserved_without_truthiness_coercion(self):
         approved = {"approved": True, "issues": [], "brief_feedback": " "}
         self.assertEqual(validate_review(approved), {**approved, "brief_feedback": ""})

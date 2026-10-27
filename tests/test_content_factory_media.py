@@ -11,10 +11,10 @@ import unittest
 import wave
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 from content_factory_media import (
-    MediaError, _caption_events, _write_scene_captions, render_slide, render_story_reel,
+    MediaError, _caption_events, _write_scene_captions, reletter_slide, render_slide, render_story_reel,
 )
 
 
@@ -113,6 +113,81 @@ class MultiSceneVideoTests(unittest.TestCase):
                 image = Image.open(io.BytesIO(frame.stdout))
                 pixel = image.getpixel((540, 960))
                 self.assertEqual(max(range(3), key=lambda channel: pixel[channel]), expected_channel)
+
+
+class LetteringRepairTests(unittest.TestCase):
+    @staticmethod
+    def decoded(data):
+        return Image.open(io.BytesIO(data)).convert("RGB")
+
+    def test_wrong_glyphs_are_removed_and_correct_glyphs_replace_them_in_both_light_layouts(self):
+        previous, corrected = "На важное дела", "На важные дела"
+        for layout in ("editorial", "clean"):
+            with self.subTest(layout=layout):
+                source = artwork()
+                original = render_slide(source, previous, "Агентство W", "#D4AF37",
+                                        slide_number="3 / 4", layout=layout)
+                repaired = reletter_slide(original, previous, corrected,
+                                          slide_number="3 / 4", layout=layout)
+                expected = render_slide(source, corrected, "Агентство W", "#D4AF37",
+                                        slide_number="3 / 4", layout=layout)
+                # Both short phrases use one line at the same size. The freshly
+                # composed corrected reference gives independent glyph positions.
+                region = (90, 1100, 985, 1235)
+                before = self.decoded(original).crop(region).convert("L").tobytes()
+                after = self.decoded(repaired).crop(region).convert("L").tobytes()
+                target = self.decoded(expected).crop(region).convert("L").tobytes()
+                old_only = [i for i, (a, b) in enumerate(zip(before, target)) if a < 100 and b > 210]
+                new_only = [i for i, (a, b) in enumerate(zip(before, target)) if a > 210 and b < 100]
+                self.assertGreater(len(old_only), 40)
+                self.assertGreater(len(new_only), 40)
+                self.assertGreater(sum(after[i] > 200 for i in old_only) / len(old_only), 0.97)
+                self.assertGreater(sum(after[i] < 115 for i in new_only) / len(new_only), 0.97)
+
+    def test_shorter_text_keeps_the_original_card_bounds_and_artwork_outside_it(self):
+        previous = "Одна повторяющаяся задача забирает ваш вечер. Передайте часть подготовки помощнику."
+        for layout in ("editorial", "clean"):
+            with self.subTest(layout=layout):
+                original = self.decoded(render_slide(artwork(), previous, "Агентство W", "#D4AF37",
+                                                     slide_number="2 / 4", layout=layout))
+                buffer = io.BytesIO()
+                original.save(buffer, format="JPEG", quality=95, subsampling=0)
+                original = self.decoded(buffer.getvalue())
+                repaired = self.decoded(reletter_slide(buffer.getvalue(), previous, "Верните себе вечер",
+                                                       slide_number="2 / 4", layout=layout))
+                old_top = next(y for y in range(500, 1350) if min(original.getpixel((540, y))) > 220)
+                new_top = next(y for y in range(500, 1350) if min(repaired.getpixel((540, y))) > 220)
+                self.assertEqual(old_top, new_top)
+                outside = (0, 0, 1080, old_top - 10)
+                difference = ImageChops.difference(original.crop(outside), repaired.crop(outside))
+                self.assertLess(max(ImageStat.Stat(difference).mean), 1.0)
+                # The existing slide number stays at its original lower position.
+                number_region = (850, 1220, 985, 1292)
+                difference = ImageChops.difference(original.crop(number_region), repaired.crop(number_region))
+                self.assertLess(max(ImageStat.Stat(difference).mean), 10)
+
+    def test_clean_footer_preserves_existing_accent_color_without_repainting_brand(self):
+        previous = "На важное дела"
+        original_data = render_slide(artwork(), previous, "Агентство W", "#7B4FD2",
+                                     slide_number="4 / 4", layout="clean")
+        original = self.decoded(original_data)
+        repaired = self.decoded(reletter_slide(original_data, previous, "На важные дела",
+                                               slide_number="4 / 4", layout="clean"))
+        # The narrow violet accent above the lettering must survive the repair.
+        pixel = original.getpixel((130, 1119))
+        self.assertGreater(pixel[2], pixel[1] + 60)
+        self.assertTrue(all(abs(a - b) < 8 for a, b in zip(pixel, repaired.getpixel((130, 1119)))))
+        difference = ImageChops.difference(original.crop((45, 45, 300, 115)), repaired.crop((45, 45, 300, 115)))
+        self.assertLess(max(ImageStat.Stat(difference).mean), 1)
+
+    def test_cover_wrong_size_and_text_overflow_fail_instead_of_destroying_artwork(self):
+        original = render_slide(artwork(), "Вечер", "Агентство W", "#D4AF37")
+        with self.assertRaises(MediaError):
+            reletter_slide(original, "Вечер", "Новый текст", layout="cover")
+        with self.assertRaises(MediaError):
+            reletter_slide(artwork(), "Вечер", "Новый текст")
+        with self.assertRaises(MediaError):
+            reletter_slide(original, "Вечер", "Ш" * 600)
 
 
 if __name__ == "__main__":
