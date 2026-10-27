@@ -106,6 +106,8 @@ class Worker:
                 changes = {"state": state, "error": message, "progress": {"stage": "failed", "message": "Материал требует внимания. Откройте его, чтобы посмотреть причину и задать правки."}}
                 if isinstance(error, GenerationError) and isinstance(error.draft, dict):
                     changes["content"] = error.draft
+                if isinstance(error, GenerationError) and error.provider_details:
+                    changes["provider_diagnostic"] = dict(error.provider_details)
                 self._finish(job, **changes)
                 result[state] += 1
                 result["errors"].append(message)

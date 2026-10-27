@@ -79,6 +79,19 @@ def requested_paths(session):
 
 
 class GenerationTests(unittest.TestCase):
+    def test_provider_diagnostics_never_persist_raw_error_or_credentials(self):
+        generator = Generator("private-key", session=Mock())
+        generator.session.post.return_value = response({"error": {
+            "code": "unsupported_parameter", "param": "reasoning.effort",
+            "message": "Unsupported reasoning option; private-key",
+        }}, status=400)
+        with self.assertRaises(GenerationError) as caught:
+            generator._request("responses", {"model": "gpt-5"})
+        details = caught.exception.provider_details
+        self.assertEqual(details["parameter"], "reasoning.effort")
+        self.assertIn("reasoning_option", details["categories"])
+        self.assertNotIn("private-key", json.dumps(details))
+
     def generator(self, replies, **kwargs):
         session = Mock()
         session.post.side_effect = replies

@@ -24,9 +24,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 class GenerationError(RuntimeError):
     """A generation step failed; the error is safe to show without credentials."""
 
-    def __init__(self, message, *, draft=None):
+    def __init__(self, message, *, draft=None, provider_details=None):
         super().__init__(message)
         self.draft = draft
+        self.provider_details = provider_details
 
 
 TEXT_LIMITS = {"instagram": 2200, "vk": 16000, "threads": 500, "telegram": 1024}
@@ -278,7 +279,29 @@ class Generator:
         except requests.RequestException as exc:
             raise GenerationError("Связь с OpenAI прервалась; автоматический повтор платного запроса не выполнялся.") from exc
         if not 200 <= response.status_code < 300:
-            raise GenerationError(f"OpenAI отклонил запрос: HTTP {response.status_code}.")
+            # Keep bounded configuration diagnostics for the operator, never the
+            # provider's message (which can repeat private input or credentials).
+            details = {"http_status": response.status_code, "endpoint": path}
+            try:
+                error = response.json().get("error", {})
+                known_codes = {"unsupported_parameter", "unsupported_value", "invalid_value", "model_not_found",
+                               "insufficient_quota", "rate_limit_exceeded", "invalid_api_key", "invalid_type",
+                               "invalid_request_error", "invalid_json_schema", "missing_required_parameter"}
+                code = error.get("code")
+                details["code"] = code if isinstance(code, str) and code in known_codes else "other"
+                param = error.get("param")
+                known_params = {"model", "reasoning", "reasoning.effort", "text.format", "text.format.type",
+                                "max_output_tokens", "input", "instructions", "quality", "size", "n"}
+                details["parameter"] = param if isinstance(param, str) and param in known_params else "other"
+                message = str(error.get("message") or "").lower()
+                markers = {"verification_required": ("must be verified", "verify your organization"),
+                           "model_access": ("does not exist", "do not have access"),
+                           "json_mode": ("json",), "reasoning_option": ("reasoning",),
+                           "retention_policy": ("zero data retention", "must be set to false", "store=false")}
+                details["categories"] = [name for name, words in markers.items() if any(word in message for word in words)]
+            except (ValueError, TypeError, AttributeError):
+                pass
+            raise GenerationError(f"OpenAI отклонил запрос: HTTP {response.status_code}.", provider_details=details)
         return response
 
     def _json(self, path: str, payload: dict) -> dict:
