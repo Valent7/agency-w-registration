@@ -107,6 +107,15 @@ class FactoryPipelineTests(unittest.TestCase):
         self.assertEqual(request["topic"], "Вернуть вечер")
         self.assertEqual(request["revision_feedback"], "Сделать короче")
 
+    def test_automatic_plan_only_generates_for_connected_selected_channels(self):
+        self.project = self.service.save_project(101, {"id": self.project["id"], "platforms": ["threads", "vk", "instagram"]})
+        self.connect()
+        self.worker.run_once(101, self.project["id"])
+        jobs = self.store.list_jobs(101, self.project["id"])
+        self.assertTrue(jobs)
+        self.assertEqual({job["platform"] for job in jobs}, {"threads"})
+        self.assertEqual(self.store.get_project(101, self.project["id"])["platforms"], ["threads", "vk", "instagram"])
+
     def test_background_request_flag_does_not_allow_publication_while_paused(self):
         self.store.save_project(101, {**self.project, "automation_enabled": False})
         job = self.job(state="scheduled", requested_by_owner=True, content={"format": "post", "text": "Готовый текст"})

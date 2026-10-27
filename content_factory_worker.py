@@ -51,7 +51,7 @@ class Worker:
         for project in projects:
             if project.get("automation_enabled") and not is_agency_access_revoked(project["owner_id"]):
                 existing = {job["id"] for job in self.store.list_jobs(project["owner_id"], project["id"], limit=1000)}
-                planned = service.plan(project["owner_id"], project["id"], int(project.get("plan_days", 7)))
+                planned = service.plan(project["owner_id"], project["id"], int(project.get("plan_days", 7)), connected_only=True)
                 result["planned"] += sum(job["id"] not in existing for job in planned)
         for _ in range(max_jobs):
             job = self.store.claim_job(self.worker_id, iso(self.clock()), lease_seconds=7200,

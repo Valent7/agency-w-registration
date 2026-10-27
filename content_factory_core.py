@@ -211,10 +211,14 @@ class ContentFactoryService:
             jobs.append(job)
         return jobs
 
-    def plan(self, owner_id, project_id, days=7):
+    def plan(self, owner_id, project_id, days=7, *, connected_only=False):
         project = self._project(owner_id, project_id)
         if not isinstance(days, int) or not 1 <= days <= 30:
             raise FactoryError("План можно создать на срок от 1 до 30 дней.")
+        platforms = list(project["platforms"])
+        if connected_only:
+            connected = {item["platform"] for item in self.store.list_connections(owner_id, project_id)}
+            platforms = [platform for platform in platforms if platform in connected]
         now = timestamp(self.clock())
         tz = ZoneInfo(project["timezone"])
         local_today = now.astimezone(tz).date()
@@ -230,7 +234,7 @@ class ContentFactoryService:
                 if scheduled < now:
                     continue
                 format_ = project["formats"][(day.toordinal() * len(project["publish_times"]) + slot) % len(project["formats"])]
-                for platform in project["platforms"]:
+                for platform in platforms:
                     key = sha256(f"{project_id}|{day.isoformat()}|{clock_text}|{platform}".encode()).hexdigest()
                     jobs.append(self.store.enqueue_job(owner_id, project_id, {
                         "platform": platform, "format": format_, "scheduled_at": iso(scheduled),
