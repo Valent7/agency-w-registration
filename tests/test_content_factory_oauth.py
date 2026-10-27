@@ -101,6 +101,7 @@ class ContentFactoryOAuthTests(unittest.TestCase):
         for attribute in ("HttpOnly", "Secure", "SameSite=lax", "Max-Age=600", "Path=/oauth/instagram/callback"):
             self.assertIn(attribute, cookie)
         self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertIn("form-action 'none'", response.headers["content-security-policy"])
         self.assertNotIn(CONFIG["INSTAGRAM_APP_SECRET"], response.headers["location"])
 
     def test_instagram_success_saves_encrypted_long_token_and_native_account(self):
@@ -147,11 +148,27 @@ class ContentFactoryOAuthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_handoff_expires_after_two_minutes(self):
+        provider = Provider("instagram")
+        self.app.state.oauth_session = provider
         with patch("content_factory_oauth.time.time", return_value=100000):
             link = make_connect_url(11, self.project["id"], "instagram", self.config)
         with patch("content_factory_oauth.time.time", return_value=100121):
             response = self.client.get(link)
         self.assertEqual(response.status_code, 403)
+        self.assertIn("Срок действия ссылки истёк", response.text)
+        self.assertIn("обновите страницу", response.text)
+        self.assertEqual(provider.calls, [])
+
+    def test_expired_tampered_handoff_is_not_reported_as_verified_expiration(self):
+        with patch("content_factory_oauth.time.time", return_value=100000):
+            link = make_connect_url(11, self.project["id"], "instagram", self.config)
+        assertion = parse_qs(urlsplit(link).query)["assertion"][0]
+        altered = assertion[:-1] + ("a" if assertion[-1] != "a" else "b")
+        with patch("content_factory_oauth.time.time", return_value=100121):
+            response = self.client.get("/connect/instagram", params={"assertion": altered})
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("недействительна или истекла", response.text)
+        self.assertNotIn("Срок действия ссылки истёк", response.text)
 
     def test_provider_state_expires_after_ten_minutes(self):
         with patch("content_factory_oauth.time.time", return_value=100000):

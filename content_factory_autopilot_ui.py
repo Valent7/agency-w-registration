@@ -57,6 +57,21 @@ def _connect_url(owner_id, project_id, platform):
         return None
 
 
+@st.fragment(run_every=45)
+def _oauth_connect_button(owner_id, project_id, platform, reconnect=False):
+    # The signed handoff expires after two minutes. Refresh its href while the
+    # cabinet is open, independently of unsaved project fields or media work.
+    # Minting a link only signs local configuration; it never calls a provider.
+    display = "Instagram" if platform == "instagram" else "Threads"
+    connect_url = _connect_url(owner_id, project_id, platform)
+    if connect_url:
+        verb = "Переподключить" if reconnect else "Подключить"
+        st.link_button(f"{verb} {display}", connect_url, type="primary", width="stretch")
+        st.caption(f"Откроется {display}. Войдите в свой аккаунт и разрешите Контент-заводу публиковать материалы.")
+    elif not reconnect:
+        st.info(f"Подключение {display} через вход в аккаунт пока не настроено. Администратор может подготовить его или подключить аккаунт вручную.")
+
+
 def _seed_project(target_profile=None):
     audience = "Предприниматели, эксперты и руководители, которым нужно освободить время от рутины."
     if isinstance(target_profile, str) and target_profile.strip():
@@ -165,14 +180,7 @@ def _connections(owner_id, project, store, capabilities):
                     except Exception as exc:
                         _action_error("Не удалось отключить аккаунт", exc)
             if platform in {"instagram", "threads"}:
-                display = "Instagram" if platform == "instagram" else "Threads"
-                connect_url = _connect_url(owner_id, project_id, platform)
-                if connect_url:
-                    verb = "Переподключить" if connection else "Подключить"
-                    st.link_button(f"{verb} {display}", connect_url, type="primary", width="stretch")
-                    st.caption(f"Откроется {display}. Войдите в свой аккаунт и разрешите Контент-заводу публиковать материалы.")
-                elif not connection:
-                    st.info(f"Подключение {display} через вход в аккаунт пока не настроено. Администратор может подготовить его или подключить аккаунт вручную.")
+                _oauth_connect_button(owner_id, project_id, platform, reconnect=bool(connection))
                 if platform == "instagram":
                     st.caption("Для публикаций подходит профессиональный Instagram-аккаунт.")
                 manual = st.expander("Подключить вручную", expanded=False)

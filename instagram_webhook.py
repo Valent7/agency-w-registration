@@ -99,7 +99,7 @@ def _page(title: str, body: str) -> HTMLResponse:
 <head>
   <meta charset=\"utf-8\">
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-  <title>{title}</title>
+  <title>{html_escape(str(title))}</title>
   <style>
     body {{ font-family: Arial, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #1f2937; }}
     h1, h2 {{ color: #111827; }}
@@ -111,7 +111,18 @@ def _page(title: str, body: str) -> HTMLResponse:
 {body}
 </body>
 </html>"""
-    return HTMLResponse(html)
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; "
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            ),
+        },
+    )
 
 
 async def health(request: Request):
@@ -832,9 +843,12 @@ async def instagram_connect(request: Request):
             status_code=302,
         )
     except Exception as exc:
+        print("INSTAGRAM_OAUTH_CONNECT_ERROR:", type(exc).__name__, flush=True)
         return _page(
             "Agency W — Instagram",
-            f"<h1>Не удалось начать подключение Instagram</h1><p>{str(exc)}</p>",
+            "<h1>Не удалось начать подключение Instagram</h1>"
+            "<p>Вернитесь в Агентство W и начните подключение заново. "
+            "Если ошибка повторяется, администратору нужно проверить настройки входа.</p>",
         )
 
 
@@ -944,7 +958,7 @@ async def instagram_oauth_callback(request: Request):
             comments_ready = False
             print(
                 "INSTAGRAM_WEBHOOK_SUBSCRIPTION_ERROR:",
-                f"{type(subscription_exc).__name__}: {subscription_exc}",
+                type(subscription_exc).__name__,
                 flush=True,
             )
 
@@ -978,7 +992,7 @@ async def instagram_oauth_callback(request: Request):
             + _instagram_return_link("access_pending"),
         )
     except Exception as exc:
-        # Errors can contain untrusted HTTP response strings; escape markup.
+        # Provider failures can contain request URLs, credentials and markup.
         print(
             "INSTAGRAM_OAUTH_CALLBACK_ERROR:",
             type(exc).__name__,
@@ -987,7 +1001,8 @@ async def instagram_oauth_callback(request: Request):
         return _page(
             "Agency W — Instagram",
             "<h1>Instagram не подключён</h1>"
-            f"<p>{html_escape(str(exc))}</p>"
+            "<p>Не удалось завершить проверку подключения. "
+            "Если ошибка повторяется, администратору нужно проверить доступ приложения.</p>"
             "<p>Вернитесь в Агентство W. Если ошибка повторяется, "
             "пришлите скриншот без секретных данных.</p>"
             + _instagram_return_link("error"),
@@ -1109,10 +1124,12 @@ async def facebook_connect(request: Request):
             status_code=302,
         )
     except Exception as exc:
+        print("FACEBOOK_RADAR_CONNECT_ERROR:", type(exc).__name__, flush=True)
         return _page(
             "Agency W — Instagram Radar",
             "<h1>Не удалось начать подключение Instagram Radar</h1>"
-            f"<p>{str(exc)}</p>",
+            "<p>Вернитесь в Агентство W и начните подключение заново. "
+            "Если ошибка повторяется, администратору нужно проверить настройки входа.</p>",
         )
 
 
@@ -1309,11 +1326,11 @@ async def facebook_exchange(request: Request):
     except Exception as exc:
         print(
             "FACEBOOK_RADAR_EXCHANGE_ERROR:",
-            f"{type(exc).__name__}: {exc}",
+            type(exc).__name__,
             flush=True,
         )
         return JSONResponse(
-            {"ok": False, "error": str(exc)},
+            {"ok": False, "error": "Не удалось завершить подключение Instagram Radar. Начните вход заново из Агентства W."},
             status_code=400,
             headers={"Cache-Control": "no-store"},
         )
@@ -1329,7 +1346,7 @@ async def facebook_oauth_callback(request: Request):
         return _page(
             "Agency W — Instagram Radar",
             "<h1>Подключение Instagram Radar отменено</h1>"
-            f"<p>{error_description or error}</p>",
+            f"<p>{html_escape(error_description or error)}</p>",
         )
 
     try:
@@ -1347,13 +1364,14 @@ async def facebook_oauth_callback(request: Request):
     except Exception as exc:
         print(
             "FACEBOOK_RADAR_CALLBACK_ERROR:",
-            f"{type(exc).__name__}: {exc}",
+            type(exc).__name__,
             flush=True,
         )
         return _page(
             "Agency W — Instagram Radar",
             "<h1>Instagram Radar не подключён</h1>"
-            f"<p>{str(exc)}</p>"
+            "<p>Не удалось завершить проверку подключения. "
+            "Если ошибка повторяется, администратору нужно проверить доступ приложения.</p>"
             "<p>Вернитесь в Агентство W и попробуйте ещё раз.</p>",
         )
 

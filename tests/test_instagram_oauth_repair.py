@@ -114,7 +114,6 @@ class InstagramOAuthErrorPageTests(unittest.TestCase):
         self.assertIn("except InstagramAccessNotApproved:", source)
         self.assertIn("INSTAGRAM_OAUTH_ACCESS_PENDING", source)
         self.assertIn("Это не ошибка браузера", source)
-        self.assertIn("html_escape(str(exc))", source)
         callback = source[
             source.index("async def instagram_oauth_callback("):
             source.index("def _facebook_oauth_settings(")

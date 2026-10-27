@@ -42,6 +42,10 @@ class OAuthError(ValueError):
     """An intentionally credential-free OAuth failure."""
 
 
+class OAuthExpired(OAuthError):
+    """A correctly signed request that has passed its short validity window."""
+
+
 def _https_url(value: str, *, origin: bool = False) -> str:
     try:
         parts = urlsplit(str(value or ""))
@@ -110,12 +114,19 @@ def _verify(raw: str, key: str, *, purpose: str, platform: str, ttl: int) -> dic
         issued = data.get("iat")
         if isinstance(issued, bool) or not isinstance(issued, int) or issued <= 0:
             raise ValueError
-        age = int(time.time()) - issued
-        if age < -15 or age > ttl:
-            raise ValueError
         if data.get("v") != 1:
             raise ValueError
+        age = int(time.time()) - issued
+        if age < -15:
+            raise ValueError
+        if age > ttl:
+            raise OAuthExpired(
+                "Срок действия ссылки истёк. Вернитесь в Агентство W, обновите страницу "
+                "и снова нажмите кнопку подключения."
+            )
         return data
+    except OAuthExpired:
+        raise
     except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
         raise OAuthError("Ссылка подключения недействительна или истекла. Начните подключение заново.") from None
 
@@ -224,7 +235,9 @@ def _secure_response(response):
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"
+    )
     return response
 
 
