@@ -79,6 +79,12 @@ class FakeService:
             if job['id'] == job_id: job['state'] = 'cancelled'
     def retry(self, owner_id, job_id):
         self.store.actions.append(('retry', owner_id, job_id))
+    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id):
+        self.store.actions.append(('create', owner_id, project_id, topic, content_format, platforms, request_id))
+        return [{'id':'new-request','state':'queued'} for platform in platforms]
+    def revise_material(self, owner_id, job_id, feedback, *, request_id):
+        self.store.actions.append(('revise', owner_id, job_id, feedback, request_id))
+        return [{'id':'new-version','state':'queued'}]
 
 if '_fake_store' not in st.session_state:
     st.session_state['_fake_store'] = FakeStore()
@@ -104,6 +110,84 @@ class AutopilotUiTests(unittest.TestCase):
         self.assertTrue(any("Проверьте аккаунт" in item.value for item in app.info))
         self.assertFalse(any("uncertain-1_retry" in (item.key or "") for item in app.button))
         self.assertFalse(any("uncertain-1_cancel" in (item.key or "") for item in app.button))
+
+    def test_brief_uses_connected_platforms_and_retries_same_request_id(self):
+        script = APP.replace("        self.connections = []", "        self.connections = [{'platform':'vk','account_id':'123','display_name':'Сообщество'}]", 1)
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        platforms = app.multiselect(key="cf_auto_77_project-1_brief_platforms")
+        self.assertEqual(platforms.value, ["vk"])
+        self.assertEqual(platforms.options, ["ВКонтакте"])
+        app.text_area(key="cf_auto_77_project-1_brief_topic").input("Как освободить вечер от повторяющихся задач")
+        next(item for item in app.button if item.label == "Создать материал").click().run()
+        self.assertFalse(app.exception)
+        first = app.session_state['_fake_store'].actions[-1]
+        self.assertEqual(first[:3], ('create',77,'project-1'))
+        self.assertEqual(first[4:6], ('post',['vk']))
+        self.assertFalse(app.session_state['_fake_store'].project['automation_enabled'])
+        app.run()
+        self.assertEqual(len([action for action in app.session_state['_fake_store'].actions if action[0]=='create']), 1)
+        next(item for item in app.button if item.label == "Создать материал").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state['_fake_store'].actions[-1][-1], first[-1])
+        self.assertTrue(any("Задача сохранена" in item.value for item in app.success))
+
+    def test_brief_disabled_without_connected_platform_and_memory_saved_explicitly(self):
+        app = self.app()
+        self.assertTrue(next(item for item in app.button if item.label == "Создать материал").disabled)
+        app.text_area(key="cf_auto_77_project-1_facts").input("Подтверждённая возможность")
+        app.text_area(key="cf_auto_77_project-1_examples").input("Живой пример текста")
+        app.text_area(key="cf_auto_77_project-1_visual_style").input("Тёплый свет")
+        app.text_area(key="cf_auto_77_project-1_avoid").input("Не обещать гарантированный доход")
+        self.assertEqual(app.session_state['_fake_store'].actions, [])
+        next(item for item in app.button if item.label == "Сохранить проект").click().run()
+        self.assertFalse(app.exception)
+        saved = app.session_state['_fake_store'].actions[-1][2]
+        self.assertEqual(saved['facts'], "Подтверждённая возможность")
+        self.assertEqual(saved['examples'], "Живой пример текста")
+        self.assertEqual(saved['visual_style'], "Тёплый свет")
+        self.assertEqual(saved['avoid'], "Не обещать гарантированный доход")
+
+    def test_revision_and_quality_feedback_stay_inside_factory_without_changing_source(self):
+        script = APP.replace("'content':{'title':'Полезный материал', 'text':'Исходный текст'}", "'content':{'title':'Полезный материал', 'text':'Исходный текст', 'quality_review':{'approved':True,'issues':[],'brief_feedback':'Один понятный пример и действие'}}", 1)
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any("Стагирит проверил" in item.value for item in app.caption))
+        self.assertTrue(any("Один понятный пример" in item.value for item in app.caption))
+        app.text_area(key="cf_auto_77_project-1_ready-1_feedback").input("Замени абстрактную картинку на вечер дома")
+        next(item for item in app.button if item.label == "Переработать материал").click().run()
+        self.assertFalse(app.exception)
+        store = app.session_state['_fake_store']
+        self.assertEqual(store.actions[-1][:4], ('revise',77,'ready-1',"Замени абстрактную картинку на вечер дома"))
+        self.assertEqual(store.jobs[0]['content']['text'], "Исходный текст")
+        self.assertTrue(app.button(key="cf_auto_77_project-1_refresh_materials"))
+
+    def test_saved_image_video_and_publication_controls_remain_available(self):
+        script = APP.replace(
+            "'content':{'title':'Полезный материал', 'text':'Исходный текст'}, 'assets':[]",
+            "'content':{'title':'Полезный материал', 'text':'Исходный текст'}, 'assets':[{'url':'https://media.example.invalid/cover.jpg','mime_type':'image/jpeg'},{'url':'https://media.example.invalid/reel.mp4','mime_type':'video/mp4'}]", 1,
+        ).replace("        return []\n\nclass FakeService:", "        return copy.deepcopy(assets)\n\nclass FakeService:", 1)
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.get('image')), 1)
+        self.assertEqual(len(app.get('video')), 1)
+        self.assertFalse(app.text_area(key="cf_auto_77_project-1_ready-1_text").disabled)
+        self.assertTrue(app.button(key="cf_auto_77_project-1_ready-1_approve"))
+        self.assertTrue(app.button(key="cf_auto_77_project-1_ready-1_cancel"))
+        self.assertTrue(any(item.proto.label == 'Открыть публикацию' for item in app.get('link_button')))
+        self.assertTrue(any(item.proto.label == 'Скачать текст' for item in app.get('download_button')))
+
+    def test_rejected_ready_draft_cannot_be_approved_but_can_be_reworked(self):
+        script = APP.replace(
+            "'content':{'title':'Полезный материал', 'text':'Исходный текст'}",
+            "'content':{'title':'Полезный материал', 'text':'Исходный текст', 'quality_review':{'approved':False,'issues':['Неподтверждённая функция'],'brief_feedback':'Нужна доработка'}}", 1,
+        )
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        self.assertFalse(any(item.key == 'cf_auto_77_project-1_ready-1_approve' for item in app.button))
+        self.assertTrue(app.text_area(key='cf_auto_77_project-1_ready-1_text').disabled)
+        self.assertTrue(any(item.label == 'Переработать материал' for item in app.button))
+        self.assertTrue(any('Неподтверждённая функция' in item.value for item in app.markdown))
 
     def test_edited_text_is_approved_only_for_current_owner(self):
         app = self.app()

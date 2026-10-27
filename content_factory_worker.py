@@ -54,7 +54,7 @@ class Worker:
                 planned = service.plan(project["owner_id"], project["id"], int(project.get("plan_days", 7)))
                 result["planned"] += sum(job["id"] not in existing for job in planned)
         for _ in range(max_jobs):
-            job = self.store.claim_job(self.worker_id, iso(self.clock()), lease_seconds=1800,
+            job = self.store.claim_job(self.worker_id, iso(self.clock()), lease_seconds=7200,
                                        owner_id=owner_id, project_id=project_id)
             if not job:
                 break
@@ -103,7 +103,10 @@ class Worker:
                 fresh = self.store.get_job(job["owner_id"], job["id"]) or job
                 uncertain = bool(fresh.get("checkpoint", {}).get("publish_started"))
                 state = "reconcile" if uncertain else "failed"
-                self._finish(job, state=state, error=message)
+                changes = {"state": state, "error": message, "progress": {"stage": "failed", "message": "Материал требует внимания. Откройте его, чтобы посмотреть причину и задать правки."}}
+                if isinstance(error, GenerationError) and isinstance(error.draft, dict):
+                    changes["content"] = error.draft
+                self._finish(job, **changes)
                 result[state] += 1
                 result["errors"].append(message)
         return result
@@ -132,17 +135,25 @@ class Worker:
         if job["platform"] not in project["platforms"] or job["format"] not in project["formats"]:
             self._finish(job, state="paused", error="Площадка или формат отключены в проекте.")
             return "pending"
-        if not project.get("automation_enabled") and (job["state"] == "scheduled" or not manual):
+        explicitly_requested = job["state"] == "queued" and job.get("requested_by_owner") is True
+        if not project.get("automation_enabled") and (job["state"] == "scheduled" or not (manual or explicitly_requested)):
             self._finish(job, state="paused")
             return "pending"
         if job["state"] == "queued":
             return self._generate(job, project)
         if job["state"] != "scheduled":
             raise ValueError("Этот материал не ожидает обработки.")
+        quality = (job.get("content") or {}).get("quality_review") or {}
+        if quality.get("approved") is False or (
+            checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
+        ):
+            from content_factory_generation import GenerationError
+            raise GenerationError("Материал не прошёл полный цикл подготовки. Задайте правки или повторите создание.",
+                                  draft=job.get("content"))
         if timestamp(job["scheduled_at"]) > timestamp(self.clock()):
             self._finish(job, available_at=job["scheduled_at"])
             return "pending"
-        if project.get("review_required") and not checkpoint.get("owner_approved"):
+        if (project.get("review_required") or job.get("review_required")) and not checkpoint.get("owner_approved"):
             self._finish(job, state="ready")
             return "pending"
         connection = self.store.get_connection(job["owner_id"], job["project_id"], job["platform"])
@@ -181,7 +192,7 @@ class Worker:
                 latest = self.store.get_project(job["owner_id"], job["project_id"])
                 if not latest or not latest.get("automation_enabled") or is_agency_access_revoked(job["owner_id"]) or job["platform"] not in latest["platforms"] or job["format"] not in latest["formats"]:
                     raise PauseRequested()
-                if latest.get("review_required") and not checkpoint.get("owner_approved"):
+                if (latest.get("review_required") or job.get("review_required")) and not checkpoint.get("owner_approved"):
                     raise PauseRequested("ready")
                 current = self.store.get_connection(job["owner_id"], job["project_id"], job["platform"])
                 if not current or current.get("id") != connection.get("id") or current["account_id"] != connection["account_id"]:
@@ -214,6 +225,8 @@ class Worker:
             self._finish(job, available_at=iso(tomorrow), error="Дневной лимит создания материалов достигнут.")
             return "pending"
         checkpoint["generation_started"] = iso(self.clock())
+        checkpoint["pipeline_version"] = 2
+        checkpoint.pop("generation_complete", None)
         self._update(job, checkpoint=checkpoint, error="")
         recent_titles = [str(item["content"].get("title") or "") for item in
                          self.store.list_jobs(job["owner_id"], job["project_id"], limit=50)
@@ -221,16 +234,28 @@ class Worker:
         request = dict(job)
         if recent_titles:
             request["topic"] = str(job.get("topic") or "") + " Не повторяй недавние темы: " + "; ".join(recent_titles)
-        content, generated_assets = self.generator.generate(project, request)
+        def progress(value):
+            self._update(job, progress=dict(value))
+
+        if getattr(self.generator, "supports_progress", False) is True:
+            content, generated_assets = self.generator.generate(project, request, progress=progress)
+        else:
+            content, generated_assets = self.generator.generate(project, request)
         if not isinstance(content, dict) or not str(content.get("text") or "").strip():
             raise ValueError("ИИ не подготовил текст материала.")
+        # Keep the paid editorial result even if the subsequent media upload
+        # fails. Incomplete production is never eligible for publication.
+        self._update(job, content=content, assets=[], checkpoint=dict(checkpoint))
         assets = []
         for asset in generated_assets:
             assets.append(self.store.put_asset(job["owner_id"], job["project_id"], job["id"],
                                                asset["filename"], asset["data"], asset["mime_type"]))
+            self._update(job, assets=list(assets))
+        checkpoint["generation_complete"] = True
         latest = self.store.get_project(job["owner_id"], job["project_id"])
-        state = "ready" if latest.get("review_required") else "scheduled" if latest.get("automation_enabled") else "paused"
+        state = "ready" if (latest.get("review_required") or job.get("review_required") or not latest.get("automation_enabled")) else "scheduled"
         self._finish(job, content=content, assets=assets, state=state, checkpoint=checkpoint,
+                     progress={"stage": "ready", "message": "Материал готов к проверке." if state == "ready" else "Материал подготовлен и ждёт времени публикации."},
                      generated_at=iso(self.clock()), available_at=iso(max(timestamp(self.clock()), timestamp(job["scheduled_at"]))), error="")
         return "generated"
 

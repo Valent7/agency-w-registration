@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
+from hashlib import sha256
+import uuid
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -91,6 +93,10 @@ def _seed_project(target_profile=None):
         "website": "https://agency-w.streamlit.app/",
         "cta": "Узнайте больше об Агентстве W на сайте.",
         "brand_color": "#D4AF37",
+        "facts": "",
+        "examples": "",
+        "visual_style": "",
+        "avoid": "",
         "platforms": list(PLATFORMS),
         "formats": list(FORMATS),
         "timezone": "Europe/Berlin",
@@ -123,6 +129,12 @@ def _project_form(owner_id, project, service, target_profile):
         language = st.text_input("Язык публикаций", value=values["language"], key=key + "_language")
         tone = st.text_area("Голос бренда", value=values["tone"], height=90, key=key + "_tone")
         cta = st.text_input("Желаемое действие читателя", value=values["cta"], key=key + "_cta")
+        with st.expander("Память бренда: факты, примеры и оформление", expanded=False):
+            st.caption("Добавьте утверждённые сведения и удачные примеры. Завод будет использовать их при создании каждого материала.")
+            facts = st.text_area("Проверенные сведения о проекте", value=values["facts"], max_chars=6000, height=140, key=key + "_facts", help="Реальные услуги, возможности, цены и подтверждённые результаты. Указывайте только то, что можно использовать в публикациях.")
+            examples = st.text_area("Примеры хороших материалов", value=values["examples"], max_chars=6000, height=140, key=key + "_examples", help="Вставьте тексты, на которые заводу стоит ориентироваться по стилю. Он должен писать новые материалы, а не копировать примеры.")
+            visual_style = st.text_area("Визуальный стиль", value=values["visual_style"], max_chars=2000, height=100, key=key + "_visual_style", help="Например: реалистичная фотография, тёплый вечерний свет, живые люди, спокойная композиция, без роботов и неоновых сеток.")
+            avoid = st.text_area("Что нельзя обещать и использовать", value=values["avoid"], max_chars=2000, height=100, key=key + "_avoid", help="Неподтверждённые возможности, запрещённые обещания, слова или визуальные образы.")
         brand_color = st.color_picker("Цвет оформления", value=values["brand_color"], key=key + "_color")
         platforms = st.multiselect("Площадки", list(PLATFORMS), default=values["platforms"], format_func=PLATFORMS.get, key=key + "_platforms")
         formats = st.multiselect("Форматы", list(FORMATS), default=values["formats"], format_func=FORMATS.get, key=key + "_formats")
@@ -131,7 +143,7 @@ def _project_form(owner_id, project, service, target_profile):
         left, right = st.columns(2)
         days = left.number_input("Планировать на дней вперёд", min_value=1, max_value=30, value=int(values["plan_days"]), key=key + "_days")
         daily_limit = right.number_input("Лимит созданий в сутки", min_value=1, max_value=60, value=int(values["max_daily_generations"]), help="Общий предел генераций по всем площадкам этого проекта. Контент сверх лимита ждёт следующего дня.", key=key + "_limit")
-        review = st.checkbox("Проверять каждый материал перед публикацией", value=bool(values["review_required"]), key=key + "_review")
+        review = st.checkbox("Проверять каждый материал перед публикацией", value=bool(values["review_required"]), key=key + "_review", help="Включено: завод создаёт материал и ждёт вашего утверждения здесь. Выключено: после проверки качества завод публикует по расписанию, если автопилот включён.")
         automatic = st.checkbox("Включить автопилот", value=bool(values["automation_enabled"]), help="ИИ создаёт материалы и публикует их в выбранные аккаунты по расписанию. При включённой проверке сначала ждёт вашего утверждения.", key=key + "_enabled")
         saved = st.form_submit_button("Сохранить проект" if existing else "Создать проект", type="primary", width="stretch")
     if saved:
@@ -139,6 +151,7 @@ def _project_form(owner_id, project, service, target_profile):
             "name": name, "product": product, "audience": audience, "goal": goal,
             "website": website, "language": language, "tone": tone, "cta": cta,
             "brand_color": brand_color, "platforms": platforms, "formats": formats,
+            "facts": facts, "examples": examples, "visual_style": visual_style, "avoid": avoid,
             "timezone": timezone, "publish_times": [part.strip() for part in publish_times.split(",") if part.strip()],
             "plan_days": int(days), "max_daily_generations": int(daily_limit),
             "review_required": review, "automation_enabled": automatic,
@@ -152,6 +165,50 @@ def _project_form(owner_id, project, service, target_profile):
             st.rerun()
         except Exception as exc:
             _action_error("Не удалось сохранить проект", exc)
+
+
+def _create_material(owner_id, project, store, service, capabilities):
+    if not project:
+        return
+    key = f"cf_auto_{owner_id}_{project['id']}_brief"
+    try:
+        connected = {item.get("platform") for item in store.list_connections(owner_id, project["id"])}
+    except Exception:
+        st.info("Не удалось проверить подключённые площадки. Настройки проекта сохранены; попробуйте обновить страницу.")
+        return
+    platforms = [value for value in project.get("platforms", []) if value in PLATFORMS and value in connected]
+    formats = [value for value in project.get("formats", []) if value in FORMATS]
+    st.markdown("#### Что создаём?")
+    st.caption("Опишите идею обычными словами. Завод подготовит текст и оформление для выбранных площадок. Готовый результат появится во вкладке «Материалы».")
+    if not platforms:
+        st.info("Подключите хотя бы одну площадку во вкладке «Площадки», чтобы создать материал для неё.")
+    if not capabilities.get("ai_configured"):
+        st.info("Создание станет доступно после подключения ИИ-сервиса администратором.")
+    with st.form(key + "_form"):
+        topic = st.text_area("Ваша задача", placeholder="Например: покажи предпринимателю, как освободить вечер от повторяющихся задач. Объясни на конкретном примере и пригласи обсудить его задачу.", max_chars=6000, height=120, key=key + "_topic")
+        content_format = st.radio("Формат материала", formats, format_func=FORMATS.get, horizontal=True, key=key + "_format") if formats else None
+        selected = st.multiselect("Где разместить", platforms, default=platforms, format_func=PLATFORMS.get, key=key + "_platforms")
+        submitted = st.form_submit_button("Создать материал", type="primary", width="stretch", disabled=not (platforms and formats and capabilities.get("ai_configured")))
+    if project.get("review_required"):
+        st.caption("Перед публикацией завод дождётся вашего утверждения во вкладке «Материалы».")
+    elif project.get("automation_enabled"):
+        st.caption("Автопилот включён: готовый материал после проверки качества будет опубликован автоматически.")
+    else:
+        st.caption("Автопилот на паузе: завод подготовит материал и сохранит его здесь. Для публикации включите автопилот во вкладке «Проект».")
+    if submitted:
+        # Reusing the ID for the same submitted brief protects a double click,
+        # a rerun, or retry after an ambiguous storage response from duplication.
+        fingerprint = sha256(repr((topic.strip(), content_format, sorted(selected))).encode()).hexdigest()
+        pending = st.session_state.get(key + "_request")
+        if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
+            pending = {"id": uuid.uuid4().hex, "fingerprint": fingerprint}
+            st.session_state[key + "_request"] = pending
+        try:
+            jobs = service.create_material(owner_id, project["id"], topic, content_format, selected, request_id=pending["id"])
+            st.session_state[f"cf_auto_{owner_id}_notice"] = f"Задача сохранена. Завод подготовит материалы для {len(jobs)} площадок. Результат появится во вкладке «Материалы»."
+            st.rerun()
+        except Exception as exc:
+            _action_error("Не удалось создать материал", exc)
 
 
 def _connections(owner_id, project, store, capabilities):
@@ -288,12 +345,51 @@ def _assets_preview(owner_id, job, store):
             st.image(source, caption=asset.get("filename"), width="stretch")
 
 
+def _quality_feedback(job, content):
+    report = content.get("quality_review") or job.get("quality_review")
+    if not isinstance(report, dict):
+        return
+    if report.get("approved") is True:
+        st.caption("Стагирит проверил содержание перед созданием оформления.")
+    elif report.get("approved") is False:
+        st.warning("Стагирит нашёл замечания. Материал требует доработки.")
+    issues = report.get("issues")
+    if isinstance(issues, list):
+        for issue in issues[:8]:
+            if isinstance(issue, str) and issue.strip():
+                st.write("• " + issue.strip()[:500])
+    feedback = report.get("brief_feedback")
+    if isinstance(feedback, str) and feedback.strip():
+        st.caption(feedback.strip()[:1000])
+
+
+def _revision_form(owner_id, job, service, key):
+    with st.form(key + "_revision_form"):
+        feedback = st.text_area("Что изменить в тексте или оформлении?", max_chars=3000, height=90, key=key + "_feedback", placeholder="Например: сделай текст короче, добавь конкретный пример, замени робота на живого человека в вечерней домашней обстановке.")
+        submitted = st.form_submit_button("Переработать материал")
+    if not submitted:
+        return
+    fingerprint = sha256(feedback.strip().encode()).hexdigest()
+    pending = st.session_state.get(key + "_revision_request")
+    if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
+        pending = {"id": uuid.uuid4().hex, "fingerprint": fingerprint}
+        st.session_state[key + "_revision_request"] = pending
+    try:
+        service.revise_material(owner_id, job["id"], feedback, request_id=pending["id"])
+        st.session_state[f"cf_auto_{owner_id}_notice"] = "Правки приняты. Завод создаст новую версию; исходный материал сохранён. Результат появится во вкладке «Материалы»."
+        st.rerun()
+    except Exception as exc:
+        _action_error("Не удалось передать правки", exc)
+
+
 def _materials(owner_id, project, jobs, store, service):
     if not project:
         st.info("После создания проекта здесь появятся тексты, карусели и видео.")
         return
+    if st.button("Обновить материалы", key=f"cf_auto_{owner_id}_{project['id']}_refresh_materials"):
+        st.rerun()
     if not jobs:
-        st.info("Готовых материалов пока нет. Начните с контент-плана.")
+        st.info("Готовых материалов пока нет. Опишите задачу в блоке «Что создаём?» или заполните контент-план.")
         return
     filter_value = st.selectbox("Показать материалы", ["all", "ready", "scheduled", "published", "attention"], format_func=lambda value: {"all": "Все", "ready": "Ждут проверки", "scheduled": "В расписании", "published": "Опубликованные", "attention": "Требуют внимания"}[value], key=f"cf_auto_{owner_id}_{project['id']}_filter")
     selected = [job for job in jobs if filter_value == "all" or (filter_value == "attention" and job.get("state") in {"failed", "needs_connection", "reconcile"}) or job.get("state") == filter_value]
@@ -307,13 +403,23 @@ def _materials(owner_id, project, jobs, store, service):
         label = f"{PLATFORMS.get(job.get('platform'), job.get('platform'))} · {title} · {STATES.get(state, state)}"
         with st.expander(label, expanded=state in {"ready", "failed", "needs_connection", "reconcile"}):
             st.caption(_local_time(job.get("scheduled_at"), project.get("timezone", "Europe/Berlin")))
+            if job.get("source_job_id"):
+                st.caption("Новая версия по вашим замечаниям. Исходный материал сохранён отдельно.")
+            progress = job.get("progress")
+            if isinstance(progress, dict) and isinstance(progress.get("message"), str) and state not in {"published", "cancelled"}:
+                st.caption(progress["message"][:400])
             if job.get("error"):
                 # Persisted error messages are produced by sanitized worker errors.
                 st.warning(str(job["error"])[:700])
             if state == "reconcile":
                 st.info("Площадка могла принять публикацию, но ответ не был подтверждён. Проверьте аккаунт перед любым повтором; автоматическая повторная отправка остановлена.")
             if content:
-                editable = state == "ready" and not (job.get("checkpoint") or {}).get("publish_started")
+                _quality_feedback(job, content)
+                checkpoint = job.get("checkpoint") or {}
+                review = content.get("quality_review") or {}
+                rejected = isinstance(review, dict) and review.get("approved") is False
+                incomplete = checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
+                editable = state == "ready" and not checkpoint.get("publish_started") and not rejected and not incomplete
                 text = st.text_area("Текст публикации", value=str(content.get("text") or ""), height=180, disabled=not editable, key=key + "_text")
                 for index, slide in enumerate(content.get("slides") or [], 1):
                     value = slide if isinstance(slide, str) else "\n".join(str(slide.get(name) or "") for name in ("title", "text"))
@@ -330,6 +436,8 @@ def _materials(owner_id, project, jobs, store, service):
                         st.rerun()
                     except Exception as exc:
                         _action_error("Не удалось утвердить материал", exc)
+                if state in {"ready", "failed"} and not (job.get("checkpoint") or {}).get("publish_started"):
+                    _revision_form(owner_id, job, service, key)
             if state == "published" and job.get("permalink"):
                 permalink = str(job["permalink"])
                 if permalink.startswith("https://"):
@@ -405,6 +513,7 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
                     st.rerun()
                 except Exception as exc:
                     _action_error("Не удалось приостановить автопилот", exc)
+            _create_material(owner_id, project, store, service, capabilities)
         project_tab, accounts_tab, calendar_tab, materials_tab = st.tabs(["Проект", "Площадки", "Календарь", "Материалы"])
         with project_tab:
             _project_form(owner_id, project, service, target_profile)

@@ -22,6 +22,10 @@ PROJECT = {
     "name": "Студия керамики", "product": "Мастер-классы по керамике",
     "audience": "Взрослые начинающие", "language": "Русский",
     "tone": "Тёплый, понятный", "goal": "Запись на занятия", "brand_color": "#336699",
+    "facts": "Занятия для начинающих, готовые работы проходят обжиг.",
+    "examples": "Проведите вечер за гончарным кругом.",
+    "visual_style": "Редакционная фотография в тёплом естественном свете.",
+    "avoid": "Не обещать изготовление готовой чашки за один вечер.",
 }
 POST = {"title": "Первый вечер за гончарным кругом", "text": "Слепите свою первую чашку. Выберите удобное занятие на сайте студии."}
 
@@ -50,14 +54,38 @@ def image_response():
     return response({"data": [{"b64_json": base64.b64encode(artwork()).decode()}]})
 
 
+def review_response(approved=True, *, issue="Изображение не соответствует сцене."):
+    return copy_response({
+        "approved": approved, "issues": [] if approved else [issue],
+        "brief_feedback": "Готово." if approved else "Исправь конкретную указанную проблему.",
+    })
+
+
+def visual_plan(count=1):
+    return {"art_direction": "Одна мастерская, натуральные материалы и тёплый свет.", "frames": [
+        {"subject": f"Этап работы с глиной {index + 1}: человек создаёт чашку.",
+         "composition": "Руки и глина в центре; свободная область под короткую подпись.",
+         "lighting": "Мягкий свет из окна.", "palette": "Тёплая глина и синий акцент."}
+        for index in range(count)
+    ]}
+
+
+def production_prefix(content=POST, count=1):
+    return [copy_response(content), review_response(), copy_response(visual_plan(count))]
+
+
+def requested_paths(session):
+    return [call.args[0].removeprefix("https://api.openai.com/v1/") for call in session.post.call_args_list]
+
+
 class GenerationTests(unittest.TestCase):
-    def generator(self, replies):
+    def generator(self, replies, **kwargs):
         session = Mock()
         session.post.side_effect = replies
-        return Generator("test-provider-key", session=session), session
+        return Generator("test-provider-key", session=session, **kwargs), session
 
     def test_post_is_platform_copy_and_a_real_branded_image(self):
-        generator, session = self.generator([copy_response(POST), image_response()])
+        generator, session = self.generator(production_prefix() + [image_response(), review_response()])
         content, assets = generator.generate(PROJECT, {"id": "one", "platform": "threads", "format": "post"})
         self.assertEqual(content["format"], "post")
         self.assertEqual(content["text"], POST["text"])
@@ -65,21 +93,23 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(assets[0]["mime_type"], "image/jpeg")
         with Image.open(io.BytesIO(assets[0]["data"])) as generated:
             self.assertEqual(generated.size, (1080, 1350))
-        self.assertEqual(session.post.call_count, 2)
+        self.assertEqual(requested_paths(session), ["responses", "responses", "responses", "images/generations", "responses"])
+        self.assertTrue(content["quality_review"]["approved"])
+        self.assertTrue(content["visual_reviews"][0]["approved"])
         sent_project = json.loads(session.post.call_args_list[0].kwargs["json"]["input"])["project"]
         self.assertEqual(sent_project["name"], PROJECT["name"])
         self.assertNotIn("Агентство W", sent_project["name"])
-        self.assertEqual(session.post.call_args_list[1].kwargs["json"]["n"], 1)
-        self.assertEqual(session.post.call_args_list[1].kwargs["json"]["quality"], "high")
+        self.assertEqual(session.post.call_args_list[3].kwargs["json"]["n"], 1)
+        self.assertEqual(session.post.call_args_list[3].kwargs["json"]["quality"], "high")
 
     def test_image_quality_is_configurable_without_changing_the_model(self):
         for quality in ("low", "medium", "high", "auto"):
             with self.subTest(quality=quality):
                 session = Mock()
-                session.post.side_effect = [copy_response(POST), image_response()]
+                session.post.side_effect = production_prefix() + [image_response(), review_response()]
                 generator = Generator("test-provider-key", session=session, image_quality=quality)
                 generator.generate(PROJECT, {"platform": "vk", "format": "post"})
-                image_payload = session.post.call_args_list[-1].kwargs["json"]
+                image_payload = session.post.call_args_list[3].kwargs["json"]
                 self.assertEqual(image_payload["quality"], quality)
                 self.assertEqual(image_payload["model"], "gpt-image-1")
 
@@ -91,12 +121,153 @@ class GenerationTests(unittest.TestCase):
 
     def test_carousel_order_and_paid_image_count_are_bounded(self):
         copy = dict(POST, slides=["Один: подготовьте глину.", "Два: найдите центр.", "Три: сформируйте чашку."])
-        generator, session = self.generator([copy_response(copy)] + [image_response() for _ in range(3)])
+        generator, session = self.generator(production_prefix(copy, 3) + [
+            reply for _ in range(3) for reply in (image_response(), review_response())
+        ])
         content, assets = generator.generate(PROJECT, {"platform": "instagram", "format": "carousel"})
         self.assertEqual(content["slides"], copy["slides"])
         self.assertEqual([a["filename"] for a in assets], ["slide_01.jpg", "slide_02.jpg", "slide_03.jpg"])
-        self.assertEqual(session.post.call_count, 4)
+        self.assertEqual(session.post.call_count, 9)
+        self.assertEqual(requested_paths(session)[3:], ["images/generations", "responses"] * 3)
         self.assertEqual(sum(c.kwargs["json"].get("n", 0) for c in session.post.call_args_list), 3)
+
+    def test_semantic_rejection_gets_one_rewrite_and_an_independent_recheck(self):
+        revised = dict(POST, text="Создайте чашку своими руками. После занятия она пройдёт обжиг. Выберите занятие на сайте.")
+        issue = "Утверждение о готовой чашке в тот же вечер не подтверждено."
+        generator, session = self.generator([
+            copy_response(POST), review_response(False, issue=issue), copy_response(revised),
+            review_response(), copy_response(visual_plan()), image_response(), review_response(),
+        ], review_model="independent-review-model")
+        content, _ = generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        self.assertEqual(content["text"], revised["text"])
+        self.assertTrue(content["quality_review"]["approved"])
+        rewrite_payload = json.loads(session.post.call_args_list[2].kwargs["json"]["input"])
+        self.assertEqual(rewrite_payload["previous"]["text"], POST["text"])
+        self.assertEqual(rewrite_payload["review"]["issues"], [issue])
+        self.assertEqual([session.post.call_args_list[i].kwargs["json"]["model"] for i in (1, 3, 6)],
+                         ["independent-review-model"] * 3)
+        self.assertEqual(requested_paths(session), ["responses"] * 5 + ["images/generations", "responses"])
+
+    def test_repeated_semantic_failure_preserves_draft_and_never_starts_media(self):
+        revised = dict(POST, text="Исправленный, но всё ещё неподтверждённый текст.")
+        generator, session = self.generator([
+            copy_response(POST), review_response(False), copy_response(revised), review_response(False),
+        ])
+        with self.assertRaises(GenerationError) as caught:
+            generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        self.assertEqual(requested_paths(session), ["responses"] * 4)
+        self.assertEqual(caught.exception.draft["text"], revised["text"])
+        self.assertFalse(caught.exception.draft["quality_review"]["approved"])
+
+    def test_contradictory_editorial_approval_cannot_unlock_media(self):
+        generator, session = self.generator([
+            copy_response(POST),
+            copy_response({"approved": True, "issues": ["Выдумана цена"], "brief_feedback": "Готово"}),
+        ])
+        with self.assertRaises(GenerationError):
+            generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        self.assertEqual(requested_paths(session), ["responses"] * 2)
+
+    def test_project_memory_reaches_author_art_director_and_image_brief(self):
+        generator, session = self.generator(production_prefix() + [image_response(), review_response()])
+        generator.generate({**PROJECT, "token": "must-not-leave-project-boundary"},
+                           {"platform": "vk", "format": "post", "topic": "Тихий вечер с глиной"})
+        for index in (0, 1, 2):
+            project = json.loads(session.post.call_args_list[index].kwargs["json"]["input"])["project"]
+            for field in ("facts", "examples", "visual_style", "avoid"):
+                self.assertEqual(project[field], PROJECT[field])
+            self.assertNotIn("token", project)
+        image_prompt = session.post.call_args_list[3].kwargs["json"]["prompt"]
+        self.assertIn(PROJECT["visual_style"], image_prompt)
+        self.assertIn(visual_plan()["frames"][0]["subject"], image_prompt)
+        self.assertNotIn("must-not-leave-project-boundary", image_prompt)
+
+    def test_vision_review_receives_the_generated_image_and_scene_brief(self):
+        generator, session = self.generator(production_prefix() + [image_response(), review_response()])
+        generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        vision = session.post.call_args_list[4].kwargs["json"]["input"][0]
+        self.assertEqual(vision["role"], "user")
+        text, image = vision["content"]
+        self.assertEqual(text["type"], "input_text")
+        self.assertEqual(json.loads(text["text"])["frames"], visual_plan()["frames"])
+        self.assertEqual(image["type"], "input_image")
+        self.assertEqual(image["detail"], "high")
+        prefix, encoded = image["image_url"].split(",", 1)
+        self.assertEqual(prefix, "data:image/jpeg;base64")
+        with Image.open(io.BytesIO(base64.b64decode(encoded, validate=True))) as preview:
+            self.assertEqual(preview.size, (256, 384))
+
+    def test_failed_visual_gets_one_concrete_correction_then_recheck(self):
+        issue = "На руках заметно сросшиеся пальцы."
+        generator, session = self.generator(production_prefix() + [
+            image_response(), review_response(False, issue=issue), image_response(), review_response(),
+        ])
+        content, assets = generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        self.assertEqual(len(assets), 1)
+        self.assertTrue(content["visual_reviews"][0]["approved"])
+        self.assertEqual(requested_paths(session), ["responses"] * 3 + ["images/generations", "responses"] * 2)
+        correction_prompt = session.post.call_args_list[5].kwargs["json"]["prompt"]
+        self.assertIn(issue, correction_prompt)
+
+    def test_second_visual_failure_stops_and_preserves_explanation(self):
+        generator, session = self.generator(production_prefix() + [
+            image_response(), review_response(False), image_response(), review_response(False),
+        ])
+        with patch("content_factory_media.render_slide") as render:
+            with self.assertRaises(GenerationError) as caught:
+                generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        render.assert_not_called()
+        self.assertEqual(session.post.call_count, 7)
+        self.assertFalse(caught.exception.draft["visual_reviews"][0]["approved"])
+        self.assertIn("Изображение не соответствует", caught.exception.draft["quality_review"]["issues"][0])
+
+    def test_visual_correction_budget_is_shared_by_the_whole_carousel(self):
+        content = dict(POST, slides=["Подготовьте глину.", "Найдите центр.", "Сформируйте чашку."])
+        generator, session = self.generator(production_prefix(content, 3) + [
+            image_response(), review_response(False), image_response(), review_response(),
+            image_response(), review_response(False),
+        ])
+        with patch("content_factory_media.render_slide") as render:
+            with self.assertRaises(GenerationError):
+                generator.generate(PROJECT, {"platform": "vk", "format": "carousel"})
+        render.assert_not_called()
+        self.assertEqual(sum(path == "images/generations" for path in requested_paths(session)), 3)
+        self.assertEqual(session.post.call_count, 9)
+
+    def test_malformed_visual_plan_stops_before_the_first_image(self):
+        generator, session = self.generator([
+            copy_response(POST), review_response(), copy_response({"art_direction": "Стиль", "frames": []}),
+        ])
+        with self.assertRaises(GenerationError) as caught:
+            generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        self.assertEqual(requested_paths(session), ["responses"] * 3)
+        self.assertTrue(caught.exception.draft["quality_review"]["approved"])
+
+    def test_broken_vision_response_does_not_repeat_a_paid_image_request(self):
+        corrupt = response({"output": [{"content": [{"type": "output_text", "text": "not json"}]}]})
+        generator, session = self.generator(production_prefix() + [image_response(), corrupt])
+        with self.assertRaises(GenerationError):
+            generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        self.assertEqual(session.post.call_count, 5)
+        self.assertEqual(requested_paths(session).count("images/generations"), 1)
+
+    def test_provider_error_during_visual_review_is_sanitized_without_regeneration(self):
+        generator, session = self.generator(production_prefix() + [
+            image_response(), response({"error": "test-provider-key"}, status=401),
+        ])
+        with self.assertRaises(GenerationError) as caught:
+            generator.generate(PROJECT, {"platform": "vk", "format": "post"})
+        self.assertNotIn("test-provider-key", str(caught.exception))
+        self.assertEqual(session.post.call_count, 5)
+        self.assertEqual(requested_paths(session).count("images/generations"), 1)
+
+    def test_progress_describes_real_stages_without_claiming_publication(self):
+        generator, _ = self.generator(production_prefix() + [image_response(), review_response()])
+        progress = Mock()
+        generator.generate(PROJECT, {"platform": "vk", "format": "post"}, progress=progress)
+        stages = [call.args[0]["stage"] for call in progress.call_args_list]
+        self.assertEqual(stages, ["copy", "review", "visual", "image", "saving"])
+        self.assertNotIn("published", stages)
 
     def test_invalid_copy_never_starts_paid_media_generation(self):
         invalid = (
@@ -154,26 +325,29 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(session.post.call_count, 1)
 
     def test_invalid_image_is_rejected_without_url_fallback(self):
-        generator, session = self.generator([copy_response(POST), response({"data": [{"url": "https://example.invalid/image"}]})])
+        generator, session = self.generator(production_prefix() + [response({"data": [{"url": "https://example.invalid/image"}]})])
         with self.assertRaises(GenerationError):
             generator.generate(PROJECT, {"platform": "vk", "format": "post"})
-        self.assertEqual(session.post.call_count, 2)
-        generator, session = self.generator([copy_response(POST), response({"data": [{"b64_json": "not base64"}]})])
+        self.assertEqual(session.post.call_count, 4)
+        generator, session = self.generator(production_prefix() + [response({"data": [{"b64_json": "not base64"}]})])
         with self.assertRaises(GenerationError):
             generator.generate(PROJECT, {"platform": "vk", "format": "post"})
 
-    def test_reel_uses_copy_image_speech_then_real_video_renderer(self):
+    def test_reel_reviews_four_distinct_scenes_before_speech_and_story_renderer(self):
         narration = " ".join(["керамика"] * 50)
-        generator, session = self.generator([
-            copy_response(dict(POST, narration=narration)), image_response(), response(content=b"speech"),
-        ])
-        with patch("content_factory_generation.render_reel", return_value=b"real-renderer-result") as render:
+        generator, session = self.generator(production_prefix(dict(POST, narration=narration), 4) + [
+            reply for _ in range(4) for reply in (image_response(), review_response())
+        ] + [response(content=b"speech")])
+        with patch("content_factory_media.render_story_reel", return_value=b"real-renderer-result") as render:
             content, assets = generator.generate(PROJECT, {"platform": "instagram", "format": "reel"})
         self.assertEqual(content["narration"], narration)
         self.assertEqual(assets, [{"data": b"real-renderer-result", "mime_type": "video/mp4", "filename": "reel.mp4"}])
-        self.assertEqual(session.post.call_count, 3)
+        self.assertEqual(session.post.call_count, 12)
+        self.assertEqual(requested_paths(session), ["responses"] * 3 + ["images/generations", "responses"] * 4 + ["audio/speech"])
         self.assertEqual(session.post.call_args_list[-1].kwargs["json"]["input"], narration)
         self.assertEqual(render.call_args.args[1], b"speech")
+        self.assertEqual(len(render.call_args.args[0]), 4)
+        self.assertEqual(render.call_args.args[2], narration)
 
     def test_reel_rejects_short_speech_and_camera_directions_before_images(self):
         for narration in ("Too short.", "Сцена 1: " + " ".join(["текст"] * 50)):

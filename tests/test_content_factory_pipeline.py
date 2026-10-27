@@ -83,6 +83,79 @@ class FactoryPipelineTests(unittest.TestCase):
         self.worker.run_once(101, self.project["id"])
         self.assertEqual(self.publisher.call_args.args[2]["text"], "Отредактированный текст")
 
+    def test_explicit_request_generates_in_background_with_schedule_off(self):
+        self.store.save_project(101, {**self.project, "automation_enabled": False})
+        job = self.job(requested_by_owner=True)
+        result = self.worker.run_once()
+        saved = self.store.get_job(101, job["id"])
+        self.assertEqual(result["generated"], 1)
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["progress"]["stage"], "ready")
+        self.assertEqual(self.worker.run_once()["published"], 0)
+        self.publisher.assert_not_called()
+
+    def test_background_request_flag_does_not_allow_publication_while_paused(self):
+        self.store.save_project(101, {**self.project, "automation_enabled": False})
+        job = self.job(state="scheduled", requested_by_owner=True, content={"format": "post", "text": "Готовый текст"})
+        self.connect()
+        self.worker.run_once()
+        self.assertEqual(self.store.get_job(101, job["id"])["state"], "paused")
+        self.publisher.assert_not_called()
+
+    def test_job_specific_review_survives_project_without_review(self):
+        self.connect()
+        job = self.job(review_required=True, requested_by_owner=True)
+        self.worker.run_once(101, self.project["id"])
+        self.assertEqual(self.store.get_job(101, job["id"])["state"], "ready")
+        self.worker.run_once(101, self.project["id"])
+        self.publisher.assert_not_called()
+        self.service.approve(101, job["id"])
+        self.worker.run_once(101, self.project["id"])
+        self.publisher.assert_called_once()
+
+    def test_job_review_is_rechecked_at_public_write_barrier(self):
+        self.connect()
+        job = self.job(state="scheduled", review_required=True,
+                       content={"format": "post", "text": "Готовый текст"})
+        self.worker.run_once(101, self.project["id"])
+        self.assertEqual(self.store.get_job(101, job["id"])["state"], "ready")
+        self.publisher.assert_not_called()
+
+    def test_quality_failure_keeps_editable_context_and_never_publishes(self):
+        from content_factory_generation import GenerationError
+        draft = {"format": "post", "text": "Неудачный черновик", "title": "Черновик",
+                 "quality_review": {"approved": False, "issues": ["Нет конкретного примера"], "brief_feedback": "Добавить пример"}}
+        job = self.job()
+        self.worker.generator = Mock()
+        self.worker.generator.generate.side_effect = GenerationError("Требуется доработка", draft=draft)
+        self.worker.run_once(101, self.project["id"])
+        saved = self.store.get_job(101, job["id"])
+        self.assertEqual(saved["state"], "failed")
+        self.assertEqual(saved["content"], draft)
+        self.assertEqual(saved["progress"]["stage"], "failed")
+        self.assertEqual(saved["assets"], [])
+        self.publisher.assert_not_called()
+
+    def test_upload_failure_retains_generated_copy_but_never_schedules_it(self):
+        job = self.job()
+        with patch.object(self.store, "put_asset", side_effect=StoreError("Хранилище временно недоступно")):
+            self.worker.run_once(101, self.project["id"])
+        saved = self.store.get_job(101, job["id"])
+        self.assertEqual(saved["state"], "failed")
+        self.assertTrue(saved["content"]["text"])
+        self.assertNotIn("generation_complete", saved["checkpoint"])
+        self.assertEqual(saved["checkpoint"]["pipeline_version"], 2)
+        self.publisher.assert_not_called()
+        self.assertEqual(self.service.retry(101, job["id"])["state"], "queued")
+
+    def test_rejected_scheduled_content_cannot_bypass_the_publisher_gate(self):
+        self.connect()
+        job = self.job(state="scheduled", content={"format": "post", "text": "Отклонённый текст",
+                       "quality_review": {"approved": False, "issues": ["Выдуманный результат"], "brief_feedback": "Исправить"}})
+        self.worker.run_once(101, self.project["id"])
+        self.assertEqual(self.store.get_job(101, job["id"])["state"], "failed")
+        self.publisher.assert_not_called()
+
     def test_missing_connection_preserves_created_media(self):
         job = self.job()
         self.worker.run_once(101, self.project["id"])

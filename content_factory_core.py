@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import copy
+import json
 from datetime import datetime, time, timedelta, timezone
 from hashlib import sha256
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -36,7 +38,9 @@ def validate_project(data):
     result = dict(data)
     required = {"name": 120, "product": 6000, "audience": 3000}
     labels = {"name": "Название проекта", "product": "Продукт или услуга", "audience": "Аудитория",
-              "language": "Язык", "tone": "Стиль общения", "goal": "Цель", "website": "Сайт", "cta": "Призыв к действию"}
+              "language": "Язык", "tone": "Стиль общения", "goal": "Цель", "website": "Сайт", "cta": "Призыв к действию",
+              "facts": "Проверенные сведения", "examples": "Примеры хороших материалов",
+              "visual_style": "Визуальный стиль", "avoid": "Что нельзя обещать и использовать"}
     optional = {"language": ("Русский", 80), "tone": ("Ясно, доброжелательно, по делу", 1000),
                 "goal": ("Привлекать заинтересованных клиентов", 2000), "website": ("", 500),
                 "cta": ("Узнать подробнее", 500)}
@@ -48,6 +52,11 @@ def validate_project(data):
         result[name] = str(data.get(name) or default).strip()
         if len(result[name]) > limit:
             raise FactoryError(f"Слишком длинное поле «{labels[name]}».")
+    for name, limit in (("facts", 6000), ("examples", 6000), ("visual_style", 2000), ("avoid", 2000)):
+        value = data.get(name, "")
+        if not isinstance(value, str) or len(value) > limit or "\x00" in value:
+            raise FactoryError(f"Поле «{labels[name]}» должно содержать текст до {limit} символов.")
+        result[name] = value.strip()
     if result["website"] and not re.fullmatch(r"https://[^\s/@]+(?:/[^\s]*)?", result["website"]):
         raise FactoryError("Ссылка проекта должна начинаться с https://.")
     for name, allowed in (("platforms", PLATFORMS), ("formats", FORMATS)):
@@ -125,18 +134,82 @@ class ContentFactoryService:
                     changes = {"state": "published", "external_id": str(saved["external_id"]), "permalink": str(saved.get("permalink") or ""), "error": ""}
                 elif job.get("checkpoint", {}).get("publish_started") and job["state"] != "published":
                     changes = {"state": "reconcile", "error": "Отправка уже начиналась. Проверьте её результат в аккаунте перед повтором."}
-                elif (not project["automation_enabled"] or not allowed) and job["state"] in {"queued", "scheduled"}:
+                elif (not allowed or (not project["automation_enabled"] and (
+                    job["state"] == "scheduled" or not job.get("requested_by_owner")
+                ))) and job["state"] in {"queued", "scheduled"}:
                     changes = {"state": "paused"}
-                elif project["review_required"] and job["state"] == "scheduled" and not job.get("checkpoint", {}).get("owner_approved"):
+                elif (project["review_required"] or job.get("review_required")) and job["state"] == "scheduled" and not job.get("checkpoint", {}).get("owner_approved"):
                     changes = {"state": "ready"}
                 elif project["automation_enabled"] and allowed and job["state"] == "paused":
                     state = "queued"
                     if job.get("content"):
-                        state = "ready" if project["review_required"] and not job.get("checkpoint", {}).get("owner_approved") else "scheduled"
+                        state = "ready" if (project["review_required"] or job.get("review_required")) and not job.get("checkpoint", {}).get("owner_approved") else "scheduled"
                     changes = {"state": state, "available_at": iso(max(self.clock(), timestamp(job["scheduled_at"]))) if state == "scheduled" else iso(self.clock())}
                 if changes:
                     self.store.update_job(owner_id, job["id"], changes, expected_updated_at=job.get("updated_at"))
         return project
+
+    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id):
+        """Queue an explicit brief without enabling scheduled publication.
+
+        The request ID survives an ambiguous response or UI rerun. The worker
+        may prepare these jobs while the project's publication schedule is off,
+        but the usual publication and owner-review checks still apply.
+        """
+        return self._create_material(owner_id, project_id, topic, content_format, platforms, request_id=request_id)
+
+    def revise_material(self, owner_id, job_id, feedback, *, request_id):
+        job = self._job(owner_id, job_id)
+        if job.get("state") not in {"ready", "paused", "failed"} or not job.get("content"):
+            raise FactoryError("Переработать можно подготовленный материал, который ещё не отправлен площадке.")
+        if job.get("external_id") or job.get("checkpoint", {}).get("publish_started"):
+            raise FactoryError("Материал уже передан площадке. Для новой публикации создайте отдельную задачу.")
+        if not isinstance(feedback, str) or not 5 <= len(feedback.strip()) <= 3000 or "\x00" in feedback:
+            raise FactoryError("Опишите, что изменить: от 5 до 3000 символов.")
+        return self._create_material(
+            owner_id, job["project_id"], job.get("topic") or job["content"].get("title") or "Переработать готовый материал",
+            job["format"], [job["platform"]], request_id=request_id,
+            revision={"source_job_id": job["id"], "previous_content": copy.deepcopy(job["content"]),
+                      "revision_feedback": feedback.strip(), "review_required": True},
+        )
+
+    def _create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id, revision=None):
+        project = self._project(owner_id, project_id)
+        if not isinstance(topic, str) or not 10 <= len(topic.strip()) <= 6000 or "\x00" in topic:
+            raise FactoryError("Опишите задачу подробнее: от 10 до 6000 символов.")
+        topic = topic.strip()
+        if content_format not in FORMATS or content_format not in project.get("formats", []):
+            raise FactoryError("Выберите формат, включённый в настройках проекта.")
+        if not isinstance(platforms, list) or not platforms or any(
+            value not in PLATFORMS or value not in project.get("platforms", []) for value in platforms
+        ):
+            raise FactoryError("Выберите площадки, включённые в настройках проекта.")
+        platforms = list(dict.fromkeys(platforms))
+        connected = {item.get("platform") for item in self.store.list_connections(owner_id, project_id)}
+        if any(platform not in connected for platform in platforms):
+            raise FactoryError("Сначала подключите выбранные площадки во вкладке «Площадки».")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
+            raise FactoryError("Не удалось определить задачу. Обновите страницу и повторите создание.")
+        fingerprint = sha256(json.dumps([topic, content_format, sorted(platforms), revision], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        for previous in self.store.list_jobs(owner_id, project_id, limit=1000):
+            if previous.get("request_id") == request_id and previous.get("request_fingerprint") != fingerprint:
+                raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
+        now = iso(self.clock())
+        jobs = []
+        for platform in platforms:
+            key = sha256(f"request|{project_id}|{request_id}|{platform}".encode()).hexdigest()
+            job = self.store.enqueue_job(owner_id, project_id, {
+                "platform": platform, "format": content_format, "scheduled_at": now,
+                "available_at": now, "state": "queued", "dedupe_key": key,
+                "topic": topic, "requested_by_owner": True, "request_id": request_id,
+                "request_fingerprint": fingerprint,
+                "content": {}, "assets": [], "checkpoint": {}, "error": "", "attempts": 0,
+                **(revision or {}),
+            })
+            if job.get("request_fingerprint") != fingerprint:
+                raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
+            jobs.append(job)
+        return jobs
 
     def plan(self, owner_id, project_id, days=7):
         project = self._project(owner_id, project_id)
@@ -174,6 +247,11 @@ class ContentFactoryService:
         if job["state"] not in {"ready", "paused", "scheduled"} or not job.get("content"):
             raise FactoryError("Утвердить можно только подготовленный материал.")
         checkpoint = dict(job.get("checkpoint") or {})
+        review = job["content"].get("quality_review")
+        if (isinstance(review, dict) and review.get("approved") is False) or (
+            checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
+        ):
+            raise FactoryError("Создание или проверка качества ещё не завершены. Сначала передайте материал на доработку.")
         if checkpoint.get("publish_started"):
             raise FactoryError("Материал уже передан площадке; менять его во время публикации нельзя.")
         updated_content = dict(job["content"])
@@ -208,10 +286,15 @@ class ContentFactoryService:
         checkpoint = dict(job.get("checkpoint") or {})
         if checkpoint.get("publish_started"):
             raise FactoryError("Результат отправки неизвестен. Сначала проверьте аккаунт: повтор может создать дубликат.")
+        review = (job.get("content") or {}).get("quality_review")
+        incomplete = checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
+        regenerate = incomplete or (isinstance(review, dict) and review.get("approved") is False)
         # Retain already-created provider containers, but a deliberate retry may
         # start a failed generation again. It consumes a new daily reservation.
         checkpoint.pop("generation_started", None)
         checkpoint.pop("retry_count", None)
+        if regenerate:
+            checkpoint.pop("generation_complete", None)
         connection = self.store.get_connection(owner_id, job["project_id"], job["platform"])
         if connection and checkpoint.get("target_account_id") and (
             str(connection["account_id"]) != str(checkpoint["target_account_id"])
@@ -222,8 +305,8 @@ class ContentFactoryService:
             # allowed into this branch because publish_started was checked above.
             checkpoint = {key: value for key, value in checkpoint.items() if key in {"owner_approved"}}
         project = self._project(owner_id, job["project_id"])
-        state = "queued" if not job.get("content") else (
-            "ready" if project["review_required"] and not checkpoint.get("owner_approved") else "scheduled"
+        state = "queued" if not job.get("content") or regenerate else (
+            "ready" if (project["review_required"] or job.get("review_required")) and not checkpoint.get("owner_approved") else "scheduled"
         )
         if not project["automation_enabled"] and state == "scheduled":
             state = "paused"

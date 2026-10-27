@@ -54,7 +54,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: CONTENT_FACTORY_TEXT_MODEL
-        value: gpt-5-mini
+        value: gpt-5
       - key: CONTENT_FACTORY_IMAGE_MODEL
         value: gpt-image-1
       - key: CONTENT_FACTORY_IMAGE_QUALITY
