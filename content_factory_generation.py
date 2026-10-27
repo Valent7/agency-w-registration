@@ -248,6 +248,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def render_reel(image_bytes: bytes, speech_bytes: bytes, narration: str, title: str,
                 brand_name: str, brand_color: str) -> bytes:
     """Render a real vertical H.264/AAC video; no remote services are called."""
+    from agency_video_branding import VideoBrandingError, apply_agency_w_logo, check_video_logo
+    try:
+        check_video_logo(brand_name)
+    except VideoBrandingError as error:
+        raise GenerationError(str(error)) from error
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         raise GenerationError("Для производства видео нужны FFmpeg и ffprobe.")
@@ -291,7 +296,10 @@ def render_reel(image_bytes: bytes, speech_bytes: bytes, narration: str, title: 
             raise GenerationError("FFmpeg не смог собрать видео с озвучкой и субтитрами.") from exc
         if not result:
             raise GenerationError("Собранный видеофайл пуст.")
-        return result
+        try:
+            return apply_agency_w_logo(result, brand_name=brand_name)
+        except VideoBrandingError as error:
+            raise GenerationError(str(error)) from error
 
 
 class Generator:
@@ -316,6 +324,15 @@ class Generator:
         self.image_quality = image_quality
         self.live_video_client_resolver = live_video_client_resolver
         self.session = session if session is not None else requests.Session()
+
+    def _speech_payload(self, project: dict, narration: str) -> dict:
+        """Keep delivery direction out of the script and unsupported TTS models."""
+        payload = {"model": self.speech_model, "voice": self.voice,
+                   "input": narration, "response_format": "mp3"}
+        if self.speech_model == "gpt-4o-mini-tts" or self.speech_model.startswith("gpt-4o-mini-tts-"):
+            from content_factory_editorial import build_speech_instructions
+            payload["instructions"] = build_speech_instructions(project)
+        return payload
 
     def _request(self, path: str, payload: dict):
         try:
@@ -454,12 +471,14 @@ class Generator:
         return validate_review(self._structured(instructions, visual_input, model=self.review_model, max_tokens=4000))
 
     def _continue_live_video(self, project, state, client, *, report, save_production, save_source, load_source):
+        from agency_video_branding import check_video_logo, video_branding_proof
         from content_factory_editorial import build_motion_prompt, validate_visual_plan
         from content_factory_live_media import render_live_reel
         from content_factory_live_video import LiveVideoError, LiveVideoPending, LiveVideoUncertain
 
         if not can_resume_video(state):
             raise GenerationError("Не удалось проверить сохранённые исходники живого видео.")
+        check_video_logo(project["name"])
         state = copy.deepcopy(state)
         content = state["content"]
         count = len(state["raw_sources"])
@@ -546,6 +565,10 @@ class Generator:
         video = render_live_reel(clips, speech, content["narration"], content["title"],
                                  project["name"], project["brand_color"])
         content["video_kind"] = "live"
+        content.pop("video_branding", None)
+        proof = video_branding_proof(video, project["name"])
+        if proof is not None:
+            content["video_branding"] = proof
         state["phase"] = "complete"
         state["content"] = content
         persist()
@@ -554,6 +577,7 @@ class Generator:
 
     def generate(self, project, job, *, progress=None, production=None,
                  save_production=None, save_source=None, load_source=None):
+        from agency_video_branding import VideoBrandingError, check_video_logo, video_branding_proof
         from content_factory_editorial import (
             PROJECT_LIMITS, EditorialError, build_image_prompt, build_visual_prompt, validate_visual_plan,
         )
@@ -583,6 +607,8 @@ class Generator:
 
         content = None
         try:
+            if job["format"] == "reel" and not production:
+                check_video_logo(clean_project["name"])
             live_client = None
             if job["format"] == "reel" and mode == "live":
                 if not callable(self.live_video_client_resolver):
@@ -624,10 +650,7 @@ class Generator:
             speech, duration = None, None
             if live_client is not None:
                 report("video", "Записываем голос, чтобы точно рассчитать длительность живых сцен.")
-                speech = self._request("audio/speech", {
-                    "model": self.speech_model, "voice": self.voice,
-                    "input": content["narration"], "response_format": "mp3",
-                }).content
+                speech = self._request("audio/speech", self._speech_payload(clean_project, content["narration"])).content
                 duration = speech_duration(speech)
             frame_count = len(content["slides"]) if job["format"] == "carousel" else (
                 max(4, math.ceil((duration + 0.35) / 10)) if live_client is not None else 4
@@ -687,12 +710,13 @@ class Generator:
                     return self._continue_live_video(clean_project, state, live_client, report=report,
                                                      save_production=save_production, save_source=save_source, load_source=load_source)
                 report("video", "Записываем озвучку и собираем сцены, движение и субтитры.")
-                speech = self._request("audio/speech", {
-                    "model": self.speech_model, "voice": self.voice,
-                    "input": content["narration"], "response_format": "mp3",
-                }).content
+                speech = self._request("audio/speech", self._speech_payload(clean_project, content["narration"])).content
                 video = render_story_reel(artwork, speech, content["narration"], title, name, color)
                 content["video_kind"] = "illustrated"
+                content.pop("video_branding", None)
+                proof = video_branding_proof(video, name)
+                if proof is not None:
+                    content["video_branding"] = proof
                 assets.append({"data": video, "mime_type": "video/mp4", "filename": "reel.mp4"})
             else:
                 image = render_slide(artwork[0], title, name, color, layout="cover")
@@ -703,5 +727,5 @@ class Generator:
             if error.draft is None:
                 error.draft = content
             raise
-        except (EditorialError, MediaError, LiveMediaError) as error:
+        except (EditorialError, MediaError, LiveMediaError, VideoBrandingError) as error:
             raise GenerationError(str(error), draft=content) from error

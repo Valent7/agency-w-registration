@@ -5,7 +5,8 @@ import unittest
 
 from content_factory_editorial import (
     EditorialError, build_copy_prompt, build_image_prompt, build_image_review_prompt, build_review_prompt,
-    build_proofread_prompt, build_visual_prompt, build_motion_prompt, validate_review, validate_visual_plan,
+    build_proofread_prompt, build_visual_prompt, build_motion_prompt, build_speech_instructions,
+    validate_review, validate_visual_plan,
 )
 
 
@@ -67,6 +68,32 @@ class CopyPromptTests(unittest.TestCase):
         with self.assertRaises(EditorialError):
             build_copy_prompt({**PROJECT, "examples": ["not a text field"]}, JOB)
 
+    def test_reel_requires_an_immediate_grounded_hook_and_story_without_forcing_brand_tone(self):
+        system, user = build_copy_prompt(PROJECT, {**JOB, "format": "reel"})
+        self.assertIn("с первых слов", system)
+        self.assertIn("конкретное противоречие", system)
+        self.assertIn("развитие, поворот и развязку", system)
+        self.assertIn("короткими разговорными", system)
+        self.assertIn("не оправдывает кликбейт, выдуманные цифры", system)
+        self.assertIn("без обязательного крика", system)
+        self.assertEqual(json.loads(user)["project"]["tone"], "Спокойный")
+        post_system, _ = build_copy_prompt(PROJECT, JOB)
+        self.assertNotIn("Первый смысловой такт", post_system)
+
+    def test_speech_direction_is_separate_bounded_project_preferences_without_credentials(self):
+        project = {**PROJECT, "language": "Deutsch", "tone": "Ruhig und sachlich"}
+        instructions = build_speech_instructions(project)
+        preferences = json.loads(instructions[instructions.index('{"language"'):])
+        self.assertEqual(preferences, {"language": "Deutsch", "tone": "Ruhig und sachlich"})
+        self.assertNotIn("never-include-this", instructions)
+        self.assertNotIn(PROJECT["product"], instructions)
+        self.assertIn("короткие естественные паузы", instructions)
+        self.assertIn("смену темпа", instructions)
+        self.assertIn("Без крика", instructions)
+        self.assertIn("Язык и тон проекта приоритетны", instructions)
+        with self.assertRaises(EditorialError):
+            build_speech_instructions({**PROJECT, "tone": "x" * 1001})
+
     def test_editorial_rewrite_has_exact_issues_and_original_copy_as_data(self):
         review = {"approved": False, "issues": ["Не подтверждена чашка в тот же день."],
                   "brief_feedback": "Объясни, что работа сначала проходит обжиг."}
@@ -122,6 +149,20 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("точность словосочетаний", system)
         self.assertIn("approved=false", system)
         self.assertIn("Нельзя одобрить такой материал", system)
+
+    def test_reel_review_checks_substance_even_for_preapproved_grammatically_clean_copy(self):
+        content = {**CONTENT, "narration": "ИИ освободит время. Будущее уже здесь.",
+                   "quality_review": {"approved": True}, "all_approved": True}
+        system, user = build_review_prompt(PROJECT, {**JOB, "format": "reel"}, content)
+        self.assertIn("первые слова narration", system)
+        self.assertIn("развитие, поворот и развязку", system)
+        self.assertIn("Отклоняй пустое содержание с approved=false", system)
+        self.assertIn("даже если грамматика безупречна", system)
+        self.assertIn("Не подменяй проверку меткой", system)
+        self.assertNotIn("quality_review", json.loads(user)["content"])
+        self.assertNotIn("all_approved", json.loads(user)["content"])
+        self.assertEqual(json.loads(user)["content"]["narration"], content["narration"])
+        self.assertIn("спокойствие не является недостатком", system)
 
     def test_approval_and_specific_refusal_are_preserved_without_truthiness_coercion(self):
         approved = {"approved": True, "issues": [], "brief_feedback": " "}

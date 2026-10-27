@@ -9,6 +9,8 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+from agency_video_branding import LOGO_PATH
 from content_factory_live_media import LiveMediaError, render_live_reel, scene_durations, speech_duration
 
 
@@ -144,6 +146,16 @@ class RealMotionTests(unittest.TestCase):
             ], capture_output=True, timeout=20, check=True).stdout
 
         self.assertEqual(pcm(self.aac_path), pcm(final))
+        frame = subprocess.run([
+            shutil.which("ffmpeg"), "-v", "error", "-ss", "1.3", "-i", str(final),
+            "-vf", "crop=144:144:54:54", "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1",
+        ], capture_output=True, timeout=20, check=True)
+        observed = Image.open(io.BytesIO(frame.stdout)).convert("RGB")
+        official = Image.open(LOGO_PATH).convert("RGBA").resize((144, 144), Image.Resampling.LANCZOS)
+        opaque = [(source[:3], actual) for source, actual in zip(official.getdata(), observed.getdata()) if source[3] > 240]
+        self.assertGreater(len(opaque), 400)
+        self.assertLess(sum(sum(abs(a-b) for a,b in zip(source, actual)) / 3
+                            for source, actual in opaque) / len(opaque), 35)
 
     def test_still_image_and_remote_playlist_are_not_video_sources(self):
         for bad in (b"\x89PNG\r\n\x1a\n", b"#EXTM3U\nhttp://127.0.0.1/private\n"):
@@ -164,6 +176,17 @@ class RealMotionTests(unittest.TestCase):
         self.assertNotIn("{\\pos(0,0)}", text)
         self.assertNotIn("W{\\an1}", text)
         self.assertEqual(sum(line.startswith("Dialogue:") for line in text.splitlines()), 3)
+
+    def test_official_agency_mark_replaces_text_badge_but_partner_brand_remains(self):
+        from content_factory_live_media import _scene_captions
+        path = self.root / "brands.ass"
+        for brand, expected_count in (("Агентство W", 0), ("Partner Brand", 1)):
+            _scene_captions(path, [(0, 1, "Текст")], 0, 1, "Название", brand, "#D4AF37")
+            self.assertEqual(sum(",Brand," in line for line in path.read_text().splitlines()
+                                 if line.startswith("Dialogue:")), expected_count)
+            self.assertIn("90,90,240,1", path.read_text())
+            if brand == "Агентство W":
+                self.assertIn("8,90,90,218,1", path.read_text())
 
 
 if __name__ == "__main__":

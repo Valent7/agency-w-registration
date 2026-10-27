@@ -18,6 +18,7 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from agency_dialogue_video import normalise_dialogue_turns, dialogue_errors, dialogue_text
 from agency_outro import append_agency_outro
+from agency_video_branding import check_video_logo
 
 
 PROFESSIONAL_PORTRAITS = {
@@ -1078,7 +1079,7 @@ def _render_vertical_frame(image_bytes, output_path, logo_path=None):
             method=Image.Resampling.LANCZOS,
             centering=(0.5, 0.5),
         )
-    if logo_path and Path(logo_path).exists():
+    if logo_path:
         try:
             with Image.open(logo_path) as logo_source:
                 logo = logo_source.convert("RGBA")
@@ -1087,7 +1088,7 @@ def _render_vertical_frame(image_bytes, output_path, logo_path=None):
                 overlay.alpha_composite(logo, (900, 55))
                 frame = Image.alpha_composite(frame.convert("RGBA"), overlay).convert("RGB")
         except OSError:
-            pass
+            raise RuntimeError("Не удалось наложить оригинальный логотип Агентства W.") from None
     frame.save(output_path, "JPEG", quality=94, optimize=True)
 
 
@@ -1100,6 +1101,7 @@ def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta, title=
         )
     if not scene_images:
         raise RuntimeError("Нет изображений для сцен Reels.")
+    logo_path = check_video_logo("Агентство W")
 
     with tempfile.TemporaryDirectory(prefix="agency_w_reel_") as temp_dir:
         temp_path = Path(temp_dir)
@@ -1112,7 +1114,6 @@ def _assemble_ready_reel(scene_images, narration_video, spoken_text, cta, title=
         end_padding = 1.5
         duration = voice_duration + end_padding
         scene_duration = duration / len(scene_images)
-        logo_path = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
         segment_paths = []
 
         for index, image_bytes in enumerate(scene_images):
@@ -1219,6 +1220,7 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta, tit
         )
     if not scene_videos:
         raise RuntimeError("Runway ещё не вернул живые сцены.")
+    logo_path = check_video_logo("Агентство W")
 
     with tempfile.TemporaryDirectory(prefix="agency_w_live_reel_") as temp_dir:
         temp_path = Path(temp_dir)
@@ -1289,7 +1291,6 @@ def _assemble_animated_reel(scene_videos, narration_video, spoken_text, cta, tit
         subtitle_path = temp_path / "captions.ass"
         _write_subtitles(subtitle_path, spoken_text, cta, voice_duration)
         assets_dir = Path(__file__).resolve().parent / "assets"
-        logo_path = assets_dir / "agency_w_icon.png"
         music_path = assets_dir / "reel_music.mp3"
         final_path = temp_path / "agency_w_live_reel.mp4"
 

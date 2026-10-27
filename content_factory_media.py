@@ -17,6 +17,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from agency_video_branding import (
+    VideoBrandingError, is_agency_w_brand, prepare_video_logo, video_logo_filter,
+)
 
 class MediaError(RuntimeError):
     """A bounded, credential-free error suitable for the material's status."""
@@ -297,7 +300,8 @@ def _video_frame(data, title, brand_name, color):
         for index, line in enumerate(lines):
             draw.text((90, 175 + index * line_height), line, font=font, fill="white")
         image = Image.alpha_composite(image, overlay)
-    _brand(image, brand_name, color)
+    if not is_agency_w_brand(brand_name):
+        _brand(image, brand_name, color)
     return _jpeg(image)
 
 
@@ -331,6 +335,10 @@ def render_story_reel(scene_images, speech_bytes, narration, title, brand_name, 
         frames = math.ceil((duration + 0.35) * 24)
         base, extra = divmod(frames, len(scene_images))
         events = _caption_events(narration, duration)
+        try:
+            logo = prepare_video_logo(root, (1080, 1920), brand_name)
+        except VideoBrandingError as error:
+            raise MediaError(str(error)) from None
         cursor = 0.0
         for index, artwork in enumerate(scene_images):
             count = base + (index < extra)
@@ -340,13 +348,17 @@ def render_story_reel(scene_images, speech_bytes, narration, title, brand_name, 
                 artwork, title if index == 0 else "", brand_name, color))
             _write_scene_captions(root / f"{filename}.ass",events,cursor,cursor+scene_duration)
             movement = "min(1.01+0.00016*on,1.055)" if index % 2 == 0 else "max(1.055-0.00016*on,1.01)"
-            filters = (f"zoompan=z='{movement}':x='iw/2-iw/zoom/2':"
-                       f"y='ih/2-ih/zoom/2':d=1:s=1080x1920:fps=24,"
-                       f"subtitles={filename}.ass,format=yuv420p")
+            movement_filter = (f"zoompan=z='{movement}':x='iw/2-iw/zoom/2':"
+                               "y='ih/2-ih/zoom/2':d=1:s=1080x1920:fps=24")
+            lettering_filter = f"subtitles={filename}.ass,format=yuv420p"
+            inputs = (["-protocol_whitelist", "file,pipe", "-format_whitelist", "png_pipe", "-i", logo.name]
+                      if logo else [])
+            filters = (["-filter_complex", video_logo_filter(movement_filter, lettering_filter, (1080, 1920)),
+                        "-map", "[branded]"] if logo else ["-vf", movement_filter + "," + lettering_filter])
             try:
-                subprocess.run([ffmpeg,"-y","-loglevel","error","-filter_threads","1",
+                subprocess.run([ffmpeg,"-y","-loglevel","error","-filter_threads","1","-filter_complex_threads","1",
                                 "-loop","1","-framerate","24","-i",f"{filename}.jpg",
-                                "-vf",filters,"-frames:v",str(count),"-an","-c:v","libx264",
+                                *inputs,*filters,"-frames:v",str(count),"-an","-c:v","libx264",
                                 "-threads","1","-preset","veryfast","-crf","21",
                                 "-pix_fmt","yuv420p",f"{filename}.mp4"],cwd=root,
                                capture_output=True,timeout=240,check=True)

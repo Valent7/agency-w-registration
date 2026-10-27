@@ -16,6 +16,7 @@ from typing import Any
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from agency_outro import append_agency_outro
+from agency_video_branding import check_video_logo
 
 SPEAKER_LABELS = {"A": "Мужчина", "B": "Женщина"}
 SPEAKER_ALIASES = {
@@ -435,6 +436,8 @@ def assemble_dialogue_mp4(video_bytes: bytes, *, logo_path: Path | None = None, 
     width, height = (720, 1280) if aspect_ratio == "9:16" else (1280, 720)
     if not video_bytes:
         raise ValueError("Видео HeyGen пустое.")
+    if logo_path is None:
+        logo_path = check_video_logo("Агентство W")
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("На сервере нет ffmpeg. MP4 HeyGen можно скачать без оформления.")

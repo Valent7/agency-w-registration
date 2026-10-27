@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageStat
 
+from agency_video_branding import LOGO_PATH
 from content_factory_media import (
     MediaError, _caption_events, _write_scene_captions, reletter_slide, render_slide, render_story_reel,
 )
@@ -113,6 +114,12 @@ class MultiSceneVideoTests(unittest.TestCase):
                 image = Image.open(io.BytesIO(frame.stdout))
                 pixel = image.getpixel((540, 960))
                 self.assertEqual(max(range(3), key=lambda channel: pixel[channel]), expected_channel)
+                logo = Image.open(LOGO_PATH).convert("RGBA").resize((144, 144), Image.Resampling.LANCZOS)
+                observed = image.crop((54, 54, 198, 198)).convert("RGB")
+                opaque = [(source[:3], actual) for source, actual in zip(logo.getdata(), observed.getdata()) if source[3] > 240]
+                self.assertGreater(len(opaque), 400)
+                self.assertLess(sum(sum(abs(a-b) for a,b in zip(source, actual)) / 3
+                                    for source, actual in opaque) / len(opaque), 35)
 
 
 class LetteringRepairTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 """Offline AI-provider contracts plus a real audio/video rendering check."""
 import base64
 import copy
+import hashlib
 import io
 import json
 import shutil
@@ -99,6 +100,38 @@ class GenerationTests(unittest.TestCase):
         session = Mock()
         session.post.side_effect = replies
         return Generator("test-provider-key", session=session, **kwargs), session
+
+    def test_speech_payload_adds_delivery_only_for_instruction_capable_models(self):
+        narration = "Вы опять закрываете ноутбук после полуночи? Начните с одной повторяющейся задачи."
+        project = {**PROJECT, "language": "Deutsch", "tone": "Ruhig", "api_key": "private-project-key"}
+        for model in ("gpt-4o-mini-tts", "gpt-4o-mini-tts-2025-03-20", "tts-1", "tts-1-hd", "other-tts"):
+            with self.subTest(model=model):
+                generator, session = self.generator([], speech_model=model, voice="coral")
+                payload = generator._speech_payload(project, narration)
+                self.assertEqual(payload["input"], narration)
+                self.assertEqual(payload["model"], model)
+                self.assertEqual(payload["voice"], "coral")
+                self.assertEqual(payload["response_format"], "mp3")
+                if model.startswith("gpt-4o-mini-tts"):
+                    self.assertIn("смысловые ударения", payload["instructions"])
+                    self.assertIn('"language": "Deutsch"', payload["instructions"])
+                    self.assertIn('"tone": "Ruhig"', payload["instructions"])
+                    self.assertNotIn("private-project-key", payload["instructions"])
+                else:
+                    self.assertNotIn("instructions", payload)
+                session.post.assert_not_called()
+
+    def test_agency_reel_checks_original_logo_before_any_paid_request(self):
+        for mode in ("live", "illustrated"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                generator, session = self.generator([])
+                generator.live_video_client_resolver = Mock()
+                with patch("agency_video_branding.LOGO_PATH", Path(folder) / "missing.png"):
+                    with self.assertRaisesRegex(GenerationError, "оригинальный фирменный знак"):
+                        generator.generate({**PROJECT, "name": "Агентство W"},
+                                           {"platform": "vk", "format": "reel", "video_mode": mode})
+                session.post.assert_not_called()
+                generator.live_video_client_resolver.assert_not_called()
 
     def test_post_is_platform_copy_and_a_real_branded_image(self):
         generator, session = self.generator(production_prefix() + [image_response(), review_response()])
@@ -410,9 +443,42 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(session.post.call_count, 13)
         self.assertEqual(requested_paths(session), ["responses"] * 4 + ["images/generations", "responses"] * 4 + ["audio/speech"])
         self.assertEqual(session.post.call_args_list[-1].kwargs["json"]["input"], narration)
+        self.assertEqual(session.post.call_args_list[-1].kwargs["json"], generator._speech_payload(PROJECT, narration))
+        self.assertIn("короткие естественные паузы", session.post.call_args_list[-1].kwargs["json"]["instructions"])
         self.assertEqual(render.call_args.args[1], b"speech")
         self.assertEqual(len(render.call_args.args[0]), 4)
         self.assertEqual(render.call_args.args[2], narration)
+        self.assertNotIn("video_branding", content)
+
+    def test_illustrated_agency_reel_binds_logo_proof_to_final_renderer_bytes(self):
+        narration = " ".join(["керамика"] * 50)
+        generator, session = self.generator(production_prefix(dict(POST, narration=narration), 4) + [
+            reply for _ in range(4) for reply in (image_response(), review_response())
+        ] + [response(content=b"speech")])
+        with patch("content_factory_media.render_story_reel", return_value=b"final-single-pass-export") as render:
+            with patch("agency_video_branding.apply_agency_w_logo") as second_encode:
+                content, assets = generator.generate({**PROJECT, "name": "Агентство W"},
+                                                     {"platform": "vk", "format": "reel"})
+        self.assertEqual(content["video_branding"]["asset_sha256"], hashlib.sha256(assets[0]["data"]).hexdigest())
+        self.assertEqual(content["video_branding"]["logo_filename"], "agency_w_icon.png")
+        self.assertEqual(render.call_count, 1)
+        second_encode.assert_not_called()
+        self.assertEqual(session.post.call_count, 13)
+
+    def test_empty_reel_rejected_by_editor_never_orders_voice_or_images_after_bounded_rewrite(self):
+        reel = dict(POST, narration=" ".join(["Будущее уже здесь, ИИ освободит время."] * 8))
+        issue = "Первые слова «Будущее уже здесь» пусты; нет конкретного действия и поворота истории."
+        generator, session = self.generator([
+            copy_response(reel), copy_response(reel), review_response(False, issue=issue),
+            copy_response(reel), copy_response(reel), review_response(False, issue=issue),
+        ])
+        with self.assertRaisesRegex(GenerationError, "Стагирит остановил производство") as caught:
+            generator.generate(PROJECT, {"platform": "vk", "format": "reel"})
+        self.assertEqual(requested_paths(session), ["responses"] * 6)
+        self.assertEqual(caught.exception.draft["quality_review"]["issues"], [issue])
+        self.assertFalse(caught.exception.draft["quality_review"]["approved"])
+        rewrite = json.loads(session.post.call_args_list[3].kwargs["json"]["input"])
+        self.assertEqual(rewrite["review"]["issues"], [issue])
 
     def test_reel_rejects_short_speech_and_camera_directions_before_images(self):
         for narration in ("Too short.", "Сцена 1: " + " ".join(["текст"] * 50)):
@@ -445,7 +511,10 @@ class GenerationTests(unittest.TestCase):
             audio.setsampwidth(2)
             audio.setframerate(16000)
             audio.writeframes(b"\x00\x00" * 16000)
-        video = render_reel(artwork(), pcm.getvalue(), "Создайте первую чашку своими руками.", POST["title"], PROJECT["name"], "#336699")
+        from agency_video_branding import apply_agency_w_logo
+        with patch("agency_video_branding.apply_agency_w_logo", wraps=apply_agency_w_logo) as branding:
+            video = render_reel(artwork(), pcm.getvalue(), "Создайте первую чашку своими руками.", POST["title"], PROJECT["name"], "#336699")
+        branding.assert_called_once_with(video, brand_name=PROJECT["name"])
         self.assertGreater(len(video), 5000)
         with tempfile.TemporaryDirectory(prefix="factory_generation_test_") as directory:
             output = Path(directory) / "output.mp4"
@@ -527,6 +596,9 @@ class LiveGenerationTests(unittest.TestCase):
         self.assertEqual(len(self.sources), 5)
         self.assertEqual(self.session.post.call_count, 13)
         self.assertEqual(requested_paths(self.session)[3], "audio/speech")
+        speech_payload = self.session.post.call_args_list[3].kwargs["json"]
+        self.assertEqual(speech_payload, self.generator._speech_payload(PROJECT, reel["narration"]))
+        self.assertIn("смену темпа", speech_payload["instructions"])
         self.assertEqual(self.client.create_scene.call_count, 4)
         self.client.task_status.side_effect = lambda task: {"status": "succeeded", "url": "https://public.invalid/" + task}
         with patch("content_factory_live_media.render_live_reel", return_value=b"moving-video") as render:
@@ -665,6 +737,24 @@ class LiveGenerationTests(unittest.TestCase):
             self.run_generation(production=state)
         self.assertEqual([call.args[1] for call in self.client.create_scene.call_args_list], state["motion_prompts"])
         self.assertEqual(render.call_args.args[1:4], (b"speech", self.content["narration"], self.content["title"]))
+        self.session.post.assert_not_called()
+
+    def test_live_agency_resume_persists_final_byte_proof_without_reordering_voice_or_video(self):
+        state = self.state(tasks=[f"task-{i}" for i in range(4)])
+        state["content"]["video_branding"] = {"asset_sha256": "stale"}
+        self.client.task_status.side_effect = lambda task: {"status": "succeeded", "url": "https://public.invalid/" + task}
+        with patch("content_factory_live_media.render_live_reel", return_value=b"final-branded-moving-video") as render:
+            with patch("agency_video_branding.apply_agency_w_logo") as second_encode:
+                content, assets = self.generator.generate(
+                    {**PROJECT, "name": "Agency W"}, self.job, production=state,
+                    save_production=self.save_production, save_source=self.save_source, load_source=self.load_source,
+                )
+        self.assertEqual(content["video_branding"]["asset_sha256"], hashlib.sha256(assets[0]["data"]).hexdigest())
+        self.assertEqual(self.snapshots[-1]["content"]["video_branding"], content["video_branding"])
+        self.assertEqual(self.snapshots[-1]["phase"], "complete")
+        self.assertEqual(render.call_args.args[1], b"speech")
+        second_encode.assert_not_called()
+        self.client.create_scene.assert_not_called()
         self.session.post.assert_not_called()
 
     def test_malformed_resume_contract_is_rejected_before_paid_scene_creation(self):

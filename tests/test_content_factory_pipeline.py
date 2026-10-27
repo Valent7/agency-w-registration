@@ -73,6 +73,48 @@ class FactoryPipelineTests(unittest.TestCase):
         self.publisher.assert_not_called()
         self.assertEqual(self.store.get_job(101, job["id"])["available_at"], iso(self.now + timedelta(hours=1)))
 
+    def video_ready_to_publish(self, *, proof=None):
+        self.project = self.service.save_project(101, {"id": self.project["id"], "formats": ["post", "reel"]})
+        job = self.job(format="reel", state="scheduled", content={"format": "reel", "text": "Текст ролика"})
+        asset = self.store.put_asset(101, self.project["id"], job["id"], "reel.mp4", b"rendered-video-fixture", "video/mp4")
+        content = dict(job["content"])
+        if proof is not None:
+            content["video_branding"] = proof
+        self.store.update_job(101, job["id"], {"assets": [asset], "content": content})
+        self.connect()
+        return job, asset
+
+    def test_agency_video_without_verified_logo_stops_before_publication(self):
+        job, _ = self.video_ready_to_publish()
+        result = self.worker.run_once(101, self.project["id"])
+        self.assertEqual(result["failed"], 1)
+        self.publisher.assert_not_called()
+        saved = self.store.get_job(101, job["id"])
+        self.assertIn("оригинальный логотип", saved["error"])
+        self.assertFalse(saved.get("checkpoint", {}).get("publish_started"))
+
+    def test_logo_proof_for_different_video_does_not_allow_publication(self):
+        from agency_video_branding import video_branding_proof
+        job, _ = self.video_ready_to_publish(proof=video_branding_proof(b"different-render"))
+        result = self.worker.run_once(101, self.project["id"])
+        self.assertEqual(result["failed"], 1)
+        self.publisher.assert_not_called()
+        self.assertEqual(self.store.get_job(101, job["id"])["state"], "failed")
+
+    def test_verified_agency_video_keeps_existing_publication_flow(self):
+        from agency_video_branding import video_branding_proof
+        job, _ = self.video_ready_to_publish(proof=video_branding_proof(b"rendered-video-fixture"))
+        self.assertEqual(self.worker.run_once(101, self.project["id"])["published"], 1)
+        self.publisher.assert_called_once()
+        self.assertEqual(self.store.get_job(101, job["id"])["state"], "published")
+
+    def test_partner_video_does_not_require_agency_mark(self):
+        self.project = self.service.save_project(101, {"id": self.project["id"], "name": "Школа рисования W"})
+        job, _ = self.video_ready_to_publish()
+        self.assertEqual(self.worker.run_once(101, self.project["id"])["published"], 1)
+        self.publisher.assert_called_once()
+        self.assertEqual(self.store.get_job(101, job["id"])["state"], "published")
+
     def test_review_required_stops_before_publication(self):
         self.project = self.service.save_project(101, {"id": self.project["id"], "review_required": True})
         self.connect()

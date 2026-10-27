@@ -16,6 +16,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from agency_video_branding import (
+    VideoBrandingError, is_agency_w_brand, prepare_video_logo, video_logo_filter,
+)
 from content_factory_media import _ass_time, _caption_events, _fit, _write_scene_captions, MediaError
 
 
@@ -113,13 +116,15 @@ def _scene_captions(path, events, start, end, title, brand_name, brand_color):
     _write_scene_captions(path, events, start, end)
     text = path.read_text(encoding="utf-8")
     color = "&H00" + brand_color[5:7] + brand_color[3:5] + brand_color[1:3]
+    title_margin = 218 if is_agency_w_brand(brand_name) else 150
     styles = (
         f"Style: Brand,DejaVu Sans,28,{color},{color},&H00121212,&H60000000,-1,0,0,0,100,100,0,0,1,2,1,7,54,54,48,1\n"
-        "Style: Title,DejaVu Sans,56,&H00FFFFFF,&H00FFFFFF,&H00121212,&H60000000,-1,0,0,0,100,100,0,0,1,3,1,8,90,90,150,1\n"
+        f"Style: Title,DejaVu Sans,56,&H00FFFFFF,&H00FFFFFF,&H00121212,&H60000000,-1,0,0,0,100,100,0,0,1,3,1,8,90,90,{title_margin},1\n"
     )
     text = text.replace("[Events]\n", styles + "[Events]\n", 1)
     last = _ass_time(end - start)
-    text += f"Dialogue: 1,0:00:00.00,{last},Brand,,0,0,0,,{_ass_text(brand_name)}\n"
+    if not is_agency_w_brand(brand_name):
+        text += f"Dialogue: 1,0:00:00.00,{last},Brand,,0,0,0,,{_ass_text(brand_name)}\n"
     if title:
         measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
         try:
@@ -155,6 +160,10 @@ def render_live_reel(scene_clips, speech_bytes, narration, title, brand_name, br
         base, extra = divmod(total_frames, len(scene_clips))
         counts = [base + (index < extra) for index in range(len(scene_clips))]
         events = _caption_events(narration, duration)
+        try:
+            logo = prepare_video_logo(root, (1080, 1920), brand_name)
+        except VideoBrandingError as error:
+            raise LiveMediaError(str(error)) from None
         # Probe every clip before encoding any output. A short clip is a failed
         # input, never permission to repeat its last frame or slow its movement.
         for index, (clip, count) in enumerate(zip(scene_clips, counts)):
@@ -177,15 +186,20 @@ def render_live_reel(scene_clips, speech_bytes, narration, title, brand_name, br
             seconds = count / FPS
             subtitle = root / f"captions-{index}.ass"
             _scene_captions(subtitle, events, cursor, cursor + seconds, title if index == 0 else "", brand_name, brand_color)
-            filters = (
+            base_filters = (
                 "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-                f"fps={FPS},setpts=PTS-STARTPTS,subtitles={subtitle.name},format=yuv420p"
+                f"fps={FPS},setpts=PTS-STARTPTS"
             )
+            lettering_filters = f"subtitles={subtitle.name},format=yuv420p"
+            inputs = (["-protocol_whitelist", "file,pipe", "-format_whitelist", "png_pipe", "-i", logo.name]
+                      if logo else [])
+            filters = (["-filter_complex", video_logo_filter(base_filters, lettering_filters, (1080, 1920)),
+                        "-map", "[branded]"] if logo else ["-vf", base_filters + "," + lettering_filters])
             try:
                 subprocess.run(
-                    [ffmpeg, "-y", "-loglevel", "error", "-filter_threads", "1",
+                    [ffmpeg, "-y", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
                      "-protocol_whitelist", "file,pipe", "-format_whitelist", MOV_FORMATS,
-                     "-i", f"source-{index}.mp4", "-vf", filters, "-frames:v", str(count),
+                     "-i", f"source-{index}.mp4", *inputs, *filters, "-frames:v", str(count),
                      "-an", "-c:v", "libx264", "-threads", "1", "-preset", "veryfast",
                      "-crf", "21", "-pix_fmt", "yuv420p", f"scene-{index}.mp4"],
                     cwd=root, capture_output=True, timeout=240, check=True,

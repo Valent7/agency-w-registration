@@ -177,6 +177,17 @@ class Worker:
         if (project.get("review_required") or job.get("review_required")) and not checkpoint.get("owner_approved"):
             self._finish(job, state="ready")
             return "pending"
+        # Only the Agency's own videos require its mark. The proof is emitted
+        # after local rendering and bound to the stored MP4, never to the copy.
+        from agency_video_branding import is_agency_w_brand, branding_proof_matches
+        video_assets = [asset for asset in (job.get("assets") or [])
+                        if asset.get("kind") == "video" or str(asset.get("mime_type") or "").startswith("video/")]
+        if is_agency_w_brand(project.get("name")) and (job["format"] == "reel" or video_assets):
+            if len(video_assets) != 1 or not branding_proof_matches(
+                (job.get("content") or {}).get("video_branding"), video_assets[0].get("sha256")
+            ):
+                raise ValueError("У видео не подтверждён оригинальный логотип Агентства W. "
+                                 "Сначала пересоберите фирменное оформление; публикация остановлена.")
         connection = self.store.get_connection(job["owner_id"], job["project_id"], job["platform"])
         if not connection:
             self._finish(job, state="needs_connection", error="Подключите аккаунт для публикаций на этой площадке.")
