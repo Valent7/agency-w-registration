@@ -118,6 +118,8 @@ class Worker:
         return self._update(job, **changes, lease_owner=None, lease_until=None)
 
     def _process(self, job, manual=False):
+        self._update(job, processing_version=2,
+                     progress={"stage": "accepted", "message": "Фоновый сервис принял материал в работу."})
         checkpoint = dict(job.get("checkpoint") or {})
         if checkpoint.get("result", {}).get("external_id"):
             saved = checkpoint["result"]
@@ -137,7 +139,7 @@ class Worker:
             return "pending"
         explicitly_requested = job["state"] == "queued" and job.get("requested_by_owner") is True
         if not project.get("automation_enabled") and (job["state"] == "scheduled" or not (manual or explicitly_requested)):
-            self._finish(job, state="paused")
+            self._finish(job, state="paused", progress={"stage": "paused", "message": "Материал приостановлен вместе с автопубликацией."})
             return "pending"
         if job["state"] == "queued":
             return self._generate(job, project)
