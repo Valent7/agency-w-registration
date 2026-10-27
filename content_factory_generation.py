@@ -255,7 +255,7 @@ class Generator:
 
     supports_progress = True
 
-    def __init__(self, api_key: str, text_model: str = "gpt-5", image_model: str = "gpt-image-1",
+    def __init__(self, api_key: str, text_model: str = "gpt-5", image_model: str = "gpt-image-2.5-sunburst",
                  speech_model: str = "gpt-4o-mini-tts", voice: str = "alloy", session=None,
                  image_quality: str = "high", review_model: str | None = None):
         if image_quality not in {"low", "medium", "high", "auto"}:

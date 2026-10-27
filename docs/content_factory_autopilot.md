@@ -152,7 +152,7 @@ Health Check Path — `/health`; ожидается HTTP 200 с `{"status":"ok"}
 Если доступ к OpenAI ограничен моделью или бюджетом, настройте поддерживаемые вашим
 аккаунтом `CONTENT_FACTORY_TEXT_MODEL`, `CONTENT_FACTORY_IMAGE_MODEL`,
 `CONTENT_FACTORY_SPEECH_MODEL` и `CONTENT_FACTORY_VOICE` в worker и, при необходимости,
-Streamlit. Blueprint задаёт `gpt-5`, `gpt-image-1`, `gpt-4o-mini-tts`, `alloy`
+Streamlit. Blueprint задаёт `gpt-5`, `gpt-image-2.5-sunburst`, `gpt-4o-mini-tts`, `alloy`
 и качество изображения `high`. Поддерживаемые качества: `low`, `medium`, `high`,
 `auto`. Рабочий доступ к этим моделям нужно подтвердить на реальном аккаунте.
 

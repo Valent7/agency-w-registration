@@ -23,7 +23,7 @@ services:
       - key: CONTENT_FACTORY_TEXT_MODEL
         value: gpt-5
       - key: CONTENT_FACTORY_IMAGE_MODEL
-        value: gpt-image-1
+        value: gpt-image-2.5-sunburst
       - key: CONTENT_FACTORY_IMAGE_QUALITY
         value: high
       - key: CONTENT_FACTORY_SPEECH_MODEL

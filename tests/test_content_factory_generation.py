@@ -125,7 +125,7 @@ class GenerationTests(unittest.TestCase):
                 generator.generate(PROJECT, {"platform": "vk", "format": "post"})
                 image_payload = session.post.call_args_list[3].kwargs["json"]
                 self.assertEqual(image_payload["quality"], quality)
-                self.assertEqual(image_payload["model"], "gpt-image-1")
+                self.assertEqual(image_payload["model"], "gpt-image-2.5-sunburst")
 
     def test_invalid_image_quality_is_rejected_before_any_paid_calls(self):
         session = Mock()

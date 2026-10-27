@@ -54,7 +54,7 @@ def get_generator():
         str(cfg["OPENAI_API_KEY"]),
         text_model=str(cfg.get("CONTENT_FACTORY_TEXT_MODEL") or "gpt-5"),
         review_model=str(cfg.get("CONTENT_FACTORY_REVIEW_MODEL") or cfg.get("CONTENT_FACTORY_TEXT_MODEL") or "gpt-5"),
-        image_model=str(cfg.get("CONTENT_FACTORY_IMAGE_MODEL") or "gpt-image-1"),
+        image_model=str(cfg.get("CONTENT_FACTORY_IMAGE_MODEL") or "gpt-image-2.5-sunburst"),
         speech_model=str(cfg.get("CONTENT_FACTORY_SPEECH_MODEL") or "gpt-4o-mini-tts"),
         voice=str(cfg.get("CONTENT_FACTORY_VOICE") or "alloy"),
         image_quality=str(cfg.get("CONTENT_FACTORY_IMAGE_QUALITY") or "high"),
