@@ -314,6 +314,20 @@ class Generator:
         return data
 
     def _structured(self, instructions, input_data, *, model=None, max_tokens=6000):
+        # The provider's JSON-mode check examines user input as well as system
+        # instructions. Keep the required literal explicit in both text/vision
+        # requests while preserving the structured project data.
+        def json_input(value):
+            data = json.loads(value)
+            return json.dumps({**data, "response_format": "JSON"}, ensure_ascii=False)
+
+        if isinstance(input_data, str):
+            input_data = json_input(input_data)
+        else:
+            input_data = [{**item, "content": [
+                {**part, "text": json_input(part["text"])} if part.get("type") == "input_text" else dict(part)
+                for part in item["content"]
+            ]} for item in input_data]
         payload = {
             "model": model or self.text_model, "instructions": instructions,
             "input": input_data, "max_output_tokens": max_tokens,

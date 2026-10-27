@@ -110,6 +110,7 @@ class GenerationTests(unittest.TestCase):
         self.assertTrue(content["quality_review"]["approved"])
         self.assertTrue(content["visual_reviews"][0]["approved"])
         sent_project = json.loads(session.post.call_args_list[0].kwargs["json"]["input"])["project"]
+        self.assertIn("JSON", session.post.call_args_list[0].kwargs["json"]["input"])
         self.assertEqual(sent_project["name"], PROJECT["name"])
         self.assertNotIn("Агентство W", sent_project["name"])
         self.assertEqual(session.post.call_args_list[3].kwargs["json"]["n"], 1)
