@@ -120,6 +120,26 @@ class AutopilotUiTests(unittest.TestCase):
         next(item for item in app.button if item.label == "Сохранить проект").click().run()
         self.assertEqual(app.session_state['_fake_store'].project['video_mode'], 'illustrated')
 
+    def test_video_mode_follows_backend_changes_and_preserves_unsaved_owner_choice(self):
+        script = APP.replace("        self.actions = []", "        self.project['video_mode'] = 'illustrated'\n        self.actions = []", 1)
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        key = 'cf_auto_77_project-1_video_mode'
+        self.assertEqual(app.selectbox(key=key).value, 'illustrated')
+        app.session_state['_fake_store'].project['video_mode'] = 'live'
+        app.run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.selectbox(key=key).value, 'live')
+        app.selectbox(key=key).select('illustrated').run()
+        self.assertFalse(app.exception)
+        app.button(key='cf_auto_77_project-1_refresh_materials').click().run()
+        self.assertEqual(app.selectbox(key=key).value, 'illustrated')
+        self.assertEqual(app.session_state['_fake_store'].project['video_mode'], 'live')
+        next(item for item in app.button if item.label == 'Сохранить проект').click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state['_fake_store'].project['video_mode'], 'illustrated')
+        self.assertEqual(app.selectbox(key=key).value, 'illustrated')
+
     def test_missing_live_provider_blocks_live_creation_without_any_fallback(self):
         script = APP.replace("self.connections = []", "self.connections = [{'platform':'vk','account_id':'123','display_name':'Моё сообщество'}]", 1)
         app = AppTest.from_string(script, default_timeout=15).run()

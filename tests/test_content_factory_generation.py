@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 import wave
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -538,6 +539,58 @@ class LiveGenerationTests(unittest.TestCase):
         self.assertEqual(self.client.create_scene.call_count, 4)
         self.assertEqual(self.client.preflight.call_count, 1)
         self.assertEqual(self.snapshots[-1]["phase"], "complete")
+
+    def test_real_worker_and_generator_resume_seeded_sources_without_rebilling(self):
+        from content_factory_store import SQLiteStore
+        from content_factory_worker import Worker
+        from content_factory_core import iso
+        now = [datetime.now(timezone.utc)]
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteStore(Path(folder) / "live-worker.sqlite")
+            project = store.save_project(77, {
+                **PROJECT, "platforms": ["vk"], "formats": ["reel"],
+                "video_mode": "live", "timezone": "Europe/Berlin",
+                "automation_enabled": False, "review_required": True,
+            })
+            job = store.enqueue_job(77, project["id"], {
+                "dedupe_key": "live-original-audio", "platform": "vk", "format": "reel",
+                "video_mode": "live", "state": "queued", "requested_by_owner": True,
+                "scheduled_at": iso(now[0]), "available_at": iso(now[0]),
+            })
+            state = self.state()
+            state["raw_sources"] = [store.put_asset(77, project["id"], job["id"],
+                f"original-{i}.png", artwork(), "image/png") for i in range(4)]
+            state["speech_source"] = store.put_asset(77, project["id"], job["id"],
+                                                      "original-speech.mp3", b"speech", "audio/mpeg")
+            store.update_job(77, job["id"], {"production": state, "content": state["content"]})
+            publisher = Mock()
+            worker = Worker(store, self.generator, clock=lambda: now[0], publisher=publisher)
+            with patch("content_factory_worker.is_agency_access_revoked", return_value=False), \
+                 patch("content_factory_core.is_agency_access_revoked", return_value=False), \
+                 patch.object(store, "reserve_generation", wraps=store.reserve_generation) as reserve:
+                first = worker.run_once(77, project["id"])
+                self.assertEqual(first["pending"], 1)
+                saved = store.get_job(77, job["id"])
+                self.assertEqual(saved["state"], "queued")
+                self.assertEqual(saved["production"]["tasks"], [f"task-{i}" for i in range(4)])
+                self.assertEqual(self.client.create_scene.call_count, 4)
+                self.session.post.assert_not_called()
+                now[0] += timedelta(seconds=120)
+                self.client.task_status.side_effect = lambda task: {
+                    "status": "succeeded", "url": "https://public.invalid/" + task}
+                with patch("content_factory_live_media.render_live_reel", return_value=b"moving-video") as render:
+                    second = worker.run_once(77, project["id"])
+                self.assertEqual(second["generated"], 1)
+                saved = store.get_job(77, job["id"])
+                self.assertEqual(saved["state"], "ready")
+                self.assertTrue(saved["checkpoint"]["generation_complete"])
+                self.assertEqual(render.call_args.args[1], b"speech")
+                self.assertEqual(len(saved["assets"]), 1)
+                self.assertEqual(reserve.call_count, 1)
+                self.assertEqual(self.client.create_scene.call_count, 4)
+                self.session.post.assert_not_called()
+                self.client.preflight.assert_not_called()
+                publisher.assert_not_called()
 
     def test_resume_known_task_does_not_recreate_it_after_uncertain_ack_marker(self):
         from content_factory_live_video import LiveVideoUncertain

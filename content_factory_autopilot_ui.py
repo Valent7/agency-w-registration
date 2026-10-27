@@ -173,6 +173,12 @@ def _project_form(owner_id, project, service, target_profile):
     if existing and "video_mode" not in project:
         values["video_mode"] = "illustrated"
     key = f"cf_auto_{owner_id}_{values.get('id') or 'new'}"
+    mode_key, mode_source_key = key + "_video_mode", key + "_video_mode_source"
+    if st.session_state.get(mode_source_key) != values["video_mode"] or mode_key not in st.session_state:
+        # A server-side mode change must replace an older keyed selection.
+        # An unchanged backend leaves the owner's unsaved selection intact.
+        st.session_state[mode_key] = values["video_mode"]
+    st.session_state[mode_source_key] = values["video_mode"]
     st.caption("Расскажите о своём проекте один раз. ИИ будет опираться на эти настройки при подготовке каждого материала.")
     with st.form(key + "_project_form"):
         name = st.text_input("Название проекта", value=values["name"], max_chars=120, key=key + "_name")
@@ -192,7 +198,7 @@ def _project_form(owner_id, project, service, target_profile):
         brand_color = st.color_picker("Цвет оформления", value=values["brand_color"], key=key + "_color")
         platforms = st.multiselect("Площадки", list(PLATFORMS), default=values["platforms"], format_func=PLATFORMS.get, key=key + "_platforms")
         formats = st.multiselect("Форматы", list(FORMATS), default=values["formats"], format_func=FORMATS.get, key=key + "_formats")
-        video_mode = st.selectbox("Как создавать видео", list(VIDEO_MODES), index=list(VIDEO_MODES).index(values["video_mode"]), format_func=VIDEO_MODES.get, key=key + "_video_mode")
+        video_mode = st.selectbox("Как создавать видео", list(VIDEO_MODES), format_func=VIDEO_MODES.get, key=mode_key)
         timezone = st.text_input("Часовой пояс расписания", value=values["timezone"], help="Например: Europe/Berlin или Europe/Moscow. Время публикаций учитывает переход на летнее и зимнее время.", key=key + "_timezone")
         publish_times = st.text_input("Время публикаций", value=", ".join(values["publish_times"]), help="В местном времени проекта, через запятую: 10:00, 18:30. Каждый слот создаёт материал для каждой выбранной площадки.", key=key + "_times")
         left, right = st.columns(2)
