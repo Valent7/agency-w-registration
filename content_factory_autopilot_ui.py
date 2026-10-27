@@ -386,8 +386,9 @@ def _materials(owner_id, project, jobs, store, service):
     if not project:
         st.info("После создания проекта здесь появятся тексты, карусели и видео.")
         return
-    if st.button("Обновить материалы", key=f"cf_auto_{owner_id}_{project['id']}_refresh_materials"):
-        st.rerun()
+    # A click already reruns the page and reloads jobs before this function.
+    # A second early rerun would discard edits before their widgets render.
+    st.button("Обновить материалы", key=f"cf_auto_{owner_id}_{project['id']}_refresh_materials")
     if not jobs:
         st.info("Готовых материалов пока нет. Опишите задачу в блоке «Что создаём?» или заполните контент-план.")
         return
@@ -420,7 +421,17 @@ def _materials(owner_id, project, jobs, store, service):
                 rejected = isinstance(review, dict) and review.get("approved") is False
                 incomplete = checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
                 editable = state == "ready" and not checkpoint.get("publish_started") and not rejected and not incomplete
-                text = st.text_area("Текст публикации", value=str(content.get("text") or ""), height=180, disabled=not editable, key=key + "_text")
+                source_text = str(content.get("text") or "")
+                text_key, source_key = key + "_text", key + "_source_text"
+                if source_key not in st.session_state:
+                    # Adopt a pre-existing owner edit when the cabinet upgrades.
+                    st.session_state[text_key] = st.session_state.get(text_key, source_text)
+                elif st.session_state[source_key] != source_text or text_key not in st.session_state:
+                    # A retry can replace content while retaining the job ID.
+                    # Only that backend change replaces the displayed draft.
+                    st.session_state[text_key] = source_text
+                st.session_state[source_key] = source_text
+                text = st.text_area("Текст публикации", height=180, disabled=not editable, key=text_key)
                 for index, slide in enumerate(content.get("slides") or [], 1):
                     value = slide if isinstance(slide, str) else "\n".join(str(slide.get(name) or "") for name in ("title", "text"))
                     st.write(f"**Слайд {index}**")

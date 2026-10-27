@@ -198,6 +198,28 @@ class AutopilotUiTests(unittest.TestCase):
         self.assertEqual(action[:3], ("approve", 77, "ready-1"))
         self.assertEqual(action[3]["text"], "Отредактированный текст")
 
+    def test_same_job_replaces_old_copy_when_backend_content_changes(self):
+        app = self.app()
+        key = "cf_auto_77_project-1_ready-1_text"
+        self.assertEqual(app.text_area(key=key).value, "Исходный текст")
+        app.session_state["_fake_store"].jobs[0]["content"]["text"] = "Новая версия после повторного создания"
+        app.run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.text_area(key=key).value, "Новая версия после повторного создания")
+        app.button(key="cf_auto_77_project-1_ready-1_approve").click().run()
+        self.assertFalse(app.exception)
+        action = app.session_state["_fake_store"].actions[-1]
+        self.assertEqual(action[3]["text"], "Новая версия после повторного создания")
+
+    def test_refresh_preserves_owner_edit_when_backend_text_is_unchanged(self):
+        app = self.app()
+        key = "cf_auto_77_project-1_ready-1_text"
+        app.text_area(key=key).input("Несохранённая правка владельца")
+        app.button(key="cf_auto_77_project-1_refresh_materials").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.text_area(key=key).value, "Несохранённая правка владельца")
+        self.assertEqual(app.session_state["_fake_store"].jobs[0]["content"]["text"], "Исходный текст")
+
     def test_connection_is_owner_scoped_and_password_cleared(self):
         app = self.app()
         app.text_input(key="cf_auto_77_project-1_instagram_account").input("12345")
