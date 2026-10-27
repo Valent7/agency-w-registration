@@ -1,0 +1,32 @@
+# Reuse the existing instagram_webhook service for content OAuth.
+# Blueprint Path: deploy/content-factory/render-worker.yaml
+services:
+  - type: worker
+    name: agency-w-content-worker
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    numInstances: 1
+    autoDeploy: false
+    dockerfilePath: ./deploy/content-factory/Dockerfile
+    dockerContext: .
+    dockerCommand: python content_factory_worker.py --interval 60 --max-jobs 2
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: FERNET_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CONTENT_FACTORY_TEXT_MODEL
+        value: gpt-5-mini
+      - key: CONTENT_FACTORY_IMAGE_MODEL
+        value: gpt-image-1
+      - key: CONTENT_FACTORY_IMAGE_QUALITY
+        value: high
+      - key: CONTENT_FACTORY_SPEECH_MODEL
+        value: gpt-4o-mini-tts
+      - key: CONTENT_FACTORY_VOICE
+        value: alloy

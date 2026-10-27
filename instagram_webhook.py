@@ -3075,3 +3075,27 @@ app = Starlette(
     routes=routes,
     lifespan=_app_lifespan,
 )
+
+
+def _attach_content_factory_oauth(application):
+    """Reuse this server without changing its existing webhook routes."""
+    required = ("CONTENT_FACTORY_SERVICE_URL", "SUPABASE_URL", "SUPABASE_SECRET_KEY")
+    if not all(os.getenv(name, "").strip() for name in required):
+        return
+    try:
+        from content_factory_oauth import runtime_app
+
+        oauth = runtime_app()
+        # Keep the webhook's health endpoint, route order and method handling.
+        additional_routes = [route for route in oauth.routes if route.path != "/health"]
+        oauth_session = oauth.state.oauth_session
+    except Exception as exc:
+        # An optional publishing configuration must not stop existing webhooks.
+        # Provider/store exception messages may contain confidential values.
+        print("CONTENT_FACTORY_OAUTH_UNAVAILABLE:", type(exc).__name__, flush=True)
+        return
+    application.router.routes.extend(additional_routes)
+    application.state.oauth_session = oauth_session
+
+
+_attach_content_factory_oauth(app)

@@ -18,6 +18,10 @@ def _configuration():
             with path.open("rb") as file:
                 result.update(tomllib.load(file))
     result.update(os.environ)
+    # Existing Agency W installations already share this OAuth service with
+    # Instagram onboarding. A dedicated factory service can still override it.
+    if not result.get("CONTENT_FACTORY_SERVICE_URL"):
+        result["CONTENT_FACTORY_SERVICE_URL"] = result.get("INSTAGRAM_OAUTH_SERVICE_URL", "")
     return result
 
 

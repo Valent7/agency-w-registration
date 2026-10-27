@@ -14,9 +14,12 @@ Instagram/Reels, ВК и Threads, календарь, ИИ-генерация, �
    базу, затем обновлять сайт. Повторное выполнение SQL предусмотрено.
 2. Перенести файлы обновления в репозиторий **Valent7/agency-w-registration**.
    Проверить изменения и обновить рабочую версию Streamlit.
-3. В **Render** создать два сервиса по файлу
-   [deploy/content-factory/render.yaml](deploy/content-factory/render.yaml):
-   один подключает Instagram и Threads, второй постоянно обрабатывает очередь.
+3. Если в **Render** уже работает `instagram_webhook`, его можно использовать
+   для подключения соцсетей. Тогда нужен только обработчик очереди по файлу
+   [deploy/content-factory/render-worker.yaml](deploy/content-factory/render-worker.yaml).
+   Для установки с отдельным сервисом подключения используется
+   [deploy/content-factory/render.yaml](deploy/content-factory/render.yaml).
+   Новые сервисы платные; проверьте стоимость до подтверждения запуска.
 4. В защищённых настройках Streamlit и Render указать общую базу и одинаковый
    ключ шифрования подключений. Для генерации используется OpenAI. Настроить
    приложения Meta с разрешениями на публикацию и адресами возврата. Все поля
