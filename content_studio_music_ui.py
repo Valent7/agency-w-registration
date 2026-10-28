@@ -90,29 +90,30 @@ def _advanced_prompt(style, mood, instruments, vocals, idea):
 
 
 def _render_suno_handoff(owner_id, project, prompt):
-    st.markdown("#### Готовое описание для Suno")
+    st.markdown("### 2. Создайте музыку")
+    st.caption("Сейчас создание выполняет Suno. Мы оставляем человеку только три действия внутри Suno.")
+
     if prompt:
+        st.markdown("**Описание уже готово. Скопируйте его:**")
         st.code(prompt, language="none")
-        st.caption("1. Нажмите значок копирования справа в поле выше.  2. Откройте Suno Create.  3. Вставьте описание и нажмите Create.")
+        st.info("В Suno сделайте только это: **Simple → вставить описание → Create**. Если открылся Advanced — нажмите **Simple** вверху слева.")
     else:
-        st.caption("Опишите желаемую музыку — готовое описание появится здесь.")
-    left, right = st.columns([2, 1], gap="large")
-    with left:
-        st.link_button(
-            "🎵 Открыть Suno Create",
-            SUNO_CREATE_URL,
-            type="primary",
-            width="stretch",
-            disabled=not bool(prompt),
-        )
-    with right:
-        st.caption("Для вашего тарифа Pro это основной рабочий экран Suno.")
+        st.info("Сначала заполните шаг 1 — тогда Агентство подготовит описание для Suno.")
+
+    st.link_button(
+        "Шаг 2 — открыть Suno",
+        SUNO_CREATE_URL,
+        type="primary",
+        width="stretch",
+        disabled=not bool(prompt),
+    )
+    st.caption("После нажатия не выбирайте Audio, Voice, Inspo и другие инструменты. Нужен только режим Simple.")
 
 
 def _render_import(owner_id, project, store):
     st.divider()
-    st.markdown("### Готово? Верните трек в Агентство")
-    st.caption("Скачайте понравившийся трек из Suno и загрузите его сюда. После этого он останется в «Моих генерациях» и будет доступен для видео.")
+    st.markdown("### 3. Верните понравившийся трек")
+    st.caption("В Suno прослушайте варианты, скачайте понравившийся трек и загрузите его сюда. Всё остальное Агентство сохранит само.")
 
     title = st.text_input(
         "Название трека",
@@ -205,81 +206,72 @@ def _render_library(owner_id, project, store):
 
 
 def render_music_tool(owner_id, project, store):
-    st.markdown("## Как должна звучать музыка?")
-    st.caption("Опишите результат обычными словами. Всё техническое мы оставим профессиональным редакторам.")
+    st.markdown("## Музыка — всего 3 шага")
+    st.caption("Без музыкальных терминов и без лишних настроек.")
 
     if not store or not project:
         st.info("Сначала выберите или сохраните проект Агентства W.")
         return
 
-    mode = st.radio(
-        "Режим",
-        ["Простой режим", "Расширенный режим"],
-        horizontal=True,
+    st.markdown("### 1. Опишите, что хотите услышать")
+    description = st.text_area(
+        "Описание музыки",
+        placeholder="Например: лёгкая музыка в стиле «Вальса цветов», спокойная и воздушная",
+        height=150,
+        key=f"studio_music_{owner_id}_{project['id']}_prompt",
         label_visibility="collapsed",
-        key=f"studio_music_{owner_id}_{project['id']}_mode",
     )
-
-    if mode == "Простой режим":
-        description = st.text_area(
-            "Опишите музыку",
-            placeholder="Например: мягкая вдохновляющая музыка для ролика о ценности времени, без резких ударных",
-            height=170,
-            key=f"studio_music_{owner_id}_{project['id']}_prompt",
-            label_visibility="collapsed",
+    type_col, mood_col = st.columns(2, gap="large")
+    with type_col:
+        kind = st.radio(
+            "Тип",
+            ["Инструментальная", "С вокалом"],
+            horizontal=True,
+            key=f"studio_music_{owner_id}_{project['id']}_kind",
         )
-        type_col, mood_col = st.columns(2, gap="large")
-        with type_col:
-            kind = st.radio(
-                "Тип",
-                ["Инструментальная", "С вокалом"],
-                horizontal=True,
-                key=f"studio_music_{owner_id}_{project['id']}_kind",
-            )
-        with mood_col:
-            mood = st.selectbox(
-                "Настроение",
-                MOODS,
-                key=f"studio_music_{owner_id}_{project['id']}_mood",
-            )
-        prompt = _simple_prompt(description, kind, mood)
-    else:
-        title_col, vocal_col = st.columns([2, 1], gap="large")
-        with title_col:
-            style = st.text_input(
-                "Стиль, жанр",
-                placeholder="Например: cinematic ambient, soft piano, light strings",
-                key=f"studio_music_{owner_id}_{project['id']}_style",
-            )
-        with vocal_col:
-            vocals = st.selectbox(
-                "Вокал",
-                ["Без вокала", "Женский", "Мужской", "Любой"],
-                key=f"studio_music_{owner_id}_{project['id']}_vocals",
-            )
-        mood = st.text_input(
+    with mood_col:
+        mood = st.selectbox(
             "Настроение",
-            placeholder="Спокойное, вдохновляющее, светлое",
-            key=f"studio_music_{owner_id}_{project['id']}_advanced_mood",
+            MOODS,
+            key=f"studio_music_{owner_id}_{project['id']}_mood",
+        )
+
+    prompt = _simple_prompt(description, kind, mood)
+
+    with st.expander("Настроить подробнее — только если хочется", expanded=False):
+        style = st.text_input(
+            "Стиль или жанр",
+            placeholder="Например: cinematic ambient, soft piano, light strings",
+            key=f"studio_music_{owner_id}_{project['id']}_style",
         )
         instruments = st.text_input(
             "Инструменты",
-            placeholder="Фортепиано, струнные, мягкий синтезатор",
+            placeholder="Например: фортепиано, струнные, мягкий синтезатор",
             key=f"studio_music_{owner_id}_{project['id']}_instruments",
         )
         idea = st.text_area(
-            "Текст песни или идея трека",
-            placeholder="Если нужен вокал — вставьте текст или опишите тему. Для инструментальной музыки опишите развитие композиции.",
-            height=180,
+            "Дополнительные пожелания",
+            placeholder="Например: плавное вступление, лёгкое развитие, мягкий финал",
+            height=110,
             key=f"studio_music_{owner_id}_{project['id']}_idea",
         )
-        prompt = _advanced_prompt(style, mood, instruments, vocals, idea)
+        additions = []
+        if _clean(style):
+            additions.append("Стиль: " + _clean(style, 500))
+        if _clean(instruments):
+            additions.append("Инструменты: " + _clean(instruments, 500))
+        if _clean(idea):
+            additions.append("Дополнительно: " + _clean(idea, 800))
+        if prompt and additions:
+            prompt = prompt + " " + ". ".join(additions) + "."
 
     _render_suno_handoff(owner_id, project, prompt)
-
-    with st.expander("Профессиональное редактирование в Suno Studio", expanded=False):
-        st.write("Studio нужен только для глубокой ручной работы: дорожки, MIDI, эффекты и сведение.")
-        st.link_button("Открыть Suno Studio (Premier)", SUNO_STUDIO_URL, width="stretch")
-
     _render_import(owner_id, project, store)
     _render_library(owner_id, project, store)
+
+    with st.expander("Хочу создавать вообще без перехода в Suno", expanded=False):
+        st.write(
+            "Для этого Агентству нужен отдельный официальный Suno Platform API. "
+            "После его подключения шаг 2 станет одной кнопкой «Создать», а готовые варианты появятся прямо здесь."
+        )
+        st.link_button("Открыть Suno Platform API", "https://platform.suno.com/auth/login?returnTo=%2Fauth", width="stretch")
