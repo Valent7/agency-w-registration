@@ -42,21 +42,22 @@ class StudioNavigationTests(unittest.TestCase):
                 self.choose(app, section)
         self.assertFalse(app.session_state['_fake_store'].actions)
 
-    def test_music_section_is_simple_first_and_never_generates_on_open(self):
+    def test_music_section_is_three_steps_and_never_generates_on_open(self):
         app = self.app()
         self.choose(app, 'music')
-        self.assertTrue(any('Как должна звучать музыка?' in item.value for item in app.markdown))
-        mode = app.radio(key='studio_music_77_project-1_mode')
-        self.assertEqual(mode.value, 'Простой режим')
-        self.assertEqual(mode.options, ['Простой режим', 'Расширенный режим'])
+        values = [item.value for item in app.markdown]
+        self.assertTrue(any('Музыка — всего 3 шага' in value for value in values))
+        self.assertTrue(any('1. Опишите' in value for value in values))
+        self.assertTrue(any('2. Создайте музыку' in value for value in values))
+        self.assertTrue(any('3. Верните понравившийся трек' in value for value in values))
         self.assertTrue(any(item.key == 'studio_music_77_project-1_prompt' for item in app.text_area))
+        self.assertNotIn('studio_music_77_project-1_mode', [item.key for item in app.radio])
         self.assertFalse(app.session_state['_fake_store'].actions)
 
-    def test_music_advanced_mode_keeps_simple_controls_out_of_the_way(self):
+    def test_music_details_are_optional_not_a_second_main_mode(self):
         app = self.app()
         self.choose(app, 'music')
-        app.radio(key='studio_music_77_project-1_mode').set_value('Расширенный режим').run()
-        self.assertFalse(app.exception, [item.message for item in app.exception])
+        self.assertTrue(any(item.label == 'Настроить подробнее — только если хочется' for item in app.expander))
         self.assertTrue(any(item.key == 'studio_music_77_project-1_style' for item in app.text_input))
         self.assertTrue(any(item.key == 'studio_music_77_project-1_idea' for item in app.text_area))
         self.assertFalse(app.session_state['_fake_store'].actions)
