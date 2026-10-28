@@ -309,7 +309,7 @@ def _video_frame(data, title, brand_name, color):
 def render_story_reel(
     scene_images, speech_bytes, narration, title, brand_name, brand_color, *,
     intro_image_bytes=None, outro_image_bytes=None, music_bytes=None,
-    voice_volume=1.0, music_volume=0.12,
+    voice_volume=1.0, music_volume=0.12, apply_finishing=False,
 ):
     """Make a narrated story and finish Agency W films with selected branding/audio."""
     if not isinstance(scene_images, list) or not 3 <= len(scene_images) <= 5:
@@ -383,7 +383,7 @@ def render_story_reel(
             if not output.is_file() or not 0 < output.stat().st_size <= 100 * 1024 * 1024:
                 raise MediaError("Видео отсутствует или превышает допустимый размер.")
             result = output.read_bytes()
-            if is_agency_w_brand(brand_name):
+            if apply_finishing and is_agency_w_brand(brand_name):
                 try:
                     result = append_agency_outro(
                         result, logo_path=check_video_logo(brand_name), size=(1080, 1920), title=title,
