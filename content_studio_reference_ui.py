@@ -218,7 +218,7 @@ def _film_finishing(owner_id, project, store, key, result):
             "Начальная заставка (по желанию)", type=["png", "jpg", "jpeg", "webp"],
             key=key + "_intro_upload", help="Если не загружать — используется фирменное начало Агентства W.",
         )
-        if intro is not None:
+        if intro is not None and str(getattr(intro, "type", "") or "").startswith("image/"):
             st.image(intro.getvalue(), caption="Ваше начало фильма", width="stretch")
         clear_intro = st.checkbox(
             "Вернуть фирменное начало",
@@ -229,7 +229,7 @@ def _film_finishing(owner_id, project, store, key, result):
             "Конечная заставка (по желанию)", type=["png", "jpg", "jpeg", "webp"],
             key=key + "_outro_upload", help="Если не загружать — используется фирменный финал Агентства W.",
         )
-        if outro is not None:
+        if outro is not None and str(getattr(outro, "type", "") or "").startswith("image/"):
             st.image(outro.getvalue(), caption="Ваш конец фильма", width="stretch")
         clear_outro = st.checkbox(
             "Вернуть фирменный финал",
