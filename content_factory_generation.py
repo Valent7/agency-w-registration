@@ -39,6 +39,7 @@ _FIELDS = ("name", "product", "audience", "language", "tone", "goal", "website",
 
 def _video_finishing(raw, *, load_source=None):
     """Validate saved finishing controls and optionally resolve their private assets."""
+    # Keep these settings local and deterministic; no paid provider call is needed for finishing.
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
