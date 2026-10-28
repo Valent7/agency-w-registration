@@ -42,24 +42,27 @@ class StudioNavigationTests(unittest.TestCase):
                 self.choose(app, section)
         self.assertFalse(app.session_state['_fake_store'].actions)
 
-    def test_music_section_is_three_steps_and_never_generates_on_open(self):
+    def test_music_section_is_true_three_step_flow_without_external_editor(self):
         app = self.app()
         self.choose(app, 'music')
         values = [item.value for item in app.markdown]
-        self.assertTrue(any('Музыка — всего 3 шага' in value for value in values))
-        self.assertTrue(any('1. Опишите' in value for value in values))
-        self.assertTrue(any('2. Создайте музыку' in value for value in values))
-        self.assertTrue(any('3. Верните понравившийся трек' in value for value in values))
+        self.assertTrue(any('Музыка — 3 шага' in value for value in values))
+        self.assertTrue(any('1. Опишите музыку' in value for value in values))
+        self.assertTrue(any('2. Создайте' in value for value in values))
+        self.assertTrue(any('3. Прослушайте и выберите' in value for value in values))
         self.assertTrue(any(item.key == 'studio_music_77_project-1_prompt' for item in app.text_area))
+        self.assertFalse(app.get('link_button'))
         self.assertNotIn('studio_music_77_project-1_mode', [item.key for item in app.radio])
         self.assertFalse(app.session_state['_fake_store'].actions)
 
-    def test_music_details_are_optional_not_a_second_main_mode(self):
+    def test_music_create_button_activates_after_plain_language_description(self):
         app = self.app()
         self.choose(app, 'music')
-        self.assertTrue(any(item.label == 'Настроить подробнее — только если хочется' for item in app.expander))
-        self.assertTrue(any(item.key == 'studio_music_77_project-1_style' for item in app.text_input))
-        self.assertTrue(any(item.key == 'studio_music_77_project-1_idea' for item in app.text_area))
+        key = 'studio_music_77_project-1_prompt'
+        create = app.button(key='studio_music_77_project-1_create')
+        self.assertTrue(create.disabled)
+        app.text_area(key=key).input('Лёгкая спокойная музыка для ролика о времени').run()
+        self.assertFalse(app.button(key='studio_music_77_project-1_create').disabled)
         self.assertFalse(app.session_state['_fake_store'].actions)
 
     def test_prompt_recipe_opens_and_prefills_its_real_tool_without_generating(self):
