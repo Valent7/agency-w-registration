@@ -39,7 +39,7 @@ class DialogueVideoTests(unittest.TestCase):
         files = (
             "agency_outro.py", "content_factory_core.py", "content_factory_generation.py",
             "content_factory_live_media.py", "content_factory_media.py", "content_factory_worker.py",
-            "content_studio_reference_ui.py", "content_studio_ui.py",
+            "content_studio_reference_ui.py", "content_studio_ui.py", "content_studio_music_ui.py",
         )
         for filename in files:
             with self.subTest(filename=filename):
