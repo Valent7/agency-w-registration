@@ -269,8 +269,24 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
     # Native controls retain keyboard/screen-reader behavior. Only visibility
     # changes with viewport width; the rest of the Agency theme is untouched.
     st.html(f"""<style>
+      /* Content is a workspace, not a narrow article column. */
+      [data-testid="stMainBlockContainer"] {{
+        max-width: 1780px !important;
+        width: calc(100% - 24px) !important;
+        padding-left: 28px !important;
+        padding-right: 28px !important;
+      }}
       .st-key-studio_mobile_{owner_id} {{ display: none; }}
-      @media (max-width: 700px) {{
+      .st-key-studio_nav_{owner_id} label p {{
+        white-space: normal !important;
+        line-height: 1.25 !important;
+      }}
+      @media (max-width: 900px) {{
+        [data-testid="stMainBlockContainer"] {{
+          width: 100% !important;
+          padding-left: 14px !important;
+          padding-right: 14px !important;
+        }}
         .st-key-studio_mobile_{owner_id} {{ display: block; }}
         .st-key-studio_nav_{owner_id} {{ display: none; }}
       }}
@@ -278,7 +294,7 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
     with st.container(key=f"studio_mobile_{owner_id}"):
         st.selectbox("Раздел завода", list(TOOLS), format_func=TOOLS.get,
                      key=mobile_key, on_change=_mobile_navigation, args=(owner_id, mobile_key))
-    navigation, workspace = st.columns([1, 4], gap="large")
+    navigation, workspace = st.columns([1.15, 5.85], gap="large")
     with navigation, st.container(key=f"studio_nav_{owner_id}"):
         logo = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
         if logo.is_file():

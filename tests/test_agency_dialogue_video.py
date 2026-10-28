@@ -35,6 +35,17 @@ CAST = {
 
 
 class DialogueVideoTests(unittest.TestCase):
+    def test_shared_content_factory_finishing_files_compile(self):
+        files = (
+            "agency_outro.py", "content_factory_core.py", "content_factory_generation.py",
+            "content_factory_live_media.py", "content_factory_media.py", "content_factory_worker.py",
+            "content_studio_reference_ui.py", "content_studio_ui.py",
+        )
+        for filename in files:
+            with self.subTest(filename=filename):
+                source = Path(filename).read_text(encoding="utf-8")
+                compile(source, filename, "exec")
+
     def test_realistic_alternating_script_passes(self):
         self.assertEqual(dialogue_errors(TURNS), [])
         self.assertEqual(normalise_dialogue_turns(TURNS), TURNS)

@@ -4,9 +4,12 @@ on:
   pull_request:
     paths:
       - "content_factory_*.py"
+      - "content_studio_*.py"
+      - "agency_outro.py"
       - "content_factory_setup.sql"
       - "requirements*.txt"
       - "tests/test_content_factory_*.py"
+      - "tests/test_content_studio_*.py"
       - ".github/workflows/content-factory-autopilot.yml"
   workflow_dispatch:
 

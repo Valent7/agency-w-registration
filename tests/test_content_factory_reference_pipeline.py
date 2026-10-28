@@ -95,6 +95,26 @@ class ReferenceServiceTests(unittest.TestCase):
         self.assertEqual(frozen["product"], PROJECT["product"])
         self.assertEqual(frozen["video_style"], "cartoon")
 
+    def test_saved_film_finishing_is_copied_into_the_new_production_job(self):
+        intro = {"storage_path": f"77/{self.project['id']}/{self.reference['id']}/film-intro.png",
+                 "mime_type": "image/png", "sha256": "a" * 64, "size": 10}
+        music = {"storage_path": f"77/{self.project['id']}/{self.reference['id']}/film-music.mp3",
+                 "mime_type": "audio/mpeg", "sha256": "b" * 64, "size": 10}
+        self.store.update_job(77, self.reference["id"], {
+            "checkpoint": {"video_personalization": {
+                "intro_asset": intro, "music_asset": music,
+                "voice_volume": 1.0, "music_volume": 0.10,
+            }}
+        })
+        job = self.service.create_from_video_reference(
+            77, self.project["id"], self.reference["id"], platforms=["vk"],
+            request_id="reference-create-with-finishing",
+        )[0]
+        saved = job["checkpoint"]["video_personalization"]
+        self.assertEqual(saved["intro_asset"]["storage_path"], intro["storage_path"])
+        self.assertEqual(saved["music_asset"]["storage_path"], music["storage_path"])
+        self.assertEqual(saved["music_volume"], 0.10)
+
     def test_duplicate_submission_reuses_job_and_changed_source_requires_new_request(self):
         first = self.create()[0]
         self.assertEqual(self.create()[0]["id"], first["id"])

@@ -285,8 +285,12 @@ class Worker:
         def load_source(asset):
             from pathlib import PurePosixPath
             parts = PurePosixPath(str(asset.get("storage_path") or "")).parts
-            if len(parts) < 4 or parts[:3] != (str(job["owner_id"]), job["project_id"], job["id"]):
-                raise ValueError("Исходный файл не принадлежит этому материалу.")
+            allowed = {(str(job["owner_id"]), job["project_id"], job["id"])}
+            approved = job.get("approved_reference")
+            if isinstance(approved, dict) and isinstance(approved.get("source_job_id"), str):
+                allowed.add((str(job["owner_id"]), job["project_id"], approved["source_job_id"]))
+            if len(parts) < 4 or parts[:3] not in allowed:
+                raise ValueError("Исходный файл не принадлежит этому материалу или принятому сценарию.")
             return self.store.read_asset(job["owner_id"], asset)
 
         if getattr(self.generator, "supports_live_video_resume", False) is True:

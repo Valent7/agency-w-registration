@@ -18,8 +18,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from agency_video_branding import (
-    VideoBrandingError, is_agency_w_brand, prepare_video_logo, video_logo_filter,
+    VideoBrandingError, check_video_logo, is_agency_w_brand, prepare_video_logo, video_logo_filter,
 )
+from agency_outro import append_agency_outro
 
 class MediaError(RuntimeError):
     """A bounded, credential-free error suitable for the material's status."""
@@ -305,8 +306,12 @@ def _video_frame(data, title, brand_name, color):
     return _jpeg(image)
 
 
-def render_story_reel(scene_images, speech_bytes, narration, title, brand_name, brand_color):
-    """Make a 1080×1920, H.264/AAC narrated story from three to five scenes."""
+def render_story_reel(
+    scene_images, speech_bytes, narration, title, brand_name, brand_color, *,
+    intro_image_bytes=None, outro_image_bytes=None, music_bytes=None,
+    voice_volume=1.0, music_volume=0.12, apply_finishing=False,
+):
+    """Make a narrated story and finish Agency W films with selected branding/audio."""
     if not isinstance(scene_images, list) or not 3 <= len(scene_images) <= 5:
         raise MediaError("Для видео нужны от трёх до пяти изображений сцен.")
     if (any(not isinstance(item, bytes) or not item for item in scene_images) or
@@ -377,6 +382,16 @@ def render_story_reel(scene_images, speech_bytes, narration, title, brand_name, 
             output = root / "story.mp4"
             if not output.is_file() or not 0 < output.stat().st_size <= 100 * 1024 * 1024:
                 raise MediaError("Видео отсутствует или превышает допустимый размер.")
-            return output.read_bytes()
+            result = output.read_bytes()
+            if apply_finishing and is_agency_w_brand(brand_name):
+                try:
+                    result = append_agency_outro(
+                        result, logo_path=check_video_logo(brand_name), size=(1080, 1920), title=title,
+                        intro_image_bytes=intro_image_bytes, outro_image_bytes=outro_image_bytes,
+                        music_bytes=music_bytes, voice_volume=voice_volume, music_volume=music_volume,
+                    )
+                except (RuntimeError, ValueError, VideoBrandingError) as exc:
+                    raise MediaError(str(exc)) from None
+            return result
         except (subprocess.SubprocessError,OSError) as exc:
             raise MediaError("Не удалось соединить сцены и озвучку видео.") from exc

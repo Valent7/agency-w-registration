@@ -168,7 +168,7 @@ class TwoMinuteReferenceTests(unittest.TestCase):
             content, assets = generator.generate(PROJECT, job, production=state,
                 save_production=lambda value: saved.append(copy.deepcopy(value)), save_source=Mock(),
                 load_source=lambda value: b"saved-media")
-        self.assertEqual(render.call_args.kwargs, {"target_seconds": 120})
+        self.assertEqual(render.call_args.kwargs, {"target_seconds": 120, "voice_volume": 1.0, "music_volume": 0.12, "apply_finishing": True})
         self.assertEqual(len(render.call_args.args[0]), 16)
         self.assertEqual(content["target_seconds"], 120)
         self.assertEqual(assets[0]["data"], b"completed-own-film")

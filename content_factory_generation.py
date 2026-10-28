@@ -37,6 +37,34 @@ _FIELDS = ("name", "product", "audience", "language", "tone", "goal", "website",
            "facts", "examples", "visual_style", "avoid", "video_mode", "video_style")
 
 
+def _video_finishing(raw, *, load_source=None):
+    """Validate saved finishing controls and optionally resolve their private assets."""
+    # Keep these settings local and deterministic; no paid provider call is needed for finishing.
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise GenerationError("Не удалось проверить сохранённое оформление видео.")
+    result = {}
+    for key, output_key in (
+        ("intro_asset", "intro_image_bytes"),
+        ("outro_asset", "outro_image_bytes"),
+        ("music_asset", "music_bytes"),
+    ):
+        asset = raw.get(key)
+        if asset is None:
+            continue
+        if not isinstance(asset, dict) or not isinstance(asset.get("storage_path"), str):
+            raise GenerationError("Файл оформления видео повреждён. Выберите его заново.")
+        if load_source is not None:
+            result[output_key] = load_source(asset)
+    for key, default, maximum in (("voice_volume", 1.0, 1.5), ("music_volume", 0.12, 0.40)):
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= maximum:
+            raise GenerationError("Громкость видео имеет неверное значение.")
+        result[key] = float(value)
+    return result
+
+
 def can_resume_video(production):
     """Recognize durable inputs without authorizing another creation request."""
     if not isinstance(production, dict) or type(production.get("version")) is not int or production["version"] != 1 or not isinstance(production.get("phase"), str) or production["phase"] not in {"inputs_ready", "clips", "complete"}:
@@ -510,6 +538,7 @@ class Generator:
         check_video_logo(project["name"])
         state = copy.deepcopy(state)
         content = state["content"]
+        finishing = _video_finishing(state.get("video_personalization"), load_source=load_source)
         count = len(state["raw_sources"])
         plan = validate_visual_plan(content.get("visual_plan"), frame_count=count)
         custom_prompts = state.get("motion_prompts")
@@ -592,8 +621,11 @@ class Generator:
         clips = [load_source(reference) for reference in state["clips"]]
         speech = load_source(state["speech_source"])
         duration_options = {"target_seconds": 120} if content.get("target_seconds") == 120 else {}
-        video = render_live_reel(clips, speech, content["narration"], content["title"],
-                                 project["name"], project["brand_color"], **duration_options)
+        video = render_live_reel(
+            clips, speech, content["narration"], content["title"],
+            project["name"], project["brand_color"], **duration_options, **finishing,
+            apply_finishing=bool(state.get("apply_finishing")),
+        )
         content["video_kind"] = "live"
         content.pop("video_branding", None)
         proof = video_branding_proof(video, project["name"])
@@ -785,16 +817,25 @@ class Generator:
                         raw_sources.append(save_source(f"live_input_{index + 1:02d}.{extension}", image, mime))
                     speech_source = save_source("live_narration.mp3", speech, "audio/mpeg")
                     content["video_kind"] = "live"
+                    personalization = (job.get("checkpoint") or {}).get("video_personalization") or {}
+                    _video_finishing(personalization)
                     state = {"version": 1, "phase": "inputs_ready", "project": clean_project,
                              "content": content, "raw_sources": raw_sources, "speech_source": speech_source,
                              "duration": duration, "scene_seconds": seconds, "tasks": [None] * frame_count,
-                             "clips": [None] * frame_count, "failed_indices": [], "starting_index": None}
+                             "clips": [None] * frame_count, "failed_indices": [], "starting_index": None,
+                             "video_personalization": copy.deepcopy(personalization),
+                             "apply_finishing": reference is not None}
                     save_production(copy.deepcopy(state))
                     return self._continue_live_video(clean_project, state, live_client, report=report,
                                                      save_production=save_production, save_source=save_source, load_source=load_source)
                 report("video", "Записываем озвучку и собираем сцены, движение и субтитры.")
                 speech = self._request("audio/speech", self._speech_payload(clean_project, content["narration"])).content
-                video = render_story_reel(artwork, speech, content["narration"], title, name, color)
+                personalization = (job.get("checkpoint") or {}).get("video_personalization") or {}
+                finishing = _video_finishing(personalization, load_source=load_source)
+                video = render_story_reel(
+                    artwork, speech, content["narration"], title, name, color, **finishing,
+                    apply_finishing=reference is not None,
+                )
                 content["video_kind"] = "illustrated"
                 content.pop("video_branding", None)
                 proof = video_branding_proof(video, name)
