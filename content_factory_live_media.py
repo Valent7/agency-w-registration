@@ -47,9 +47,19 @@ def _text(value, limit):
     return value.strip()
 
 
-def _duration(value):
-    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or not 0.3 <= value <= 59.5:
-        raise LiveMediaError("Озвучка должна длиться от 0,3 до 59,5 секунды.")
+def _limits(target_seconds):
+    # This is an explicit production contract, not a reason to relax limits
+    # for existing short-Reel callers or malformed saved state.
+    if type(target_seconds) is not int or target_seconds not in {45, 120}:
+        raise LiveMediaError("Выберите короткий ролик или видео до двух минут.")
+    return (119.5, 16) if target_seconds == 120 else (59.5, 6)
+
+
+def _duration(value, *, target_seconds=45):
+    maximum, _ = _limits(target_seconds)
+    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or not 0.3 <= value <= maximum:
+        limit = "119,5" if target_seconds == 120 else "59,5"
+        raise LiveMediaError(f"Озвучка должна длиться от 0,3 до {limit} секунды.")
     return float(value)
 
 
@@ -75,33 +85,36 @@ def _probe(ffprobe, path, formats):
         raise LiveMediaError("Не удалось проверить исходный медиафайл живого видео.") from None
 
 
-def _audio_info(ffprobe, path):
+def _audio_info(ffprobe, path, *, target_seconds=45):
     data, duration = _probe(ffprobe, path, AUDIO_FORMATS)
     audio = next((stream for stream in data["streams"] if stream.get("codec_type") == "audio"), None)
     if audio is None:
         raise LiveMediaError("В файле озвучки нет звуковой дорожки.")
-    return _duration(duration), audio.get("codec_name")
+    return _duration(duration, target_seconds=target_seconds), audio.get("codec_name")
 
 
-def _audio_duration(ffprobe, path):
-    return _audio_info(ffprobe, path)[0]
+def _audio_duration(ffprobe, path, *, target_seconds=45):
+    return _audio_info(ffprobe, path, target_seconds=target_seconds)[0]
 
 
-def speech_duration(speech_bytes):
+def speech_duration(speech_bytes, *, target_seconds=45):
     """Measure local MP3/WAV or M4A/AAC before requesting moving footage."""
+    _limits(target_seconds)
     _speech(speech_bytes)
     _, ffprobe = _tools()
     with tempfile.TemporaryDirectory(prefix="factory_voice_probe_") as folder:
         path = Path(folder) / "speech.audio"
         path.write_bytes(speech_bytes)
-        return _audio_duration(ffprobe, path)
+        return _audio_duration(ffprobe, path, target_seconds=target_seconds)
 
 
-def scene_durations(duration, frame_count):
+def scene_durations(duration, frame_count, *, target_seconds=45):
     """Return bounded Runway Gen-4.5 requests covering voice plus its tail."""
-    duration = _duration(duration)
-    if type(frame_count) is not int or not 3 <= frame_count <= 6:
-        raise LiveMediaError("Для живого ролика нужны от трёх до шести сцен.")
+    duration = _duration(duration, target_seconds=target_seconds)
+    _, maximum = _limits(target_seconds)
+    if type(frame_count) is not int or not 3 <= frame_count <= maximum:
+        limit = "шестнадцати" if target_seconds == 120 else "шести"
+        raise LiveMediaError(f"Для живого ролика нужны от трёх до {limit} сцен.")
     seconds = max(2, math.ceil((duration + END_PADDING) / frame_count))
     if seconds > 10:
         raise LiveMediaError("Для этой озвучки нужно больше живых сцен длительностью до 10 секунд.")
@@ -138,16 +151,18 @@ def _scene_captions(path, events, start, end, title, brand_name, brand_color):
     path.write_text(text, encoding="utf-8")
 
 
-def render_live_reel(scene_clips, speech_bytes, narration, title, brand_name, brand_color):
+def render_live_reel(scene_clips, speech_bytes, narration, title, brand_name, brand_color, *, target_seconds=45):
     """Make a 1080×1920 reel at normal speed, preserving imported AAC packets."""
-    if not isinstance(scene_clips, list) or not 3 <= len(scene_clips) <= 6:
-        raise LiveMediaError("Для живого видео нужны от трёх до шести готовых видеосцен.")
+    _, maximum = _limits(target_seconds)
+    if not isinstance(scene_clips, list) or not 3 <= len(scene_clips) <= maximum:
+        limit = "шестнадцати" if target_seconds == 120 else "шести"
+        raise LiveMediaError(f"Для живого видео нужны от трёх до {limit} готовых видеосцен.")
     if any(not isinstance(clip, bytes) or not clip or len(clip) > MAX_CLIP_BYTES for clip in scene_clips):
         raise LiveMediaError("Видеосцена отсутствует или превышает размер 25 МБ.")
     if sum(map(len, scene_clips)) > MAX_TOTAL_CLIP_BYTES:
         raise LiveMediaError("Общий размер видеосцен превышает 100 МБ.")
     _speech(speech_bytes)
-    narration, title, brand_name = _text(narration, 3000), _text(title, 150), _text(brand_name, 120)
+    narration, title, brand_name = _text(narration, 4000 if target_seconds == 120 else 3000), _text(title, 150), _text(brand_name, 120)
     if not isinstance(brand_color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", brand_color):
         raise LiveMediaError("Цвет оформления должен иметь формат #RRGGBB.")
     ffmpeg, ffprobe = _tools()
@@ -155,7 +170,7 @@ def render_live_reel(scene_clips, speech_bytes, narration, title, brand_name, br
         root = Path(folder)
         speech = root / "speech.audio"
         speech.write_bytes(speech_bytes)
-        duration, audio_codec = _audio_info(ffprobe, speech)
+        duration, audio_codec = _audio_info(ffprobe, speech, target_seconds=target_seconds)
         total_frames = math.ceil((duration + END_PADDING) * FPS)
         base, extra = divmod(total_frames, len(scene_clips))
         counts = [base + (index < extra) for index in range(len(scene_clips))]

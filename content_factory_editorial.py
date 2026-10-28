@@ -68,7 +68,12 @@ def _content_context(content: dict) -> dict:
     if not isinstance(content, dict):
         raise EditorialError("Материал для редактора должен быть объектом.")
     result = {}
-    for field, maximum in (("title", 150), ("text", 16000), ("narration", 1200)):
+    long_video = content.get("target_seconds") == 120 and type(content.get("target_seconds")) is int
+    if "target_seconds" in content:
+        if not long_video:
+            raise EditorialError("Неизвестная длительность нового видео.")
+        result["target_seconds"] = 120
+    for field, maximum in (("title", 150), ("text", 16000), ("narration", 4000 if long_video else 1200)):
         if field in content:
             result[field] = _string(content[field], field, maximum, required=False)
     if "slides" in content:
@@ -77,6 +82,14 @@ def _content_context(content: dict) -> dict:
             raise EditorialError("Для проверки карусели нужны от трёх до шести слайдов.")
         result["slides"] = [_string(slide, "текст слайда", 400) for slide in slides]
     return result
+
+
+def _long_job(context: dict) -> bool:
+    """Only an accepted plan or an explicit revision carries a longer target."""
+    accepted = context.get("approved_storyboard", {}).get("plan", {})
+    previous = context.get("previous_content", {})
+    return any(value.get("target_seconds") == 120 for value in (accepted, previous)
+               if isinstance(value, dict))
 
 
 def _json(value: dict) -> str:
@@ -140,9 +153,17 @@ def build_copy_prompt(project: dict, job: dict, *, previous: dict | None = None,
             "а не дословно повторяет её. Не превращай каждый слайд в одинаковую рекламу."
         )
     elif content_format == "reel":
-        instructions += (
-            ',"narration":"только произносимые слова диктора"}. '
+        long_video = _long_job(context) or (isinstance(previous, dict) and previous.get("target_seconds") == 120)
+        duration_schema = ',"target_seconds":120' if long_video else ""
+        duration_rule = (
+            "Речь диктора — 180–250 слов, до 4000 знаков: цельная история примерно на две минуты. "
+            "Сохрани target_seconds=120; не сокращай принятый сюжет до короткого Reels. "
+            if long_video else
             "Речь диктора — 45–85 слов, до 1200 знаков: короткая цельная история на 25–45 секунд. "
+        )
+        instructions += (
+            ',"narration":"только произносимые слова диктора"' + duration_schema + '}. '
+            + duration_rule +
             "Первый смысловой такт цепляет с первых слов: конкретное противоречие, точный вопрос "
             "из жизни аудитории или видимый результат, подтверждённый фактами проекта. Вопрос "
             "должен ставить реальную проблему, а не просто спрашивать «хотите лучше?». Не трать "
@@ -200,6 +221,8 @@ def build_proofread_prompt(project: dict, job: dict, content: dict) -> tuple[str
     """Build a focused correction pass without changing the editorial assignment."""
     context = _job_context(job)
     source = _content_context(content)
+    long_video = source.get("target_seconds") == 120
+    word_rule = "180–250 слов, до 4000 знаков" if long_video else "45–85 слов"
     instructions = (
         "Ты — корректор готового материала контент-завода. Исправь только объективные "
         "ошибки орфографии, грамматики, согласования, управления, пунктуации и неестественные "
@@ -220,7 +243,7 @@ def build_proofread_prompt(project: dict, job: dict, content: dict) -> tuple[str
         "факта или CTA, не изобретай замену: оставь это для следующей смысловой проверки. "
         "Сохрани точное число слайдов и их порядок: исправляй каждый слайд на его прежнем "
         "месте, не объединяй, не переставляй и не добавляй слайды. У ролика оставь только "
-        "произносимую речь, 45–85 слов, без режиссёрских ремарок. Если ошибок нет, верни "
+        f"произносимую речь, {word_rule}, без режиссёрских ремарок. Если ошибок нет, верни "
         "исходный текст без изменений. Верни полный исправленный объект, только JSON без "
         "Markdown, метаданных, заключения, оценок, списка ошибок или объяснения своих правок. "
         f"Лимит text вместе с CTA и ссылками: {TEXT_LIMITS[context['platform']]} знаков. "
@@ -234,11 +257,15 @@ def build_proofread_prompt(project: dict, job: dict, content: dict) -> tuple[str
             f"{count} в том же порядке, каждый до 400 знаков."
         )
     elif context["format"] == "reel":
+        duration_schema = ',"target_seconds":120' if long_video else ""
+        maximum = 4000 if long_video else 1200
         instructions += (
-            ',"narration":"исправленная речь диктора, до 1200 знаков"}. '
+            f',"narration":"исправленная речь диктора, до {maximum} знаков"' + duration_schema + '}. '
             "Сохрани конкретный крючок в первых словах, короткие разговорные фразы и связку "
             "развитие → поворот → развязка; не сглаживай их в отвлечённое рекламное вступление."
         )
+        if long_video:
+            instructions += " Сохрани target_seconds=120 и весь принятый двухминутный сюжет; не превращай его в короткий ролик."
     else:
         instructions += "}."
     return instructions, _json({"project": _project_context(project), **context, "content": source})
@@ -330,8 +357,8 @@ def validate_review(data: Any) -> dict:
 
 
 def _frame_count(value: Any) -> int:
-    if type(value) is not int or not 1 <= value <= 6:
-        raise EditorialError("В визуальном плане должно быть от одного до шести кадров.")
+    if type(value) is not int or not 1 <= value <= 16:
+        raise EditorialError("В визуальном плане должно быть от одного до шестнадцати кадров.")
     return value
 
 
@@ -415,22 +442,30 @@ def validate_reference_plan(data: Any, *, platform: str = "vk") -> dict:
     if (not isinstance(data, dict) or not isinstance(platform, str) or platform not in TEXT_LIMITS
             or data.get("format", "reel") != "reel"):
         raise EditorialError("Неверный сценарий нового видео по образцу.")
-    narration = _string(data.get("narration"), "речь нового ролика", 1200)
-    if not 45 <= len(narration.split()) <= 85:
-        raise EditorialError("Для нового короткого видео нужна речь длиной от 45 до 85 слов.")
+    long_video = data.get("target_seconds") == 120 and type(data.get("target_seconds")) is int
+    if "target_seconds" in data and not long_video:
+        raise EditorialError("Неизвестная длительность нового видео.")
+    minimum, maximum, characters = (180, 250, 4000) if long_video else (45, 85, 1200)
+    narration = _string(data.get("narration"), "речь нового ролика", characters)
+    if not minimum <= len(narration.split()) <= maximum:
+        raise EditorialError(f"Для нового видео нужна речь длиной от {minimum} до {maximum} слов.")
     import re
     if re.search(r"(?im)^\s*(сцена|кадр|камера|scene|camera)\s*\d*\s*[:—-]", narration):
         raise EditorialError("В речь нового ролика попали указания для монтажа.")
     plan = data.get("visual_plan")
     frames = plan.get("frames") if isinstance(plan, dict) else None
-    if not isinstance(frames, list) or not 4 <= len(frames) <= 6:
-        raise EditorialError("Для нового видео нужны от четырёх до шести самостоятельных сцен.")
-    return {
+    minimum_frames, maximum_frames = (12, 16) if long_video else (4, 6)
+    if not isinstance(frames, list) or not minimum_frames <= len(frames) <= maximum_frames:
+        raise EditorialError(f"Для нового видео нужны от {minimum_frames} до {maximum_frames} самостоятельных сцен.")
+    result = {
         "format": "reel", "title": _string(data.get("title"), "заголовок нового ролика", 150),
         "text": _string(data.get("text"), "подпись нового ролика", TEXT_LIMITS[platform]),
         "narration": narration,
         "visual_plan": validate_visual_plan(plan, frame_count=len(frames)),
     }
+    if long_video:
+        result["target_seconds"] = 120
+    return result
 
 
 def _reference_hash(data: dict) -> str:

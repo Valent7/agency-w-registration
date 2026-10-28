@@ -186,7 +186,7 @@ class RunwayVideoClient:
         concurrent requests or provider pricing changes can change the bill.
         """
         allowed = range(2, 11) if self.model == "gen4.5" else (5, 10)
-        if (not isinstance(scene_seconds, list) or not 1 <= len(scene_seconds) <= 6
+        if (not isinstance(scene_seconds, list) or not 1 <= len(scene_seconds) <= 16
                 or any(type(value) is not int or value not in allowed for value in scene_seconds)):
             raise LiveVideoError("Не удалось оценить кредиты: неверный план длительности сцен.")
         return 12 * sum(scene_seconds) if self.model == "gen4.5" else None

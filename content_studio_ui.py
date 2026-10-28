@@ -232,7 +232,7 @@ def _preserve_drafts(owner_id):
                 "_goal", "_website", "_language", "_tone", "_cta", "_facts", "_examples",
                 "_visual_style", "_avoid", "_color", "_platforms", "_formats", "_video_mode",
                 "_timezone", "_times", "_days", "_limit", "_review", "_enabled", "_topic",
-                "_format", "_text", "_feedback", "_style")
+                "_format", "_text", "_feedback", "_style", "_target_seconds")
     for key in list(st.session_state):
         scoped = key.startswith((f"studio_tool_{owner_id}_", f"cf_auto_{owner_id}_", f"studio_reference_{owner_id}_"))
         manual = key in {f"content_factory_request_{owner_id}", f"cf2_format_{owner_id}", f"content_studio_{owner_id}_video_style"} or (

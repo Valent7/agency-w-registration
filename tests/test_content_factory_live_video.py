@@ -140,7 +140,7 @@ class RunwayClientTests(unittest.TestCase):
 
     def test_invalid_credit_plans_never_contact_provider(self):
         client, session, _ = self.client()
-        for seconds in (None, [], [True], [1], [11], [5] * 7, [5.0], "10"):
+        for seconds in (None, [], [True], [1], [11], [5] * 17, [5.0], "10"):
             with self.subTest(seconds=seconds), self.assertRaises(LiveVideoError):
                 client.estimate_credits(seconds)
         session.get.assert_not_called()

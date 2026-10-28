@@ -32,7 +32,7 @@ def save_reference_result(store, owner_id, project_id, report, *, request_id):
     plan = checked["reference_plan"]
     content = {**checked, "title": plan["title"], "text": plan["text"]}
     serialized = json.dumps(content, ensure_ascii=False, sort_keys=True, allow_nan=False)
-    if len(serialized.encode()) > 64000:
+    if len(serialized.encode()) > 128 * 1024:
         raise ValueError("Разбор видео превышает допустимый размер.")
     fingerprint = sha256(serialized.encode()).hexdigest()
     now = iso(utc_now())

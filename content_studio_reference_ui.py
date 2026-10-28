@@ -27,15 +27,17 @@ def _report(value):
     return validate_reference_report(value)
 
 
-def _fingerprint(project, video_bytes, goal, style):
+def _fingerprint(project, video_bytes, goal, style, target_seconds=45):
     # A project correction or a different source deserves a new analysis. The
     # source hash never becomes permission to reuse another owner's report.
     context = {field: project.get(field) for field in (
         "id", "owner_id", "name", "product", "audience", "language", "tone", "goal",
         "facts", "examples", "visual_style", "avoid", "cta", "website",
     )}
-    return sha256(json.dumps([context, sha256(video_bytes).hexdigest(), goal, style],
-                             ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    values = [context, sha256(video_bytes).hexdigest(), goal, style]
+    if target_seconds != 45:
+        values.append(target_seconds)
+    return sha256(json.dumps(values, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 def _save(owner_id, project, store, result):
@@ -78,6 +80,8 @@ def _show_report(owner_id, project, store, service, key, result):
     plan = report["reference_plan"]
     st.subheader("Ваш новый сценарий")
     st.caption("Формат: " + STYLES[report["reference_style"]])
+    st.caption("Длительность нового ролика: около двух минут." if plan.get("target_seconds") == 120
+               else "Длительность нового ролика: до одной минуты.")
     with st.expander("Что взяли из образца", expanded=False):
         st.write(report["source_summary"])
         st.caption("Используем идею и приёмы. Герои, сцены, текст и оформление нового ролика создаются для вашего проекта.")
@@ -168,8 +172,11 @@ def render_reference_tool(owner_id, project, store, service):
                             placeholder="Например: покажи, как наш помощник освобождает вечер предпринимателя.", key=key + "_goal")
         style = st.radio("Какой результат нужен?", list(STYLES), format_func=STYLES.get,
                          horizontal=True, key=key + "_style")
+        target_seconds = st.radio("Длительность вашего нового видео", [45, 120],
+                                  format_func=lambda value: "Около двух минут" if value == 120 else "Короткое, до минуты",
+                                  horizontal=True, key=key + "_target_seconds")
         submitted = st.form_submit_button("Разобрать и подготовить свой сценарий", width="stretch", type="primary")
-        st.caption("Файл до 50 МБ и до двух минут. Сначала оплачивается только разбор образца; создание видео запускается отдельной кнопкой.")
+        st.caption("Исходный ролик: до 50 МБ и до 15 минут. Завод разбирает речь всего ролика; длительность вашего нового видео выбирается отдельно. Сначала оплачивается разбор, создание видео запускается другой кнопкой.")
     with st.expander("Если у вас только ссылка на публикацию", expanded=False):
         st.caption("Автоматическое получение роликов по ссылкам соцсетей пока не подключено. Загрузите сам видеофайл.")
     if submitted:
@@ -183,7 +190,7 @@ def render_reference_tool(owner_id, project, store, service):
                 raise ReferenceUiError("Выберите непустой видеофайл размером до 50 МБ.")
             if not 10 <= len(goal.strip()) <= 3000 or "\x00" in goal:
                 raise ReferenceUiError("Опишите тему своего видео: от 10 до 3000 символов.")
-            fingerprint = _fingerprint(project, video_bytes, goal.strip(), style)
+            fingerprint = _fingerprint(project, video_bytes, goal.strip(), style, target_seconds)
             previous = st.session_state.get(key + "_result")
             if isinstance(previous, dict) and previous.get("fingerprint") == fingerprint:
                 st.info("Разбор этого образца с этой задачей уже готов ниже.")
@@ -192,10 +199,12 @@ def render_reference_tool(owner_id, project, store, service):
                 from content_studio_reference import analyze_reference_video
 
                 with st.spinner("Изучаем образец и готовим новую историю…"):
+                    duration_options = {"target_seconds": 120} if target_seconds == 120 else {}
                     report = _report(analyze_reference_video(get_generator(), project, video_bytes,
                                                              filename=str(getattr(upload, "name", "reference.mp4")),
-                                                             goal=goal.strip(), style=style))
-                if report["reference_style"] != style or report["source"]["sha256"] != sha256(video_bytes).hexdigest():
+                                                             goal=goal.strip(), style=style, **duration_options))
+                if (report["reference_style"] != style or report["source"]["sha256"] != sha256(video_bytes).hexdigest()
+                        or report["reference_plan"].get("target_seconds", 45) != target_seconds):
                     raise ReferenceUiError("Не удалось связать разбор с выбранным образцом и стилем. Новое видео не запускалось.")
                 result = {"report": copy.deepcopy(report), "fingerprint": fingerprint,
                           "request_id": uuid.uuid4().hex, "saved_job_id": None,
@@ -207,7 +216,7 @@ def render_reference_tool(owner_id, project, store, service):
         except ReferenceError as error:
             st.error(str(error))
         except Exception:
-            st.error("Не удалось разобрать образец. Проверьте, что видео открывается и длится не более двух минут. Автоматический повтор платного запроса не запускался.")
+            st.error("Не удалось разобрать образец. Проверьте, что видео открывается и длится не более 15 минут. Автоматический повтор платного запроса не запускался.")
     result = st.session_state.get(key + "_result")
     if isinstance(result, dict):
         _show_report(owner_id, project, store, service, key, result)

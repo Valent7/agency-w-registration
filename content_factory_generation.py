@@ -43,7 +43,7 @@ def can_resume_video(production):
         return False
     sources = production.get("raw_sources")
     count = len(sources) if isinstance(sources, list) else 0
-    if not 4 <= count <= 6 or any(not isinstance(value, dict) or not value for value in sources):
+    if not 4 <= count <= 16 or any(not isinstance(value, dict) or not value for value in sources):
         return False
     if not isinstance(production.get("speech_source"), dict) or not production["speech_source"]:
         return False
@@ -53,11 +53,15 @@ def can_resume_video(production):
     if not isinstance(review, dict) or review.get("approved") is not True:
         return False
     try:
-        validate_content(production["content"], "reel", "vk")
+        checked_content = validate_content(production["content"], "reel", "vk")
     except GenerationError:
         return False
+    long_video = checked_content.get("target_seconds") == 120
+    if count > (16 if long_video else 6):
+        return False
     try:
-        if not math.isfinite(float(production["duration"])) or not 0.3 <= float(production["duration"]) <= 59.5:
+        maximum_duration = 119.5 if long_video else 59.5
+        if not math.isfinite(float(production["duration"])) or not 0.3 <= float(production["duration"]) <= maximum_duration:
             return False
     except (TypeError, ValueError, KeyError):
         return False
@@ -125,12 +129,35 @@ def validate_content(data: Any, content_format: str, platform: str) -> dict:
         if len(set(result["slides"])) != len(result["slides"]):
             raise GenerationError("ИИ повторил одинаковые слайды карусели.")
     if content_format == "reel":
-        narration = _text(data.get("narration"), "речь диктора", 1200)
-        if not 45 <= len(narration.split()) <= 85:
-            raise GenerationError("Для короткого видео нужна речь длиной от 45 до 85 слов.")
+        long_video = data.get("target_seconds") == 120 and type(data.get("target_seconds")) is int
+        if "target_seconds" in data and not long_video:
+            raise GenerationError("Неизвестная длительность нового видео.")
+        minimum, maximum, characters = (180, 250, 4000) if long_video else (45, 85, 1200)
+        narration = _text(data.get("narration"), "речь диктора", characters)
+        if not minimum <= len(narration.split()) <= maximum:
+            raise GenerationError(f"Для видео нужна речь длиной от {minimum} до {maximum} слов.")
         if re.search(r"(?im)^\s*(сцена|кадр|камера|scene|camera)\s*\d*\s*[:—-]", narration):
             raise GenerationError("В речь диктора попали технические указания.")
         result["narration"] = narration
+        if long_video:
+            result["target_seconds"] = 120
+    return result
+
+
+def _bind_reel_target(result, job, source=None):
+    """Preserve an accepted duration even when a model omits its metadata."""
+    if job.get("format") != "reel" or not isinstance(result, dict):
+        return result
+    candidates = (source, job.get("previous_content"),
+                  (job.get("approved_reference") or {}).get("plan"))
+    long_video = any(isinstance(value, dict) and type(value.get("target_seconds")) is int
+                     and value["target_seconds"] == 120 for value in candidates)
+    if long_video:
+        if "target_seconds" in result and (type(result["target_seconds"]) is not int or result["target_seconds"] != 120):
+            raise GenerationError("Редактор изменил принятую длительность видео; производство остановлено.")
+        return {**result, "target_seconds": 120}
+    if "target_seconds" in result:
+        raise GenerationError("Редактор изменил принятую длительность видео; производство остановлено.")
     return result
 
 
@@ -417,7 +444,8 @@ class Generator:
     def _copy(self, project, job, *, previous=None, review=None):
         from content_factory_editorial import build_copy_prompt
         instructions, input_data = build_copy_prompt(project, job, previous=previous, review=review)
-        return validate_content(self._structured(instructions, input_data), job["format"], job["platform"])
+        result = _bind_reel_target(self._structured(instructions, input_data), job, previous)
+        return validate_content(result, job["format"], job["platform"])
 
     def _review_copy(self, project, job, content):
         from content_factory_editorial import build_review_prompt, validate_review
@@ -431,6 +459,7 @@ class Generator:
         result = self._structured(instructions, input_data, model=self.review_model)
         if isinstance(result, dict) and result.get("format", job["format"]) != job["format"]:
             raise GenerationError("Корректор изменил формат материала; производство остановлено.")
+        result = _bind_reel_target(result, job, content)
         corrected = validate_content(result, job["format"], job["platform"])
         if job["format"] == "carousel":
             original_slides = content.get("slides") or []
@@ -562,8 +591,9 @@ class Generator:
         report("video", "Собираем живые сцены с голосом и субтитрами.")
         clips = [load_source(reference) for reference in state["clips"]]
         speech = load_source(state["speech_source"])
+        duration_options = {"target_seconds": 120} if content.get("target_seconds") == 120 else {}
         video = render_live_reel(clips, speech, content["narration"], content["title"],
-                                 project["name"], project["brand_color"])
+                                 project["name"], project["brand_color"], **duration_options)
         content["video_kind"] = "live"
         content.pop("video_branding", None)
         proof = video_branding_proof(video, project["name"])
@@ -677,7 +707,8 @@ class Generator:
             if live_client is not None:
                 report("video", "Записываем голос, чтобы точно рассчитать длительность живых сцен.")
                 speech = self._request("audio/speech", self._speech_payload(clean_project, content["narration"])).content
-                duration = speech_duration(speech)
+                duration_options = {"target_seconds": 120} if content.get("target_seconds") == 120 else {}
+                duration = speech_duration(speech, **duration_options)
             frame_count = len(content["slides"]) if job["format"] == "carousel" else (
                 max(4, math.ceil((duration + 0.35) / 10)) if live_client is not None else 4
             ) if job["format"] == "reel" else 1
@@ -687,7 +718,7 @@ class Generator:
                 # A long voice must not discard an accepted scene or silently
                 # replace the owner's original story before purchasing images.
                 if live_client is not None:
-                    scene_durations(duration, frame_count)
+                    scene_durations(duration, frame_count, **duration_options)
                 visual_plan = validate_visual_plan(reference["plan"]["visual_plan"], frame_count=frame_count)
             else:
                 instructions, input_data = build_visual_prompt(clean_project, job, content, frame_count=frame_count)
@@ -696,7 +727,7 @@ class Generator:
             content["visual_reviews"] = []
             planned_seconds = None
             if live_client is not None:
-                planned_seconds = scene_durations(duration, frame_count)
+                planned_seconds = scene_durations(duration, frame_count, **duration_options)
                 if getattr(live_client, "model", "gen4.5") == "gen4_turbo":
                     planned_seconds = [5 if value <= 5 else 10 for value in planned_seconds]
                 estimate = getattr(live_client, "estimate_credits", None)

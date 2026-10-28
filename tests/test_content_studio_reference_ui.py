@@ -60,7 +60,13 @@ def analyze(generator, current_project, video_bytes, **kwargs):
     st.session_state['_analyses'].append((current_project,video_bytes,kwargs))
     if st.session_state.get('_analysis_error'):
         raise RuntimeError('private-model-url?token=secret')
-    return report(kwargs['style'])
+    result = report(kwargs['style'])
+    if kwargs.get('target_seconds') == 120:
+        result['reference_plan'].update(target_seconds=120, narration=' '.join(['подготовка'] * 200))
+        result['reference_plan']['visual_plan']['frames'] = [
+            {'subject':'Самостоятельная сцена '+str(i),'composition':'Крупный план',
+             'lighting':'Тёплый свет','palette':'Золото и синий'} for i in range(16)]
+    return result
 
 def save(store, owner_id, project_id, data, *, request_id):
     st.session_state['_saves'].append((owner_id,project_id,copy.deepcopy(data),request_id))
@@ -108,6 +114,16 @@ class ReferenceUiTests(unittest.TestCase):
         self.assertEqual(app.session_state['_saves'], [])
         self.assertEqual(app.session_state['_creates'], [])
         self.assertFalse(any(item.label == 'Создать моё видео' for item in app.button))
+
+    def test_new_duration_is_selected_independently_and_passed_to_analysis(self):
+        app = self.app()
+        app.radio(key=self.key + '_target_seconds').set_value(120)
+        self.analyze(app, style='cartoon')
+        self.assertEqual(app.session_state['_analyses'][0][2]['target_seconds'], 120)
+        self.assertEqual(app.session_state['_saves'][0][2]['reference_plan']['target_seconds'], 120)
+        self.assertEqual(len(app.session_state['_saves'][0][2]['reference_plan']['visual_plan']['frames']), 16)
+        self.assertEqual(app.session_state['_creates'], [])
+        self.assertTrue(any('около двух минут' in item.value for item in app.caption))
 
     def test_reopening_saved_script_keeps_the_same_render_request_identity(self):
         first = self.analyze(self.app(), style='cartoon')
