@@ -155,7 +155,7 @@ def _scene_captions(path, events, start, end, title, brand_name, brand_color):
 def render_live_reel(
     scene_clips, speech_bytes, narration, title, brand_name, brand_color, *,
     target_seconds=45, intro_image_bytes=None, outro_image_bytes=None, music_bytes=None,
-    voice_volume=1.0, music_volume=0.12,
+    voice_volume=1.0, music_volume=0.12, apply_finishing=False,
 ):
     """Make a live reel and finish Agency W films with selected branding/audio."""
     _, maximum = _limits(target_seconds)
@@ -260,7 +260,7 @@ def render_live_reel(
             if not output.is_file() or not 0 < output.stat().st_size <= 100 * 1024 * 1024:
                 raise LiveMediaError("Готовое живое видео отсутствует или превышает 100 МБ.")
             result = output.read_bytes()
-            if is_agency_w_brand(brand_name):
+            if apply_finishing and is_agency_w_brand(brand_name):
                 try:
                     result = append_agency_outro(
                         result, logo_path=check_video_logo(brand_name), size=(1080, 1920), title=title,
