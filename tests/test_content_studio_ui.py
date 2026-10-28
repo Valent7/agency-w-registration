@@ -42,10 +42,23 @@ class StudioNavigationTests(unittest.TestCase):
                 self.choose(app, section)
         self.assertFalse(app.session_state['_fake_store'].actions)
 
-    def test_music_section_opens_suno_studio_bridge_without_generating(self):
+    def test_music_section_is_simple_first_and_never_generates_on_open(self):
         app = self.app()
         self.choose(app, 'music')
-        self.assertTrue(any('Вернуть готовую музыку' in item.value for item in app.markdown))
+        self.assertTrue(any('Как должна звучать музыка?' in item.value for item in app.markdown))
+        mode = app.radio(key='studio_music_77_project-1_mode')
+        self.assertEqual(mode.value, 'Простой режим')
+        self.assertEqual(mode.options, ['Простой режим', 'Расширенный режим'])
+        self.assertTrue(any(item.key == 'studio_music_77_project-1_prompt' for item in app.text_area))
+        self.assertFalse(app.session_state['_fake_store'].actions)
+
+    def test_music_advanced_mode_keeps_simple_controls_out_of_the_way(self):
+        app = self.app()
+        self.choose(app, 'music')
+        app.radio(key='studio_music_77_project-1_mode').set_value('Расширенный режим').run()
+        self.assertFalse(app.exception, [item.message for item in app.exception])
+        self.assertTrue(any(item.key == 'studio_music_77_project-1_style' for item in app.text_input))
+        self.assertTrue(any(item.key == 'studio_music_77_project-1_idea' for item in app.text_area))
         self.assertFalse(app.session_state['_fake_store'].actions)
 
     def test_prompt_recipe_opens_and_prefills_its_real_tool_without_generating(self):
@@ -94,6 +107,16 @@ class StudioNavigationTests(unittest.TestCase):
         app.text_input(key='studio_library_77_search').input('Полезный материал').run()
         opens = [item.key for item in app.button if str(item.key).endswith('_open')]
         self.assertEqual(opens, ['studio_library_77_ready-1_open'])
+
+    def test_unsubmitted_music_description_survives_switching_tools(self):
+        app = self.app()
+        self.choose(app, 'music')
+        key = 'studio_music_77_project-1_prompt'
+        app.text_area(key=key).input('Мягкая музыка о ценности времени')
+        self.choose(app, 'images')
+        self.choose(app, 'music')
+        self.assertEqual(app.text_area(key=key).value, 'Мягкая музыка о ценности времени')
+        self.assertFalse(app.session_state['_fake_store'].actions)
 
     def test_unsubmitted_text_survives_switching_tools(self):
         app = self.app()
