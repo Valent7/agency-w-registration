@@ -229,7 +229,7 @@ def _project_form(owner_id, project, service, target_profile):
             _action_error("Не удалось сохранить проект", exc)
 
 
-def _create_material(owner_id, project, store, service, capabilities):
+def _create_material(owner_id, project, store, service, capabilities, *, format_filter=None, workspace=False):
     if not project:
         return
     key = f"cf_auto_{owner_id}_{project['id']}_brief"
@@ -240,10 +240,20 @@ def _create_material(owner_id, project, store, service, capabilities):
         return
     platforms = [value for value in project.get("platforms", []) if value in PLATFORMS and value in connected]
     formats = [value for value in project.get("formats", []) if value in FORMATS]
+    if format_filter is not None:
+        formats = [value for value in formats if value in format_filter]
+        format_key = key + "_format"
+        if formats and st.session_state.get(format_key) not in formats:
+            st.session_state[format_key] = formats[0]
     st.markdown("#### Что создаём?")
-    st.caption("Опишите идею обычными словами. Завод подготовит текст и оформление для выбранных площадок. Готовый результат появится во вкладке «Материалы».")
+    results_location = "в разделе «Мои генерации»" if workspace else "во вкладке «Материалы»"
+    settings_location = "в разделе «Настройки проекта»" if workspace else "во вкладке «Проект»"
+    st.caption("Опишите идею обычными словами. Завод подготовит текст и оформление для выбранных площадок. Готовый результат появится " + results_location + ".")
     if not platforms:
-        st.info("Подключите хотя бы одну площадку во вкладке «Площадки», чтобы создать материал для неё.")
+        connections_location = "в разделе «Площадки»" if workspace else "во вкладке «Площадки»"
+        st.info("Подключите хотя бы одну площадку " + connections_location + ", чтобы создать материал для неё.")
+    if format_filter is not None and not formats:
+        st.info("Этот формат пока не выбран для проекта. Включите его в настройках проекта.")
     if not capabilities.get("ai_configured"):
         st.info("Создание станет доступно после подключения ИИ-сервиса администратором.")
     with st.form(key + "_form"):
@@ -257,13 +267,14 @@ def _create_material(owner_id, project, store, service, capabilities):
             st.caption("Завод создаст сцены с настоящим движением. Работа видеосервиса оплачивается отдельно от Render и генерации текста.")
         submitted = st.form_submit_button("Создать материал", type="primary", width="stretch", disabled=not (platforms and formats and capabilities.get("ai_configured")) or live_missing)
     if live_missing:
-        st.info("Для живого видео подключите видеосервис: «Проект → Подключение живого видео». Ролик из картинок вместо него не создаётся.")
+        connection_location = "Настройки проекта → Подключение живого видео" if workspace else "Проект → Подключение живого видео"
+        st.info("Для живого видео подключите видеосервис: «" + connection_location + "». Ролик из картинок вместо него не создаётся.")
     if project.get("review_required"):
-        st.caption("Перед публикацией завод дождётся вашего утверждения во вкладке «Материалы».")
+        st.caption("Перед публикацией завод дождётся вашего утверждения " + results_location + ".")
     elif project.get("automation_enabled"):
         st.caption("Автопилот включён: готовый материал после проверки качества будет опубликован автоматически.")
     else:
-        st.caption("Автопилот на паузе: завод подготовит материал и сохранит его здесь. Для публикации включите автопилот во вкладке «Проект».")
+        st.caption("Автопилот на паузе: завод подготовит материал и сохранит его здесь. Для публикации включите автопилот " + settings_location + ".")
     if submitted:
         if live_missing:
             return
@@ -276,15 +287,15 @@ def _create_material(owner_id, project, store, service, capabilities):
             st.session_state[key + "_request"] = pending
         try:
             jobs = service.create_material(owner_id, project["id"], topic, content_format, selected, request_id=pending["id"])
-            st.session_state[f"cf_auto_{owner_id}_notice"] = f"Задача сохранена. Завод подготовит материалы для {len(jobs)} площадок. Результат появится во вкладке «Материалы»."
+            st.session_state[f"cf_auto_{owner_id}_notice"] = f"Задача сохранена. Завод подготовит материалы для {len(jobs)} площадок. Результат появится {results_location}."
             st.rerun()
         except Exception as exc:
             _action_error("Не удалось создать материал", exc)
 
 
-def _connections(owner_id, project, store, capabilities):
+def _connections(owner_id, project, store, capabilities, *, workspace=False):
     if not project:
-        st.info("Сначала создайте проект во вкладке «Проект».")
+        st.info("Сначала создайте проект в разделе «Настройки проекта»." if workspace else "Сначала создайте проект во вкладке «Проект».")
         return
     project_id = project["id"]
     connections = {item["platform"]: item for item in store.list_connections(owner_id, project_id)}
@@ -350,13 +361,14 @@ def _local_time(value, timezone):
         return "Время не задано"
 
 
-def _calendar(owner_id, project, service, store, jobs, capabilities):
+def _calendar(owner_id, project, service, store, jobs, capabilities, *, workspace=False):
     if not project:
         st.info("Создайте проект, чтобы ИИ подготовил календарь публикаций.")
         return
     st.write(f"Время проекта: **{project.get('timezone', 'Europe/Berlin')}**. Форматы чередуются в выбранных слотах.")
     if not project.get("automation_enabled"):
-        st.info("Автопилот на паузе. Контент можно готовить; для публикации включите автопилот во вкладке «Проект».")
+        settings_location = "в разделе «Настройки проекта»" if workspace else "во вкладке «Проект»"
+        st.info("Автопилот на паузе. Контент можно готовить; для публикации включите автопилот " + settings_location + ".")
     if capabilities.get("worker_recent") is True:
         st.caption("Фоновый запуск подтверждён: очередь обрабатывается без открытого кабинета.")
     else:
@@ -434,7 +446,7 @@ def _quality_feedback(job, content):
         st.caption(feedback.strip()[:1000])
 
 
-def _revision_form(owner_id, job, service, key):
+def _revision_form(owner_id, job, service, key, *, workspace=False):
     with st.form(key + "_revision_form"):
         feedback = st.text_area("Что изменить в тексте или оформлении?", max_chars=3000, height=90, key=key + "_feedback", placeholder="Например: сделай текст короче, добавь конкретный пример, замени робота на живого человека в вечерней домашней обстановке.")
         submitted = st.form_submit_button("Переработать материал")
@@ -447,13 +459,14 @@ def _revision_form(owner_id, job, service, key):
         st.session_state[key + "_revision_request"] = pending
     try:
         service.revise_material(owner_id, job["id"], feedback, request_id=pending["id"])
-        st.session_state[f"cf_auto_{owner_id}_notice"] = "Правки приняты. Завод создаст новую версию; исходный материал сохранён. Результат появится во вкладке «Материалы»."
+        results_location = "в разделе «Мои генерации»" if workspace else "во вкладке «Материалы»"
+        st.session_state[f"cf_auto_{owner_id}_notice"] = "Правки приняты. Завод создаст новую версию; исходный материал сохранён. Результат появится " + results_location + "."
         st.rerun()
     except Exception as exc:
         _action_error("Не удалось передать правки", exc)
 
 
-def _materials(owner_id, project, jobs, store, service):
+def _materials(owner_id, project, jobs, store, service, *, workspace=False):
     if not project:
         st.info("После создания проекта здесь появятся тексты, карусели и видео.")
         return
@@ -522,7 +535,7 @@ def _materials(owner_id, project, jobs, store, service):
                     except Exception as exc:
                         _action_error("Не удалось утвердить материал", exc)
                 if state in {"ready", "failed"} and not (job.get("checkpoint") or {}).get("publish_started"):
-                    _revision_form(owner_id, job, service, key)
+                    _revision_form(owner_id, job, service, key, workspace=workspace)
             if state == "published" and job.get("permalink"):
                 permalink = str(job["permalink"])
                 if permalink.startswith("https://"):
@@ -543,7 +556,7 @@ def _materials(owner_id, project, jobs, store, service):
                         _action_error("Не удалось отменить материал", exc)
 
 
-def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None):
+def _render_content_autopilot_legacy(owner_id: int, owner_name: str, target_profile=None):
     """Render the authenticated partner's independent projects and queue."""
     try:
         owner_id = int(owner_id)
@@ -611,3 +624,83 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
             _calendar(owner_id, project, service, store, jobs, capabilities)
         with materials_tab:
             _materials(owner_id, project, jobs, store, service)
+
+
+def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None, *, section=None, format_filter=None):
+    """Render the full existing page or one focused content-studio section.
+
+    The default remains the legacy page, including its controls and state keys.
+    A focused section only renders its own controls; it never processes jobs.
+    """
+    if section is None:
+        return _render_content_autopilot_legacy(owner_id, owner_name, target_profile)
+    if section not in {"create", "materials", "calendar", "project", "connections"}:
+        raise ValueError("Неизвестный раздел Контент-завода.")
+    try:
+        owner_id = int(owner_id)
+    except (TypeError, ValueError):
+        return
+    if owner_id <= 0:
+        return
+    try:
+        store, service, capabilities = _runtime()
+        projects = store.list_projects(owner_id)
+    except Exception:
+        st.info("Не удалось открыть проекты. Попробуйте обновить страницу; созданные материалы сохранены.")
+        return
+    for project in projects:
+        for platform in PLATFORMS:
+            key = f"cf_auto_{owner_id}_{project['id']}_{platform}"
+            if st.session_state.pop(key + "_clear_token", False):
+                st.session_state[key + "_token"] = ""
+    notice = st.session_state.pop(f"cf_auto_{owner_id}_notice", None)
+    if notice:
+        st.success(notice)
+    options = [item["id"] for item in projects] + [_NEW]
+    labels = {item["id"]: item["name"] for item in projects}
+    labels[_NEW] = "＋ Новый проект"
+    selection_key = f"cf_auto_{owner_id}_selected_project"
+    next_project = st.session_state.pop(f"cf_auto_{owner_id}_next_project", None)
+    if next_project in options:
+        st.session_state[selection_key] = next_project
+    if st.session_state.get(selection_key) not in options:
+        st.session_state[selection_key] = options[0]
+    selected = st.selectbox("Проект", options, format_func=labels.get, key=selection_key)
+    project = next((item for item in projects if item["id"] == selected), None)
+    if not project:
+        st.caption("Создайте проект, чтобы сохранять материалы и настройки отдельно.")
+        _project_form(owner_id, None, service, target_profile)
+        return
+    if section == "project" or (section == "create" and (format_filter is None or "reel" in format_filter)):
+        capabilities = _prepare_video_capabilities(owner_id, project, capabilities)
+    jobs = []
+    if section in {"create", "materials", "calendar"}:
+        try:
+            jobs = store.list_jobs(owner_id, project["id"], limit=100)
+        except Exception:
+            st.info("Очередь временно недоступна. Настройки проекта сохранены.")
+        counts = Counter(job.get("state") for job in jobs)
+        first, second, third = st.columns(3)
+        first.metric("В работе", sum(counts[state] for state in ("queued", "scheduled", "generating", "publishing", "pending")))
+        second.metric("Ждут проверки", counts["ready"])
+        third.metric("Опубликовано", counts["published"])
+        st.caption(f"Статистика по последним {len(jobs)} материалам проекта.")
+        if project.get("automation_enabled") and st.button("⏸ Поставить автопилот на паузу", key=f"cf_auto_{owner_id}_{project['id']}_pause"):
+            try:
+                service.save_project(owner_id, {**project, "automation_enabled": False})
+                st.session_state[f"cf_auto_{owner_id}_{project['id']}_enabled"] = False
+                st.rerun()
+            except Exception as exc:
+                _action_error("Не удалось приостановить автопилот", exc)
+    if section == "create":
+        _create_material(owner_id, project, store, service, capabilities, format_filter=format_filter, workspace=True)
+    elif section == "materials":
+        _materials(owner_id, project, jobs, store, service, workspace=True)
+    elif section == "calendar":
+        _calendar(owner_id, project, service, store, jobs, capabilities, workspace=True)
+    elif section == "project":
+        _project_form(owner_id, project, service, target_profile)
+        _video_connection_form(owner_id, project, capabilities)
+    else:
+        _connections(owner_id, project, store, capabilities, workspace=True)
+    return project

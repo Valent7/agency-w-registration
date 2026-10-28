@@ -27,7 +27,9 @@ class ContentFactoryNavigationTests(unittest.TestCase):
             node.name: node for node in tree.body
             if isinstance(node, ast.FunctionDef)
         }
-        active_code = ast.get_source_segment(source, methods["render_content_factory"])
+        active_code = ast.get_source_segment(source, methods["_render_single_material"])
+        entry = ast.get_source_segment(source, methods["render_content_factory"])
+        self.assertIn("render_content_studio(", entry)
         self.assertNotIn('render_video_cleanup(owner_id)', active_code)
         self.assertNotIn('["✨ Создать контент", "🧹 Очистить видео"]', active_code)
         self.assertNotIn('if choice == "🧹 Очистить видео":', active_code)

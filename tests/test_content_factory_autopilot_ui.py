@@ -442,12 +442,172 @@ with patch.object(ui, '_connect_url', side_effect=fresh_link):
         )
         app = AppTest.from_string(script, default_timeout=15).run()
         self.assertFalse(app.exception)
-        self.assertTrue(any(item.label == "🚀 Автопилот: контент и публикации" for item in app.expander))
+        self.assertFalse(any(item.label == "🚀 Автопилот: контент и публикации" for item in app.expander))
+        self.assertFalse(any(item.key == "cf2_start_77" for item in app.button))
+        app.radio(key="content_studio_77_tool").set_value("editor").run()
+        self.assertFalse(app.exception)
         self.assertEqual(app.button(key="cf2_start_77").label, "✨ Создать контент")
         app.button(key="cf2_start_77").click().run()
         self.assertFalse(app.exception)
         self.assertEqual(app.radio(key="cf2_format_77").value, "post")
-        self.assertTrue(any(item.label == "🚀 Автопилот: контент и публикации" for item in app.expander))
+        self.assertFalse(any(item.label == "🚀 Автопилот: контент и публикации" for item in app.expander))
+
+    def compact_app(self, section, *, format_filter=None):
+        script = APP.replace(
+            "    ui.render_content_autopilot(77, 'Партнёр')",
+            "    ui.render_content_autopilot(77, 'Партнёр', "
+            f"section=st.session_state.get('_section', {section!r}), "
+            f"format_filter=st.session_state.get('_format_filter', {format_filter!r}))",
+            1,
+        )
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception, [item.message for item in app.exception])
+        return app
+
+    def test_compact_materials_show_results_and_existing_approval_without_other_forms(self):
+        app = self.compact_app("materials")
+        self.assertFalse(app.tabs)
+        self.assertFalse(any(item.label == "🚀 Автопилот: контент и публикации" for item in app.expander))
+        self.assertEqual([item.value for item in app.metric], ["0", "1", "1"])
+        self.assertTrue(app.selectbox(key="cf_auto_77_project-1_filter"))
+        self.assertFalse(any(item.label in {"Ваша задача", "Что продвигаем"} for item in app.text_area))
+        self.assertFalse(any(item.label == "Ключ доступа к публикациям" for item in app.text_input))
+        self.assertTrue(app.button(key="cf_auto_77_project-1_refresh_materials"))
+        self.assertTrue(app.button(key="cf_auto_77_project-1_ready-1_cancel"))
+        app.text_area(key="cf_auto_77_project-1_ready-1_text").input("Проверенный текст из рабочего пространства")
+        app.button(key="cf_auto_77_project-1_ready-1_approve").click().run()
+        self.assertFalse(app.exception)
+        action = app.session_state["_fake_store"].actions[-1]
+        self.assertEqual(action[:3], ("approve", 77, "ready-1"))
+        self.assertEqual(action[3]["text"], "Проверенный текст из рабочего пространства")
+
+    def test_compact_calendar_retains_plan_process_and_queue_without_creation_or_settings(self):
+        app = self.compact_app("calendar")
+        self.assertTrue(app.dataframe)
+        self.assertFalse(app.tabs)
+        self.assertFalse(app.text_area)
+        self.assertFalse(any(item.label == "Сохранить проект" for item in app.button))
+        app.button(key="cf_auto_77_project-1_plan").click().run()
+        self.assertEqual(app.session_state["_fake_store"].actions[-1], ("plan", 77, "project-1", 7))
+        app.button(key="cf_auto_77_project-1_process").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state["_fake_store"].actions[-1], ("process", 77, "project-1"))
+
+    def test_compact_materials_keep_carousel_slides_images_download_and_approval(self):
+        script_resolver = "        return []\n\nclass FakeService:"
+        # The normal fake deliberately hides media; this standalone app allows
+        # the owner's saved image URL through the same resolver contract.
+        script = APP.replace(script_resolver, "        return copy.deepcopy(assets)\n\nclass FakeService:", 1).replace(
+            "'platform':'instagram', 'format':'post', 'state':'ready'",
+            "'platform':'instagram', 'format':'carousel', 'state':'ready'",
+            1,
+        ).replace(
+            "'content':{'title':'Полезный материал', 'text':'Исходный текст'}, 'assets':[]",
+            "'content':{'title':'Три понятных шага', 'text':'Подпись к карусели', 'slides':['Первый шаг','Второй шаг','Третий шаг']}, 'assets':[{'url':'https://media.example.invalid/slide.jpg','mime_type':'image/jpeg'}]",
+            1,
+        ).replace(
+            "    ui.render_content_autopilot(77, 'Партнёр')",
+            "    ui.render_content_autopilot(77, 'Партнёр', section='materials')",
+            1,
+        )
+        app = AppTest.from_string(script, default_timeout=15).run()
+        self.assertFalse(app.exception)
+        self.assertEqual(len(app.get("image")), 1)
+        visible = " ".join(item.value for item in app.markdown)
+        for slide in ("Первый шаг", "Второй шаг", "Третий шаг"):
+            self.assertIn(slide, visible)
+        self.assertTrue(any(item.proto.label == "Скачать текст" for item in app.get("download_button")))
+        app.button(key="cf_auto_77_project-1_ready-1_approve").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state["_fake_store"].actions[-1][3]["slides"], ["Первый шаг", "Второй шаг", "Третий шаг"])
+
+    def test_compact_connections_and_project_do_not_load_jobs_or_sync_unneeded_video(self):
+        for section in ("connections", "project"):
+            with self.subTest(section=section):
+                script = APP.replace(
+                    "    def list_jobs(self, owner_id, project_id, limit=100):\n        assert (owner_id,project_id) == (77,'project-1')",
+                    "    def list_jobs(self, owner_id, project_id, limit=100):\n        raise AssertionError('Settings do not load content jobs')",
+                    1,
+                ).replace(
+                    "    ui.render_content_autopilot(77, 'Партнёр')",
+                    f"    ui.render_content_autopilot(77, 'Партнёр', section={section!r})",
+                    1,
+                )
+                if section == "connections":
+                    script = script.replace(
+                        "with patch.object(ui, '_runtime',",
+                        "with patch.object(ui, '_prepare_video_capabilities', side_effect=AssertionError('Connections do not sync video secrets')), patch.object(ui, '_runtime',",
+                        1,
+                    )
+                app = AppTest.from_string(script, default_timeout=15).run()
+                self.assertFalse(app.exception, [item.message for item in app.exception])
+                self.assertFalse(app.tabs)
+                self.assertFalse(app.metric)
+                self.assertFalse(any(item.label == "Ваша задача" for item in app.text_area))
+                if section == "connections":
+                    self.assertTrue(app.text_input(key="cf_auto_77_project-1_instagram_account"))
+                    self.assertFalse(any(item.label == "Сохранить проект" for item in app.button))
+                else:
+                    self.assertTrue(app.text_input(key="cf_auto_77_project-1_name"))
+                    self.assertTrue(any(item.label == "Сохранить проект" for item in app.button))
+                    self.assertFalse(any(item.label == "Ключ доступа к публикациям" for item in app.text_input))
+
+    def test_compact_create_filters_format_and_updates_stale_selection_without_creating_media(self):
+        app = self.compact_app("create", format_filter=["carousel"])
+        key = "cf_auto_77_project-1_brief_format"
+        self.assertEqual(app.radio(key=key).options, ["Карусель"])
+        self.assertEqual(app.radio(key=key).value, "carousel")
+        self.assertTrue(app.text_area(key="cf_auto_77_project-1_brief_topic"))
+        self.assertFalse(any(item.label == "Сохранить проект" for item in app.button))
+        self.assertFalse(any(item.label == "Обновить материалы" for item in app.button))
+        app.session_state["_format_filter"] = ["post"]
+        app.run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.radio(key=key).options, ["Пост"])
+        self.assertEqual(app.radio(key=key).value, "post")
+        self.assertEqual(app.session_state["_fake_store"].actions, [])
+
+    def test_compact_new_project_form_available_from_materials_and_not_generated(self):
+        app = self.compact_app("materials")
+        app.selectbox(key="cf_auto_77_selected_project").select("__new_project__").run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any(item.label == "Создать проект" for item in app.button))
+        self.assertFalse(any(item.label == "Ваша задача" for item in app.text_area))
+        self.assertFalse(app.metric)
+        self.assertEqual(app.session_state["_fake_store"].actions, [])
+
+    def test_compact_creation_and_revision_notices_point_to_my_generations(self):
+        app = self.compact_app("create", format_filter=["post"])
+        app.session_state["_fake_store"].connections = [{"platform": "vk", "account_id": "123", "display_name": "Мой проект"}]
+        app.run()
+        app.text_area(key="cf_auto_77_project-1_brief_topic").input("Объясни, как предпринимателю освободить вечер от рутины")
+        app.multiselect(key="cf_auto_77_project-1_brief_platforms").set_value(["vk"])
+        next(item for item in app.button if item.label == "Создать материал").click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any("Результат появится в разделе «Мои генерации»" in item.value for item in app.success))
+        self.assertFalse(any("во вкладке" in item.value for kind in (app.caption, app.info, app.success) for item in kind))
+        app.session_state["_section"] = "materials"
+        app.run()
+        app.text_area(key="cf_auto_77_project-1_ready-1_feedback").input("Добавь конкретный пример из жизни")
+        next(item for item in app.button if item.label == "Переработать материал").click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any("Результат появится в разделе «Мои генерации»" in item.value for item in app.success))
+        self.assertEqual(app.session_state["_fake_store"].jobs[0]["content"]["text"], "Исходный текст")
+
+    def test_compact_navigation_instructions_use_visible_sections_and_legacy_keeps_tabs(self):
+        app = self.compact_app("create", format_filter=["reel"])
+        visible = " ".join(item.value for kind in (app.info, app.caption) for item in kind)
+        self.assertIn("в разделе «Площадки»", visible)
+        self.assertIn("Настройки проекта → Подключение живого видео", visible)
+        self.assertIn("в разделе «Мои генерации»", visible)
+        self.assertNotIn("во вкладке", visible)
+        app.session_state["_section"] = "calendar"
+        app.run()
+        self.assertTrue(any("в разделе «Настройки проекта»" in item.value for item in app.info))
+        legacy = self.app()
+        visible = " ".join(item.value for kind in (legacy.info, legacy.caption) for item in kind)
+        self.assertIn("во вкладке «Материалы»", visible)
+        self.assertIn("во вкладке «Проект»", visible)
 
 
 if __name__ == "__main__":

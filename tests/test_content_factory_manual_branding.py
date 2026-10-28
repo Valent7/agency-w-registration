@@ -22,7 +22,7 @@ import content_factory_autopilot_ui as auto
 def paid(*args, **kwargs):
     raise AssertionError("A page view must not generate media")
 with patch.object(auto, "render_content_autopilot"), patch.object(ui, "_load_latest_package", return_value=None):
-    ui.render_content_factory(77, "Владелец", paid, paid, paid, paid)
+    ui._render_single_material(77, "Владелец", paid, paid, paid, paid)
 '''
         app = AppTest.from_string(script, default_timeout=15).run()
         self.assertFalse(app.exception)

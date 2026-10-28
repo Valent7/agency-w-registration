@@ -3309,6 +3309,24 @@ def render_content_factory(
     get_avatar_video_fn,
     target_profile=None,
 ):
+    """Open the unified workspace from the Agency's Content navigation."""
+    from content_studio_ui import render_content_studio
+    render_content_studio(
+        owner_telegram_id, owner_name, ask_ai_fn, generate_illustration_fn,
+        create_avatar_video_fn, get_avatar_video_fn, target_profile=target_profile,
+        render_manual=_render_single_material,
+    )
+
+
+def _render_single_material(
+    owner_telegram_id,
+    owner_name,
+    ask_ai_fn,
+    generate_illustration_fn,
+    create_avatar_video_fn,
+    get_avatar_video_fn,
+    target_profile=None,
+):
     """Контент-завод: одно человеческое задание превращается в готовый материал."""
     owner_id = int(owner_telegram_id)
     state_key = f"content_factory_package_{owner_id}"
@@ -3317,11 +3335,7 @@ def render_content_factory(
     request_key = f"content_factory_request_{owner_id}"
     load_marker = f"content_factory_v2_loaded_{owner_id}"
 
-    st.markdown("## 🏭 Контент-завод W")
-    from content_factory_autopilot_ui import render_content_autopilot
-    render_content_autopilot(owner_id, owner_name, target_profile=target_profile)
-
-    st.markdown("### Создать отдельный материал")
+    st.markdown("### Сценарий и оформление материала")
     st.caption(
         "Скажите задачу обычными словами. Завод подготовит профессиональный текст, "
         "Стагирит проверит его, а платные инструменты включатся только после утверждения."
@@ -3538,9 +3552,16 @@ def render_content_factory(
     if save_warning:
         st.caption("Материал создан. История пока не сохранена: " + str(save_warning))
 
+    item_index = 0
+    if len(package["items"]) > 1:
+        item_index = st.selectbox(
+            "Материал в комплекте", list(range(len(package["items"]))),
+            format_func=lambda index: str(package["items"][index].get("title") or f"Материал {index + 1}"),
+            key=f"cf2_archive_{owner_id}_{package.get('package_id', 'current')}",
+        )
     _render_item(
         package,
-        package["items"][0],
+        package["items"][item_index],
         owner_id,
         ask_ai_fn,
         generate_illustration_fn,
@@ -3561,6 +3582,6 @@ def render_content_factory(
         st.rerun()
 
     with st.expander("📚 Готовые материалы"):
-        current = package["items"][0]
+        current = package["items"][item_index]
         status = "Готово к производству" if current.get("status") == "approved" else "На согласовании"
         st.write(f"**{current.get('title') or 'Материал'}** — {status}")
