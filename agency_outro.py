@@ -220,6 +220,43 @@ def render_agency_intro(
     return output.getvalue()
 
 
+
+def _custom_card(image_bytes: bytes, logo_path: Path, *, size=(720, 1280)) -> bytes:
+    """Fit an owner-supplied still to the film and stamp the exact Agency W logo."""
+    if not isinstance(image_bytes, bytes) or not 0 < len(image_bytes) <= 10 * 1024 * 1024:
+        raise ValueError("Заставка должна быть изображением размером до 10 МБ.")
+    if not Path(logo_path).is_file():
+        raise RuntimeError("Не найден оригинальный логотип Агентства W.")
+    try:
+        with Image.open(BytesIO(image_bytes)) as source:
+            if source.width * source.height > 25_000_000:
+                raise ValueError
+            source.load()
+            canvas = ImageOps.fit(
+                source.convert("RGB"), size,
+                method=Image.Resampling.LANCZOS, centering=(0.5, 0.5),
+            ).convert("RGBA")
+        with Image.open(logo_path) as source:
+            mark = source.convert("RGBA")
+            edge = max(72, round(min(size) * 0.16))
+            mark.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+            inset = max(22, round(min(size) * 0.045))
+            canvas.alpha_composite(mark, (size[0] - mark.width - inset, inset))
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ValueError("Не удалось прочитать заставку. Используйте PNG, JPG или WebP.") from exc
+    output = BytesIO()
+    canvas.convert("RGB").save(output, format="PNG")
+    return output.getvalue()
+
+
+def _volume(value, *, default: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if 0.0 <= number <= maximum else default
+
+
 def _run_ffmpeg(command, target: Path, *, timeout: int = 450):
     run = subprocess.run(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -233,15 +270,21 @@ def _run_ffmpeg(command, target: Path, *, timeout: int = 450):
 
 
 def append_agency_outro(
-    video_bytes: bytes, *, logo_path: Path, size=(720, 1280), title: str = ""
+    video_bytes: bytes, *, logo_path: Path, size=(720, 1280), title: str = "",
+    intro_image_bytes: bytes | None = None, outro_image_bytes: bytes | None = None,
+    music_bytes: bytes | None = None, voice_volume: float = 1.0, music_volume: float = 0.12,
 ) -> bytes:
-    """Add a readable two-second hook and two-second agency end slate.
+    """Add Agency W opening/end cards and optionally mix owner-selected music.
 
-    The final audio is silence, not an invented musical track. Existing music
-    and narration remain in the original section, unaffected.
+    The narration stays the primary track. Music is intentionally capped well
+    below speech level so a saved setting cannot drown out the voice.
     """
     if not video_bytes:
         raise ValueError("Готовое видео пустое.")
+    if music_bytes is not None and (not isinstance(music_bytes, bytes) or not 0 < len(music_bytes) <= 25 * 1024 * 1024):
+        raise ValueError("Музыкальный файл должен быть размером до 25 МБ.")
+    voice_volume = _volume(voice_volume, default=1.0, maximum=1.5)
+    music_volume = _volume(music_volume, default=0.12, maximum=0.40)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("Для фирменной заставки нужен ffmpeg.")
@@ -255,8 +298,16 @@ def append_agency_outro(
         closer = tmp / "outro.mp4"
         result = tmp / "video_with_brand.mp4"
         raw.write_bytes(video_bytes)
-        opener_card.write_bytes(render_agency_intro(title, logo_path, size=size))
-        closer_card.write_bytes(render_agency_outro(logo_path, size=size))
+        opener_card.write_bytes(
+            _custom_card(intro_image_bytes, logo_path, size=size)
+            if intro_image_bytes is not None
+            else render_agency_intro(title, logo_path, size=size)
+        )
+        closer_card.write_bytes(
+            _custom_card(outro_image_bytes, logo_path, size=size)
+            if outro_image_bytes is not None
+            else render_agency_outro(logo_path, size=size)
+        )
         for card, clip, seconds in (
             (opener_card, opener, INTRO_SECONDS),
             (closer_card, closer, OUTRO_SECONDS),
@@ -296,4 +347,31 @@ def append_agency_outro(
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", str(result),
         ], result)
-        return result.read_bytes()
+
+        if music_bytes is None and abs(voice_volume - 1.0) < 0.001:
+            return result.read_bytes()
+
+        mixed = tmp / "video_with_audio_mix.mp4"
+        if music_bytes is not None:
+            music = tmp / "owner_music"
+            music.write_bytes(music_bytes)
+            audio_filter = (
+                f"[0:a]volume={voice_volume:.3f}[voice];"
+                f"[1:a]volume={music_volume:.3f}[music];"
+                "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]"
+            )
+            _run_ffmpeg([
+                ffmpeg, "-y", "-i", str(result), "-stream_loop", "-1", "-i", str(music),
+                "-filter_complex", audio_filter,
+                "-map", "0:v:0", "-map", "[a]", "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k", "-shortest",
+                "-movflags", "+faststart", str(mixed),
+            ], mixed)
+        else:
+            _run_ffmpeg([
+                ffmpeg, "-y", "-i", str(result), "-map", "0:v:0", "-map", "0:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-af", f"volume={voice_volume:.3f}",
+                "-movflags", "+faststart", str(mixed),
+            ], mixed)
+        return mixed.read_bytes()
