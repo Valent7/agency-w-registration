@@ -622,7 +622,8 @@ class Generator:
         duration_options = {"target_seconds": 120} if content.get("target_seconds") == 120 else {}
         video = render_live_reel(
             clips, speech, content["narration"], content["title"],
-            project["name"], project["brand_color"], **duration_options, **finishing
+            project["name"], project["brand_color"], **duration_options, **finishing,
+            apply_finishing=bool(state.get("apply_finishing")),
         )
         content["video_kind"] = "live"
         content.pop("video_branding", None)
@@ -821,7 +822,8 @@ class Generator:
                              "content": content, "raw_sources": raw_sources, "speech_source": speech_source,
                              "duration": duration, "scene_seconds": seconds, "tasks": [None] * frame_count,
                              "clips": [None] * frame_count, "failed_indices": [], "starting_index": None,
-                             "video_personalization": copy.deepcopy(personalization)}
+                             "video_personalization": copy.deepcopy(personalization),
+                             "apply_finishing": reference is not None}
                     save_production(copy.deepcopy(state))
                     return self._continue_live_video(clean_project, state, live_client, report=report,
                                                      save_production=save_production, save_source=save_source, load_source=load_source)
@@ -830,7 +832,8 @@ class Generator:
                 personalization = (job.get("checkpoint") or {}).get("video_personalization") or {}
                 finishing = _video_finishing(personalization, load_source=load_source)
                 video = render_story_reel(
-                    artwork, speech, content["narration"], title, name, color, **finishing
+                    artwork, speech, content["narration"], title, name, color, **finishing,
+                    apply_finishing=reference is not None,
                 )
                 content["video_kind"] = "illustrated"
                 content.pop("video_branding", None)
