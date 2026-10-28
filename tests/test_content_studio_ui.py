@@ -36,11 +36,29 @@ class StudioNavigationTests(unittest.TestCase):
 
     def test_all_sections_open_without_generating_or_hiding_neighbor_controls(self):
         app = self.app()
-        for section in ('texts', 'images', 'carousel', 'video', 'speech', 'music', 'library', 'editor',
-                        'calendar', 'connections', 'project', 'help', 'ready'):
+        for section in ('texts', 'images', 'carousel', 'video', 'reference', 'speech', 'music', 'library', 'editor',
+                        'prompts', 'search', 'calendar', 'connections', 'project', 'help', 'ready'):
             with self.subTest(section=section):
                 self.choose(app, section)
         self.assertFalse(app.session_state['_fake_store'].actions)
+
+    def test_prompt_recipe_opens_and_prefills_its_real_tool_without_generating(self):
+        app = self.app()
+        self.choose(app, 'prompts')
+        next(item for item in app.button if item.key == 'studio_templates_77_post-small-story_use').click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.radio(key='content_studio_77_tool').value, 'texts')
+        self.assertIn('Агентство W', app.text_area(key='studio_tool_77_project-1_text_prompt').value)
+        self.assertFalse(app.session_state['_fake_store'].actions)
+
+    def test_favorites_filter_keeps_only_saved_favorites(self):
+        app = self.app()
+        app.session_state['_fake_store'].jobs[0]['favorite'] = True
+        self.choose(app, 'library')
+        app.checkbox(key='studio_library_77_favorites').check().run()
+        self.assertFalse(app.exception)
+        opens = [item.key for item in app.button if str(item.key).endswith('_open')]
+        self.assertEqual(opens, ['studio_library_77_ready-1_open'])
 
     def test_gallery_shows_existing_ready_material_and_preserves_approval_editor(self):
         app = self.app()

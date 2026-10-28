@@ -177,6 +177,20 @@ class RunwayVideoClient:
         finally:
             response.close()
 
+    def estimate_credits(self, scene_seconds):
+        """Estimate the planned orders locally; this is not a provider quote.
+
+        Gen-4.5 used 120 credits for each ten-second scene in the Agency's
+        2026-10-27 production run. Use that observed 12-credit/second rate.
+        Other tariffs are not inferred. A balance read is not a reservation:
+        concurrent requests or provider pricing changes can change the bill.
+        """
+        allowed = range(2, 11) if self.model == "gen4.5" else (5, 10)
+        if (not isinstance(scene_seconds, list) or not 1 <= len(scene_seconds) <= 6
+                or any(type(value) is not int or value not in allowed for value in scene_seconds)):
+            raise LiveVideoError("Не удалось оценить кредиты: неверный план длительности сцен.")
+        return 12 * sum(scene_seconds) if self.model == "gen4.5" else None
+
     def create_scene(self, image_bytes, prompt, duration):
         if not isinstance(prompt, str) or not prompt.strip() or "\x00" in prompt:
             raise LiveVideoError("Опишите действие для живой сцены.")

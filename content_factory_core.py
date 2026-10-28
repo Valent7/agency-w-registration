@@ -154,14 +154,41 @@ class ContentFactoryService:
                     self.store.update_job(owner_id, job["id"], changes, expected_updated_at=job.get("updated_at"))
         return project
 
-    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id):
+    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id, video_style=None):
         """Queue an explicit brief without enabling scheduled publication.
 
         The request ID survives an ambiguous response or UI rerun. The worker
         may prepare these jobs while the project's publication schedule is off,
         but the usual publication and owner-review checks still apply.
         """
-        return self._create_material(owner_id, project_id, topic, content_format, platforms, request_id=request_id)
+        return self._create_material(owner_id, project_id, topic, content_format, platforms,
+                                     request_id=request_id, video_style=video_style)
+
+    def create_from_video_reference(self, owner_id, project_id, reference_job_id, *, platforms, request_id):
+        """Queue the owner's accepted original storyboard, never the source pixels."""
+        from content_factory_editorial import build_reference_seed, EditorialError, validate_reference_plan
+        project = self._project(owner_id, project_id)
+        reference = self._job(owner_id, reference_job_id)
+        content = reference.get("content")
+        if (reference.get("owner_id") != owner_id or reference.get("project_id") != project["id"]
+                or reference.get("state") != "studio" or reference.get("platform") != "studio"
+                or reference.get("studio_tool") != "reference" or reference.get("studio_complete") is not True
+                or not isinstance(content, dict)):
+            raise FactoryError("Сначала сохраните собственный сценарий по видео-образцу в этом проекте.")
+        if not isinstance(platforms, list) or not platforms:
+            raise FactoryError("Выберите площадки для нового видео.")
+        try:
+            # Validate all publication limits before the first durable enqueue.
+            for platform in platforms:
+                validate_reference_plan(content.get("reference_plan"), platform=platform)
+            seed = build_reference_seed(owner_id, project["id"], reference["id"],
+                                        content.get("reference_style"), content.get("reference_plan"), project)
+        except EditorialError as error:
+            raise FactoryError(str(error)) from error
+        topic = f"Создать собственный ролик по принятому сценарию: {seed['plan']['title']}"
+        return self._create_material(owner_id, project_id, topic, "reel", platforms,
+                                     request_id=request_id, video_style=seed["style"],
+                                     revision={"approved_reference": seed, "review_required": True})
 
     def revise_material(self, owner_id, job_id, feedback, *, request_id):
         job = self._job(owner_id, job_id)
@@ -178,10 +205,15 @@ class ContentFactoryService:
             job["format"], [job["platform"]], request_id=request_id,
             revision={"source_job_id": job["id"], "previous_content": copy.deepcopy(job["content"]),
                       "revision_feedback": feedback.strip(), "review_required": True},
+            video_style=job.get("video_style") if job["format"] == "reel" else None,
         )
 
-    def _create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id, revision=None):
+    def _create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id, revision=None,
+                         video_style=None):
         project = self._project(owner_id, project_id)
+        if video_style is not None and (content_format != "reel" or not isinstance(video_style, str)
+                                        or video_style not in {"live", "cartoon"}):
+            raise FactoryError("Выберите живое видео или мультфильм для формата Видео / Reels.")
         if not isinstance(topic, str) or not 10 <= len(topic.strip()) <= 6000 or "\x00" in topic:
             raise FactoryError("Опишите задачу подробнее: от 10 до 6000 символов.")
         topic = topic.strip()
@@ -197,8 +229,11 @@ class ContentFactoryService:
             raise FactoryError("Сначала подключите выбранные площадки во вкладке «Площадки».")
         if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
             raise FactoryError("Не удалось определить задачу. Обновите страницу и повторите создание.")
-        video_mode = project.get("video_mode", "illustrated") if content_format == "reel" else None
-        fingerprint = sha256(json.dumps([topic, content_format, sorted(platforms), revision, video_mode], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        video_mode = ("live" if video_style is not None else project.get("video_mode", "illustrated")) if content_format == "reel" else None
+        intent = [topic, content_format, sorted(platforms), revision, video_mode]
+        if video_style is not None:
+            intent.append(video_style)
+        fingerprint = sha256(json.dumps(intent, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         for previous in self.store.list_jobs(owner_id, project_id, limit=1000):
             if previous.get("request_id") == request_id and previous.get("request_fingerprint") != fingerprint:
                 raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
@@ -211,7 +246,8 @@ class ContentFactoryService:
                 "available_at": now, "state": "queued", "dedupe_key": key,
                 "topic": topic, "requested_by_owner": True, "request_id": request_id,
                 "request_fingerprint": fingerprint,
-                **({"video_mode": project.get("video_mode", "illustrated")} if content_format == "reel" else {}),
+                **({"video_mode": video_mode} if content_format == "reel" else {}),
+                **({"video_style": video_style} if video_style is not None else {}),
                 "content": {}, "assets": [], "checkpoint": {}, "error": "", "attempts": 0,
                 **(revision or {}),
             })

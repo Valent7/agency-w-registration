@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 from content_factory_core import iso, utc_now
 from content_factory_store import SQLiteStore, StoreError
 from content_factory_worker import Worker
-from content_studio_catalog import list_manual_packages, save_studio_result
+from content_studio_catalog import list_manual_packages, save_studio_result, save_reference_result, set_favorite
 
 
 class ManualCatalogTests(unittest.TestCase):
@@ -173,6 +173,38 @@ class StudioResultTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 self.save(kind, **kwargs)
         self.assertEqual(self.store.list_jobs(101, self.project["id"]), [])
+
+    def test_reference_analysis_is_durable_private_idempotent_and_inert(self):
+        from test_content_factory_reference_pipeline import PLAN
+        report = {"version": 1, "reference_style": "cartoon", "reference_plan": copy.deepcopy(PLAN),
+                  "source_summary": "Начало с вопроса, действие, развязка.", "transcript": "Речь образца",
+                  "source": {"sha256": "a" * 64, "duration": 20.0, "filename": "source.mp4"}}
+        first = save_reference_result(self.store, 101, self.project["id"], report, request_id="reference-12345")
+        second = save_reference_result(self.store, 101, self.project["id"], report, request_id="reference-12345")
+        self.assertEqual(first, second)
+        self.assertEqual(first["state"], "studio")
+        self.assertEqual(first["studio_tool"], "reference")
+        self.assertTrue(first["studio_complete"])
+        self.assertEqual(first["assets"], [])
+        self.assertEqual(self.store.get_job(101, first["id"])["content"]["reference_style"], "cartoon")
+        self.assertIsNone(self.store.get_job(202, first["id"]))
+        self.assertIsNone(self.store.claim_job("factory", iso(utc_now())))
+        with self.assertRaises(ValueError):
+            save_reference_result(self.store, 202, self.project["id"], report, request_id="reference-foreign")
+        changed = copy.deepcopy(report)
+        changed["reference_style"] = "live"
+        with self.assertRaisesRegex(ValueError, "другими условиями"):
+            save_reference_result(self.store, 101, self.project["id"], changed, request_id="reference-12345")
+
+    def test_favorites_are_owner_scoped_and_preserve_media_and_state(self):
+        job = self.save("image", data=b"owned-image", mime_type="image/png")
+        favorite = set_favorite(self.store, 101, job["id"], True)
+        self.assertTrue(favorite["favorite"])
+        self.assertEqual(favorite["state"], job["state"])
+        self.assertEqual(favorite["assets"], job["assets"])
+        with self.assertRaises(ValueError):
+            set_favorite(self.store, 202, job["id"], False)
+        self.assertFalse(set_favorite(self.store, 101, job["id"], False)["favorite"])
 
 
 if __name__ == "__main__":

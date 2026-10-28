@@ -34,7 +34,7 @@ class GenerationError(RuntimeError):
 TEXT_LIMITS = {"instagram": 2200, "vk": 16000, "threads": 500, "telegram": 1024}
 FORMATS = {"post", "carousel", "reel"}
 _FIELDS = ("name", "product", "audience", "language", "tone", "goal", "website", "cta",
-           "facts", "examples", "visual_style", "avoid", "video_mode")
+           "facts", "examples", "visual_style", "avoid", "video_mode", "video_style")
 
 
 def can_resume_video(production):
@@ -580,6 +580,7 @@ class Generator:
         from agency_video_branding import VideoBrandingError, check_video_logo, video_branding_proof
         from content_factory_editorial import (
             PROJECT_LIMITS, EditorialError, build_image_prompt, build_visual_prompt, validate_visual_plan,
+            validate_reference_seed,
         )
         from content_factory_media import MediaError, render_slide, render_story_reel
         from content_factory_live_media import LiveMediaError, speech_duration, scene_durations
@@ -593,10 +594,28 @@ class Generator:
         if any(not clean_project[name] for name in ("name", "product", "audience")):
             raise GenerationError("Заполните название, продукт и аудиторию проекта.")
         clean_project["brand_color"] = _color(project.get("brand_color"))
+        reference = None
+        if job.get("approved_reference") is not None:
+            try:
+                reference = validate_reference_seed(job["approved_reference"], platform=job["platform"])
+            except EditorialError as error:
+                raise GenerationError(str(error)) from error
+            if (job["format"] != "reel" or reference["owner_id"] != job.get("owner_id")
+                    or reference["project_id"] != job.get("project_id")
+                    or reference["style"] != job.get("video_style") or job.get("video_mode") != "live"):
+                raise GenerationError("Принятый сценарий не принадлежит этому заданию нового видео.")
+            # The owner's accepted brief must not drift when project settings
+            # change while its background job is waiting for a worker.
+            clean_project = copy.deepcopy(reference["project"])
         mode = "live" if production else job.get("video_mode", project.get("video_mode", "illustrated"))
         if mode not in {"live", "illustrated"}:
             raise GenerationError("Выберите поддерживаемый режим создания видео.")
         clean_project["video_mode"] = mode
+        if job["format"] == "reel":
+            style = reference["style"] if reference else job.get("video_style") or project.get("video_style") or "live"
+            if not isinstance(style, str) or style not in {"live", "cartoon"}:
+                raise GenerationError("Выберите живое видео или мультфильм.")
+            clean_project["video_style"] = style
         _font(36)
         if job["format"] == "reel" and not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
             raise GenerationError("Для производства видео нужны FFmpeg и ffprobe.")
@@ -610,6 +629,7 @@ class Generator:
             if job["format"] == "reel" and not production:
                 check_video_logo(clean_project["name"])
             live_client = None
+            balance = None
             if job["format"] == "reel" and mode == "live":
                 if not callable(self.live_video_client_resolver):
                     raise GenerationError("Живое видео пока не подключено. Завершите подключение видеосервиса в проекте.")
@@ -630,7 +650,8 @@ class Generator:
                 if isinstance(balance, (int, float)) and balance <= 0:
                     raise GenerationError("В видеосервисе недостаточно кредитов для создания живых сцен.")
             report("copy", "Автор готовит текст по вашей задаче.")
-            content = self._copy(clean_project, job)
+            content = (validate_content(reference["plan"], "reel", job["platform"])
+                       if reference is not None else self._copy(clean_project, job))
             report("proofread", "Корректор проверяет грамматику и точность формулировок.")
             content = self._proofread(clean_project, job, content)
             report("review", "Стагирит проверяет смысл, факты и пользу текста.")
@@ -646,6 +667,11 @@ class Generator:
             if not review["approved"]:
                 raise GenerationError("Стагирит остановил производство: текст требует доработки. "
                                       + "; ".join(review["issues"])[:600], draft=content)
+            if reference is not None:
+                content.update(reference_source_job_id=reference["source_job_id"],
+                               reference_plan_sha256=reference["fingerprint"], video_style=reference["style"])
+            elif job["format"] == "reel":
+                content["video_style"] = clean_project["video_style"]
 
             speech, duration = None, None
             if live_client is not None:
@@ -656,10 +682,38 @@ class Generator:
                 max(4, math.ceil((duration + 0.35) / 10)) if live_client is not None else 4
             ) if job["format"] == "reel" else 1
             report("visual", "Арт-директор разрабатывает сюжет и единый стиль иллюстраций.")
-            instructions, input_data = build_visual_prompt(clean_project, job, content, frame_count=frame_count)
-            visual_plan = validate_visual_plan(self._structured(instructions, input_data), frame_count=frame_count)
+            if reference is not None:
+                frame_count = len(reference["plan"]["visual_plan"]["frames"])
+                # A long voice must not discard an accepted scene or silently
+                # replace the owner's original story before purchasing images.
+                if live_client is not None:
+                    scene_durations(duration, frame_count)
+                visual_plan = validate_visual_plan(reference["plan"]["visual_plan"], frame_count=frame_count)
+            else:
+                instructions, input_data = build_visual_prompt(clean_project, job, content, frame_count=frame_count)
+                visual_plan = validate_visual_plan(self._structured(instructions, input_data), frame_count=frame_count)
             content["visual_plan"] = visual_plan
             content["visual_reviews"] = []
+            planned_seconds = None
+            if live_client is not None:
+                planned_seconds = scene_durations(duration, frame_count)
+                if getattr(live_client, "model", "gen4.5") == "gen4_turbo":
+                    planned_seconds = [5 if value <= 5 else 10 for value in planned_seconds]
+                estimate = getattr(live_client, "estimate_credits", None)
+                credits = estimate(planned_seconds) if callable(estimate) else None
+                if (isinstance(credits, (int, float)) and not isinstance(credits, bool)
+                        and math.isfinite(credits) and credits >= 0):
+                    content["video_credit_estimate"] = {
+                        "credits": credits, "scene_seconds": planned_seconds,
+                        "model": str(getattr(live_client, "model", ""))[:80], "is_estimate": True,
+                    }
+                    if (isinstance(balance, (int, float)) and not isinstance(balance, bool)
+                            and math.isfinite(balance) and credits > balance):
+                        raise GenerationError(
+                            f"Для выбранных сцен нужно примерно {credits:g} кредитов, доступно {balance:g}. "
+                            "Изображения и видеосцены не запускались. Сократите ролик или пополните баланс.",
+                            draft=content,
+                        )
             artwork = []
             # One correction for the whole deliverable bounds image spending.
             corrections_left = 1
@@ -689,9 +743,7 @@ class Generator:
                     assets.append({"data": image, "mime_type": "image/jpeg", "filename": f"slide_{index + 1:02d}.jpg"})
             elif job["format"] == "reel":
                 if live_client is not None:
-                    seconds = scene_durations(duration, frame_count)
-                    if getattr(live_client, "model", "gen4.5") == "gen4_turbo":
-                        seconds = [5 if value <= 5 else 10 for value in seconds]
+                    seconds = planned_seconds
                     raw_sources = []
                     for index, image in enumerate(artwork):
                         with Image.open(io.BytesIO(image)) as source:

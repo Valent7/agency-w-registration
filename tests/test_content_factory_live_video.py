@@ -126,6 +126,26 @@ class RunwayClientTests(unittest.TestCase):
         self.assertEqual(session.get.call_args.args[0], BASE_URL + "/organization")
         session.post.assert_not_called()
 
+    def test_estimate_uses_observed_gen45_cost_without_requests_or_unknown_tariff(self):
+        client, session, _ = self.client()
+        self.assertEqual(client.estimate_credits([10] * 4), 480)
+        self.assertEqual(client.estimate_credits([9] * 4), 432)
+        self.assertEqual(client.estimate_credits([2, 3, 4]), 108)
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+        turbo, session, _ = self.client(model="gen4_turbo")
+        self.assertIsNone(turbo.estimate_credits([5, 10]))
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+
+    def test_invalid_credit_plans_never_contact_provider(self):
+        client, session, _ = self.client()
+        for seconds in (None, [], [True], [1], [11], [5] * 7, [5.0], "10"):
+            with self.subTest(seconds=seconds), self.assertRaises(LiveVideoError):
+                client.estimate_credits(seconds)
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+
     def test_preflight_unknown_endpoint_is_not_reported_as_invalid_key(self):
         for status in (404, 405):
             client, session, _ = self.client()

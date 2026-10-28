@@ -11,11 +11,14 @@ TOOLS = {
     "images": "Изображения",
     "carousel": "Карусели",
     "video": "Видео",
+    "reference": "Своё по видео-образцу",
     "speech": "Озвучка",
     "music": "Музыка",
     "ready": "Готовый контент",
     "library": "Мои генерации",
     "editor": "Редактор",
+    "prompts": "Готовые задания",
+    "search": "Поиск",
     "calendar": "Календарь публикаций",
     "connections": "Площадки",
     "project": "Настройки проекта",
@@ -55,7 +58,7 @@ def _context(owner_id):
 
 
 def _kind(job):
-    if job.get("studio_tool") in {"text", "image", "audio"}:
+    if job.get("studio_tool") in {"text", "image", "audio", "reference"}:
         return job["studio_tool"]
     return {"reel": "video", "carousel": "carousel"}.get(job.get("format"), "ready")
 
@@ -85,6 +88,15 @@ def _media(owner_id, job, store):
 
 def _studio_detail(owner_id, job, store):
     content = job.get("content") or {}
+    if job.get("studio_tool") == "reference":
+        st.subheader(content.get("title") or "Разбор видео-образца")
+        st.write(content.get("source_summary") or "")
+        plan = content.get("reference_plan") or {}
+        st.markdown("**Ваш новый сценарий**")
+        st.write(plan.get("narration") or "")
+        if st.button("Продолжить создание своего видео", key=f"studio_reference_{owner_id}_{job['id']}_continue", type="primary"):
+            _navigate(owner_id, "reference", reference_job_id=job["id"])
+        return
     st.subheader(content.get("title") or "Материал")
     _media(owner_id, job, store)
     if content.get("text"):
@@ -161,11 +173,13 @@ def _library(owner_id, owner_name, target_profile, render_manual):
         st.session_state.pop(f"content_studio_{owner_id}_detail", None)
     search, filters = st.columns([2, 1])
     query = search.text_input("Поиск по материалам", key=f"studio_library_{owner_id}_search").strip().casefold()
-    kind = filters.selectbox("Тип материала", ["all", "ready", "text", "image", "carousel", "video", "audio"],
-                            format_func=lambda value: {"all": "Все", "ready": "Готовый контент", "text": "Тексты", "image": "Изображения", "carousel": "Карусели", "video": "Видео", "audio": "Озвучка"}[value],
+    kind = filters.selectbox("Тип материала", ["all", "ready", "text", "image", "carousel", "video", "audio", "reference"],
+                            format_func=lambda value: {"all": "Все", "ready": "Готовый контент", "text": "Тексты", "image": "Изображения", "carousel": "Карусели", "video": "Видео", "audio": "Озвучка", "reference": "Разборы видео"}[value],
                             key=f"studio_library_{owner_id}_kind")
+    favorites_only = st.checkbox("Только избранное", key=f"studio_library_{owner_id}_favorites")
     show_cancelled = st.checkbox("Показать отменённые", key=f"studio_library_{owner_id}_cancelled")
     selected = [job for job in jobs if (show_cancelled or job.get("state") != "cancelled")
+                and (not favorites_only or job.get("favorite") is True)
                 and (kind == "all" or _kind(job) == kind)
                 and (not query or query in str(job.get("content") or {}).casefold() or query in str(job.get("prompt") or job.get("topic") or "").casefold())]
     if selected:
@@ -182,7 +196,15 @@ def _library(owner_id, owner_name, target_profile, render_manual):
                     st.session_state[f"content_studio_{owner_id}_detail"] = job["id"]
                     st.session_state[f"cf_auto_{owner_id}_{project['id']}_filter"] = "all"
                     st.rerun()
-    manual = _manual_archive(owner_id, packages, query, kind)
+                favorite = job.get("favorite") is True
+                if st.button("♥ В избранном" if favorite else "♡ В избранное", key=f"studio_library_{owner_id}_{job['id']}_favorite"):
+                    try:
+                        from content_studio_catalog import set_favorite
+                        set_favorite(store, owner_id, job["id"], not favorite)
+                        st.rerun()
+                    except Exception:
+                        st.error("Не удалось изменить избранное. Обновите материалы и повторите.")
+    manual = False if favorites_only else _manual_archive(owner_id, packages, query, kind)
     if not selected and not manual:
         st.info("Здесь появятся ваши результаты. Выберите инструмент слева и создайте первый материал.")
 
@@ -210,10 +232,10 @@ def _preserve_drafts(owner_id):
                 "_goal", "_website", "_language", "_tone", "_cta", "_facts", "_examples",
                 "_visual_style", "_avoid", "_color", "_platforms", "_formats", "_video_mode",
                 "_timezone", "_times", "_days", "_limit", "_review", "_enabled", "_topic",
-                "_format", "_text", "_feedback")
+                "_format", "_text", "_feedback", "_style")
     for key in list(st.session_state):
-        scoped = key.startswith((f"studio_tool_{owner_id}_", f"cf_auto_{owner_id}_"))
-        manual = key in {f"content_factory_request_{owner_id}", f"cf2_format_{owner_id}"} or (
+        scoped = key.startswith((f"studio_tool_{owner_id}_", f"cf_auto_{owner_id}_", f"studio_reference_{owner_id}_"))
+        manual = key in {f"content_factory_request_{owner_id}", f"cf2_format_{owner_id}", f"content_studio_{owner_id}_video_style"} or (
             key.startswith("cf2_u_") and key.endswith(f"_{owner_id}"))
         if (scoped and key.endswith(suffixes)) or manual:
             st.session_state[key] = st.session_state[key]
@@ -266,17 +288,31 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
         tool = st.radio("Раздел завода", list(TOOLS), format_func=TOOLS.get, key=key, label_visibility="collapsed")
     with workspace:
         st.markdown("## " + TOOLS[tool])
-        if tool in {"texts", "images", "speech"}:
+        if tool in {"texts", "images", "speech", "reference", "prompts"}:
+            from content_studio_templates import apply_template_handoff
             store, _, project = _context(owner_id)
-            {"texts": lambda: render_text_tool(owner_id, project, store, ask_ai_fn),
-             "images": lambda: render_image_tool(owner_id, project, store, generate_illustration_fn),
-             "speech": lambda: render_speech_tool(owner_id, project, store)}[tool]()
+            if project:
+                apply_template_handoff(owner_id, project, st.session_state)
+            if tool == "reference":
+                from content_studio_reference_ui import render_reference_tool
+                from content_factory_core import ContentFactoryService
+                render_reference_tool(owner_id, project, store, ContentFactoryService(store) if store else None)
+            elif tool == "prompts":
+                from content_studio_templates import render_templates
+                render_templates(owner_id, project)
+            else:
+                {"texts": lambda: render_text_tool(owner_id, project, store, ask_ai_fn),
+                 "images": lambda: render_image_tool(owner_id, project, store, generate_illustration_fn),
+                 "speech": lambda: render_speech_tool(owner_id, project, store)}[tool]()
         elif tool in {"ready", "carousel", "video"}:
             if tool == "video":
-                st.caption("Создание нового ролика запускается только по вашей кнопке. Ранее отклонённый ролик не возобновляется.")
+                if st.button("Создать своё по видео-образцу", key=f"studio_video_{owner_id}_reference", type="primary"):
+                    _navigate(owner_id, "reference")
+                st.caption("Или опишите собственную идею ниже. Создание запускается только по вашей кнопке.")
             render_content_autopilot(owner_id, owner_name, target_profile=target_profile, section="create",
-                                     format_filter={"carousel": ["carousel"], "video": ["reel"]}.get(tool))
-        elif tool == "library":
+                                     format_filter={"carousel": ["carousel"], "video": ["reel"]}.get(tool),
+                                     video_style=st.session_state.get(f"content_studio_{owner_id}_video_style") if tool == "video" else None)
+        elif tool in {"library", "search"}:
             _library(owner_id, owner_name, target_profile, render_manual)
         elif tool == "editor":
             render_manual(owner_id, owner_name, ask_ai_fn, generate_illustration_fn,

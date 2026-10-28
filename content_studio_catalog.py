@@ -18,6 +18,55 @@ from content_factory_core import iso, utc_now
 from content_factory_store import StoreError
 
 
+def save_reference_result(store, owner_id, project_id, report, *, request_id):
+    """Save a checked analysis, never the competitor's media or a queued video."""
+    from content_studio_reference import validate_reference_report
+
+    owner_id = _owner(owner_id)
+    project = store.get_project(owner_id, project_id)
+    if not project or project.get("owner_id") != owner_id:
+        raise ValueError("Проект не найден в вашем кабинете.")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
+        raise ValueError("Не удалось определить запрос сохранения разбора.")
+    checked = validate_reference_report(report)
+    plan = checked["reference_plan"]
+    content = {**checked, "title": plan["title"], "text": plan["text"]}
+    serialized = json.dumps(content, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    if len(serialized.encode()) > 64000:
+        raise ValueError("Разбор видео превышает допустимый размер.")
+    fingerprint = sha256(serialized.encode()).hexdigest()
+    now = iso(utc_now())
+    job = store.enqueue_job(owner_id, project_id, {
+        "platform": "studio", "format": "reference", "state": "studio",
+        "dedupe_key": "studio-reference:" + request_id, "scheduled_at": now, "available_at": now,
+        "studio_tool": "reference", "studio_complete": False,
+        "reference_fingerprint": fingerprint, "content": content, "assets": [],
+        "topic": plan["title"], "checkpoint": {}, "error": "",
+    })
+    if job.get("studio_tool") != "reference" or job.get("reference_fingerprint") != fingerprint:
+        raise ValueError("Этот разбор уже сохранён с другими условиями.")
+    if job.get("studio_complete") is True:
+        return job
+    try:
+        return store.update_job(owner_id, job["id"], {"content": content, "studio_complete": True},
+                                expected_updated_at=job.get("updated_at"))
+    except StoreError:
+        latest = store.get_job(owner_id, job["id"])
+        if latest and latest.get("studio_complete") is True and latest.get("reference_fingerprint") == fingerprint:
+            return latest
+        raise StoreError("Не удалось подтвердить сохранение разбора. Повторите сохранение без новой генерации.") from None
+
+
+def set_favorite(store, owner_id, job_id, favorite):
+    owner_id = _owner(owner_id)
+    if type(favorite) is not bool:
+        raise ValueError("Не удалось изменить избранное.")
+    job = store.get_job(owner_id, job_id)
+    if not job:
+        raise ValueError("Материал не найден в вашем кабинете.")
+    return store.update_job(owner_id, job_id, {"favorite": favorite}, expected_updated_at=job.get("updated_at"))
+
+
 def _owner(value):
     if isinstance(value, bool) or not (type(value) is int or isinstance(value, str) and value.isdecimal()):
         raise ValueError("Не удалось определить владельца материалов.")

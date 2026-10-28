@@ -229,7 +229,7 @@ def _project_form(owner_id, project, service, target_profile):
             _action_error("Не удалось сохранить проект", exc)
 
 
-def _create_material(owner_id, project, store, service, capabilities, *, format_filter=None, workspace=False):
+def _create_material(owner_id, project, store, service, capabilities, *, format_filter=None, workspace=False, video_style=None):
     if not project:
         return
     key = f"cf_auto_{owner_id}_{project['id']}_brief"
@@ -258,8 +258,9 @@ def _create_material(owner_id, project, store, service, capabilities, *, format_
         st.info("Создание станет доступно после подключения ИИ-сервиса администратором.")
     with st.form(key + "_form"):
         topic = st.text_area("Ваша задача", placeholder="Например: покажи предпринимателю, как освободить вечер от повторяющихся задач. Объясни на конкретном примере и пригласи обсудить его задачу.", max_chars=6000, height=120, key=key + "_topic")
-        live_mode = project.get("video_mode", "illustrated") == "live"
-        format_label = lambda value: ("Живое видео" if live_mode else "Ролик из иллюстраций") if value == "reel" else FORMATS.get(value, value)
+        live_mode = video_style in {"live", "cartoon"} or project.get("video_mode", "illustrated") == "live"
+        video_label = "Мультфильм" if video_style == "cartoon" else "Живое видео" if live_mode else "Ролик из иллюстраций"
+        format_label = lambda value: video_label if value == "reel" else FORMATS.get(value, value)
         content_format = st.radio("Формат материала", formats, format_func=format_label, horizontal=True, key=key + "_format") if formats else None
         selected = st.multiselect("Где разместить", platforms, default=platforms, format_func=PLATFORMS.get, key=key + "_platforms")
         live_missing = live_mode and content_format == "reel" and not capabilities.get("live_video_configured")
@@ -280,13 +281,14 @@ def _create_material(owner_id, project, store, service, capabilities, *, format_
             return
         # Reusing the ID for the same submitted brief protects a double click,
         # a rerun, or retry after an ambiguous storage response from duplication.
-        fingerprint = sha256(repr((topic.strip(), content_format, sorted(selected), project.get("video_mode", "illustrated") if content_format == "reel" else None)).encode()).hexdigest()
+        fingerprint = sha256(repr((topic.strip(), content_format, sorted(selected), project.get("video_mode", "illustrated") if content_format == "reel" else None, video_style)).encode()).hexdigest()
         pending = st.session_state.get(key + "_request")
         if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
             pending = {"id": uuid.uuid4().hex, "fingerprint": fingerprint}
             st.session_state[key + "_request"] = pending
         try:
-            jobs = service.create_material(owner_id, project["id"], topic, content_format, selected, request_id=pending["id"])
+            options = {"video_style": video_style} if content_format == "reel" and video_style is not None else {}
+            jobs = service.create_material(owner_id, project["id"], topic, content_format, selected, request_id=pending["id"], **options)
             st.session_state[f"cf_auto_{owner_id}_notice"] = f"Задача сохранена. Завод подготовит материалы для {len(jobs)} площадок. Результат появится {results_location}."
             st.rerun()
         except Exception as exc:
@@ -486,7 +488,7 @@ def _materials(owner_id, project, jobs, store, service, *, workspace=False):
         key = f"cf_auto_{owner_id}_{project['id']}_{job['id']}"
         title = content.get("title") or job.get("topic") or FORMATS.get(job.get("format"), "Материал")
         if job.get("format") == "reel":
-            video_label = "Живое видео" if content.get("video_kind") == "live" else "Ролик из иллюстраций"
+            video_label = "Мультфильм" if content.get("video_style") == "cartoon" else "Живое видео" if content.get("video_kind") == "live" else "Ролик из иллюстраций"
             title = f"{video_label}: {title}"
         label = f"{PLATFORMS.get(job.get('platform'), job.get('platform'))} · {title} · {STATES.get(state, state)}"
         with st.expander(label, expanded=state in {"ready", "failed", "needs_connection", "reconcile"}):
@@ -626,7 +628,7 @@ def _render_content_autopilot_legacy(owner_id: int, owner_name: str, target_prof
             _materials(owner_id, project, jobs, store, service)
 
 
-def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None, *, section=None, format_filter=None):
+def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None, *, section=None, format_filter=None, video_style=None):
     """Render the full existing page or one focused content-studio section.
 
     The default remains the legacy page, including its controls and state keys.
@@ -671,6 +673,16 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
         st.caption("Создайте проект, чтобы сохранять материалы и настройки отдельно.")
         _project_form(owner_id, None, service, target_profile)
         return
+    if section == "create":
+        from content_studio_templates import apply_template_handoff
+        apply_template_handoff(owner_id, project, st.session_state)
+        if format_filter == ["reel"]:
+            style_key = f"content_studio_{owner_id}_video_style"
+            if st.session_state.get(style_key) not in {"live", "cartoon"}:
+                st.session_state[style_key] = video_style if video_style in {"live", "cartoon"} else "live"
+            video_style = st.radio("Какой ролик создаём?", ["live", "cartoon"],
+                                   format_func=lambda value: "Мультфильм" if value == "cartoon" else "Живое видео",
+                                   horizontal=True, key=style_key)
     if section == "project" or (section == "create" and (format_filter is None or "reel" in format_filter)):
         capabilities = _prepare_video_capabilities(owner_id, project, capabilities)
     jobs = []
@@ -693,7 +705,7 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
             except Exception as exc:
                 _action_error("Не удалось приостановить автопилот", exc)
     if section == "create":
-        _create_material(owner_id, project, store, service, capabilities, format_filter=format_filter, workspace=True)
+        _create_material(owner_id, project, store, service, capabilities, format_filter=format_filter, workspace=True, video_style=video_style)
     elif section == "materials":
         _materials(owner_id, project, jobs, store, service, workspace=True)
     elif section == "calendar":

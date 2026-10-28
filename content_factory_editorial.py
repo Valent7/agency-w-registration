@@ -7,6 +7,8 @@ separate from the production and review instructions.
 from __future__ import annotations
 
 import json
+from hashlib import sha256
+import uuid
 from typing import Any
 
 
@@ -20,7 +22,7 @@ PROJECT_LIMITS = {
     "name": 120, "product": 6000, "audience": 3000, "language": 80,
     "tone": 1000, "goal": 2000, "website": 500, "cta": 500,
     "facts": 6000, "examples": 6000, "visual_style": 2000, "avoid": 2000,
-    "brand_color": 7, "video_mode": 20,
+    "brand_color": 7, "video_mode": 20, "video_style": 20,
 }
 
 
@@ -56,6 +58,9 @@ def _job_context(job: dict) -> dict:
         context["revision_feedback"] = _string(job["revision_feedback"], "правки владельца", 4000)
     if job.get("previous_content") is not None:
         context["previous_content"] = _content_context(job["previous_content"])
+    if job.get("approved_reference") is not None:
+        seed = validate_reference_seed(job["approved_reference"], platform=job["platform"])
+        context["approved_storyboard"] = {"style": seed["style"], "plan": seed["plan"]}
     return context
 
 
@@ -166,6 +171,13 @@ def build_copy_prompt(project: dict, job: dict, *, previous: dict | None = None,
             "содержательные правки владельца. Учти эти правки, сохрани исходную тему и удачные "
             "части, но проверь прошлые утверждения по сведениям product и facts: прежний текст "
             "не является доказательством фактов. Не публикуй сами замечания владельца."
+        )
+    if context.get("approved_storyboard"):
+        instructions += (
+            " В approved_storyboard дан собственный сценарий и план сцен, которые владелец "
+            "принял после разбора видео-образца. При редакторской доработке сохрани эту "
+            "историю, последовательность действий и выбранный стиль; исправляй конкретные "
+            "замечания. Не возвращай чужие фразы, лица, голос, бренд или исходные видеокадры."
         )
     if previous is not None or review is not None:
         if previous is None or review is None:
@@ -356,7 +368,15 @@ def build_visual_prompt(project: dict, job: dict, content: dict, *, frame_count:
     )
     payload = {"project": _project_context(project), **context,
                "content": _content_context(content), "frame_count": count}
-    if project.get("video_mode") == "live" and context["format"] == "reel":
+    if project.get("video_mode") == "live" and context["format"] == "reel" and project.get("video_style") == "cartoon":
+        instructions += (
+            " Это исходники оригинального анимационного фильма с настоящим движением. "
+            "Сохрани рисованный или трёхмерный мультяшный стиль, дизайн персонажей и мира. "
+            "Не заменяй их фотореалистичной съёмкой. В subject каждой сцены задай одно видимое "
+            "физическое действие, начальное состояние и результат. Исходный кадр показывает "
+            "начало действия. Неподвижный рисунок с зумом или панорамой не заменяет анимацию."
+        )
+    elif project.get("video_mode") == "live" and context["format"] == "reel":
         instructions += (
             " Это исходники для настоящего сюжетного видео с движущимися людьми и предметами. "
             "Выбери фотореалистичную живую съёмку. В subject каждой сцены задай одно видимое "
@@ -390,6 +410,72 @@ def validate_visual_plan(data: Any, *, frame_count: int) -> dict:
     return {"art_direction": direction, "frames": result}
 
 
+def validate_reference_plan(data: Any, *, platform: str = "vk") -> dict:
+    """Validate an owner's new script/storyboard before motion production."""
+    if (not isinstance(data, dict) or not isinstance(platform, str) or platform not in TEXT_LIMITS
+            or data.get("format", "reel") != "reel"):
+        raise EditorialError("Неверный сценарий нового видео по образцу.")
+    narration = _string(data.get("narration"), "речь нового ролика", 1200)
+    if not 45 <= len(narration.split()) <= 85:
+        raise EditorialError("Для нового короткого видео нужна речь длиной от 45 до 85 слов.")
+    import re
+    if re.search(r"(?im)^\s*(сцена|кадр|камера|scene|camera)\s*\d*\s*[:—-]", narration):
+        raise EditorialError("В речь нового ролика попали указания для монтажа.")
+    plan = data.get("visual_plan")
+    frames = plan.get("frames") if isinstance(plan, dict) else None
+    if not isinstance(frames, list) or not 4 <= len(frames) <= 6:
+        raise EditorialError("Для нового видео нужны от четырёх до шести самостоятельных сцен.")
+    return {
+        "format": "reel", "title": _string(data.get("title"), "заголовок нового ролика", 150),
+        "text": _string(data.get("text"), "подпись нового ролика", TEXT_LIMITS[platform]),
+        "narration": narration,
+        "visual_plan": validate_visual_plan(plan, frame_count=len(frames)),
+    }
+
+
+def _reference_hash(data: dict) -> str:
+    return sha256(json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                             allow_nan=False).encode()).hexdigest()
+
+
+def build_reference_seed(owner_id, project_id, source_job_id, style, plan, project) -> dict:
+    if not isinstance(style, str) or style not in {"live", "cartoon"}:
+        raise EditorialError("Выберите живое видео или мультфильм.")
+    snapshot = _project_context(project)
+    snapshot.update(video_mode="live", video_style=style)
+    value = {"version": 1, "owner_id": owner_id, "project_id": project_id,
+             "source_job_id": source_job_id, "style": style,
+             "plan": validate_reference_plan(plan), "project": snapshot}
+    value["fingerprint"] = _reference_hash(value)
+    return validate_reference_seed(value)
+
+
+def validate_reference_seed(data: Any, *, platform="vk") -> dict:
+    """Bind the accepted plan/context to its owner and immutable source record."""
+    required = {"version", "owner_id", "project_id", "source_job_id", "style", "plan", "project", "fingerprint"}
+    if (not isinstance(data, dict) or set(data) != required or type(data.get("version")) is not int
+            or data["version"] != 1 or type(data.get("owner_id")) is not int or data["owner_id"] <= 0
+            or not isinstance(data.get("style"), str) or data["style"] not in {"live", "cartoon"}):
+        raise EditorialError("Не удалось проверить принятый план нового видео.")
+    try:
+        if any(str(uuid.UUID(data[name])) != data[name] for name in ("project_id", "source_job_id")):
+            raise ValueError
+    except (ValueError, TypeError, AttributeError):
+        raise EditorialError("Не удалось определить исходный разбор видео.") from None
+    body = {key: value for key, value in data.items() if key != "fingerprint"}
+    try:
+        if not isinstance(data["fingerprint"], str) or data["fingerprint"] != _reference_hash(body):
+            raise ValueError
+    except (ValueError, TypeError, OverflowError):
+        raise EditorialError("Принятый план видео изменился. Сначала подтвердите новую версию.") from None
+    project = _project_context(data["project"])
+    if (any(not project[name] for name in ("name", "product", "audience"))
+            or project["video_mode"] != "live" or project["video_style"] != data["style"]):
+        raise EditorialError("Сведения проекта не совпадают с принятым стилем видео.")
+    return {**body, "project": project, "plan": validate_reference_plan(data["plan"], platform=platform),
+            "fingerprint": data["fingerprint"]}
+
+
 def build_image_prompt(project: dict, frame: dict, art_direction: str, *, index: int = 0,
                        total: int = 1) -> str:
     """Translate a checked visual frame into a bounded image-generation prompt."""
@@ -414,7 +500,12 @@ def build_image_prompt(project: dict, frame: dict, art_direction: str, *, index:
             "avoid": context["avoid"], "frame_number": index + 1, "frame_total": count,
             "art_direction": checked["art_direction"], "frame": checked["frames"][0],
         })
-        + ("\nThis is the START FRAME for a live-action film shot. Show the beginning of the "
+        + ("\nThis is the START FRAME for an original animated film shot. Preserve the chosen "
+           "cartoon medium, character design and world rather than photographic people. "
+           "Show the beginning of the specified action, before its outcome. The characters "
+           "will perform actual animated actions, not a zoom on a static illustrated card."
+           if context["video_mode"] == "live" and context["video_style"] == "cartoon" else
+           "\nThis is the START FRAME for a live-action film shot. Show the beginning of the "
            "specified physical action, before its outcome. Use believable photographic people "
            "and locations, not a flat illustrated card or finished-motion montage."
            if context["video_mode"] == "live" else "")
@@ -428,9 +519,16 @@ def build_motion_prompt(project: dict, frame: dict, art_direction: str, *, index
     count = _frame_count(total)
     if type(index) is not int or not 0 <= index < count:
         raise EditorialError("Неверный номер живой сцены.")
-    _project_context(project)
+    context = _project_context(project)
     subject = checked["frames"][0]["subject"]
     prefix = (
+        f"Animated film shot {index + 1} of {count}. Continue the supplied start frame. "
+        "Keep the original cartoon character designs, shapes, palette and world. "
+        "Animate a meaningful visible action from its beginning to its outcome. "
+        "A static drawing, only blinking, zoom or camera pan is insufficient. "
+        "Smooth deliberate character and object motion; preserve continuity and framing. "
+        "No style switch to photographic people, morphing, new characters, lettering, logos or watermarks. Action: "
+        if context["video_style"] == "cartoon" else
         f"Live-action film shot {index + 1} of {count}. Continue the supplied start frame. "
         "Show meaningful visible physical action from its beginning to its outcome, "
         "rather than a static pose, only breathing, blinking, a zoom or camera pan. "
