@@ -58,7 +58,7 @@ def _context(owner_id):
 
 
 def _kind(job):
-    if job.get("studio_tool") in {"text", "image", "audio", "reference"}:
+    if job.get("studio_tool") in {"text", "image", "audio", "music", "reference"}:
         return job["studio_tool"]
     return {"reel": "video", "carousel": "carousel"}.get(job.get("format"), "ready")
 
@@ -173,8 +173,8 @@ def _library(owner_id, owner_name, target_profile, render_manual):
         st.session_state.pop(f"content_studio_{owner_id}_detail", None)
     search, filters = st.columns([2, 1])
     query = search.text_input("Поиск по материалам", key=f"studio_library_{owner_id}_search").strip().casefold()
-    kind = filters.selectbox("Тип материала", ["all", "ready", "text", "image", "carousel", "video", "audio", "reference"],
-                            format_func=lambda value: {"all": "Все", "ready": "Готовый контент", "text": "Тексты", "image": "Изображения", "carousel": "Карусели", "video": "Видео", "audio": "Озвучка", "reference": "Разборы видео"}[value],
+    kind = filters.selectbox("Тип материала", ["all", "ready", "text", "image", "carousel", "video", "audio", "music", "reference"],
+                            format_func=lambda value: {"all": "Все", "ready": "Готовый контент", "text": "Тексты", "image": "Изображения", "carousel": "Карусели", "video": "Видео", "audio": "Озвучка", "music": "Музыка", "reference": "Разборы видео"}[value],
                             key=f"studio_library_{owner_id}_kind")
     favorites_only = st.checkbox("Только избранное", key=f"studio_library_{owner_id}_favorites")
     show_cancelled = st.checkbox("Показать отменённые", key=f"studio_library_{owner_id}_cancelled")
@@ -336,7 +336,8 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
         elif tool in {"calendar", "connections", "project"}:
             render_content_autopilot(owner_id, owner_name, target_profile=target_profile, section=tool)
         elif tool == "music":
-            st.subheader("Музыка для ваших материалов")
-            st.info("Генератор музыки ещё не подключён к Агентству. Создание и оплата музыки здесь пока недоступны.")
+            from content_studio_music_ui import render_music_tool
+            store, _, project = _context(owner_id)
+            render_music_tool(owner_id, project, store)
         elif tool == "help":
             _help(owner_id)

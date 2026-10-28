@@ -125,13 +125,17 @@ class StudioResultTests(unittest.TestCase):
 
     def test_image_and_audio_use_private_owner_project_job_paths(self):
         for kind, mime, data in (("image", "image/png", b"stored-image-bytes"),
-                                 ("audio", "audio/mpeg", b"stored-voice-bytes")):
+                                 ("audio", "audio/mpeg", b"stored-voice-bytes"),
+                                 ("music", "audio/mpeg", b"stored-music-bytes")):
             with self.subTest(kind=kind):
                 job = self.save(kind, data=data, mime_type=mime, text="Подпись", request_id="request-" + kind)
                 self.assertTrue(job["studio_complete"])
                 asset = job["assets"][0]
                 self.assertTrue(asset["storage_path"].startswith(f"101/{self.project['id']}/{job['id']}/"))
                 self.assertEqual(self.store.read_asset(101, asset), data)
+                if kind == "music":
+                    self.assertEqual(job["format"], "audio")
+                    self.assertEqual(job["studio_tool"], "music")
                 with self.assertRaises(StoreError):
                     self.store.read_asset(202, asset)
 
