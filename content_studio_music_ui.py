@@ -12,6 +12,7 @@ from pathlib import Path
 import streamlit as st
 
 SUNO_STUDIO_URL = "https://suno.com/studio-welcome"
+# The editor itself stays on Suno; Agency W owns the private import/use workflow.
 _AUDIO_TYPES = {
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
