@@ -99,6 +99,27 @@ def validate_project(data):
     return result
 
 
+def _reference_video_personalization(reference):
+    """Copy only bounded, owner-saved finishing controls into a production job."""
+    checkpoint = reference.get("checkpoint") if isinstance(reference, dict) else None
+    raw = checkpoint.get("video_personalization") if isinstance(checkpoint, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    result = {}
+    for key in ("intro_asset", "outro_asset", "music_asset"):
+        value = raw.get(key)
+        if value is not None:
+            if not isinstance(value, dict) or not isinstance(value.get("storage_path"), str):
+                raise FactoryError("Сохранённое оформление видео повреждено. Выберите файлы заново.")
+            result[key] = copy.deepcopy(value)
+    for key, default, maximum in (("voice_volume", 1.0, 1.5), ("music_volume", 0.12, 0.40)):
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= maximum:
+            raise FactoryError("Сохранённая громкость видео имеет неверное значение.")
+        result[key] = float(value)
+    return result
+
+
 class ContentFactoryService:
     def __init__(self, store, clock=utc_now):
         self.store = store
@@ -183,12 +204,14 @@ class ContentFactoryService:
                 validate_reference_plan(content.get("reference_plan"), platform=platform)
             seed = build_reference_seed(owner_id, project["id"], reference["id"],
                                         content.get("reference_style"), content.get("reference_plan"), project)
+            personalization = _reference_video_personalization(reference)
         except EditorialError as error:
             raise FactoryError(str(error)) from error
         topic = f"Создать собственный ролик по принятому сценарию: {seed['plan']['title']}"
         return self._create_material(owner_id, project_id, topic, "reel", platforms,
                                      request_id=request_id, video_style=seed["style"],
-                                     revision={"approved_reference": seed, "review_required": True})
+                                     revision={"approved_reference": seed, "review_required": True,
+                                               "checkpoint": {"video_personalization": personalization}})
 
     def revise_material(self, owner_id, job_id, feedback, *, request_id):
         job = self._job(owner_id, job_id)
