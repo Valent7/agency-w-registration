@@ -17,8 +17,9 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from agency_video_branding import (
-    VideoBrandingError, is_agency_w_brand, prepare_video_logo, video_logo_filter,
+    VideoBrandingError, check_video_logo, is_agency_w_brand, prepare_video_logo, video_logo_filter,
 )
+from agency_outro import append_agency_outro
 from content_factory_media import _ass_time, _caption_events, _fit, _write_scene_captions, MediaError
 
 
@@ -151,8 +152,12 @@ def _scene_captions(path, events, start, end, title, brand_name, brand_color):
     path.write_text(text, encoding="utf-8")
 
 
-def render_live_reel(scene_clips, speech_bytes, narration, title, brand_name, brand_color, *, target_seconds=45):
-    """Make a 1080×1920 reel at normal speed, preserving imported AAC packets."""
+def render_live_reel(
+    scene_clips, speech_bytes, narration, title, brand_name, brand_color, *,
+    target_seconds=45, intro_image_bytes=None, outro_image_bytes=None, music_bytes=None,
+    voice_volume=1.0, music_volume=0.12,
+):
+    """Make a live reel and finish Agency W films with selected branding/audio."""
     _, maximum = _limits(target_seconds)
     if not isinstance(scene_clips, list) or not 3 <= len(scene_clips) <= maximum:
         limit = "шестнадцати" if target_seconds == 120 else "шести"
@@ -254,6 +259,16 @@ def render_live_reel(scene_clips, speech_bytes, narration, title, brand_name, br
             output = root / "live-reel.mp4"
             if not output.is_file() or not 0 < output.stat().st_size <= 100 * 1024 * 1024:
                 raise LiveMediaError("Готовое живое видео отсутствует или превышает 100 МБ.")
-            return output.read_bytes()
+            result = output.read_bytes()
+            if is_agency_w_brand(brand_name):
+                try:
+                    result = append_agency_outro(
+                        result, logo_path=check_video_logo(brand_name), size=(1080, 1920), title=title,
+                        intro_image_bytes=intro_image_bytes, outro_image_bytes=outro_image_bytes,
+                        music_bytes=music_bytes, voice_volume=voice_volume, music_volume=music_volume,
+                    )
+                except (RuntimeError, ValueError, VideoBrandingError) as exc:
+                    raise LiveMediaError(str(exc)) from None
+            return result
         except (subprocess.SubprocessError, OSError):
             raise LiveMediaError("Не удалось соединить живые сцены и озвучку.") from None
