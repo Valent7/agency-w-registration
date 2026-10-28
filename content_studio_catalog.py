@@ -131,8 +131,8 @@ def save_studio_result(store, owner_id, project_id, kind, prompt, *, text="", da
     incomplete, unpublished record with its text and a safe explanation.
     """
     owner_id = _owner(owner_id)
-    if not isinstance(kind, str) or kind not in {"text", "image", "audio"}:
-        raise ValueError("Выберите текст, изображение или озвучку.")
+    if not isinstance(kind, str) or kind not in {"text", "image", "audio", "music"}:
+        raise ValueError("Выберите текст, изображение, озвучку или музыку.")
     if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 6000 or "\x00" in prompt:
         raise ValueError("Опишите задачу: от 1 до 6000 символов.")
     prompt = prompt.strip()
@@ -142,8 +142,11 @@ def save_studio_result(store, owner_id, project_id, kind, prompt, *, text="", da
         if not text.strip() or data is not None or mime_type is not None:
             raise ValueError("Для сохранения текста нужен непустой текстовый результат.")
     else:
-        allowed = {"image": {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"},
-                   "audio": {"audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/wav": "wav"}}[kind]
+        allowed = {
+            "image": {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"},
+            "audio": {"audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/wav": "wav"},
+            "music": {"audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/wav": "wav"},
+        }[kind]
         if not isinstance(mime_type, str) or mime_type not in allowed or not isinstance(data, bytes) or not 0 < len(data) <= 100 * 1024 * 1024:
             raise ValueError("Нужен готовый медиафайл поддерживаемого формата размером до 100 МБ.")
     request_id = uuid.uuid4().hex if request_id is None else request_id
@@ -156,14 +159,15 @@ def save_studio_result(store, owner_id, project_id, kind, prompt, *, text="", da
     fingerprint = sha256(json.dumps([kind, prompt], ensure_ascii=False,
                                     separators=(",", ":")).encode()).hexdigest()
     content = {"title": prompt.splitlines()[0][:150], "text": text, "prompt": prompt}
+    stored_format = "audio" if kind == "music" else kind
     job = store.enqueue_job(owner_id, project["id"], {
-        "platform": "studio", "format": kind, "state": "studio",
+        "platform": "studio", "format": stored_format, "state": "studio",
         "dedupe_key": "studio:" + request_id, "scheduled_at": iso(now), "available_at": iso(now),
         "studio_tool": kind, "studio_complete": False, "studio_request_id": request_id,
         "studio_request_fingerprint": fingerprint, "content": content, "assets": [],
         "topic": prompt, "checkpoint": {}, "error": "",
     })
-    if job.get("state") != "studio" or job.get("platform") != "studio" or job.get("format") != kind or job.get("studio_request_fingerprint") != fingerprint:
+    if job.get("state") != "studio" or job.get("platform") != "studio" or job.get("format") != stored_format or job.get("studio_tool") != kind or job.get("studio_request_fingerprint") != fingerprint:
         raise ValueError("Этот запрос уже сохранён с другими условиями. Создайте новый запрос.")
     if job.get("studio_complete") is True:
         return job
