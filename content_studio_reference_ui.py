@@ -108,19 +108,16 @@ def _save_personalization(owner_id, project, store, result, *, intro, outro, mus
     settings = dict(checkpoint.get("video_personalization") or {})
     assets = list(job.get("assets") or [])
 
-    def upload_asset(upload, key_name, prefix, maximum, allowed_mime):
+    def upload_asset(upload, key_name, prefix, maximum, formats):
         if upload is None:
             return
         data = upload.getvalue()
-        mime = str(getattr(upload, "type", "") or "").lower()
-        if not isinstance(data, bytes) or not data or len(data) > maximum or mime not in allowed_mime:
-            raise ReferenceUiError("Выбранный файл оформления имеет неподдерживаемый формат или слишком большой размер.")
         suffix = Path(str(getattr(upload, "name", "") or "")).suffix.lower()
-        if not suffix or len(suffix) > 6:
-            suffix = ".bin"
+        mime = formats.get(suffix)
+        if not isinstance(data, bytes) or not data or len(data) > maximum or mime is None:
+            raise ReferenceUiError("Выбранный файл оформления имеет неподдерживаемый формат или слишком большой размер.")
         asset = store.put_asset(
-            owner_id, project["id"], saved, prefix + suffix, data,
-            mime or "application/octet-stream",
+            owner_id, project["id"], saved, prefix + suffix, data, mime,
         )
         settings[key_name] = asset
         if all(item.get("storage_path") != asset.get("storage_path") for item in assets if isinstance(item, dict)):
@@ -132,12 +129,11 @@ def _save_personalization(owner_id, project, store, result, *, intro, outro, mus
         settings.pop("outro_asset", None)
     if clear_music:
         settings.pop("music_asset", None)
-    upload_asset(intro, "intro_asset", "film-intro", 10 * 1024 * 1024,
-                 {"image/png", "image/jpeg", "image/webp"})
-    upload_asset(outro, "outro_asset", "film-outro", 10 * 1024 * 1024,
-                 {"image/png", "image/jpeg", "image/webp"})
-    upload_asset(music, "music_asset", "film-music", 25 * 1024 * 1024,
-                 {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac", "audio/x-m4a"})
+    image_formats = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+    music_formats = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/mp4"}
+    upload_asset(intro, "intro_asset", "film-intro", 10 * 1024 * 1024, image_formats)
+    upload_asset(outro, "outro_asset", "film-outro", 10 * 1024 * 1024, image_formats)
+    upload_asset(music, "music_asset", "film-music", 25 * 1024 * 1024, music_formats)
 
     settings["voice_volume"] = max(0.0, min(1.5, float(voice_volume)))
     settings["music_volume"] = max(0.0, min(0.40, float(music_volume)))
