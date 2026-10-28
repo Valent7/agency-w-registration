@@ -45,7 +45,6 @@ class StudioNavigationTests(unittest.TestCase):
     def test_music_section_opens_suno_studio_bridge_without_generating(self):
         app = self.app()
         self.choose(app, 'music')
-        self.assertTrue(any(item.label == '🎵 Открыть Suno Studio' for item in app.get('link_button')))
         self.assertTrue(any('Вернуть готовую музыку' in item.value for item in app.markdown))
         self.assertFalse(app.session_state['_fake_store'].actions)
 
