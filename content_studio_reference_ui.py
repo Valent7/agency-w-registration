@@ -96,7 +96,7 @@ def _current_personalization(owner_id, store, result):
 
 def _save_personalization(owner_id, project, store, result, *, intro, outro, music,
                           voice_volume, music_volume, clear_intro=False,
-                          clear_outro=False, clear_music=False):
+                          clear_outro=False, clear_music=False, music_library_asset=None):
     saved = result.get("saved_job_id")
     if not saved:
         raise ReferenceUiError("Сначала сохраните сценарий, затем настройте оформление фильма.")
@@ -133,7 +133,22 @@ def _save_personalization(owner_id, project, store, result, *, intro, outro, mus
     music_formats = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/mp4"}
     upload_asset(intro, "intro_asset", "film-intro", 10 * 1024 * 1024, image_formats)
     upload_asset(outro, "outro_asset", "film-outro", 10 * 1024 * 1024, image_formats)
-    upload_asset(music, "music_asset", "film-music", 25 * 1024 * 1024, music_formats)
+    if music_library_asset is not None:
+        if not isinstance(music_library_asset, dict):
+            raise ReferenceUiError("Не удалось проверить выбранную музыку.")
+        mime = str(music_library_asset.get("mime_type") or "")
+        extension = {"audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/mp4": ".m4a"}.get(mime)
+        if extension is None:
+            raise ReferenceUiError("Выбранная музыка имеет неподдерживаемый формат.")
+        data = store.read_asset(owner_id, music_library_asset)
+        if not 0 < len(data) <= 25 * 1024 * 1024:
+            raise ReferenceUiError("Для фильма выберите музыкальный файл размером до 25 МБ.")
+        asset = store.put_asset(owner_id, project["id"], saved, "film-music" + extension, data, mime)
+        settings["music_asset"] = asset
+        if all(item.get("storage_path") != asset.get("storage_path") for item in assets if isinstance(item, dict)):
+            assets.append(asset)
+    else:
+        upload_asset(music, "music_asset", "film-music", 25 * 1024 * 1024, music_formats)
 
     settings["voice_volume"] = max(0.0, min(1.5, float(voice_volume)))
     settings["music_volume"] = max(0.0, min(0.40, float(music_volume)))
@@ -233,18 +248,75 @@ def _film_finishing(owner_id, project, store, key, result):
         )
 
     st.markdown("**Музыка и голос**")
+    try:
+        music_jobs = [
+            job for job in store.list_jobs(owner_id, project["id"], limit=100)
+            if isinstance(job, dict) and job.get("state") == "studio"
+            and job.get("studio_tool") == "music" and job.get("studio_complete") is True
+            and isinstance(job.get("assets"), list) and job["assets"]
+        ]
+    except Exception:
+        music_jobs = []
+
+    selected_suno_job = st.session_state.get(f"studio_music_{owner_id}_selected_job")
+    valid_suno_ids = {job["id"] for job in music_jobs}
+    if selected_suno_job not in valid_suno_ids:
+        selected_suno_job = None
+
+    music_modes = ["Без музыки"]
+    if settings.get("music_asset"):
+        music_modes.append("Оставить сохранённую музыку")
+    if music_jobs:
+        music_modes.append("Музыка из Suno / Моих генераций")
+    music_modes.append("Загрузить файл")
+
+    if selected_suno_job:
+        default_mode = "Музыка из Suno / Моих генераций"
+    elif settings.get("music_asset"):
+        default_mode = "Оставить сохранённую музыку"
+    else:
+        default_mode = "Без музыки"
     music_mode = st.radio(
-        "Музыкальное сопровождение", ["Без музыки", "Загрузить свою музыку"],
-        index=1 if settings.get("music_asset") else 0, horizontal=True, key=key + "_music_mode",
+        "Музыкальное сопровождение", music_modes,
+        index=music_modes.index(default_mode), horizontal=True, key=key + "_music_mode",
     )
+
     music = None
-    if music_mode == "Загрузить свою музыку":
+    music_library_asset = None
+    if music_mode == "Музыка из Suno / Моих генераций":
+        labels = {
+            job["id"]: str((job.get("content") or {}).get("title") or job.get("topic") or "Музыкальный трек")
+            for job in music_jobs
+        }
+        ids = [job["id"] for job in music_jobs]
+        default_id = selected_suno_job if selected_suno_job in ids else ids[0]
+        selected_id = st.selectbox(
+            "Музыка проекта", ids, index=ids.index(default_id),
+            format_func=labels.get, key=key + "_suno_music_job",
+        )
+        st.session_state[f"studio_music_{owner_id}_selected_job"] = selected_id
+        chosen = next(job for job in music_jobs if job["id"] == selected_id)
+        music_library_asset = chosen["assets"][0]
+        try:
+            resolved = store.resolve_assets(owner_id, [music_library_asset])[0]
+            source = resolved.get("url") or resolved.get("path")
+            if source:
+                st.audio(source, format=resolved.get("mime_type"))
+        except Exception:
+            st.caption("Предпросмотр музыки временно недоступен, но сохранённый трек можно использовать.")
+    elif music_mode == "Загрузить файл":
         music = st.file_uploader(
             "Музыкальный файл", type=["mp3", "wav", "m4a", "aac"],
             key=key + "_music_upload", help="До 25 МБ. Музыка будет тише речи.",
         )
         if music is not None:
             st.audio(music.getvalue())
+
+    if not music_jobs:
+        if st.button("🎵 Создать или отредактировать музыку в Suno", key=key + "_open_music"):
+            st.session_state[f"content_studio_{owner_id}_next"] = "music"
+            st.rerun()
+
     clear_music = music_mode == "Без музыки"
     voice_default = int(round(float(settings.get("voice_volume", 1.0)) * 100))
     music_default = int(round(float(settings.get("music_volume", 0.12)) * 100))
@@ -253,9 +325,10 @@ def _film_finishing(owner_id, project, store, key, result):
         voice_percent = st.slider("Голос", 60, 150, max(60, min(150, voice_default)), 5,
                                   format="%d%%", key=key + "_voice_volume")
     with volume_right:
+        music_enabled = music_mode != "Без музыки"
         music_percent = st.slider("Музыка", 0, 40, max(0, min(40, music_default)), 1,
                                   format="%d%%", key=key + "_music_volume",
-                                  disabled=music_mode == "Без музыки")
+                                  disabled=not music_enabled)
     st.caption("Музыка ограничена 40% от исходного уровня, чтобы она не заглушала диктора.")
 
     if st.button("Сохранить оформление фильма", type="primary", width="stretch", key=key + "_save_finishing"):
@@ -264,6 +337,7 @@ def _film_finishing(owner_id, project, store, key, result):
                 owner_id, project, store, result, intro=intro, outro=outro, music=music,
                 voice_volume=voice_percent / 100, music_volume=music_percent / 100,
                 clear_intro=clear_intro, clear_outro=clear_outro, clear_music=clear_music,
+                music_library_asset=music_library_asset,
             )
             st.success("Оформление сохранено. Эти настройки будут применены при создании фильма.")
             st.rerun()
@@ -276,7 +350,7 @@ def _film_finishing(owner_id, project, store, key, result):
     summary = []
     summary.append("своё начало" if active.get("intro_asset") else "фирменное начало W")
     summary.append("свой финал" if active.get("outro_asset") else "фирменный финал W")
-    summary.append("музыка загружена" if active.get("music_asset") else "без музыки")
+    summary.append("музыка выбрана" if active.get("music_asset") else "без музыки")
     st.info("Будет использовано: " + " · ".join(summary) + ".")
 
 
