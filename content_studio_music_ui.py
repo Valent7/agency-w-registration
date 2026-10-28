@@ -92,7 +92,7 @@ def _advanced_prompt(style, mood, instruments, vocals, idea):
 def _render_suno_handoff(owner_id, project, prompt):
     st.markdown("#### Готовое описание для Suno")
     if prompt:
-        st.code(prompt, language=None)
+        st.code(prompt, language="none")
         st.caption("1. Нажмите значок копирования справа в поле выше.  2. Откройте Suno Create.  3. Вставьте описание и нажмите Create.")
     else:
         st.caption("Опишите желаемую музыку — готовое описание появится здесь.")
