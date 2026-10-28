@@ -1,4 +1,5 @@
 name: Content factory autopilot
+# Direct music generation is covered by the full Content Studio regression.
 # Covers Content Studio integrations such as the Suno music bridge.
 
 on:
