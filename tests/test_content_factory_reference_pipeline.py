@@ -184,6 +184,24 @@ class ReferenceServiceTests(unittest.TestCase):
             1,
         )
 
+    def test_project_social_setting_change_does_not_pause_master_video(self):
+        job = self.service.create_master_from_video_reference(
+            77,
+            self.project["id"],
+            self.reference["id"],
+            request_id="reference-master-survives-settings",
+        )
+        self.assertEqual(job["state"], "queued")
+        self.service.save_project(77, {
+            "id": self.project["id"],
+            "platforms": ["threads"],
+            "formats": ["post"],
+            "automation_enabled": False,
+        })
+        saved = self.store.get_job(77, job["id"])
+        self.assertEqual(saved["state"], "queued")
+        self.assertTrue(saved["studio_master"])
+
     def test_normal_video_style_is_explicit_idempotent_and_revision_keeps_animation(self):
         job = self.service.create_material(77, self.project["id"], "Сделай мультфильм о первом уроке керамики", "reel", ["vk"],
                                            request_id="cartoon-new-request", video_style="cartoon")[0]
