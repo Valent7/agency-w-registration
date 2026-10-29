@@ -495,6 +495,17 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
                 "Это не нормальное длительное ожидание: задача зависла между проверками. "
                 "Сценарий и уже созданные данные сохранены; повторно разбирать образец не нужно."
             )
+            if st.button("▶️ Продолжить создание", key=key + "_resume_stalled_master", width="stretch"):
+                try:
+                    service.resume_stalled_video(owner_id, job_id)
+                    st.success("Задача возвращена на проверку уже заказанных сцен.")
+                    st.rerun()
+                except Exception as exc:
+                    from content_factory_core import FactoryError
+                    if isinstance(exc, FactoryError):
+                        st.error("Продолжение не запущено: " + str(exc))
+                    else:
+                        st.error("Продолжение не запущено: внутренняя ошибка производства.")
             return
 
         st.info("🎬 " + (progress_text or "Видео принято в работу. Создаём сцены и озвучку."))
