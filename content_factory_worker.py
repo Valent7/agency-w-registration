@@ -353,9 +353,12 @@ def main(argv=None):
     # credentials. This lets the Agency explain "insufficient credits" before
     # an owner wastes time waiting for a video that cannot start.
     try:
-        from content_factory_runtime import resolve_live_video_client
-        projects = store.list_active_projects()
-        probe_project = projects[0] if projects else None
+        from content_factory_runtime import resolve_live_video_client, _configuration
+        cfg = _configuration()
+        probe_project = {"owner_id": 1, "id": "00000000-0000-0000-0000-000000000001"}
+        if not str(cfg.get("RUNWAYML_API_SECRET") or "").strip():
+            projects = store.list_active_projects()
+            probe_project = projects[0] if projects else None
         if probe_project:
             client = resolve_live_video_client(probe_project)
             preflight = client.preflight()
