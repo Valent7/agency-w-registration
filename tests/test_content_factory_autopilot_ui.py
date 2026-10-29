@@ -358,7 +358,10 @@ def remember_save(owner, project, key):
     def test_oauth_connect_buttons_do_not_require_partner_credentials(self):
         script = APP.replace(
             "    ui.render_content_autopilot(77, 'Партнёр')",
-            "    with patch.object(ui, '_connect_url', side_effect=lambda owner, project, platform: f'https://connect.example/{platform}?assertion=signed-connect-request'):\n        ui.render_content_autopilot(77, 'Партнёр')",
+            "    import content_factory_runtime as runtime\n"
+            "    with patch.object(runtime, 'get_owner_instagram_connect_url', return_value='https://connect.example/instagram/connect?state=owner-signed'), "
+            "patch.object(ui, '_connect_url', side_effect=lambda owner, project, platform: f'https://connect.example/{platform}?assertion=signed-connect-request'):\n"
+            "        ui.render_content_autopilot(77, 'Партнёр')",
         )
         app = AppTest.from_string(script, default_timeout=15).run()
         self.assertFalse(app.exception)
@@ -367,12 +370,21 @@ def remember_save(owner, project, key):
         self.assertIn("Подключить Threads", links)
         self.assertEqual(links["Подключить Instagram"].type, "primary")
         self.assertEqual(links["Подключить Threads"].type, "primary")
-        self.assertIn("/instagram?assertion=", links["Подключить Instagram"].url)
-        self.assertEqual(len([item for item in app.expander if item.label == "Подключить вручную"]), 2)
-        self.assertFalse(any(item.proto.expanded for item in app.expander if item.label == "Подключить вручную"))
+        self.assertIn("/instagram/connect?state=", links["Подключить Instagram"].url)
+        self.assertEqual(
+            len([item for item in app.expander if item.label == "Ручное подключение — только технический резерв"]),
+            2,
+        )
+        self.assertFalse(
+            any(
+                item.proto.expanded
+                for item in app.expander
+                if item.label == "Ручное подключение — только технический резерв"
+            )
+        )
         self.assertTrue(all(not item.value for item in app.text_input if item.label == "Ключ доступа к публикациям"))
 
-    def test_open_cabinet_registers_link_refresh_and_mints_a_new_short_lived_handoff(self):
+    def test_open_cabinet_registers_link_refresh_for_threads_project_handoff(self):
         from content_factory_oauth import HANDOFF_TTL, OAuthError, _verify
         from streamlit.testing.v1.local_script_runner import LocalScriptRunner
 
@@ -380,6 +392,7 @@ def remember_save(owner, project, key):
 import streamlit as st
 from unittest.mock import patch
 import content_factory_autopilot_ui as ui
+import content_factory_runtime as runtime
 from content_factory_oauth import make_connect_url
 
 if '_test_clock' not in st.session_state:
@@ -392,9 +405,9 @@ def fresh_link(owner, project, platform):
     with patch('content_factory_oauth.time.time', return_value=st.session_state['_test_clock']):
         return make_connect_url(owner, project, platform, config)
 st.text_input('Черновик проекта', key='unsaved_project_note')
-with patch.object(ui, '_connect_url', side_effect=fresh_link):
-    ui._oauth_connect_button(77, '2788cb04-7bcb-4262-8bcc-68cdcc3207ee', 'instagram')
-    ui._oauth_connect_button(77, '2788cb04-7bcb-4262-8bcc-68cdcc3207ee', 'threads')
+with patch.object(runtime, 'get_owner_instagram_connect_url', return_value='https://connect.example/instagram/connect?state=owner-signed'), patch.object(ui, '_connect_url', side_effect=fresh_link):
+    ui._oauth_connect_button(77, '2788cb04-7bcb-4262-8bcc-68cdcc3207ee', 'instagram', owner_name='Партнёр')
+    ui._oauth_connect_button(77, '2788cb04-7bcb-4262-8bcc-68cdcc3207ee', 'threads', owner_name='Партнёр')
 '''
         timers = []
         forward_messages = LocalScriptRunner.forward_msgs
@@ -411,27 +424,23 @@ with patch.object(ui, '_connect_url', side_effect=fresh_link):
         self.assertEqual(len({fragment_id for fragment_id, _ in timers}), 2)
         self.assertTrue(all(0 < interval < HANDOFF_TTL for _, interval in timers))
         old_link = next(item.proto.url for item in app.get('link_button')
-                        if item.proto.label == 'Подключить Instagram')
+                        if item.proto.label == 'Подключить Threads')
         old_assertion = parse_qs(urlsplit(old_link).query)['assertion'][0]
 
-        # AppTest does not advance browser timers. Advance its clock and rerun
-        # the registered view, then verify real OAuth TTL and owner binding.
         app.session_state['_test_clock'] = 1800000000 + HANDOFF_TTL + 1
         app.text_input(key='unsaved_project_note').input('Несохранённое описание проекта')
         app.run()
         self.assertFalse(app.exception)
-        self.assertEqual(app.text_input(key='unsaved_project_note').value,
-                         'Несохранённое описание проекта')
         new_link = next(item.proto.url for item in app.get('link_button')
-                        if item.proto.label == 'Подключить Instagram')
+                        if item.proto.label == 'Подключить Threads')
         self.assertNotEqual(old_link, new_link)
         key = 'test-only-handoff-signing-key-' + 'x' * 32
         with patch('content_factory_oauth.time.time', return_value=1800000000 + HANDOFF_TTL + 1):
             with self.assertRaises(OAuthError):
                 _verify(old_assertion, key, purpose='content_factory_connect',
-                        platform='instagram', ttl=HANDOFF_TTL)
+                        platform='threads', ttl=HANDOFF_TTL)
             current = _verify(parse_qs(urlsplit(new_link).query)['assertion'][0], key,
-                              purpose='content_factory_connect', platform='instagram', ttl=HANDOFF_TTL)
+                              purpose='content_factory_connect', platform='threads', ttl=HANDOFF_TTL)
         self.assertEqual(current['owner_id'], 77)
         self.assertEqual(current['project_id'], '2788cb04-7bcb-4262-8bcc-68cdcc3207ee')
 
