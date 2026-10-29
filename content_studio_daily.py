@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -86,39 +86,41 @@ def _build_prompt(project, topic, goal, channels, formats):
     ctx = _project_context(project)
     channel_names = [CHANNELS[value] for value in channels]
     format_names = [FORMATS[value] for value in formats]
-    return (
-        "Подготовь единый контент-пакет на одну тему. Одна центральная мысль должна "
-        "узнаваться во всех материалах, но текст нельзя механически копировать между площадками.\\n\\n"
-        f"Проект: {ctx['name']}\\n"
-        f"Продукт/система: {ctx['product']}\\n"
-        f"Аудитория: {ctx['audience']}\\n"
-        f"Цель проекта: {ctx['goal']}\\n"
-        f"Стиль общения: {ctx['tone']}\\n"
-        f"Проверенные факты: {ctx['facts']}\\n"
-        f"Визуальный стиль: {ctx['visual_style']}\\n"
-        f"Нельзя обещать/использовать: {ctx['avoid']}\\n"
-        f"Тема дня: {topic}\\n"
-        f"Задача материала: {GOALS[goal]}\\n"
-        f"Площадки: {', '.join(channel_names)}\\n"
-        f"Форматы: {', '.join(format_names)}\\n\\n"
-        "Правила качества:\\n"
-        "1) одна ясная мысль, конкретное начало, минимум рекламных штампов;\\n"
-        "2) не выдумывай клиентов, доходы, проценты, функции или факты;\\n"
-        "3) для Zoom не дави: сначала польза/причина, затем мягкое приглашение;\\n"
-        "4) Instagram — живо и визуально; Threads — короче и разговорнее; "
-        "VK — чуть подробнее; LinkedIn — профессионально, но без канцелярита; "
-        "WhatsApp Status — очень коротко;\\n"
-        "5) Reels: сильный первый кадр/фраза, затем 3–5 смысловых шагов и один CTA;\\n"
-        "6) карусель: 5 слайдов, на каждом одна короткая мысль;\\n"
-        "7) Stories/Status: 3 коротких кадра, которые понятны без длинного пояснения.\\n\\n"
-        "Верни ТОЛЬКО JSON без markdown по схеме:\\n"
-        '{"core_idea":"...","cta":"...",'
-        '"reel":{"hook":"...","script":"...","caption":"..."},'
-        '"story":{"frames":["...","...","..."],"status":"..."},'
-        '"post":{"instagram":"...","whatsapp":"...","threads":"...","vk":"...","linkedin":"..."},'
-        '"carousel":{"title":"...","slides":["...","...","...","...","..."],"caption":"..."}}.'
-    )
+    return f"""
+Подготовь единый контент-пакет на одну тему. Одна центральная мысль должна
+узнаваться во всех материалах, но текст нельзя механически копировать между площадками.
 
+Проект: {ctx['name']}
+Продукт/система: {ctx['product']}
+Аудитория: {ctx['audience']}
+Цель проекта: {ctx['goal']}
+Стиль общения: {ctx['tone']}
+Проверенные факты: {ctx['facts']}
+Визуальный стиль: {ctx['visual_style']}
+Нельзя обещать/использовать: {ctx['avoid']}
+Тема дня: {topic}
+Задача материала: {GOALS[goal]}
+Площадки: {', '.join(channel_names)}
+Форматы: {', '.join(format_names)}
+
+Правила качества:
+1) одна ясная мысль, конкретное начало, минимум рекламных штампов;
+2) не выдумывай клиентов, доходы, проценты, функции или факты;
+3) для Zoom не дави: сначала польза/причина, затем мягкое приглашение;
+4) Instagram — живо и визуально; Threads — короче и разговорнее;
+   VK — чуть подробнее; LinkedIn — профессионально, но без канцелярита;
+   WhatsApp Status — очень коротко;
+5) Reels: сильный первый кадр/фраза, затем 3–5 смысловых шагов и один CTA;
+6) карусель: 5 слайдов, на каждом одна короткая мысль;
+7) Stories/Status: 3 коротких кадра, которые понятны без длинного пояснения.
+
+Верни ТОЛЬКО JSON без markdown по схеме:
+{{"core_idea":"...","cta":"...",
+ "reel":{{"hook":"...","script":"...","caption":"..."}},
+ "story":{{"frames":["...","...","..."],"status":"..."}},
+ "post":{{"instagram":"...","whatsapp":"...","threads":"...","vk":"...","linkedin":"..."}},
+ "carousel":{{"title":"...","slides":["...","...","...","...","..."],"caption":"..."}}}}.
+""".strip()
 
 def _normalise_pack(data, channels, formats):
     result = {
@@ -163,40 +165,237 @@ def _normalise_pack(data, channels, formats):
     return result
 
 
-def _pack_markdown(pack, channels, formats):
-    parts = ["# Пакет дня", "", "## Главная мысль", pack["core_idea"]]
+
+WEEKDAY_RU = (
+    "Понедельник", "Вторник", "Среда", "Четверг",
+    "Пятница", "Суббота", "Воскресенье",
+)
+
+
+def _local_today(project):
+    timezone = project.get("timezone") or "Europe/Berlin"
+    return datetime.now(ZoneInfo(timezone)).date()
+
+
+def _week_dates(project):
+    today = _local_today(project)
+    return [today + timedelta(days=offset) for offset in range(7)]
+
+
+def _build_weekly_plan_prompt(project, owner_note, dates):
+    ctx = _project_context(project)
+    period = ", ".join(day.isoformat() for day in dates)
+    return f"""
+Составь редакционный план Агентства W на ближайшие 7 дней совместно с владельцем.
+
+Проект: {ctx['name']}
+Продукт/система: {ctx['product']}
+Аудитория: {ctx['audience']}
+Цель проекта: {ctx['goal']}
+Проверенные факты: {ctx['facts']}
+Нельзя обещать/использовать: {ctx['avoid']}
+Пожелание владельца на эту неделю: {owner_note or 'специальных пожеланий нет'}
+Даты плана: {period}
+
+Твоя роль — Стагирит, координатор. Ты ПРЕДЛАГАЕШЬ темы, но не утверждаешь их
+за владельца. Темы должны чередовать пользу, разговор, мягкое приглашение,
+живую историю и объяснение возможностей. Не повторяй одну мысль семь раз.
+Не выдумывай доходы, клиентов, функции и гарантии.
+
+Верни только JSON:
+{{"focus":"одна фраза — смысл недели","days":[
+{{"topic":"тема дня 1","goal":"value"}},
+{{"topic":"тема дня 2","goal":"engage"}},
+{{"topic":"тема дня 3","goal":"zoom"}},
+{{"topic":"тема дня 4","goal":"story"}},
+{{"topic":"тема дня 5","goal":"value"}},
+{{"topic":"тема дня 6","goal":"engage"}},
+{{"topic":"тема дня 7","goal":"value"}}
+]}}
+Допустимые goal: value, engage, zoom, story.
+""".strip()
+
+
+def _normalise_weekly_plan(data, dates):
+    if not isinstance(data, dict):
+        raise DailyContentError("Стагирит не смог подготовить план недели.")
+    raw_days = data.get("days")
+    if not isinstance(raw_days, list) or len(raw_days) < 7:
+        raise DailyContentError("Стагирит подготовил неполный план. Повторите ещё раз.")
+    days = []
+    for index, day in enumerate(dates[:7]):
+        raw = raw_days[index] if isinstance(raw_days[index], dict) else {}
+        topic = _clean(raw.get("topic"), 500)
+        if not topic:
+            raise DailyContentError("В плане недели есть пустая тема.")
+        goal = raw.get("goal")
+        if goal not in GOALS:
+            goal = "value"
+        days.append({
+            "date": day.isoformat(),
+            "day": WEEKDAY_RU[day.weekday()],
+            "topic": topic,
+            "goal": goal,
+        })
+    return {
+        "version": 1,
+        "focus": _clean(data.get("focus"), 900),
+        "days": days,
+    }
+
+
+def _weekly_plan_text(plan):
+    parts = ["ПЛАН КОНТЕНТА НА 7 ДНЕЙ"]
+    if plan.get("focus"):
+        parts += ["", "Смысл недели:", plan["focus"]]
+    for item in plan.get("days") or []:
+        parts += [
+            "",
+            f"{item.get('day')} · {item.get('date')}",
+            item.get("topic") or "",
+            "Цель: " + GOALS.get(item.get("goal"), GOALS["value"]),
+        ]
+    return "\n".join(parts).strip()
+
+
+def _load_weekly_plan(store, owner_id, project):
+    try:
+        jobs = store.list_jobs(owner_id, project["id"], limit=200)
+    except Exception:
+        return None
+    candidates = []
+    for job in jobs:
+        content = job.get("content") if isinstance(job, dict) else None
+        plan = content.get("weekly_plan") if isinstance(content, dict) else None
+        if isinstance(plan, dict) and isinstance(plan.get("days"), list):
+            candidates.append(job)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: str(item.get("updated_at") or item.get("scheduled_at") or ""),
+        reverse=True,
+    )
+    return (candidates[0].get("content") or {}).get("weekly_plan")
+
+
+def _save_weekly_plan(store, owner_id, project, plan):
+    from content_studio_catalog import save_studio_result
+
+    title = (
+        "План недели — "
+        + str((plan.get("days") or [{}])[0].get("date") or "")
+        + " — "
+        + str((plan.get("days") or [{}])[-1].get("date") or "")
+    )
+    job = save_studio_result(
+        store,
+        owner_id,
+        project["id"],
+        "text",
+        title,
+        text=_weekly_plan_text(plan),
+        request_id="weekly-plan-" + uuid.uuid4().hex[:24],
+    )
+    content = dict(job.get("content") or {})
+    content["weekly_plan"] = plan
+    content["title"] = title
+    return store.update_job(
+        owner_id,
+        job["id"],
+        {"content": content},
+        expected_updated_at=job.get("updated_at"),
+    )
+
+
+def _today_plan_item(plan, project):
+    if not isinstance(plan, dict):
+        return None
+    today = _local_today(project).isoformat()
+    for item in plan.get("days") or []:
+        if isinstance(item, dict) and item.get("date") == today:
+            return item
+    return None
+
+def _pack_text(pack, channels, formats):
+    parts = ["ПАКЕТ ДНЯ", "", "Главная мысль", pack["core_idea"]]
     if pack.get("cta"):
-        parts += ["", "## Следующий шаг", pack["cta"]]
+        parts += ["", "Следующий шаг", pack["cta"]]
     if "reel" in formats and pack.get("reel"):
         reel = pack["reel"]
         parts += [
-            "", "## Reels / короткое видео",
-            "**Хук:** " + (reel.get("hook") or ""),
+            "", "REELS / КОРОТКОЕ ВИДЕО",
+            "Хук: " + (reel.get("hook") or ""),
             "", reel.get("script") or "",
-            "", "**Подпись:**", reel.get("caption") or "",
+            "", "Подпись:", reel.get("caption") or "",
         ]
     if "story" in formats and pack.get("story"):
         story = pack["story"]
-        parts += ["", "## Stories / Status"]
+        parts += ["", "STORIES / STATUS"]
         for index, frame in enumerate(story.get("frames") or [], 1):
             parts.append(f"{index}. {frame}")
         if story.get("status"):
-            parts += ["", "**WhatsApp Status:** " + story["status"]]
+            parts += ["", "WhatsApp Status: " + story["status"]]
     if "post" in formats and pack.get("post"):
-        parts += ["", "## Посты по площадкам"]
+        parts += ["", "ПОСТЫ ПО ПЛОЩАДКАМ"]
         for channel in channels:
             value = pack["post"].get(channel)
             if value:
-                parts += ["", f"### {CHANNELS[channel]}", value]
+                parts += ["", CHANNELS[channel], value]
     if "carousel" in formats and pack.get("carousel"):
         carousel = pack["carousel"]
-        parts += ["", "## Карусель", "**Обложка:** " + (carousel.get("title") or "")]
+        parts += ["", "КАРУСЕЛЬ", "Обложка: " + (carousel.get("title") or "")]
         for index, slide in enumerate(carousel.get("slides") or [], 1):
             parts.append(f"{index}. {slide}")
         if carousel.get("caption"):
-            parts += ["", "**Подпись:**", carousel["caption"]]
-    return "\\n".join(parts).strip()
+            parts += ["", "Подпись:", carousel["caption"]]
+    return "\n".join(parts).strip()
 
+
+def _render_pack(pack, channels, formats):
+    with st.container(border=True):
+        st.markdown("**Главная мысль**")
+        st.write(pack.get("core_idea") or "")
+        if pack.get("cta"):
+            st.markdown("**Следующий шаг**")
+            st.write(pack["cta"])
+
+    if "reel" in formats and pack.get("reel"):
+        reel = pack["reel"]
+        with st.expander("🎬 Reels / короткое видео", expanded=True):
+            st.markdown("**Хук**")
+            st.write(reel.get("hook") or "")
+            st.markdown("**Сценарий**")
+            st.write(reel.get("script") or "")
+            st.markdown("**Подпись**")
+            st.write(reel.get("caption") or "")
+
+    if "story" in formats and pack.get("story"):
+        story = pack["story"]
+        with st.expander("📱 Stories / Status", expanded=True):
+            for index, frame in enumerate(story.get("frames") or [], 1):
+                st.write(f"{index}. {frame}")
+            if story.get("status"):
+                st.markdown("**WhatsApp Status**")
+                st.write(story["status"])
+
+    if "post" in formats and pack.get("post"):
+        st.markdown("**Посты по площадкам**")
+        for channel in channels:
+            value = pack["post"].get(channel)
+            if value:
+                with st.expander(CHANNELS[channel], expanded=False):
+                    st.write(value)
+
+    if "carousel" in formats and pack.get("carousel"):
+        carousel = pack["carousel"]
+        with st.expander("🖼️ Карусель", expanded=True):
+            st.markdown("**Обложка**")
+            st.write(carousel.get("title") or "")
+            for index, slide in enumerate(carousel.get("slides") or [], 1):
+                st.write(f"{index}. {slide}")
+            if carousel.get("caption"):
+                st.markdown("**Подпись**")
+                st.write(carousel["caption"])
 
 def _queue_brief(pack, content_format):
     if content_format == "reel":
