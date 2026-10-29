@@ -275,7 +275,6 @@ def _queue_supported(owner_id, project, store, service, pack, channels, formats,
 
 
 def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
-    st.markdown("## Сегодняшний контент")
     st.caption("Одна идея → пакет для всех площадок → готовые материалы и производство.")
 
     if not project or not store or not service:
