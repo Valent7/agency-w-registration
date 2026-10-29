@@ -125,7 +125,10 @@ class DailyContentTests(unittest.TestCase):
         self.assertIn("REELS", instagram)
         self.assertIn("STORIES", instagram)
         self.assertIn("КАРУСЕЛЬ", instagram)
-        self.assertIn("STATUS", whatsapp)
+        self.assertEqual(whatsapp, PACK["story"]["status"])
+        self.assertNotIn("WhatsApp Status", whatsapp)
+        self.assertNotIn("Готово к публикации", whatsapp)
+        self.assertNotIn("ТЕКСТ", whatsapp)
         self.assertNotIn("REELS", whatsapp)
         self.assertIn("Разговорный Threads.", threads)
         self.assertNotIn("КАРУСЕЛЬ", threads)
@@ -202,6 +205,8 @@ class DailyContentTests(unittest.TestCase):
         self.assertIn("Zoom", text)
         self.assertIn("LinkedIn", text)
         self.assertIn("не выдумывай клиентов, доходы, проценты", text)
+        self.assertIn("без фразы", text)
+        self.assertIn("слово «Презентация»", text)
 
 
 if __name__ == "__main__":
