@@ -59,6 +59,9 @@ class Uploaded:
     def getvalue(self): return VIDEO
 
 class Store:
+    def list_jobs(self, owner_id, project_id, limit=300):
+        assert (owner_id, project_id) == (77, 'project-1')
+        return copy.deepcopy(st.session_state.get('_master_jobs', []))
     def get_job(self, owner_id, job_id):
         assert owner_id == 77
         if job_id == 'new-film':
@@ -220,6 +223,26 @@ class ReferenceUiTests(unittest.TestCase):
         all_labels = [item.label for item in app.button]
         self.assertNotIn('Создать моё видео', all_labels)
         self.assertFalse(any('Площадки' in str(item.value) for item in app.markdown))
+
+    def test_refresh_recovers_existing_master_and_never_offers_second_paid_create(self):
+        app = self.approve(self.analyze(self.app()))
+        app.session_state['_master_jobs'] = [{
+            'id':'new-film','owner_id':77,'project_id':'project-1',
+            'state':'queued','platform':'instagram','format':'reel',
+            'studio_master':True,
+            'approved_reference':{'source_job_id':'reference-saved'},
+            'created_at':'2030-01-01T08:00:00+00:00',
+            'updated_at':'2030-01-01T08:00:00+00:00',
+        }]
+        app.session_state[self.key + '_result'].pop('created_job_id', None)
+        app.run()
+        self.assertFalse(app.exception)
+        self.assertEqual(
+            app.session_state[self.key + '_result']['created_job_id'],
+            'new-film',
+        )
+        self.assertFalse(any(item.label == '🎬 Создать видео' for item in app.button))
+        self.assertEqual(app.session_state['_creates'], [])
 
     def test_missing_video_service_shows_reason_on_same_page(self):
         app = self.analyze(self.app())
