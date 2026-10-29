@@ -108,6 +108,19 @@ class InstagramTokenExchangeTests(unittest.TestCase):
         self.assertIn("access_token", session.get.call_args.kwargs["params"])
 
 
+class InstagramUnifiedScopeTests(unittest.TestCase):
+    def test_one_owner_login_requests_publish_direct_and_comments(self):
+        source = Path("instagram_webhook.py").read_text(encoding="utf-8")
+        scope_block = source[
+            source.index("INSTAGRAM_OAUTH_SCOPES ="):
+            source.index("# Multi-partner Instagram Business Login")
+        ]
+        self.assertIn("instagram_business_basic", scope_block)
+        self.assertIn("instagram_business_content_publish", scope_block)
+        self.assertIn("instagram_business_manage_messages", scope_block)
+        self.assertIn("instagram_business_manage_comments", scope_block)
+
+
 class InstagramOAuthErrorPageTests(unittest.TestCase):
     def test_meta_access_denied_is_explained_without_forcing_reconnect(self):
         source = Path("instagram_webhook.py").read_text(encoding="utf-8")
