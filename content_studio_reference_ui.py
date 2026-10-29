@@ -525,9 +525,24 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
                             st.error("Продолжение не запущено: внутренняя ошибка производства.")
             else:
                 st.caption(
-                    "Сценарий сохранён. Другой образец брать не нужно. Сначала требуется "
-                    "повторный запуск производства из уже утверждённого сценария."
+                    "Сценарий сохранён. Другой образец брать не нужно. Runway ещё не получил "
+                    "заказ видеосцен: производство можно безопасно запустить заново из уже "
+                    "утверждённого сценария."
                 )
+                if st.button("🔄 Запустить производство снова", key=key + "_restart_unstarted_master", width="stretch"):
+                    try:
+                        service.restart_unstarted_master_video(owner_id, job_id)
+                        st.success(
+                            "Производство перезапущено. Перед заказом сцен система снова "
+                            "проверит баланс Runway и стоимость ролика."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        from content_factory_core import FactoryError
+                        if isinstance(exc, FactoryError):
+                            st.error("Повторный запуск не выполнен: " + str(exc))
+                        else:
+                            st.error("Повторный запуск не выполнен: внутренняя ошибка производства.")
             return
 
         st.info("🎬 " + (progress_text or "Видео принято в работу. Создаём сцены и озвучку."))
