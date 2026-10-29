@@ -348,6 +348,29 @@ def main(argv=None):
         generator = get_generator()
     except ValueError:
         generator = None
+
+    # Safe operational diagnostic: expose only provider/model/balance, never
+    # credentials. This lets the Agency explain "insufficient credits" before
+    # an owner wastes time waiting for a video that cannot start.
+    try:
+        from content_factory_runtime import resolve_live_video_client
+        projects = store.list_active_projects()
+        probe_project = projects[0] if projects else None
+        if probe_project:
+            client = resolve_live_video_client(probe_project)
+            preflight = client.preflight()
+            print(json.dumps({
+                "video_provider": "runway",
+                "video_model": str(getattr(client, "model", "")),
+                "video_credit_balance": preflight.get("credit_balance") if isinstance(preflight, dict) else None,
+                "video_balance_supported": bool(isinstance(preflight, dict) and preflight.get("supported")),
+            }, ensure_ascii=False), flush=True)
+    except Exception as error:
+        print(json.dumps({
+            "video_balance_check": "unavailable",
+            "reason": type(error).__name__,
+        }, ensure_ascii=False), flush=True)
+
     worker = Worker(store, generator)
     while True:
         try:
