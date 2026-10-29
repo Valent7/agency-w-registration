@@ -423,6 +423,18 @@ class ContentFactoryService:
             raise FactoryError("Публикация уже отправлена площадке. Проверьте её результат в аккаунте.")
         return self.store.update_job(owner_id, job_id, {"state": "cancelled", "error": ""}, expected_updated_at=job.get("updated_at"))
 
+    def resume_stalled_video(self, owner_id, job_id):
+        job = self._job(owner_id, job_id)
+        try:
+            return self.store.resume_stalled_video_job(
+                owner_id, job_id, iso(self.clock()), stale_seconds=180
+            )
+        except Exception as exc:
+            from content_factory_store import StoreError
+            if isinstance(exc, StoreError):
+                raise FactoryError(str(exc)) from None
+            raise
+
     def retry(self, owner_id, job_id):
         job = self._job(owner_id, job_id)
         if job["state"] not in {"failed", "needs_connection"}:
