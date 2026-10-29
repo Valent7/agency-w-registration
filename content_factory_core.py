@@ -423,6 +423,43 @@ class ContentFactoryService:
             raise FactoryError("Публикация уже отправлена площадке. Проверьте её результат в аккаунте.")
         return self.store.update_job(owner_id, job_id, {"state": "cancelled", "error": ""}, expected_updated_at=job.get("updated_at"))
 
+    def restart_unstarted_master_video(self, owner_id, job_id):
+        job = self._job(owner_id, job_id)
+        if job.get("state") != "queued" or job.get("studio_master") is not True:
+            raise FactoryError("Повторный запуск доступен только для зависшего мастер-видео.")
+        if isinstance(job.get("production"), dict):
+            raise FactoryError("У видео уже есть сохранённое производство; используйте продолжение, а не новый запуск.")
+        updated = str(job.get("updated_at") or "")
+        try:
+            age = (self.clock() - timestamp(updated)).total_seconds()
+        except Exception:
+            age = 0
+        if age < 180:
+            raise FactoryError("Задача ещё обрабатывается. Повторный запуск пока не нужен.")
+        checkpoint = copy.deepcopy(job.get("checkpoint") or {})
+        if checkpoint.get("publish_started"):
+            raise FactoryError("Публикация уже начиналась; повторный запуск остановлен.")
+        checkpoint.pop("generation_started", None)
+        checkpoint.pop("generation_complete", None)
+        checkpoint.pop("retry_count", None)
+        return self.store.update_job(
+            owner_id,
+            job_id,
+            {
+                "state": "queued",
+                "checkpoint": checkpoint,
+                "error": "",
+                "progress": {
+                    "stage": "restart",
+                    "message": "Производство перезапущено из утверждённого сценария. Перед заказом сцен будет проверен баланс видеосервиса.",
+                },
+                "lease_owner": None,
+                "lease_until": None,
+                "available_at": iso(self.clock()),
+            },
+            expected_updated_at=job.get("updated_at"),
+        )
+
     def resume_stalled_video(self, owner_id, job_id):
         job = self._job(owner_id, job_id)
         try:
