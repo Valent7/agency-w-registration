@@ -481,13 +481,137 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
     if notice:
         st.success(notice)
 
+    topic_key = f"daily_content_{owner_id}_{project['id']}_topic"
+    goal_key = f"daily_content_{owner_id}_{project['id']}_goal"
+    draft_key = f"daily_content_{owner_id}_{project['id']}_weekly_draft"
+    plan = _load_weekly_plan(store, owner_id, project)
+    today_item = _today_plan_item(plan, project)
+    if today_item and not str(st.session_state.get(topic_key) or "").strip():
+        st.session_state[topic_key] = today_item.get("topic") or ""
+    if today_item and st.session_state.get(goal_key) not in GOALS:
+        st.session_state[goal_key] = today_item.get("goal") if today_item.get("goal") in GOALS else "value"
+
+    st.markdown("### План недели: вы + Стагирит")
+    st.caption(
+        "Стагирит предлагает темы на 7 дней. Владелец меняет их при необходимости "
+        "и только потом утверждает план."
+    )
+    if plan:
+        st.success("Недельный план утверждён. Сегодняшняя тема подставляется из него автоматически.")
+        with st.expander("Посмотреть утверждённый план"):
+            if plan.get("focus"):
+                st.write("Смысл недели: " + str(plan["focus"]))
+            for item in plan.get("days") or []:
+                if isinstance(item, dict):
+                    st.write(
+                        f"• {item.get('day')} · {item.get('date')} — "
+                        f"{item.get('topic')} ({GOALS.get(item.get('goal'), GOALS['value'])})"
+                    )
+
+    owner_note = st.text_area(
+        "Что важно учесть на этой неделе?",
+        placeholder="Например: в среду презентация в Zoom; сделать акцент на возвращении времени и живых примерах.",
+        height=85,
+        max_chars=1500,
+        key=f"daily_content_{owner_id}_{project['id']}_weekly_note",
+    )
+    if st.button(
+        "🧭 Стагирит предложит план на 7 дней",
+        width="stretch",
+        key=f"daily_content_{owner_id}_{project['id']}_weekly_propose",
+    ):
+        try:
+            with st.spinner("Стагирит готовит предложение на неделю…"):
+                dates = _week_dates(project)
+                answer = ask_ai_fn(
+                    "Ты — Стагирит, координатор Агентства W. Ты предлагаешь редакционный план, "
+                    "но окончательное решение всегда принимает владелец.",
+                    _build_weekly_plan_prompt(project, owner_note.strip(), dates),
+                )
+                st.session_state[draft_key] = _normalise_weekly_plan(_extract_json(answer), dates)
+            st.rerun()
+        except DailyContentError as error:
+            st.error(str(error))
+        except Exception:
+            st.error("Не удалось получить предложение Стагирита. Попробуйте ещё раз.")
+
+    draft = st.session_state.get(draft_key)
+    if isinstance(draft, dict) and isinstance(draft.get("days"), list):
+        st.info("Это предложение Стагирита. Измените любую тему или цель и только потом утвердите.")
+        if draft.get("focus"):
+            st.write("Предложенный смысл недели: " + str(draft["focus"]))
+        for index, item in enumerate(draft["days"][:7]):
+            topic_edit_key = f"{draft_key}_topic_{index}"
+            goal_edit_key = f"{draft_key}_goal_{index}"
+            if topic_edit_key not in st.session_state:
+                st.session_state[topic_edit_key] = item.get("topic") or ""
+            if st.session_state.get(goal_edit_key) not in GOALS:
+                st.session_state[goal_edit_key] = item.get("goal") if item.get("goal") in GOALS else "value"
+            with st.container(border=True):
+                st.markdown(f"**{item.get('day')} · {item.get('date')}**")
+                st.text_input(
+                    "Тема",
+                    key=topic_edit_key,
+                    max_chars=500,
+                    label_visibility="collapsed",
+                )
+                st.selectbox(
+                    "Цель",
+                    list(GOALS),
+                    format_func=GOALS.get,
+                    key=goal_edit_key,
+                )
+        if st.button(
+            "✅ Утвердить план недели",
+            type="primary",
+            width="stretch",
+            key=f"{draft_key}_approve",
+        ):
+            try:
+                approved = {
+                    "version": 1,
+                    "focus": _clean(draft.get("focus"), 900),
+                    "days": [],
+                }
+                for index, item in enumerate(draft["days"][:7]):
+                    topic_value = _clean(st.session_state.get(f"{draft_key}_topic_{index}"), 500)
+                    if not topic_value:
+                        raise DailyContentError("В утверждённом плане не может быть пустой темы.")
+                    goal_value = st.session_state.get(f"{draft_key}_goal_{index}")
+                    if goal_value not in GOALS:
+                        goal_value = "value"
+                    approved["days"].append({
+                        "date": item.get("date"),
+                        "day": item.get("day"),
+                        "topic": topic_value,
+                        "goal": goal_value,
+                    })
+                _save_weekly_plan(store, owner_id, project, approved)
+                approved_today = _today_plan_item(approved, project)
+                if approved_today:
+                    st.session_state[topic_key] = approved_today["topic"]
+                    st.session_state[goal_key] = approved_today["goal"]
+                st.session_state.pop(draft_key, None)
+                st.session_state[f"daily_content_{owner_id}_notice"] = (
+                    "План недели утверждён владельцем. Сегодняшняя тема взята из него."
+                )
+                st.rerun()
+            except DailyContentError as error:
+                st.error(str(error))
+            except Exception:
+                st.error("Не удалось сохранить недельный план. Попробуйте ещё раз.")
+
     st.markdown("### 1. О чём говорим сегодня?")
+    if today_item:
+        st.caption("Тема взята из утверждённого недельного плана. Перед созданием пакета её можно изменить вручную.")
+    else:
+        st.caption("Можно написать тему вручную или сначала составить недельный план вместе со Стагиритом.")
     topic = st.text_area(
         "Тема дня",
         placeholder="Например: почему человек теряет вечер на повторяющиеся задачи и что можно передать ИИ",
         height=130,
         max_chars=4000,
-        key=f"daily_content_{owner_id}_{project['id']}_topic",
+        key=topic_key,
         label_visibility="collapsed",
     )
     goal = st.radio(
@@ -495,7 +619,7 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
         list(GOALS),
         format_func=GOALS.get,
         horizontal=True,
-        key=f"daily_content_{owner_id}_{project['id']}_goal",
+        key=goal_key,
     )
 
     st.markdown("### 2. Что подготовить?")
@@ -554,7 +678,7 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
                     pending["package"] = package
                     st.session_state[pending_key] = pending
 
-            markdown = _pack_markdown(package, channels, formats)
+            package_text = _pack_text(package, channels, formats)
             from content_studio_catalog import save_studio_result
             save_studio_result(
                 store,
@@ -564,7 +688,7 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
                 "Пакет дня — " + datetime.now(
                     ZoneInfo(project.get("timezone") or "Europe/Berlin")
                 ).strftime("%d.%m.%Y"),
-                text=markdown,
+                text=package_text,
                 request_id="daily-pack-" + pending["id"][:24],
             )
             jobs, skipped = _queue_supported(
@@ -572,7 +696,7 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
             )
             st.session_state[f"daily_content_{owner_id}_{project['id']}_latest"] = {
                 "pack": package,
-                "markdown": markdown,
+                "text": package_text,
                 "jobs": len(jobs),
                 "skipped": skipped,
             }
@@ -589,15 +713,15 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
             )
 
     latest = st.session_state.get(f"daily_content_{owner_id}_{project['id']}_latest")
-    if isinstance(latest, dict) and latest.get("markdown"):
+    if isinstance(latest, dict) and latest.get("text") and isinstance(latest.get("pack"), dict):
         st.divider()
         st.markdown("### Готовый пакет")
-        st.markdown(latest["markdown"])
+        _render_pack(latest["pack"], channels, formats)
         st.download_button(
             "Скачать пакет текстом",
-            latest["markdown"],
-            file_name="agency-w-daily-content.md",
-            mime="text/markdown",
+            latest["text"],
+            file_name="agency-w-daily-content.txt",
+            mime="text/plain",
             key=f"daily_content_{owner_id}_{project['id']}_download",
         )
         if latest.get("jobs"):
