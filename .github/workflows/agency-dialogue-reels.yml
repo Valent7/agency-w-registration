@@ -9,7 +9,11 @@ on:
       - "tests/test_agency_dialogue_*.py"
       - "content_studio_music_ui.py"
       - "content_studio_music_provider.py"
+      - "content_studio_daily.py"
+      - "content_studio_ui.py"
       - "tests/test_content_studio_music_provider.py"
+      - "tests/test_content_studio_daily.py"
+      - "tests/test_content_studio_ui.py"
       - ".github/workflows/agency-dialogue-reels.yml"
   workflow_dispatch:
 
@@ -29,12 +33,13 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg >/dev/null
-          python -m pip install requests Pillow
+          python -m pip install requests Pillow streamlit
       - name: Compile dialogue, factory and direct music
-        run: python -m py_compile agency_outro.py agency_dialogue_video.py agency_dialogue_ui.py content_factory_ui.py content_studio_music_ui.py content_studio_music_provider.py tests/test_content_studio_music_provider.py tests/test_agency_dialogue_video.py tests/test_agency_dialogue_ui.py tests/test_agency_dialogue_editorial.py
+        run: python -m py_compile agency_outro.py agency_dialogue_video.py agency_dialogue_ui.py content_factory_ui.py content_studio_ui.py content_studio_daily.py content_studio_music_ui.py content_studio_music_provider.py tests/test_content_studio_daily.py tests/test_content_studio_music_provider.py tests/test_agency_dialogue_video.py tests/test_agency_dialogue_ui.py tests/test_agency_dialogue_editorial.py
       - name: Test one-job generation, safe approval and MP4 rendering
         run: |
           python -m unittest discover -s tests -p "test_agency_dialogue_video.py" -v
           python -m unittest discover -s tests -p "test_agency_dialogue_ui.py" -v
           python -m unittest discover -s tests -p "test_agency_dialogue_editorial.py" -v
           python -m unittest discover -s tests -p "test_content_studio_music_provider.py" -v
+          python -m unittest discover -s tests -p "test_content_studio_daily.py" -v
