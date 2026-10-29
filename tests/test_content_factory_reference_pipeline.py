@@ -146,6 +146,44 @@ class ReferenceServiceTests(unittest.TestCase):
             self.create(platforms=["vk", "threads"])
         self.assertEqual(len(self.store.list_jobs(77, self.project["id"])), 1)
 
+    def test_master_video_is_one_job_and_needs_no_social_connection(self):
+        self.store.delete_connection(77, self.project["id"], "vk")
+        self.service.save_project(77, {
+            "id": self.project["id"],
+            "platforms": ["threads"],
+            "formats": ["post"],
+        })
+        job = self.service.create_master_from_video_reference(
+            77,
+            self.project["id"],
+            self.reference["id"],
+            request_id="reference-master-one",
+        )
+        self.assertEqual(job["platform"], "instagram")
+        self.assertEqual(job["format"], "reel")
+        self.assertEqual(job["state"], "queued")
+        self.assertTrue(job["studio_master"])
+        self.assertTrue(job["requested_by_owner"])
+        self.assertTrue(job["review_required"])
+        self.assertEqual(job["video_style"], "cartoon")
+        self.assertEqual(job["approved_reference"]["plan"]["narration"], PLAN["narration"])
+        self.assertEqual(
+            self.service.create_master_from_video_reference(
+                77,
+                self.project["id"],
+                self.reference["id"],
+                request_id="reference-master-one",
+            )["id"],
+            job["id"],
+        )
+        self.assertEqual(
+            len([
+                item for item in self.store.list_jobs(77, self.project["id"])
+                if item.get("studio_master") is True
+            ]),
+            1,
+        )
+
     def test_normal_video_style_is_explicit_idempotent_and_revision_keeps_animation(self):
         job = self.service.create_material(77, self.project["id"], "Сделай мультфильм о первом уроке керамики", "reel", ["vk"],
                                            request_id="cartoon-new-request", video_style="cartoon")[0]

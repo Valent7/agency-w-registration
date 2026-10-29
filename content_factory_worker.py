@@ -153,7 +153,10 @@ class Worker:
         project = self.store.get_project(job["owner_id"], job["project_id"])
         if not project:
             raise ValueError("Проект больше недоступен.")
-        if job["platform"] not in project["platforms"] or job["format"] not in project["formats"]:
+        studio_master = job.get("studio_master") is True
+        if not studio_master and (
+            job["platform"] not in project["platforms"] or job["format"] not in project["formats"]
+        ):
             self._finish(job, state="paused", error="Площадка или формат отключены в проекте.")
             return "pending"
         explicitly_requested = job["state"] == "queued" and job.get("requested_by_owner") is True
