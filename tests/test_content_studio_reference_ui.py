@@ -172,7 +172,7 @@ class ReferenceUiTests(unittest.TestCase):
         app = self.app()
         visible = ' '.join(
             str(item.value)
-            for group in (app.markdown, app.caption, app.info)
+            for group in (app.subheader, app.markdown, app.caption, app.info)
             for item in group
         )
         self.assertIn('Видео по образцу — 3 шага', visible)
@@ -186,7 +186,7 @@ class ReferenceUiTests(unittest.TestCase):
     def test_analysis_prepares_editable_script_but_never_saves_or_creates_video(self):
         app = self.analyze(self.app(), style='cartoon')
         self.assertEqual(len(app.session_state['_analyses']), 1)
-        self.assertEqual(app.session_state['_analyses'][0][1], VIDEO)
+        self.assertEqual(app.session_state['_analyses'][0][1], b'owned-reference-video')
         self.assertEqual(app.session_state['_analyses'][0][2]['style'], 'cartoon')
         self.assertEqual(app.session_state['_analyses'][0][2].get('target_seconds'), None)
         self.assertEqual(app.session_state['_saves'], [])
