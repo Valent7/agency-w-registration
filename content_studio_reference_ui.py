@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -467,6 +468,35 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
     error = str(job.get("error") or "").strip()
 
     if state in {"queued", "generating", "scheduled"}:
+        # A live-video job should refresh its durable status every few minutes.
+        # If it does not, do not leave the owner staring at an endless
+        # "accepted" message: explain that the background continuation stalled.
+        stale_seconds = 0.0
+        updated_raw = str(job.get("updated_at") or "").strip()
+        if updated_raw:
+            try:
+                updated_at = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                stale_seconds = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds(),
+                )
+            except (TypeError, ValueError):
+                stale_seconds = 0.0
+
+        if stale_seconds >= 180:
+            minutes = max(3, int(stale_seconds // 60))
+            st.error(
+                "❌ Видео пока не создано. Причина: фоновая обработка перестала "
+                f"обновлять статус после передачи видеосервису ({minutes} мин без обновлений)."
+            )
+            st.caption(
+                "Это не нормальное длительное ожидание: задача зависла между проверками. "
+                "Сценарий и уже созданные данные сохранены; повторно разбирать образец не нужно."
+            )
+            return
+
         st.info("🎬 " + (progress_text or "Видео принято в работу. Создаём сцены и озвучку."))
         st.caption("Статус на этой странице обновляется автоматически.")
         return
