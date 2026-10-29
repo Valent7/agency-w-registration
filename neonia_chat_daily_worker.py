@@ -1,13 +1,14 @@
 """Sequential, per-owner Telegram-group scout for workspace schema v7+.
 
 Only the Telegram group explicitly chosen by the owner may feed its daily five.
-Does not send direct messages. Reads visible participants through the owner's
-existing authenticated Telegram session, respects Telegram restrictions, and
-stores selection under the owner's encrypted workspace for the UI and Stagirite.
+Does not send direct messages. Prefers people who actually write in the selected
+Telegram group, then ranks them against the owner's target-audience passport.
+If Telegram hides the member list, recent group messages still provide a lawful
+visible source. No fallback to personal contacts or another group is allowed.
 """
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient
@@ -69,6 +70,230 @@ def _daily_task_source(storage, owner_id, day):
     container = container if isinstance(container, dict) else {}
     batches = container.get("daily_batches")
     return task, ((batches or {}).get(day.isoformat()) or {})
+
+
+async def _read_active_group_authors(session_string, api_id, api_hash, chat,
+                                     excluded, desired=30, message_limit=800):
+    """Read recent HUMAN authors from the exact selected group.
+
+    This is the primary path for large groups where Telegram may hide the full
+    participant list. Only messages visible to the owner's authenticated session
+    are used. Group messages are public context, never treated as private DM
+    history.
+    """
+    client = TelegramClient(StringSession(session_string), api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            raise RuntimeError("Telegram session authorization expired")
+        target = int(chat["chat_id"])
+        entity = None
+        async for dialog in client.iter_dialogs(limit=500):
+            if not bool(getattr(dialog, "is_group", False)):
+                continue
+            if int(getattr(dialog.entity, "id", -1)) == target:
+                entity = dialog.entity
+                break
+        if entity is None:
+            raise RuntimeError("Selected Telegram group is inaccessible")
+
+        self_user = await client.get_me()
+        own_id = int(self_user.id)
+        authors = {}
+        scanned = 0
+
+        async for message in client.iter_messages(entity, limit=max(50, int(message_limit))):
+            scanned += 1
+            sender_id = getattr(message, "sender_id", None)
+            try:
+                uid = int(sender_id)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid == own_id or uid in excluded:
+                continue
+
+            text = str(getattr(message, "message", "") or "").strip()
+            if not text:
+                continue
+
+            try:
+                sender = await message.get_sender()
+            except Exception:
+                sender = None
+            if sender is None:
+                continue
+            # Anonymous admins/channel identities are not people-candidates.
+            if getattr(sender, "first_name", None) is None and getattr(sender, "last_name", None) is None:
+                continue
+            if (getattr(sender, "deleted", False) or getattr(sender, "bot", False)
+                or getattr(sender, "scam", False) or getattr(sender, "fake", False)):
+                continue
+
+            first_name = str(getattr(sender, "first_name", "") or "").strip()
+            last_name = str(getattr(sender, "last_name", "") or "").strip()
+            name = " ".join(x for x in (first_name, last_name) if x).strip() or "Без имени"
+            raw_date = getattr(message, "date", None)
+            if isinstance(raw_date, datetime):
+                if raw_date.tzinfo is None:
+                    raw_date = raw_date.replace(tzinfo=UTC)
+                local_date = raw_date.astimezone(BERLIN)
+                today = datetime.now(BERLIN).date()
+                if local_date.date() == today:
+                    activity_label = f"писал в выбранном чате сегодня в {local_date:%H:%M}"
+                elif local_date.date() == today - timedelta(days=1):
+                    activity_label = f"писал в выбранном чате вчера в {local_date:%H:%M}"
+                else:
+                    activity_label = f"писал в выбранном чате {local_date:%d.%m.%Y}"
+                last_seen_at = local_date.isoformat()
+            else:
+                activity_label = "активный автор выбранного чата"
+                last_seen_at = ""
+
+            item = authors.get(uid)
+            if item is None:
+                item = {
+                    "telegram_id": uid,
+                    "name": name,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": str(getattr(sender, "username", "") or "").strip(),
+                    "access_hash": getattr(sender, "access_hash", None),
+                    "source_chat_id": target,
+                    "source_chat_title": str(chat.get("title") or "Telegram-чат"),
+                    "source_type": "telegram_chat",
+                    "source": "Telegram-чат: " + str(chat.get("title") or "Без названия"),
+                    "is_owner_contact": False,
+                    "activity_eligible": True,
+                    "telegram_activity_label": activity_label,
+                    "last_seen_at": last_seen_at,
+                    "activity_precision": "group_message_exact",
+                    "_stagirite_activity_tier": 0,
+                    "has_message_history": False,
+                    "recent_messages": [],
+                    "group_messages": [],
+                }
+                authors[uid] = item
+
+            if len(item["group_messages"]) < 4:
+                item["group_messages"].append(text[:700])
+
+            if len(authors) >= desired and scanned >= min(message_limit, 120):
+                break
+
+        for item in authors.values():
+            snippets = " | ".join(item.get("group_messages") or [])
+            item["public_info"] = (
+                f"Активный автор сообщений в выбранной Telegram-группе "
+                f"«{chat.get('title') or 'Telegram-чат'}». "
+                f"Публичные сообщения в этой группе: {snippets}"
+            )[:3200]
+        return list(authors.values()), scanned
+    finally:
+        await client.disconnect()
+
+
+def _local_business_signal(context):
+    """Conservative no-AI fallback based only on visible group text."""
+    text = " ".join([
+        str(context.get("public_info") or ""),
+        " ".join(str(x) for x in context.get("group_messages") or []),
+    ]).lower()
+    tokens = (
+        "бизнес", "предприним", "партнер", "партнёр", "команда", "клиент",
+        "маркет", "продаж", "проект", "доход", "заработ", "инвест", "крипт",
+        "искусствен", " ии ", "ai", "автоматизац", "нейросет", "обучен",
+        "лидер", "сервис", "контент", "рекрут",
+    )
+    return any(token in text for token in tokens)
+
+
+def _rank_active_group_authors(state, storage, authors, desired):
+    """Apply workability + target-audience analysis to active group authors."""
+    passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
+    if not passport or not authors:
+        return []
+
+    sent_ids = storage._sent_ids(state)
+    blocked_ids = storage._blocked_ids(state)
+    known_ids = storage._known_contact_ids(state)
+    workable = []
+    for source in authors:
+        state_info = storage._classify_workability(
+            source,
+            already_sent_ids=sent_ids,
+            known_contact_ids=known_ids,
+            blocked_ids=blocked_ids,
+        )
+        enriched = {**source, **state_info}
+        if enriched.get("work_state") == "available" and not bool(enriched.get("selection_blocked")):
+            workable.append(enriched)
+
+    ranked = []
+    passport_analysis = passport.get("analysis") or passport.get("profile") or passport
+    for start in range(0, len(workable), 10):
+        if len(ranked) >= desired:
+            break
+        batch = workable[start:start+10]
+        informative, empty = storage._split_analysis_value(batch)
+        batch_results = []
+        if informative:
+            try:
+                batch_results.extend(storage._analyze_candidates(passport_analysis, informative))
+            except Exception:
+                # Keep service useful if the AI analysis endpoint is temporarily down,
+                # but only for visible authors with an explicit local business signal.
+                for source in informative:
+                    if _local_business_signal(source):
+                        batch_results.append({
+                            **source,
+                            "potential_interest": "средний",
+                            "actuality": "активен сейчас",
+                            "warmth": "холодный",
+                            "obstacles": [],
+                            "short_portrait": "Активный автор выбранного тематического чата; требуется ручная проверка профиля.",
+                            "owner_hint": "Проверьте профиль перед первым сообщением.",
+                            "message_angle": "Начать с контекста его публичного сообщения в группе.",
+                            "business_relevant": True,
+                            "business_evidence": ["активное публичное сообщение по деловой/проектной теме"],
+                            "business_gate_reason": "Локальный резервный фильтр по публичному сообщению.",
+                            "score": 45,
+                            "recommendation": "Решает владелец",
+                            "selection_blocked": False,
+                            "block_reason": "",
+                            "analysis_cost_mode": "local_group_signal",
+                            "status": "Проанализирован",
+                        })
+
+        source_by_id = {int(x["telegram_id"]): x for x in batch}
+        for item in batch_results:
+            try:
+                cid = int(item["telegram_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            source = source_by_id.get(cid)
+            if not source:
+                continue
+            merged = {
+                **source,
+                **item,
+                "is_owner_contact": False,
+                "source_chat_id": int(source.get("source_chat_id") or 0),
+                "source_chat_title": str(source.get("source_chat_title") or ""),
+                "source_type": "telegram_chat",
+                "source": str(source.get("source") or ""),
+            }
+            if bool(merged.get("selection_blocked")):
+                continue
+            if merged.get("business_relevant") is not True:
+                continue
+            ranked.append(merged)
+
+    dedup = {}
+    for item in ranked:
+        dedup[int(item["telegram_id"])] = item
+    ranked = list(dedup.values())
+    ranked.sort(key=storage._candidate_priority)
+    return ranked[:max(1, int(desired))]
 
 
 async def _read_selected_members(session_string, api_id, api_hash, chat, offset,
@@ -168,15 +393,21 @@ def _persist_group_selection(storage, owner_id, mode, chat, candidates,
         stat["completed"] = bool(exhausted)
         stat.pop("error",None)
         stats[str(chat_id)] = stat
+        previous_today = set()
+        if (str(progress.get("last_batch_date") or "") == today
+            and str(progress.get("last_batch_source_signature") or "") == signature):
+            previous_today = _int_set(progress.get("last_batch_ids", []))
+        today_ids = previous_today | {int(c["telegram_id"]) for c in candidates}
         progress.update({
             "chat_stats":stats, "source_mode":"chats",
             "preferred_source_mode":"chats", "preferred_chat_id":chat_id,
             "preferred_chat_title":str(chat.get("title") or ""),
             "current_chat_id":chat_id,"source_type":"telegram_chat",
             "source_name":"Telegram-чат: "+str(chat.get("title") or ""),
-            "today":len(candidates),"updated_at":datetime.now(BERLIN).isoformat(),
-            "last_batch_date":today,"last_batch_ids":[int(c["telegram_id"]) for c in candidates],
+            "today":len(today_ids),"updated_at":datetime.now(BERLIN).isoformat(),
+            "last_batch_date":today,"last_batch_ids":sorted(today_ids),
             "last_batch_source_signature":signature,
+            "selection_method":"active_group_authors",
         })
         if exhausted:
             progress["completed_chat_ids"] = sorted(
@@ -237,7 +468,7 @@ def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
     last.update({
         "candidate_ids":selected_ids,
         "approved_ids":[cid for cid in confirmed if cid in selected_ids],
-        "source":"neonia_sequential_queue",
+        "source":"neonia_group_activity_targeting",
         "source_mode":"chats",
         "source_chat_id":int(chat_id),
         "source_signature":signature,
@@ -303,23 +534,60 @@ def process(owner_id,session_string,state,storage):
                         and int(x.get("source_chat_id") or 0)==chat_id]
     offset=int((state.get("chat_offsets") or {}).get(str(chat_id)) or 0)
     api_id,api_hash=storage._telegram_api_credentials()
+    needed=max(1,5-len(existing_cards))
+    cards=[]
+    scanned=0
+    exhausted=False
+
+    # PRIMARY: people who actually write in the selected group. This works even
+    # when Telegram hides the full 12k-member participant list.
     try:
-        cards,new_offset,scanned,exhausted=asyncio.run(
-            _read_selected_members(session_string,api_id,api_hash,chat,offset,
-                                   excluded,desired=max(1,5-len(existing_cards))))
+        authors,scanned=asyncio.run(
+            _read_active_group_authors(
+                session_string,api_id,api_hash,chat,excluded,
+                desired=max(30,needed*6),message_limit=800,
+            )
+        )
+        cards=_rank_active_group_authors(state,storage,authors,needed)
     except Exception as exc:
-        return {"owner_id":owner_id,"status":"skip",
-                "reason":"selected Telegram group cannot be enumerated",
-                "error_type":type(exc).__name__}
+        print(
+            f"[NeoniaChat] owner={owner_id} active-author scan failed: {type(exc).__name__}",
+            flush=True,
+        )
+
+    # SECONDARY: keep the old participant-list path only as a fallback. It is
+    # useful in small open groups, but never falls back to personal contacts.
+    new_offset=offset
+    if len(cards)<needed:
+        try:
+            raw_members,new_offset,member_scanned,exhausted=asyncio.run(
+                _read_selected_members(
+                    session_string,api_id,api_hash,chat,offset,
+                    excluded | {int(x["telegram_id"]) for x in cards},
+                    desired=max(1,needed-len(cards)),
+                )
+            )
+            scanned += member_scanned
+            # Participant-only cards have no evidence for target-audience ranking.
+            # Keep only locally business-signaled records; usually the active-author
+            # path above supplies the full five.
+            for item in raw_members:
+                if len(cards)>=needed:
+                    break
+                if _local_business_signal(item):
+                    cards.append(item)
+        except Exception as exc:
+            print(
+                f"[NeoniaChat] owner={owner_id} participant fallback unavailable: {type(exc).__name__}",
+                flush=True,
+            )
+
     if not cards and not existing_cards:
-        # Advance the cursor past previously seen/inaccessible participants;
-        # otherwise an owner in a 12k-member group can be stuck forever on
-        # the same 250 duplicate profiles every morning.
         if scanned>0:
             _persist_group_selection(storage,owner_id,mode,chat,[],
                                      new_offset,scanned,exhausted)
         return {"owner_id":owner_id,"status":"empty",
-                "reason":"no accessible new members in selected chat",
+                "reason":"no target active authors found in selected chat",
                 "source_chat_id":chat_id}
     if not _persist_group_selection(storage,owner_id,mode,chat,cards,
                                     new_offset,scanned,exhausted):
