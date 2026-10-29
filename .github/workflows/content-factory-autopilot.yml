@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONDONTWRITEBYTECODE: "1"
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/agency-w-pycache
+      PYTHONPYCACHEPREFIX: /tmp/agency-w-pycache
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
