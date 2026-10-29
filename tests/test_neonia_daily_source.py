@@ -1,4 +1,7 @@
-"""Offline tests for the green Neonia Telegram-group source button."""
+"""Offline tests for the green Neonia Telegram-group source button.
+
+Active group authors are the primary source; personal contacts never fill gaps.
+"""
 import unittest
 from datetime import date
 from unittest.mock import patch
