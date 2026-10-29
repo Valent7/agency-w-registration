@@ -200,9 +200,11 @@ def _local_business_signal(context):
     ]).lower()
     tokens = (
         "бизнес", "предприним", "партнер", "партнёр", "команда", "клиент",
-        "маркет", "продаж", "проект", "доход", "заработ", "инвест", "крипт",
+        "маркет", "продаж", "проект", "доход", "заработ", "инвест",
         "искусствен", " ии ", "ai", "автоматизац", "нейросет", "обучен",
-        "лидер", "сервис", "контент", "рекрут",
+        "лидер", "сервис", "контент", "рекрут", "рутин", "времени",
+        "не успева", "занят", "перегруз", "админист", "организ", "встреч",
+        "сообщен", "заявк", "рассыл", "публикац", "соцсет",
     )
     return any(token in text for token in tokens)
 
@@ -545,7 +547,7 @@ def process(owner_id,session_string,state,storage):
         authors,scanned=asyncio.run(
             _read_active_group_authors(
                 session_string,api_id,api_hash,chat,excluded,
-                desired=max(30,needed*6),message_limit=800,
+                desired=max(120,needed*24),message_limit=3000,
             )
         )
         cards=_rank_active_group_authors(state,storage,authors,needed)

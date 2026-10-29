@@ -154,11 +154,17 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertEqual(self.storage.state["source_progress"]["selection_method"],"active_group_authors")
         self.assertEqual(self.storage.state["source_progress"]["today"],5)
 
-    def test_local_fallback_requires_business_signal(self):
-        yes={"public_info":"Обсуждение бизнеса и автоматизации команды","group_messages":[]}
-        no={"public_info":"Доброе утро всем","group_messages":[]}
-        self.assertTrue(worker._local_business_signal(yes))
-        self.assertFalse(worker._local_business_signal(no))
+    def test_local_fallback_requires_practical_agency_signal(self):
+        for text in (
+            "Обсуждение бизнеса и автоматизации команды",
+            "Не успеваю отвечать на сообщения клиентов, слишком много рутины",
+            "Каждый день веду соцсети, публикации и заявки вручную",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(worker._local_business_signal(
+                    {"public_info":text,"group_messages":[]}))
+        self.assertFalse(worker._local_business_signal(
+            {"public_info":"Доброе утро всем","group_messages":[]}))
 
     def test_missing_group_no_fallback(self):
         self.storage.state["selected_source_chat"]=9999
