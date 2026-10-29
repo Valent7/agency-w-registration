@@ -69,7 +69,19 @@ class Worker:
                 self._finish(job, state=error.state, error="")
                 result["pending"] += 1
             except LiveVideoPending as error:
-                self._finish(job, state="queued", available_at=iso(self.clock() + timedelta(seconds=error.retry_after)), error="")
+                retry_at = iso(self.clock() + timedelta(seconds=error.retry_after))
+                self._finish(
+                    job,
+                    state="queued",
+                    available_at=retry_at,
+                    error="",
+                    progress={
+                        "stage": "video_wait",
+                        "message": str(error),
+                        "retry_after_seconds": int(error.retry_after),
+                        "retry_expected_at": retry_at,
+                    },
+                )
                 result["pending"] += 1
             except LiveVideoError as error:
                 fresh = self.store.get_job(job["owner_id"], job["id"]) or job
