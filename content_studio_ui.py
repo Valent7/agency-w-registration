@@ -7,6 +7,7 @@ import streamlit as st
 
 
 TOOLS = {
+    "today": "Сегодняшний контент",
     "texts": "Тексты",
     "images": "Изображения",
     "carousel": "Карусели",
@@ -212,10 +213,10 @@ def _library(owner_id, owner_name, target_profile, render_manual):
 def _help(owner_id):
     st.subheader("От идеи до готового материала")
     for title, description in (
-        ("1. Выберите задачу", "Текст, изображение, карусель, видео или озвучка — каждый инструмент открывается отдельно."),
-        ("2. Опишите результат", "Напишите обычными словами, что хотите получить. Настройки проекта помогают сохранить ваш стиль."),
-        ("3. Найдите результат", "Все сохранённые результаты доступны в «Мои генерации». Там можно открыть материал, проверить и скачать его."),
-        ("4. Утвердите публикацию", "Подключите площадки и задайте расписание. Правила проверки и автопилота находятся в настройках проекта."),
+        ("1. Начните с «Сегодняшнего контента»", "Одна тема дня превращается в согласованный пакет для нескольких площадок и форматов."),
+        ("2. Завод адаптирует материал", "Instagram, WhatsApp Status, Threads, VK и LinkedIn получают разную подачу одной центральной мысли."),
+        ("3. Доработайте только при необходимости", "Отдельные инструменты текста, изображения, видео, музыки и озвучки остаются мастерской для точечной правки."),
+        ("4. Проверьте и опубликуйте", "Все результаты сохраняются в «Моих генерациях»; подключённые площадки можно передать в производство и расписание."),
     ):
         with st.container(border=True):
             st.markdown("**" + title + "**")
@@ -236,7 +237,8 @@ def _preserve_drafts(owner_id):
                 "_mood", "_advanced_mood", "_instruments", "_vocals", "_idea", "_kind", "_mode")
     for key in list(st.session_state):
         scoped = key.startswith((f"studio_tool_{owner_id}_", f"cf_auto_{owner_id}_",
-                                 f"studio_reference_{owner_id}_", f"studio_music_{owner_id}_"))
+                                 f"studio_reference_{owner_id}_", f"studio_music_{owner_id}_",
+                                 f"daily_content_{owner_id}_"))
         manual = key in {f"content_factory_request_{owner_id}", f"cf2_format_{owner_id}", f"content_studio_{owner_id}_video_style"} or (
             key.startswith("cf2_u_") and key.endswith(f"_{owner_id}"))
         if (scoped and key.endswith(suffixes)) or manual:
@@ -265,7 +267,7 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
     if next_tool in TOOLS:
         st.session_state[key] = next_tool
     if st.session_state.get(key) not in TOOLS:
-        st.session_state[key] = "ready"
+        st.session_state[key] = "today"
     mobile_key = f"content_studio_{owner_id}_mobile_tool"
     st.session_state[mobile_key] = st.session_state[key]
     # Native controls retain keyboard/screen-reader behavior. Only visibility
@@ -306,7 +308,11 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
         tool = st.radio("Раздел завода", list(TOOLS), format_func=TOOLS.get, key=key, label_visibility="collapsed")
     with workspace:
         st.markdown("## " + TOOLS[tool])
-        if tool in {"texts", "images", "speech", "reference", "prompts"}:
+        if tool == "today":
+            from content_studio_daily import render_daily_content_hub
+            store, service, project = _context(owner_id)
+            render_daily_content_hub(owner_id, project, store, service, ask_ai_fn)
+        elif tool in {"texts", "images", "speech", "reference", "prompts"}:
             from content_studio_templates import apply_template_handoff
             store, _, project = _context(owner_id)
             if project:
