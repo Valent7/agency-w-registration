@@ -9,6 +9,7 @@ on:
       - "telegram_scout_worker.py"
       - "stagirite_center.py"
       - "streamlit_app.py"
+      - "workspace_persistence.py"
       - "tests/test_neonia_daily_source.py"
       - ".github/workflows/neonia-daily-source-tests.yml"
   pull_request:
@@ -18,6 +19,7 @@ on:
       - "telegram_scout_worker.py"
       - "stagirite_center.py"
       - "streamlit_app.py"
+      - "workspace_persistence.py"
       - "tests/test_neonia_daily_source.py"
       - ".github/workflows/neonia-daily-source-tests.yml"
   workflow_dispatch:
@@ -37,6 +39,6 @@ jobs:
       - name: Install isolated worker requirements
         run: pip install -r requirements_worker.txt
       - name: Check touched Python files parse
-        run: python -m py_compile neonia_daily_source.py neonia_chat_daily_worker.py telegram_scout_worker.py stagirite_center.py streamlit_app.py
+        run: python -m py_compile neonia_daily_source.py neonia_chat_daily_worker.py telegram_scout_worker.py stagirite_center.py streamlit_app.py workspace_persistence.py
       - name: Test exact selected chat and no fallback
         run: python -m unittest discover -s tests -p 'test_neonia_daily_source.py' -v
