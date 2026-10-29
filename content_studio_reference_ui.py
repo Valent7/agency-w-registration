@@ -71,6 +71,7 @@ def _load_saved(owner_id, project, store, key):
         st.session_state[key + "_result"] = {
             "report": report, "request_id": uuid.uuid4().hex, "fingerprint": None,
             "saved_job_id": job["id"], "save_failed": False, "create_requests": {},
+            "scenario_approved": True,
             "video_personalization": copy.deepcopy((job.get("checkpoint") or {}).get("video_personalization") or {}),
         }
     except Exception:
@@ -354,85 +355,233 @@ def _film_finishing(owner_id, project, store, key, result):
     st.info("Будет использовано: " + " · ".join(summary) + ".")
 
 
+def _approved_scenario_form(owner_id, project, store, key, result):
+    report = result["report"]
+    plan = report["reference_plan"]
+
+    st.markdown("### 2. Проверьте сценарий")
+    st.caption("Исправьте всё, что хотите. Повторно разбирать видео для этого не нужно.")
+    with st.form(key + "_approve_form"):
+        title = st.text_input("Название ролика", value=plan["title"], max_chars=150)
+        narration = st.text_area(
+            "Текст диктора",
+            value=plan["narration"],
+            height=220,
+            max_chars=4000 if plan.get("target_seconds") == 120 else 1200,
+        )
+        scene_values = []
+        with st.expander("Сцены — можно изменить при необходимости", expanded=False):
+            for index, frame in enumerate(plan["visual_plan"]["frames"], 1):
+                scene_values.append(st.text_area(
+                    f"Сцена {index}",
+                    value=frame["subject"],
+                    max_chars=600,
+                    key=key + f"_approve_scene_{index}",
+                    height=75,
+                ))
+        approved = st.form_submit_button(
+            "✅ Утвердить сценарий",
+            type="primary",
+            width="stretch",
+        )
+
+    if approved:
+        try:
+            edited = copy.deepcopy(report)
+            target = edited["reference_plan"]
+            target["title"] = title.strip()
+            target["narration"] = narration.strip()
+            for frame, subject in zip(target["visual_plan"]["frames"], scene_values):
+                frame["subject"] = subject.strip()
+            result["report"] = _report(edited)
+            # A changed/approved script is a new durable version, but never a
+            # new paid analysis of the source video.
+            result["request_id"] = uuid.uuid4().hex
+            result["saved_job_id"] = None
+            result["save_failed"] = False
+            result["create_requests"] = {}
+            result.pop("created_job_id", None)
+            _save(owner_id, project, store, result)
+            if result.get("saved_job_id"):
+                result["scenario_approved"] = True
+                st.success("Сценарий утверждён. Можно создавать видео.")
+                st.rerun()
+            else:
+                st.error("Сценарий готов, но не удалось сохранить его. Видео не запускалось.")
+        except Exception:
+            st.error("Не удалось утвердить сценарий. Проверьте текст и сцены.")
+
+    if result.get("scenario_approved") and result.get("saved_job_id"):
+        st.success("✅ Сценарий утверждён.")
+
+
+def _master_video_asset(job):
+    for asset in job.get("assets") or []:
+        if isinstance(asset, dict) and (
+            asset.get("kind") == "video"
+            or str(asset.get("mime_type") or "").startswith("video/")
+        ):
+            return asset
+    return None
+
+
+@st.fragment(run_every=15)
+def _render_master_status(owner_id, project, store, service, key, job_id):
+    try:
+        job = store.get_job(owner_id, job_id)
+    except Exception:
+        st.error("Не удалось прочитать состояние видео. Обновите страницу.")
+        return
+    if not isinstance(job, dict):
+        st.error("Задача создания видео не найдена.")
+        return
+
+    state = str(job.get("state") or "")
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    progress_text = str(progress.get("message") or "").strip()
+    error = str(job.get("error") or "").strip()
+
+    if state in {"queued", "generating", "scheduled"}:
+        st.info("🎬 " + (progress_text or "Видео принято в работу. Создаём сцены и озвучку."))
+        st.caption("Статус на этой странице обновляется автоматически.")
+        return
+
+    if state == "ready":
+        asset = _master_video_asset(job)
+        if not asset:
+            st.warning("Видео подготовлено, но файл ещё не появился в хранилище. Обновите статус.")
+            return
+        try:
+            resolved = store.resolve_assets(owner_id, [asset])[0]
+            source = resolved.get("url") or resolved.get("path")
+            st.success("✅ Видео готово.")
+            if source:
+                st.video(source)
+            try:
+                data = store.read_asset(owner_id, asset)
+                st.download_button(
+                    "⬇️ Скачать готовое видео",
+                    data,
+                    file_name="agency-w-master-video.mp4",
+                    mime="video/mp4",
+                    width="stretch",
+                    key=key + "_master_download",
+                )
+            except Exception:
+                st.caption("Видео готово к просмотру. Скачивание временно недоступно.")
+        except Exception:
+            st.error("Видео создано, но не удалось открыть готовый файл.")
+        return
+
+    if state == "failed":
+        reason = error or progress_text or "Видеосервис не завершил создание."
+        st.error("❌ Видео не создано. Причина: " + reason)
+        if st.button("Повторить создание", key=key + "_retry_master", width="stretch"):
+            try:
+                service.retry(owner_id, job_id)
+                st.rerun()
+            except Exception as exc:
+                st.error("Повтор не запущен: " + str(exc))
+        return
+
+    if state == "paused":
+        st.error("⏸️ Создание остановлено. Причина: " + (error or progress_text or "задача приостановлена."))
+        return
+
+    if state == "needs_connection":
+        st.error(
+            "❌ Видео не создано. Внутренняя ошибка: мастер-ролик не должен требовать "
+            "подключения соцсети."
+        )
+        return
+
+    if state == "reconcile":
+        st.error("❌ Результат создания не подтверждён. Причина: " + (error or progress_text or "неизвестный ответ видеосервиса."))
+        return
+
+    st.info(progress_text or f"Состояние видео: {state or 'неизвестно'}.")
+
+
 def _show_report(owner_id, project, store, service, key, result):
     report = result["report"]
     plan = report["reference_plan"]
-    st.subheader("Ваш новый сценарий")
-    st.caption("Формат: " + STYLES[report["reference_style"]])
-    st.caption("Длительность нового ролика: около двух минут." if plan.get("target_seconds") == 120
-               else "Длительность нового ролика: до одной минуты.")
-    with st.expander("Что взяли из образца", expanded=False):
+
+    st.markdown("### Сценарий по вашему образцу")
+    st.caption(
+        ("Живое видео" if report["reference_style"] == "live" else "Мультфильм")
+        + " · короткий вертикальный ролик"
+    )
+    with st.expander("Что завод понял из образца", expanded=False):
         st.write(report["source_summary"])
-        st.caption("Используем идею и приёмы. Герои, сцены, текст и оформление нового ролика создаются для вашего проекта.")
-    st.markdown("**" + plan["title"] + "**")
-    st.write(plan["narration"])
-    with st.expander("План сцен", expanded=False):
-        for index, frame in enumerate(plan["visual_plan"]["frames"], 1):
-            st.write(f"**{index}.** {frame['subject']}")
-        st.caption(plan["visual_plan"]["art_direction"])
-    draft = plan["title"] + "\n\n" + plan["narration"] + "\n\n" + "\n".join(
-        f"{index}. {frame['subject']}" for index, frame in enumerate(plan["visual_plan"]["frames"], 1))
-    st.download_button("Скачать сценарий", draft, file_name="agency-w-new-video-script.txt",
-                       mime="text/plain", key=key + "_download")
-    _scenario_editor(owner_id, project, store, key, result)
-    if result.get("saved_job_id"):
-        st.success("Разбор и сценарий сохранены в «Моих генерациях».")
-    elif result.get("save_failed"):
-        st.warning("Сценарий готов, но история пока не сохранилась. Повторите сохранение — новый разбор для этого не нужен.")
-        if st.button("Повторить сохранение разбора", key=key + "_retry_save"):
-            _save(owner_id, project, store, result)
-            st.rerun()
+        st.caption(
+            "Берём структуру и приёмы. Лица, сцены, текст и бренд нового ролика "
+            "создаются заново для Агентства W."
+        )
 
-    _film_finishing(owner_id, project, store, key, result)
+    _approved_scenario_form(owner_id, project, store, key, result)
 
-    try:
-        connections = store.list_connections(owner_id, project["id"])
-        connected = {item.get("platform") for item in connections if isinstance(item, dict)}
-        platforms = [value for value in project.get("platforms", []) if value in connected and value in PLATFORMS]
-    except Exception:
-        platforms = []
+    st.markdown("### 3. Создать готовое видео")
+    if not (result.get("scenario_approved") and result.get("saved_job_id")):
+        st.info("Сначала утвердите сценарий выше.")
+        return
+
     try:
         from content_factory_runtime import get_live_video_capabilities
-        video_configured = get_live_video_capabilities(owner_id, project["id"]).get("live_video_configured") is True
+        video_configured = (
+            get_live_video_capabilities(owner_id, project["id"]).get("live_video_configured")
+            is True
+        )
     except Exception:
         video_configured = False
-    with st.form(key + "_create_form"):
-        selected = st.multiselect("Где разместить новое видео", platforms, default=platforms,
-                                  format_func=PLATFORMS.get, key=key + "_platforms")
-        submitted = st.form_submit_button(
-            "Создать моё видео", type="primary", width="stretch",
-            disabled=not (result.get("saved_job_id") and platforms and video_configured
-                          and "reel" in project.get("formats", [])) or bool(result.get("created_jobs")),
-        )
-        st.caption("Эта кнопка запускает платное создание новых сцен и озвучки. Готовый ролик сначала появится на вашу проверку.")
-    if not platforms:
-        st.info("Подключите площадку в разделе «Площадки», чтобы передать новый ролик в производство.")
-    if "reel" not in project.get("formats", []):
-        st.info("Включите формат «Видео / Reels» в настройках проекта.")
+
     if not video_configured:
-        st.info("Для создания движущихся сцен подключите видеосервис в настройках проекта. Сценарий уже можно прочитать и скачать.")
-    if submitted:
-        if not selected:
-            st.warning("Выберите хотя бы одну площадку.")
-            return
-        fingerprint = sha256(json.dumps([owner_id, project["id"], result["saved_job_id"], sorted(selected)]).encode()).hexdigest()
-        requests = result.setdefault("create_requests", {})
-        # The same accepted scenario keeps its identity even after closing the
-        # browser and reopening history. Reading it cannot buy a second render.
-        request_id = requests.setdefault(fingerprint, "reference-" + fingerprint[:48])
-        try:
-            jobs = service.create_from_video_reference(owner_id, project["id"], result["saved_job_id"],
-                                                       platforms=selected, request_id=request_id)
-            if not isinstance(jobs, list) or not jobs or any(not isinstance(job, dict) or not job.get("id") for job in jobs):
-                raise ReferenceUiError("Создание задачи пока не подтверждено.")
-            result["created_jobs"] = [job["id"] for job in jobs]
-            st.session_state[f"cf_auto_{owner_id}_notice"] = "Новый ролик передан в производство. Результат появится в «Моих генерациях» и дождётся вашей проверки."
-            st.session_state[f"content_studio_{owner_id}_next"] = "library"
-            st.rerun()
-        except Exception:
-            st.error("Не удалось подтвердить задачу создания видео. Обновите материалы; повторная кнопка использует тот же запрос и не создаёт дубликат.")
-    if result.get("created_jobs"):
-        st.info("Новый ролик передан в производство. Откройте «Мои генерации», чтобы следить за результатом.")
+        st.error(
+            "Видео сейчас не создастся: не подключён рабочий видеосервис. "
+            "Сценарий сохранён; после подключения повторно разбирать образец не потребуется."
+        )
+        return
+
+    created_job_id = result.get("created_job_id")
+    if not created_job_id:
+        if st.button(
+            "🎬 Создать видео",
+            type="primary",
+            width="stretch",
+            key=key + "_create_master",
+        ):
+            fingerprint = sha256(json.dumps([
+                owner_id, project["id"], result["saved_job_id"], "master-video"
+            ]).encode()).hexdigest()
+            requests = result.setdefault("create_requests", {})
+            request_id = requests.setdefault(
+                fingerprint,
+                "reference-master-" + fingerprint[:40],
+            )
+            try:
+                job = service.create_master_from_video_reference(
+                    owner_id,
+                    project["id"],
+                    result["saved_job_id"],
+                    request_id=request_id,
+                )
+                if not isinstance(job, dict) or not job.get("id"):
+                    raise ReferenceUiError("Задача создания видео не подтверждена.")
+                result["created_job_id"] = job["id"]
+                st.success("Видео принято в работу. Оставайтесь на этой странице — статус появится ниже.")
+                st.rerun()
+            except ReferenceUiError as error:
+                st.error("Видео не запущено. Причина: " + str(error))
+            except Exception as error:
+                from content_factory_core import FactoryError
+                if isinstance(error, FactoryError):
+                    st.error("Видео не запущено. Причина: " + str(error))
+                else:
+                    st.error("Видео не запущено. Причина: не удалось создать задачу производства.")
+        return
+
+    _render_master_status(
+        owner_id, project, store, service, key, created_job_id
+    )
 
 
 def render_reference_tool(owner_id, project, store, service):
@@ -440,25 +589,45 @@ def render_reference_tool(owner_id, project, store, service):
     from content_studio_tools import _ready
     from content_studio_reference import ReferenceError
 
-    st.subheader("Создать своё видео по образцу")
-    st.caption("Загрузите ролик, укажите свою тему и получите собственный сценарий для живого видео или мультфильма.")
+    st.subheader("Видео по образцу — 3 шага")
+    st.caption("1. Загрузить образец → 2. Утвердить сценарий → 3. Создать готовое видео. Всё на одной странице.")
     if not _ready(owner_id, project, store) or service is None:
         return
     owner_id = int(owner_id)
     key = _key(owner_id, project)
     _load_saved(owner_id, project, store, key)
     epoch = st.session_state.get(key + "_upload_epoch", 0)
+    st.markdown("### 1. Загрузите видео-образец")
     with st.form(key + "_analysis_form"):
-        upload = st.file_uploader("Видео-образец", type=["mp4", "mov", "webm"], key=key + f"_file_{epoch}")
-        goal = st.text_area("О чём должно быть ваше видео?", max_chars=3000, height=100,
-                            placeholder="Например: покажи, как наш помощник освобождает вечер предпринимателя.", key=key + "_goal")
-        style = st.radio("Какой результат нужен?", list(STYLES), format_func=STYLES.get,
-                         horizontal=True, key=key + "_style")
-        target_seconds = st.radio("Длительность вашего нового видео", [45, 120],
-                                  format_func=lambda value: "Около двух минут" if value == 120 else "Короткое, до минуты",
-                                  horizontal=True, key=key + "_target_seconds")
-        submitted = st.form_submit_button("Разобрать и подготовить свой сценарий", width="stretch", type="primary")
-        st.caption("Исходный ролик: до 50 МБ и до 15 минут. Завод разбирает речь всего ролика; длительность вашего нового видео выбирается отдельно. Сначала оплачивается разбор, создание видео запускается другой кнопкой.")
+        upload = st.file_uploader(
+            "Видео-образец",
+            type=["mp4", "mov", "webm"],
+            key=key + f"_file_{epoch}",
+        )
+        goal = st.text_area(
+            "Что должно говориться в вашем новом видео?",
+            max_chars=3000,
+            height=110,
+            placeholder=(
+                "Например: Агентство W освобождает время от рутины. "
+                "Сегодня в 20:00 МСК презентация в Zoom. Напишите «Презентация»."
+            ),
+            key=key + "_goal",
+        )
+        style = st.radio(
+            "Вид ролика",
+            list(STYLES),
+            format_func=STYLES.get,
+            horizontal=True,
+            key=key + "_style",
+        )
+        target_seconds = 45
+        submitted = st.form_submit_button(
+            "✨ Подготовить сценарий",
+            width="stretch",
+            type="primary",
+        )
+        st.caption("Короткий вертикальный ролик до минуты. Образец — до 50 МБ и 15 минут.")
     with st.expander("Если у вас только ссылка на публикацию", expanded=False):
         st.caption("Автоматическое получение роликов по ссылкам соцсетей пока не подключено. Загрузите сам видеофайл.")
     if submitted:
@@ -488,11 +657,17 @@ def render_reference_tool(owner_id, project, store, service):
                 if (report["reference_style"] != style or report["source"]["sha256"] != sha256(video_bytes).hexdigest()
                         or report["reference_plan"].get("target_seconds", 45) != target_seconds):
                     raise ReferenceUiError("Не удалось связать разбор с выбранным образцом и стилем. Новое видео не запускалось.")
-                result = {"report": copy.deepcopy(report), "fingerprint": fingerprint,
-                          "request_id": uuid.uuid4().hex, "saved_job_id": None,
-                          "save_failed": False, "create_requests": {}, "video_personalization": {}}
+                result = {
+                    "report": copy.deepcopy(report),
+                    "fingerprint": fingerprint,
+                    "request_id": uuid.uuid4().hex,
+                    "saved_job_id": None,
+                    "save_failed": False,
+                    "create_requests": {},
+                    "scenario_approved": False,
+                    "video_personalization": {},
+                }
                 st.session_state[key + "_result"] = result
-                _save(owner_id, project, store, result)
         except ReferenceUiError as error:
             st.error(str(error))
         except ReferenceError as error:
