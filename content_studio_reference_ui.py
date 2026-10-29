@@ -415,6 +415,31 @@ def _approved_scenario_form(owner_id, project, store, key, result):
         st.success("✅ Сценарий утверждён.")
 
 
+def _find_existing_master_job(store, owner_id, project_id, reference_job_id):
+    """Recover a previously started master after refresh; never create a paid duplicate."""
+    try:
+        jobs = store.list_jobs(owner_id, project_id, limit=300)
+    except Exception:
+        return None
+    candidates = []
+    for job in jobs:
+        if not isinstance(job, dict) or job.get("studio_master") is not True:
+            continue
+        approved = job.get("approved_reference")
+        if not isinstance(approved, dict) or approved.get("source_job_id") != reference_job_id:
+            continue
+        if job.get("state") == "cancelled":
+            continue
+        candidates.append(job)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
+    return candidates[0]
+
+
 def _master_video_asset(job):
     for asset in job.get("assets") or []:
         if isinstance(asset, dict) and (
@@ -481,7 +506,11 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
                 service.retry(owner_id, job_id)
                 st.rerun()
             except Exception as exc:
-                st.error("Повтор не запущен: " + str(exc))
+                from content_factory_core import FactoryError
+                if isinstance(exc, FactoryError):
+                    st.error("Повтор не запущен: " + str(exc))
+                else:
+                    st.error("Повтор не запущен: внутренняя ошибка производства.")
         return
 
     if state == "paused":
@@ -542,6 +571,14 @@ def _show_report(owner_id, project, store, service, key, result):
         return
 
     created_job_id = result.get("created_job_id")
+    if not created_job_id:
+        existing = _find_existing_master_job(
+            store, owner_id, project["id"], result["saved_job_id"]
+        )
+        if existing and existing.get("id"):
+            created_job_id = existing["id"]
+            result["created_job_id"] = created_job_id
+
     if not created_job_id:
         if st.button(
             "🎬 Создать видео",
