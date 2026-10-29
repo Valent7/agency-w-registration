@@ -9,6 +9,7 @@ import os
 import tomllib
 from pathlib import Path
 import uuid
+from urllib.parse import urlencode
 
 
 def _configuration():
@@ -71,6 +72,25 @@ def get_generator():
 def get_connect_url(owner_id, project_id, platform):
     from content_factory_oauth import make_connect_url
     return make_connect_url(owner_id, project_id, platform, _configuration())
+
+
+def get_owner_instagram_connect_url(owner_id, owner_name):
+    """Use the Agency-wide Instagram OAuth once for Direct + publishing.
+
+    The signed handoff contains only the authenticated Agency owner identity.
+    Instagram returns the professional account id itself; users never type it.
+    """
+    cfg = _configuration()
+    base = str(cfg.get("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
+    shared = str(cfg.get("SUPABASE_SECRET_KEY") or "").strip()
+    if not base or not shared:
+        return None
+    try:
+        from instagram_auth_handoff import create_signed_handoff
+        signed = create_signed_handoff(int(owner_id), str(owner_name or ""), shared)
+    except Exception:
+        return None
+    return base + "/instagram/connect?" + urlencode({"state": signed})
 
 
 _VIDEO_PROVIDER = "runway_video"

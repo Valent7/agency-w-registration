@@ -535,6 +535,63 @@ class SupabaseStore(_StoreBase):
     def list_active_projects(self) -> list[dict]:
         return [_unpack(row) for row in self._rows("content_factory_projects", {"automation_enabled": "eq.true", "order": "created_at.asc"})]
 
+    def _owner_instagram_connection(self, owner_id: int, project_id: str, *, with_token: bool = False) -> dict | None:
+        """Expose the Agency-wide Instagram owner login to any of their projects."""
+        rows = self._rows(
+            "agency_instagram_connections",
+            {
+                "owner_telegram_id": f"eq.{_owner(owner_id)}",
+                "status": "eq.connected",
+                "select": (
+                    "owner_telegram_id,instagram_account_id,instagram_username,"
+                    "access_token_encrypted,token_expires_at,status,connected_at,updated_at"
+                ),
+                "limit": 1,
+            },
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        account_id = str(row.get("instagram_account_id") or "").strip()
+        if not account_id:
+            return None
+        result = {
+            "id": f"owner-instagram-{_owner(owner_id)}",
+            "owner_id": _owner(owner_id),
+            "project_id": _id(project_id),
+            "platform": "instagram",
+            "account_id": account_id,
+            "display_name": str(row.get("instagram_username") or account_id),
+            "extra": {
+                "owner_level": True,
+                "direct_enabled": True,
+                "token_expires_at": row.get("token_expires_at"),
+                "connected_at": row.get("connected_at"),
+            },
+            "created_at": row.get("connected_at") or row.get("updated_at") or _now(),
+            "updated_at": row.get("updated_at") or row.get("connected_at") or _now(),
+            "has_token": True,
+        }
+        if with_token:
+            encrypted = str(row.get("access_token_encrypted") or "").strip()
+            if not encrypted:
+                return None
+            # agency_instagram_connections is encrypted by the Instagram
+            # webhook service with the shared FERNET_KEY. Do not assume the
+            # Content Factory's optional CONTENT_FACTORY_FERNET_KEY is equal.
+            instagram_key = str(os.environ.get("FERNET_KEY") or "").strip()
+            if not instagram_key:
+                raise StoreError("Не настроен общий ключ Instagram-подключений.")
+            try:
+                result["access_token"] = Fernet(
+                    instagram_key.encode("utf-8")
+                ).decrypt(encrypted.encode("utf-8")).decode("utf-8")
+            except (InvalidToken, ValueError, TypeError):
+                raise StoreError(
+                    "Instagram-подключение не удалось открыть. Переподключите аккаунт."
+                ) from None
+        return result
+
     def save_connection(self, owner_id: int, project_id: str, platform: str, account_id: str, display_name: str, access_token: str, extra: dict | None = None) -> dict:
         owner_id, project_id = _owner(owner_id), _id(project_id)
         self._require_project(owner_id, project_id)
@@ -546,11 +603,49 @@ class SupabaseStore(_StoreBase):
 
     def list_connections(self, owner_id: int, project_id: str) -> list[dict]:
         fields = "id,owner_id,project_id,platform,account_id,display_name,extra,created_at,updated_at"
-        return [_safe_connection(row) for row in self._rows("content_factory_connections", {"owner_id": f"eq.{_owner(owner_id)}", "project_id": f"eq.{_id(project_id)}", "select": fields, "order": "platform.asc"})]
+        result = [_safe_connection(row) for row in self._rows(
+            "content_factory_connections",
+            {
+                "owner_id": f"eq.{_owner(owner_id)}",
+                "project_id": f"eq.{_id(project_id)}",
+                "select": fields,
+                "order": "platform.asc",
+            },
+        )]
+        # The owner-level Instagram login is canonical. A legacy project-only
+        # Instagram row remains only as fallback until the owner reconnects.
+        try:
+            owner_instagram = self._owner_instagram_connection(owner_id, project_id)
+        except Exception:
+            owner_instagram = None
+        if owner_instagram:
+            result = [item for item in result if item.get("platform") != "instagram"]
+            result.append(owner_instagram)
+        return sorted(result, key=lambda item: str(item.get("platform") or ""))
 
     def get_connection(self, owner_id: int, project_id: str, platform: str) -> dict | None:
-        rows = self._rows("content_factory_connections", {"owner_id": f"eq.{_owner(owner_id)}", "project_id": f"eq.{_id(project_id)}", "platform": f"eq.{platform}", "limit": 1})
-        return {**_safe_connection(rows[0]), "access_token": self._decrypt(rows[0]["token_encrypted"])} if rows else None
+        if platform == "instagram":
+            try:
+                owner_instagram = self._owner_instagram_connection(
+                    owner_id, project_id, with_token=True
+                )
+            except Exception:
+                owner_instagram = None
+            if owner_instagram:
+                return owner_instagram
+        rows = self._rows(
+            "content_factory_connections",
+            {
+                "owner_id": f"eq.{_owner(owner_id)}",
+                "project_id": f"eq.{_id(project_id)}",
+                "platform": f"eq.{platform}",
+                "limit": 1,
+            },
+        )
+        return (
+            {**_safe_connection(rows[0]), "access_token": self._decrypt(rows[0]["token_encrypted"])}
+            if rows else None
+        )
 
     def delete_connection(self, owner_id: int, project_id: str, platform: str) -> None:
         self._request("DELETE", "/rest/v1/content_factory_connections", params={"owner_id": f"eq.{_owner(owner_id)}", "project_id": f"eq.{_id(project_id)}", "platform": f"eq.{platform}"}, raw=True)

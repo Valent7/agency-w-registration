@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -230,13 +231,76 @@ class SupabaseStoreTests(unittest.TestCase):
         self.project_id = "12345678-1234-5678-1234-567812345678"
 
     def test_connection_list_requests_only_safe_owner_scoped_fields(self):
-        self.session.request.return_value = response([{"id": "a", "extra": {}, "platform": "threads"}])
+        self.session.request.side_effect = [
+            response([{"id": "a", "extra": {}, "platform": "threads"}]),
+            response([]),
+        ]
         result = self.store.list_connections(11, self.project_id)
-        params = self.session.request.call_args.kwargs["params"]
+        first_call = self.session.request.call_args_list[0]
+        params = first_call.kwargs["params"]
         self.assertEqual("eq.11", params["owner_id"])
         self.assertEqual("eq." + self.project_id, params["project_id"])
         self.assertNotIn("token_encrypted", params["select"])
         self.assertTrue(result[0]["has_token"])
+
+    def test_owner_instagram_is_reused_by_project_without_exposing_token(self):
+        instagram_key = Fernet.generate_key()
+        encrypted = Fernet(instagram_key).encrypt(b"owner-instagram-token").decode()
+        self.session.request.side_effect = [
+            response([]),
+            response([{
+                "owner_telegram_id": 11,
+                "instagram_account_id": "178414123456789",
+                "instagram_username": "agency_owner",
+                "access_token_encrypted": encrypted,
+                "token_expires_at": "2026-12-01T00:00:00+00:00",
+                "status": "connected",
+                "connected_at": "2026-10-29T00:00:00+00:00",
+                "updated_at": "2026-10-29T00:00:00+00:00",
+            }]),
+        ]
+        with patch.dict(os.environ, {"FERNET_KEY": instagram_key.decode()}, clear=False):
+            listed = self.store.list_connections(11, self.project_id)
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["platform"], "instagram")
+        self.assertEqual(listed[0]["account_id"], "178414123456789")
+        self.assertTrue(listed[0]["extra"]["owner_level"])
+        self.assertTrue(listed[0]["extra"]["direct_enabled"])
+        self.assertNotIn("access_token", listed[0])
+        self.assertNotIn("owner-instagram-token", json.dumps(listed))
+
+        self.session.request.side_effect = [
+            response([{
+                "owner_telegram_id": 11,
+                "instagram_account_id": "178414123456789",
+                "instagram_username": "agency_owner",
+                "access_token_encrypted": encrypted,
+                "token_expires_at": "2026-12-01T00:00:00+00:00",
+                "status": "connected",
+                "connected_at": "2026-10-29T00:00:00+00:00",
+                "updated_at": "2026-10-29T00:00:00+00:00",
+            }]),
+        ]
+        with patch.dict(os.environ, {"FERNET_KEY": instagram_key.decode()}, clear=False):
+            connection = self.store.get_connection(11, self.project_id, "instagram")
+        self.assertEqual(connection["access_token"], "owner-instagram-token")
+        self.assertEqual(connection["project_id"], self.project_id)
+
+    def test_owner_instagram_token_uses_instagram_key_not_factory_key(self):
+        instagram_key = Fernet.generate_key()
+        encrypted = Fernet(instagram_key).encrypt(b"separate-instagram-token").decode()
+        self.session.request.side_effect = [
+            response([{
+                "owner_telegram_id": 11,
+                "instagram_account_id": "178414123456789",
+                "instagram_username": "owner",
+                "access_token_encrypted": encrypted,
+                "status": "connected",
+            }]),
+        ]
+        with patch.dict(os.environ, {"FERNET_KEY": instagram_key.decode()}, clear=False):
+            connection = self.store.get_connection(11, self.project_id, "instagram")
+        self.assertEqual(connection["access_token"], "separate-instagram-token")
 
     def test_rpc_claim_is_filtered_and_reservation_uses_atomic_rpc(self):
         now = datetime.now(timezone.utc).isoformat()

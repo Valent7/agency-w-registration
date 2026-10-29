@@ -8,7 +8,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from content_factory_oauth import _verify, HANDOFF_TTL
-from content_factory_runtime import get_connect_url
+from content_factory_runtime import get_connect_url, get_owner_instagram_connect_url
 import content_factory_runtime as runtime
 from content_factory_store import SQLiteStore
 from cryptography.fernet import Fernet
@@ -38,6 +38,25 @@ class ExistingOAuthServiceTests(unittest.TestCase):
 
     def test_no_service_does_not_show_unusable_connect_link(self):
         self.assertIsNone(self.link())
+
+
+    def test_owner_instagram_link_is_not_project_scoped_and_carries_owner_name(self):
+        values = {
+            "SUPABASE_SECRET_KEY": "test-only-server-key-" + "x" * 40,
+            "INSTAGRAM_OAUTH_SERVICE_URL": "https://existing.example.com/",
+        }
+        with patch.dict(os.environ, values, clear=True), patch("pathlib.Path.is_file", return_value=False):
+            link = get_owner_instagram_connect_url(11, "Валентина")
+        parts = urlsplit(link)
+        self.assertEqual(parts.path, "/instagram/connect")
+        self.assertIn("state", parse_qs(parts.query))
+        from instagram_auth_handoff import verify_signed_handoff
+        identity = verify_signed_handoff(
+            parse_qs(parts.query)["state"][0],
+            values["SUPABASE_SECRET_KEY"],
+        )
+        self.assertEqual(identity["owner_id"], "11")
+        self.assertEqual(identity["owner_name"], "Валентина")
 
 
 class LiveVideoRuntimeTests(unittest.TestCase):
