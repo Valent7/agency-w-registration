@@ -175,7 +175,7 @@ class ReferenceUiTests(unittest.TestCase):
             for group in (app.subheader, app.markdown, app.caption, app.info)
             for item in group
         )
-        self.assertIn('Видео по образцу — 3 шага', visible)
+        self.assertIn('1. Загрузить образец → 2. Утвердить сценарий → 3. Создать готовое видео', visible)
         self.assertIn('1. Загрузите видео-образец', visible)
         self.assertEqual(app.session_state['_analyses'], [])
         self.assertEqual(app.session_state['_saves'], [])
