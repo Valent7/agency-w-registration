@@ -5451,8 +5451,12 @@ def ensure_weekly_candidates_for_neona(
     matches_preference = matches_daily_batch(
         today_info, owner_pref, owner_chat_id
     )
+    accepted_daily_sources = {
+        "neonia_sequential_queue",
+        "neonia_group_activity_targeting",
+    }
     sequential_source = (
-        str(today_info.get("source") or "") == "neonia_sequential_queue"
+        str(today_info.get("source") or "") in accepted_daily_sources
         and matches_preference
     )
 
@@ -5531,7 +5535,8 @@ def ensure_weekly_candidates_for_neona(
 
     # После перехода на последовательную очередь старая сегодняшняя партия,
     # собранная по активности/ЦА, один раз заменяется новой очередью. Дальше
-    # source=neonia_sequential_queue фиксирует пятёрку до следующего дня.
+    # source=neonia_sequential_queue или neonia_group_activity_targeting
+    # фиксирует пятёрку до следующего дня.
     if not sequential_source:
         candidate_ids = []
         approved_ids = []
