@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install read-only mock test dependencies
-        run: python -m pip install requests cryptography starlette
+        run: python -m pip install requests cryptography starlette Pillow
       - name: Compile webhook and interface without executing them
         run: python -m py_compile instagram_webhook.py instagram_auth_tools.py instagram_auth_handoff.py content_factory_runtime.py content_factory_store.py streamlit_app.py tests/test_content_factory_runtime.py tests/test_content_factory_store.py tests/test_instagram_oauth_repair.py tests/test_instagram_auth_handoff.py tests/test_instagram_native_identity.py tests/test_instagram_partner_onboarding.py
       - name: Offline OAuth, provider-verified account identity and Direct mapping
