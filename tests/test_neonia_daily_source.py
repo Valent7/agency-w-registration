@@ -59,6 +59,32 @@ class DummyStorage:
         return {111}
     def _telegram_api_credentials(self):
         return (123,"fake")
+    def _sent_ids(self,state):
+        return set()
+    def _blocked_ids(self,state):
+        return set()
+    def _known_contact_ids(self,state):
+        return set()
+    def _classify_workability(self,source,**kwargs):
+        return {"work_state":"available","selection_blocked":False,"block_reason":""}
+    def _split_analysis_value(self,items):
+        return (items,[])
+    def _analyze_candidates(self,passport,items):
+        result=[]
+        for item in items:
+            result.append({
+                "telegram_id":int(item["telegram_id"]),
+                "business_relevant":True,
+                "business_evidence":["публичный деловой сигнал"],
+                "selection_blocked":False,
+                "potential_interest":"высокий" if int(item["telegram_id"]) % 2 else "средний",
+                "score":75 if int(item["telegram_id"]) % 2 else 50,
+                "warmth":"холодный",
+                "status":"Проанализирован",
+            })
+        return result
+    def _candidate_priority(self,item):
+        return (-int(item.get("score") or 0),int(item["telegram_id"]))
     def _load_tasks(self, owner_id):
         return [self.tasks["row"]] if self.task_exists else []
     def _active_weekly_task(self,tasks,day):
@@ -93,24 +119,43 @@ class DailyWorkerTests(unittest.TestCase):
             "chat_offsets":{},
             "source_progress":{},
             "candidates":[],
+            "passport":{"analysis":{"target":"деловые люди, которым полезна передача рутины ИИ"}},
         }
-    def test_group_only_daily_five(self):
-        async def fake_fetch(session,apiid,hash,chat,offset,excluded,desired):
+    def test_group_only_daily_five_comes_from_active_authors_and_is_ranked(self):
+        async def fake_active(session,apiid,hash,chat,excluded,desired,message_limit):
             self.assertEqual(chat["title"],"Preferred Group")
             self.assertIn(111,excluded)
-            return ([{"telegram_id":i,"name":str(i),"source_chat_id":9211,
-                       "source_chat_title":"Preferred Group","source_type":"telegram_chat"}
-                      for i in range(201,206)],5,5,False)
-        with patch.object(worker,"_read_selected_members",new=fake_fetch):
+            return ([{
+                "telegram_id":i,"name":str(i),"source_chat_id":9211,
+                "source_chat_title":"Preferred Group","source_type":"telegram_chat",
+                "source":"Telegram-чат: Preferred Group",
+                "public_info":"Обсуждает бизнес, команду и автоматизацию рабочих процессов в публичном сообщении.",
+                "group_messages":["Как автоматизировать работу команды и освободить время для клиентов?"],
+                "activity_eligible":True,"telegram_activity_label":"писал сегодня",
+                "_stagirite_activity_tier":0,"has_message_history":False,"recent_messages":[],
+            } for i in range(201,207)],120)
+        async def should_not_need_members(*args,**kwargs):
+            raise AssertionError("participant list must not be required when active authors provide five")
+        with patch.object(worker,"_read_active_group_authors",new=fake_active), \
+             patch.object(worker,"_read_selected_members",new=should_not_need_members):
             result=worker.process(77,"fake",self.storage.state,self.storage)
         self.assertEqual(result["status"],"prepared",result)
         self.assertEqual(result["count"],5)
         stored_batch=self.storage.tasks["row"]["result"]["daily_candidate_feed"]["daily_batches"][
-            date.today().isoformat()]
-        # Test uses local date; date may vary on the runner.
+            worker.datetime.now(worker.BERLIN).date().isoformat()]
         self.assertEqual(stored_batch["source_signature"],"chats:9211")
-        self.assertEqual(stored_batch["candidate_ids"],[201,202,203,204,205])
+        self.assertEqual(stored_batch["source"],"neonia_group_activity_targeting")
+        self.assertEqual(len(stored_batch["candidate_ids"]),5)
         self.assertNotIn(111,stored_batch["candidate_ids"])
+        self.assertTrue(all(201 <= cid <= 206 for cid in stored_batch["candidate_ids"]))
+        self.assertEqual(self.storage.state["source_progress"]["selection_method"],"active_group_authors")
+        self.assertEqual(self.storage.state["source_progress"]["today"],5)
+
+    def test_local_fallback_requires_business_signal(self):
+        yes={"public_info":"Обсуждение бизнеса и автоматизации команды","group_messages":[]}
+        no={"public_info":"Доброе утро всем","group_messages":[]}
+        self.assertTrue(worker._local_business_signal(yes))
+        self.assertFalse(worker._local_business_signal(no))
 
     def test_missing_group_no_fallback(self):
         self.storage.state["selected_source_chat"]=9999
