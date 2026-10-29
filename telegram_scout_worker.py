@@ -977,7 +977,9 @@ def _sent_ids(state: dict[str, Any]) -> set[int]:
 
 
 def _blocked_ids(state: dict[str, Any]) -> set[int]:
-    return _ids_from_list(state.get("blocked_first_messages", []))
+    blocked = _ids_from_list(state.get("blocked_first_messages", []))
+    blocked.update(_ids_from_list(state.get("excluded_candidates", [])))
+    return blocked
 
 
 def _load_tasks(owner_id: int) -> list[dict[str, Any]]:

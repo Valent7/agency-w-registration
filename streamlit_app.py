@@ -58,6 +58,15 @@ accept_weekly_candidates_for_neona = getattr(
         "selected_ids": [],
     },
 )
+remove_candidate_from_daily_neonia = getattr(
+    _stagirite_center,
+    "remove_candidate_from_daily_neonia",
+    lambda *args, **kwargs: {
+        "ok": False,
+        "removed": False,
+        "candidate_ids": [],
+    },
+)
 get_recent_daily_candidates_for_stagirite = getattr(
     _stagirite_center,
     "get_recent_daily_candidates_for_stagirite",
@@ -10369,6 +10378,91 @@ if telegram_login_valid or remembered_data:
                     blocked_first_messages_key = (
                         f"neona_first_message_blocked_{telegram_id}"
                     )
+                    excluded_candidates_key = (
+                        f"neonia_excluded_candidates_{telegram_id}"
+                    )
+
+                    def exclude_neonia_candidate(contact_id, reason="Удалён владельцем"):
+                        contact_id = int(contact_id)
+                        now_iso = datetime.now(ZoneInfo("UTC")).isoformat()
+
+                        excluded = st.session_state.get(
+                            excluded_candidates_key, []
+                        )
+                        if not isinstance(excluded, list):
+                            excluded = []
+                        if not any(
+                            isinstance(item, dict)
+                            and str(item.get("telegram_id") or "") == str(contact_id)
+                            for item in excluded
+                        ):
+                            excluded.append({
+                                "telegram_id": contact_id,
+                                "reason": str(reason or "Удалён владельцем"),
+                                "excluded_at": now_iso,
+                            })
+                        st.session_state[excluded_candidates_key] = excluded
+
+                        current_candidates = st.session_state.get(
+                            candidates_key, []
+                        )
+                        if isinstance(current_candidates, list):
+                            st.session_state[candidates_key] = [
+                                item for item in current_candidates
+                                if not (
+                                    isinstance(item, dict)
+                                    and str(item.get("telegram_id") or "") == str(contact_id)
+                                )
+                            ]
+
+                        current_selected = st.session_state.get(
+                            selected_candidates_key, []
+                        )
+                        if isinstance(current_selected, list):
+                            st.session_state[selected_candidates_key] = [
+                                item for item in current_selected
+                                if str(item) != str(contact_id)
+                            ]
+
+                        chat_candidates_key = (
+                            f"neonia_chat_candidates_{telegram_id}"
+                        )
+                        chat_candidates = st.session_state.get(
+                            chat_candidates_key, {}
+                        )
+                        if isinstance(chat_candidates, dict):
+                            cleaned = {}
+                            for chat_id, items in chat_candidates.items():
+                                if not isinstance(items, list):
+                                    cleaned[chat_id] = items
+                                    continue
+                                cleaned[chat_id] = [
+                                    item for item in items
+                                    if not (
+                                        isinstance(item, dict)
+                                        and str(item.get("telegram_id") or "")
+                                        == str(contact_id)
+                                    )
+                                ]
+                            st.session_state[chat_candidates_key] = cleaned
+
+                        drafts = st.session_state.get(neona_drafts_key, {})
+                        if isinstance(drafts, dict):
+                            draft = drafts.get(
+                                contact_id, drafts.get(str(contact_id), {})
+                            )
+                            if not (
+                                isinstance(draft, dict)
+                                and bool(draft.get("sent"))
+                            ):
+                                drafts.pop(contact_id, None)
+                                drafts.pop(str(contact_id), None)
+                                st.session_state[neona_drafts_key] = drafts
+
+                        persist_workspace_if_changed(
+                            telegram_id,
+                            force=True,
+                        )
 
                     # --------------------------------------------------
                     # Стагирит → Неона без ежедневного захода к Неонии.
@@ -10462,6 +10556,19 @@ if telegram_login_valid or remembered_data:
                     if not isinstance(all_contacts, list):
                         all_contacts = []
 
+                    excluded_candidate_ids = set()
+                    for item in st.session_state.get(
+                        excluded_candidates_key, []
+                    ) or []:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            excluded_candidate_ids.add(
+                                int(item.get("telegram_id"))
+                            )
+                        except (TypeError, ValueError):
+                            continue
+
                     candidate_by_id = {}
                     for candidate in candidate_results:
                         try:
@@ -10469,6 +10576,8 @@ if telegram_login_valid or remembered_data:
                                 candidate.get("telegram_id")
                             )
                         except (TypeError, ValueError):
+                            continue
+                        if candidate_id in excluded_candidate_ids:
                             continue
                         candidate_by_id[candidate_id] = candidate
 
@@ -10647,6 +10756,71 @@ if telegram_login_valid or remembered_data:
                                     ).date().isoformat()
                                 ),
                             )
+
+                            remove_daily_id = st.selectbox(
+                                "Удалить ненужного кандидата",
+                                options=[None] + daily_available_ids,
+                                format_func=lambda contact_id: (
+                                    "Выберите кандидата для удаления"
+                                    if contact_id is None
+                                    else (
+                                        str(
+                                            candidate_by_id[contact_id].get("name")
+                                            or "Кандидат"
+                                        )
+                                        + (
+                                            " · @"
+                                            + str(
+                                                candidate_by_id[contact_id].get(
+                                                    "username"
+                                                )
+                                            )
+                                            if candidate_by_id[contact_id].get(
+                                                "username"
+                                            )
+                                            else ""
+                                        )
+                                    )
+                                ),
+                                key=(
+                                    "neona_stagirite_daily_remove_choice_"
+                                    f"{telegram_id}_"
+                                    + datetime.now(
+                                        ZoneInfo("Europe/Berlin")
+                                    ).date().isoformat()
+                                ),
+                            )
+                            if st.button(
+                                "🗑 Удалить кандидата",
+                                disabled=remove_daily_id is None,
+                                key=(
+                                    "neona_stagirite_daily_remove_"
+                                    f"{telegram_id}_"
+                                    + datetime.now(
+                                        ZoneInfo("Europe/Berlin")
+                                    ).date().isoformat()
+                                ),
+                                use_container_width=True,
+                            ):
+                                remove_candidate_from_daily_neonia(
+                                    telegram_id,
+                                    int(remove_daily_id),
+                                    str(
+                                        weekly_neona_day.get("task_id")
+                                        or ""
+                                    ),
+                                )
+                                exclude_neonia_candidate(
+                                    int(remove_daily_id),
+                                    reason="Удалён владельцем из ежедневной пятёрки",
+                                )
+                                st.session_state[
+                                    f"neonia_candidate_removed_notice_{telegram_id}"
+                                ] = (
+                                    "Кандидат удалён и больше не будет "
+                                    "предлагаться Неонией."
+                                )
+                                st.rerun()
 
                             if st.button(
                                 "✅ Выбрать и подготовить сообщения",
@@ -11050,6 +11224,12 @@ if telegram_login_valid or remembered_data:
                         st.rerun()
 
                     st.divider()
+                    removed_notice = st.session_state.pop(
+                        f"neonia_candidate_removed_notice_{telegram_id}",
+                        "",
+                    )
+                    if removed_notice:
+                        st.success(removed_notice)
                     st.markdown("### 👥 Кого взять в работу")
                     st.caption(
                         "У Неоны три независимых входа: холодные контакты из "
@@ -11102,6 +11282,39 @@ if telegram_login_valid or remembered_data:
                                 "Это холодный контакт. Неона использует контекст "
                                 "Неонии, но никогда не сообщает человеку о внутреннем анализе."
                             )
+                            if focused_cold_id in sent_ids:
+                                st.caption(
+                                    "Первое сообщение уже отправлено — этот человек "
+                                    "остаётся в истории диалога и не удаляется как кандидат."
+                                )
+                            elif st.button(
+                                "🗑 Удалить кандидата",
+                                key=(
+                                    "neona_remove_cold_candidate_"
+                                    f"{telegram_id}_{focused_cold_id}"
+                                ),
+                                use_container_width=True,
+                            ):
+                                remove_candidate_from_daily_neonia(
+                                    telegram_id,
+                                    int(focused_cold_id),
+                                    str(
+                                        weekly_neona_day.get("task_id")
+                                        if isinstance(weekly_neona_day, dict)
+                                        else ""
+                                    ),
+                                )
+                                exclude_neonia_candidate(
+                                    int(focused_cold_id),
+                                    reason="Удалён владельцем из списка Неонии",
+                                )
+                                st.session_state[
+                                    f"neonia_candidate_removed_notice_{telegram_id}"
+                                ] = (
+                                    "Кандидат удалён и больше не будет "
+                                    "предлагаться Неонией."
+                                )
+                                st.rerun()
                     else:
                         st.info(
                             "Здесь появятся люди, которых вы выбрали из списка Неонии "

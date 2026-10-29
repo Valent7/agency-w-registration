@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import neonia_daily_source as policy
 import neonia_chat_daily_worker as worker
+import telegram_scout_worker as scout_storage
 
 
 class DailySourcePolicy(unittest.TestCase):
@@ -108,6 +109,17 @@ class DummyStorage:
             self.tasks["row"]={**self.tasks["row"],**payload}
             return [self.tasks["row"]]
         return [{"updated_at":"v2"}]
+
+
+class CandidateExclusionTests(unittest.TestCase):
+    def test_manual_exclusion_is_a_hard_block_for_future_selection(self):
+        state = {
+            "blocked_first_messages": [{"telegram_id": 101}],
+            "excluded_candidates": [
+                {"telegram_id": 202, "reason": "Удалён владельцем"},
+            ],
+        }
+        self.assertEqual(scout_storage._blocked_ids(state), {101, 202})
 
 
 class DailyWorkerTests(unittest.TestCase):
