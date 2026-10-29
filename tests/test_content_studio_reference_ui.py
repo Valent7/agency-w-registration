@@ -188,7 +188,7 @@ class ReferenceUiTests(unittest.TestCase):
         self.assertEqual(len(app.session_state['_analyses']), 1)
         self.assertEqual(app.session_state['_analyses'][0][1], b'owned-reference-video')
         self.assertEqual(app.session_state['_analyses'][0][2]['style'], 'cartoon')
-        self.assertEqual(app.session_state['_analyses'][0][2].get('target_seconds'), None)
+        self.assertEqual(app.session_state['_analyses'][0][2].get('target_seconds'), 45)
         self.assertEqual(app.session_state['_saves'], [])
         self.assertEqual(app.session_state['_creates'], [])
         self.assertTrue(any(item.label == '✅ Утвердить сценарий' for item in app.button))
