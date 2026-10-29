@@ -269,7 +269,6 @@ class SupabaseStoreTests(unittest.TestCase):
         self.assertNotIn("owner-instagram-token", json.dumps(listed))
 
         self.session.request.side_effect = [
-            response([]),
             response([{
                 "owner_telegram_id": 11,
                 "instagram_account_id": "178414123456789",
@@ -290,7 +289,6 @@ class SupabaseStoreTests(unittest.TestCase):
         instagram_key = Fernet.generate_key()
         encrypted = Fernet(instagram_key).encrypt(b"separate-instagram-token").decode()
         self.session.request.side_effect = [
-            response([]),
             response([{
                 "owner_telegram_id": 11,
                 "instagram_account_id": "178414123456789",
