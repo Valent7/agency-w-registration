@@ -612,16 +612,27 @@ class SupabaseStore(_StoreBase):
                 "order": "platform.asc",
             },
         )]
-        if not any(item.get("platform") == "instagram" for item in result):
-            try:
-                owner_instagram = self._owner_instagram_connection(owner_id, project_id)
-            except Exception:
-                owner_instagram = None
-            if owner_instagram:
-                result.append(owner_instagram)
+        # The owner-level Instagram login is canonical. A legacy project-only
+        # Instagram row remains only as fallback until the owner reconnects.
+        try:
+            owner_instagram = self._owner_instagram_connection(owner_id, project_id)
+        except Exception:
+            owner_instagram = None
+        if owner_instagram:
+            result = [item for item in result if item.get("platform") != "instagram"]
+            result.append(owner_instagram)
         return sorted(result, key=lambda item: str(item.get("platform") or ""))
 
     def get_connection(self, owner_id: int, project_id: str, platform: str) -> dict | None:
+        if platform == "instagram":
+            try:
+                owner_instagram = self._owner_instagram_connection(
+                    owner_id, project_id, with_token=True
+                )
+            except Exception:
+                owner_instagram = None
+            if owner_instagram:
+                return owner_instagram
         rows = self._rows(
             "content_factory_connections",
             {
@@ -631,14 +642,10 @@ class SupabaseStore(_StoreBase):
                 "limit": 1,
             },
         )
-        if rows:
-            return {**_safe_connection(rows[0]), "access_token": self._decrypt(rows[0]["token_encrypted"])}
-        if platform == "instagram":
-            try:
-                return self._owner_instagram_connection(owner_id, project_id, with_token=True)
-            except Exception:
-                return None
-        return None
+        return (
+            {**_safe_connection(rows[0]), "access_token": self._decrypt(rows[0]["token_encrypted"])}
+            if rows else None
+        )
 
     def delete_connection(self, owner_id: int, project_id: str, platform: str) -> None:
         self._request("DELETE", "/rest/v1/content_factory_connections", params={"owner_id": f"eq.{_owner(owner_id)}", "project_id": f"eq.{_id(project_id)}", "platform": f"eq.{platform}"}, raw=True)
