@@ -11,6 +11,15 @@ on:
       - "streamlit_app.py"
       - "tests/test_neonia_daily_source.py"
       - ".github/workflows/neonia-daily-source-tests.yml"
+  pull_request:
+    paths:
+      - "neonia_chat_daily_worker.py"
+      - "neonia_daily_source.py"
+      - "telegram_scout_worker.py"
+      - "stagirite_center.py"
+      - "streamlit_app.py"
+      - "tests/test_neonia_daily_source.py"
+      - ".github/workflows/neonia-daily-source-tests.yml"
   workflow_dispatch:
 
 permissions:
