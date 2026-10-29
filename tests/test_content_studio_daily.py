@@ -205,6 +205,8 @@ class DailyContentTests(unittest.TestCase):
         self.assertIn("Zoom", text)
         self.assertIn("LinkedIn", text)
         self.assertIn("не выдумывай клиентов, доходы, проценты", text)
+        self.assertIn("без фразы", text)
+        self.assertIn("слово «Презентация»", text)
 
 
 if __name__ == "__main__":
