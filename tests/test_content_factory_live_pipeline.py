@@ -127,6 +127,39 @@ class LiveVideoPipelineTests(unittest.TestCase):
             return db.execute("SELECT count(*) FROM content_factory_generation_reservations WHERE owner_id=? AND project_id=?",
                               (101, self.project["id"])).fetchone()[0]
 
+    def test_studio_master_generates_even_when_social_platform_and_reel_are_disabled(self):
+        self.service.save_project(101, {
+            "id": self.project["id"],
+            "platforms": ["vk"],
+            "formats": ["post"],
+            "automation_enabled": False,
+        })
+        job = self.store.enqueue_job(101, self.project["id"], {
+            "platform": "instagram",
+            "format": "reel",
+            "video_mode": "live",
+            "video_style": "live",
+            "studio_master": True,
+            "state": "queued",
+            "requested_by_owner": True,
+            "review_required": True,
+            "dedupe_key": "studio-master-no-social",
+            "topic": "Создать один мастер-ролик для ручной публикации",
+            "scheduled_at": iso(self.now),
+            "available_at": iso(self.now),
+            "content": {},
+            "assets": [],
+            "checkpoint": {},
+        })
+        generator = FakeLiveGenerator()
+        result = self.worker(generator).run_once()
+        saved = self.store.get_job(101, job["id"])
+        self.assertEqual(result["pending"], 1)
+        self.assertEqual(saved["state"], "queued")
+        self.assertTrue(saved["studio_master"])
+        self.assertIn("production", saved)
+        self.assertNotEqual(saved.get("error"), "Площадка или формат отключены в проекте.")
+
     def test_pending_persists_inputs_task_ids_and_releases_lease(self):
         job = self.enqueue()
         generator = FakeLiveGenerator()
