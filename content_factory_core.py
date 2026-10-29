@@ -153,7 +153,13 @@ class ContentFactoryService:
                 if job.get("lease_owner"):
                     continue
                 changes = None
-                allowed = job["platform"] in project["platforms"] and job["format"] in project["formats"]
+                allowed = (
+                    job.get("studio_master") is True
+                    or (
+                        job["platform"] in project["platforms"]
+                        and job["format"] in project["formats"]
+                    )
+                )
                 saved = job.get("checkpoint", {}).get("result", {})
                 if saved.get("external_id") and job["state"] != "published":
                     changes = {"state": "published", "external_id": str(saved["external_id"]), "permalink": str(saved.get("permalink") or ""), "error": ""}
