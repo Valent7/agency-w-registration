@@ -213,6 +213,75 @@ class ContentFactoryService:
                                      revision={"approved_reference": seed, "review_required": True,
                                                "checkpoint": {"video_personalization": personalization}})
 
+    def create_master_from_video_reference(self, owner_id, project_id, reference_job_id, *, request_id):
+        """Queue one owner-only 9:16 master video, independent of social connections."""
+        from content_factory_editorial import build_reference_seed, EditorialError, validate_reference_plan
+        project = self._project(owner_id, project_id)
+        reference = self._job(owner_id, reference_job_id)
+        content = reference.get("content")
+        if (reference.get("owner_id") != owner_id or reference.get("project_id") != project["id"]
+                or reference.get("state") != "studio" or reference.get("platform") != "studio"
+                or reference.get("studio_tool") != "reference" or reference.get("studio_complete") is not True
+                or not isinstance(content, dict)):
+            raise FactoryError("Сначала утвердите сценарий по видео-образцу.")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
+            raise FactoryError("Не удалось определить задачу. Обновите страницу и повторите создание.")
+        try:
+            # The master is vertical and reusable across Reels, Stories, Status and Threads.
+            validate_reference_plan(content.get("reference_plan"), platform="instagram")
+            seed = build_reference_seed(
+                owner_id, project["id"], reference["id"],
+                content.get("reference_style"), content.get("reference_plan"), project,
+            )
+            personalization = _reference_video_personalization(reference)
+        except EditorialError as error:
+            raise FactoryError(str(error)) from error
+
+        topic = f"Создать мастер-ролик по утверждённому сценарию: {seed['plan']['title']}"
+        video_style = seed["style"]
+        revision = {
+            "approved_reference": seed,
+            "review_required": True,
+            "studio_master": True,
+            "checkpoint": {"video_personalization": personalization},
+        }
+        intent = [topic, "reel", "studio-master", revision, video_style]
+        fingerprint = sha256(
+            json.dumps(intent, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+        for previous in self.store.list_jobs(owner_id, project_id, limit=1000):
+            if previous.get("request_id") == request_id and previous.get("request_fingerprint") != fingerprint:
+                raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
+
+        now = iso(self.clock())
+        key = sha256(f"reference-master|{project_id}|{request_id}".encode()).hexdigest()
+        job = self.store.enqueue_job(owner_id, project_id, {
+            # 'instagram' is an internal 9:16 render profile here, not a publication target.
+            "platform": "instagram",
+            "format": "reel",
+            "scheduled_at": now,
+            "available_at": now,
+            "state": "queued",
+            "dedupe_key": key,
+            "topic": topic,
+            "requested_by_owner": True,
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "video_mode": "live",
+            "video_style": video_style,
+            "content": {},
+            "assets": [],
+            "checkpoint": revision["checkpoint"],
+            "error": "",
+            "attempts": 0,
+            "approved_reference": seed,
+            "review_required": True,
+            "studio_master": True,
+        })
+        if job.get("request_fingerprint") != fingerprint:
+            raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
+        return job
+
     def revise_material(self, owner_id, job_id, feedback, *, request_id):
         job = self._job(owner_id, job_id)
         if job.get("state") not in {"ready", "paused", "failed"} or not job.get("content"):
