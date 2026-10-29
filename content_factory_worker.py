@@ -40,6 +40,18 @@ class Worker:
             raise ValueError("За один проход можно обработать от 1 до 20 материалов.")
         result = {key: 0 for key in ("planned", "processed", "generated", "published", "pending", "failed", "needs_connection", "reconcile")}
         result["errors"] = []
+        result["video_credit_balance"] = None
+        result["video_model"] = ""
+        if self.generator is not None and callable(getattr(self.generator, "live_video_client_resolver", None)):
+            try:
+                probe = {"owner_id": 1, "id": "00000000-0000-0000-0000-000000000001"}
+                client = self.generator.live_video_client_resolver(probe)
+                preflight = client.preflight()
+                if isinstance(preflight, dict):
+                    result["video_credit_balance"] = preflight.get("credit_balance")
+                result["video_model"] = str(getattr(client, "model", ""))
+            except Exception:
+                pass
         service = ContentFactoryService(self.store, self.clock)
         if owner_id is None:
             projects = self.store.list_active_projects()
