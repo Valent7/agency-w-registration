@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 import content_studio_daily as daily
@@ -103,6 +104,40 @@ class DailyContentTests(unittest.TestCase):
             self.assertNotIn("linkedin", call[4])
         self.assertEqual(len(jobs), 6)
         self.assertFalse(any("WhatsApp" in item or "LinkedIn" in item for item in skipped))
+
+    def test_each_platform_gets_its_own_copy_paste_package(self):
+        instagram = daily._channel_package_text(
+            PACK, "instagram", ["reel", "story", "post", "carousel"]
+        )
+        whatsapp = daily._channel_package_text(
+            PACK, "whatsapp", ["story", "post"]
+        )
+        threads = daily._channel_package_text(
+            PACK, "threads", ["post"]
+        )
+        vk = daily._channel_package_text(
+            PACK, "vk", ["reel", "post", "carousel"]
+        )
+        linkedin = daily._channel_package_text(
+            PACK, "linkedin", ["post"]
+        )
+
+        self.assertIn("REELS", instagram)
+        self.assertIn("STORIES", instagram)
+        self.assertIn("КАРУСЕЛЬ", instagram)
+        self.assertIn("STATUS", whatsapp)
+        self.assertNotIn("REELS", whatsapp)
+        self.assertIn("Разговорный Threads.", threads)
+        self.assertNotIn("КАРУСЕЛЬ", threads)
+        self.assertIn("Подробный пост ВК.", vk)
+        self.assertIn("КАРУСЕЛЬ", vk)
+        self.assertIn("Профессиональный LinkedIn.", linkedin)
+        self.assertNotEqual(instagram, linkedin)
+
+    def test_create_package_does_not_automatically_queue_publication(self):
+        source = inspect.getsource(daily.render_daily_content_hub)
+        self.assertNotIn("_queue_supported(", source)
+        self.assertIn("Ничего автоматически не опубликовано", source)
 
     def test_pack_text_is_plain_readable_text_with_real_line_breaks(self):
         text = daily._pack_text(

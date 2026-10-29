@@ -4,10 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from html import escape
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 CHANNELS = {
@@ -351,6 +353,140 @@ def _pack_text(pack, channels, formats):
     return "\n".join(parts).strip()
 
 
+CHANNEL_FILES = {
+    "instagram": "instagram.txt",
+    "whatsapp": "whatsapp-status.txt",
+    "threads": "threads.txt",
+    "vk": "vk.txt",
+    "linkedin": "linkedin.txt",
+}
+
+
+def _channel_package_text(pack, channel, formats):
+    """Prepare one clean copy/paste package for a single social channel."""
+    if channel not in CHANNELS:
+        return ""
+    parts = [CHANNELS[channel], "Готово к публикации"]
+
+    posts = pack.get("post") if isinstance(pack.get("post"), dict) else {}
+    post = _clean(posts.get(channel), 6000)
+    if post:
+        parts += ["", "ТЕКСТ", post]
+
+    if channel == "instagram":
+        if "reel" in formats and isinstance(pack.get("reel"), dict):
+            reel = pack["reel"]
+            if any(reel.get(name) for name in ("hook", "script", "caption")):
+                parts += [
+                    "", "REELS",
+                    "Хук: " + str(reel.get("hook") or ""),
+                    "", "Сценарий:", str(reel.get("script") or ""),
+                    "", "Подпись:", str(reel.get("caption") or ""),
+                ]
+        if "story" in formats and isinstance(pack.get("story"), dict):
+            story = pack["story"]
+            frames = story.get("frames") if isinstance(story.get("frames"), list) else []
+            if frames:
+                parts += ["", "STORIES"]
+                parts.extend(f"{index}. {frame}" for index, frame in enumerate(frames[:3], 1))
+        if "carousel" in formats and isinstance(pack.get("carousel"), dict):
+            carousel = pack["carousel"]
+            slides = carousel.get("slides") if isinstance(carousel.get("slides"), list) else []
+            if carousel.get("title") or slides or carousel.get("caption"):
+                parts += ["", "КАРУСЕЛЬ", "Обложка: " + str(carousel.get("title") or "")]
+                parts.extend(f"{index}. {slide}" for index, slide in enumerate(slides[:5], 1))
+                if carousel.get("caption"):
+                    parts += ["", "Подпись:", str(carousel["caption"])]
+
+    elif channel == "whatsapp":
+        if "story" in formats and isinstance(pack.get("story"), dict):
+            status = _clean(pack["story"].get("status"), 700)
+            if status:
+                parts += ["", "STATUS", status]
+
+    elif channel == "vk":
+        if "reel" in formats and isinstance(pack.get("reel"), dict):
+            reel = pack["reel"]
+            if reel.get("script") or reel.get("caption"):
+                parts += [
+                    "", "КОРОТКОЕ ВИДЕО",
+                    str(reel.get("script") or ""),
+                    "", "Подпись:", str(reel.get("caption") or ""),
+                ]
+        if "carousel" in formats and isinstance(pack.get("carousel"), dict):
+            carousel = pack["carousel"]
+            slides = carousel.get("slides") if isinstance(carousel.get("slides"), list) else []
+            if carousel.get("title") or slides or carousel.get("caption"):
+                parts += ["", "КАРУСЕЛЬ", "Обложка: " + str(carousel.get("title") or "")]
+                parts.extend(f"{index}. {slide}" for index, slide in enumerate(slides[:5], 1))
+                if carousel.get("caption"):
+                    parts += ["", "Подпись:", str(carousel["caption"])]
+
+    text = "\n".join(str(item) for item in parts if item is not None).strip()
+    return text if len(text) > len(CHANNELS[channel]) + 25 else ""
+
+
+def _copy_button(text, key):
+    """Small browser-side copy control; no content leaves the user's browser."""
+    element_id = "copy_" + hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:12]
+    safe = escape(str(text or ""))
+    components.html(
+        f"""
+        <textarea id="{element_id}" style="position:absolute;left:-10000px;top:-10000px;">{safe}</textarea>
+        <button id="{element_id}_button"
+            style="width:100%;height:38px;border:1px solid #d0d0d0;border-radius:8px;background:white;cursor:pointer;font-size:14px;"
+            onclick="(function(){{
+                var box=document.getElementById('{element_id}');
+                box.focus(); box.select();
+                var ok=false;
+                try {{ ok=document.execCommand('copy'); }} catch(e) {{}}
+                var button=document.getElementById('{element_id}_button');
+                button.textContent=ok ? '✓ Скопировано' : 'Выделите текст и скопируйте';
+                setTimeout(function(){{ button.textContent='📋 Скопировать текст'; }},1800);
+            }})()">
+            📋 Скопировать текст
+        </button>
+        """,
+        height=46,
+        scrolling=False,
+    )
+
+
+def _render_publish_cards(pack, channels, formats, owner_id, project_id):
+    st.markdown("### Готово к публикации")
+    st.caption(
+        "Контент-завод всё подготовил. Ничего не публикуется автоматически: "
+        "владелец сам копирует или скачивает материал и размещает его на своей площадке."
+    )
+    rendered = 0
+    for channel in channels:
+        text = _channel_package_text(pack, channel, formats)
+        if not text:
+            continue
+        rendered += 1
+        with st.container(border=True):
+            st.markdown(f"**{CHANNELS[channel]} — ✅ Готово к публикации**")
+            with st.expander("Посмотреть подготовленный материал", expanded=False):
+                st.text(text)
+            left, right = st.columns(2)
+            with left:
+                _copy_button(
+                    text,
+                    f"{owner_id}:{project_id}:{channel}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}",
+                )
+            with right:
+                st.download_button(
+                    "⬇️ Скачать",
+                    text,
+                    file_name=CHANNEL_FILES[channel],
+                    mime="text/plain",
+                    width="stretch",
+                    key=f"daily_publish_{owner_id}_{project_id}_{channel}_download",
+                )
+    if not rendered:
+        st.info("Для выбранных площадок пока нет готового текста.")
+
+
 def _render_pack(pack, channels, formats):
     with st.container(border=True):
         st.markdown("**Главная мысль**")
@@ -691,18 +827,15 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
                 text=package_text,
                 request_id="daily-pack-" + pending["id"][:24],
             )
-            jobs, skipped = _queue_supported(
-                owner_id, project, store, service, package, channels, formats, pending["id"]
-            )
             st.session_state[f"daily_content_{owner_id}_{project['id']}_latest"] = {
                 "pack": package,
                 "text": package_text,
-                "jobs": len(jobs),
-                "skipped": skipped,
+                "channels": list(channels),
+                "formats": list(formats),
             }
             st.session_state[f"daily_content_{owner_id}_notice"] = (
-                f"Пакет дня готов. В производство поставлено материалов: {len(jobs)}. "
-                "Тексты для ручной публикации сохранены в «Моих генерациях»."
+                "Пакет дня готов и сохранён в «Моих генерациях». "
+                "Ничего автоматически не опубликовано."
             )
             st.rerun()
         except DailyContentError as error:
@@ -714,24 +847,29 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
 
     latest = st.session_state.get(f"daily_content_{owner_id}_{project['id']}_latest")
     if isinstance(latest, dict) and latest.get("text") and isinstance(latest.get("pack"), dict):
+        latest_channels = [
+            value for value in (latest.get("channels") or channels)
+            if value in CHANNELS
+        ]
+        latest_formats = [
+            value for value in (latest.get("formats") or formats)
+            if value in FORMATS
+        ]
         st.divider()
         st.markdown("### Готовый пакет")
-        _render_pack(latest["pack"], channels, formats)
+        _render_pack(latest["pack"], latest_channels, latest_formats)
         st.download_button(
-            "Скачать пакет текстом",
+            "⬇️ Скачать весь пакет",
             latest["text"],
             file_name="agency-w-daily-content.txt",
             mime="text/plain",
+            width="stretch",
             key=f"daily_content_{owner_id}_{project['id']}_download",
         )
-        if latest.get("jobs"):
-            st.success(f"В производство поставлено: {latest['jobs']}.")
-        if latest.get("skipped"):
-            with st.expander("Что осталось для ручной публикации"):
-                for item in latest["skipped"]:
-                    st.write("• " + str(item))
-        st.caption(
-            "WhatsApp Status и LinkedIn сейчас готовятся для ручной публикации. "
-            "Instagram, VK и Threads ставятся в производство автоматически, "
-            "если они подключены и формат включён в проект."
+        _render_publish_cards(
+            latest["pack"],
+            latest_channels,
+            latest_formats,
+            owner_id,
+            project["id"],
         )
