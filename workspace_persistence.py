@@ -80,6 +80,9 @@ def get_workspace_state_keys(telegram_id):
         "blocked_first_messages": (
             f"neona_first_message_blocked_{telegram_id}"
         ),
+        "excluded_candidates": (
+            f"neonia_excluded_candidates_{telegram_id}"
+        ),
         "accessibility_talkback": (
             f"agency_accessibility_talkback_{telegram_id}"
         ),
@@ -125,9 +128,15 @@ def collect_workspace_state(telegram_id):
     )
     if not isinstance(blocked_first_messages, list):
         blocked_first_messages = []
+    excluded_candidates = st.session_state.get(
+        keys["excluded_candidates"],
+        [],
+    )
+    if not isinstance(excluded_candidates, list):
+        excluded_candidates = []
 
     return {
-        "schema_version": 9,
+        "schema_version": 10,
         "passport": st.session_state.get(
             keys["passport"]
         ),
@@ -223,6 +232,11 @@ def collect_workspace_state(telegram_id):
             for item in blocked_first_messages
             if isinstance(item, dict)
         ],
+        "excluded_candidates": [
+            item
+            for item in excluded_candidates
+            if isinstance(item, dict)
+        ][-5000:],
         "accessibility_talkback": bool(
             st.session_state.get(
                 keys["accessibility_talkback"],
@@ -506,6 +520,23 @@ def _normalize_workspace_state(state):
             {**item, "telegram_id": contact_id}
         )
 
+    excluded_raw = state.get("excluded_candidates", [])
+    if not isinstance(excluded_raw, list):
+        excluded_raw = []
+    excluded_candidates = []
+    seen_excluded = set()
+    for item in excluded_raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            contact_id = int(item.get("telegram_id"))
+        except (TypeError, ValueError):
+            continue
+        if contact_id in seen_excluded:
+            continue
+        seen_excluded.add(contact_id)
+        excluded_candidates.append({**item, "telegram_id": contact_id})
+
     return {
         "passport": (
             state.get("passport")
@@ -535,6 +566,7 @@ def _normalize_workspace_state(state):
         "neona_drafts": drafts,
         "sent_log": sent_log,
         "blocked_first_messages": blocked_first_messages,
+        "excluded_candidates": excluded_candidates,
         "accessibility_talkback": bool(
             state.get("accessibility_talkback", False)
         ),
@@ -841,6 +873,9 @@ def hydrate_workspace_state_once(telegram_id):
         st.session_state[
             keys["blocked_first_messages"]
         ] = state["blocked_first_messages"]
+        st.session_state[
+            keys["excluded_candidates"]
+        ] = state["excluded_candidates"]
         st.session_state[
             keys["accessibility_talkback"]
         ] = state["accessibility_talkback"]
