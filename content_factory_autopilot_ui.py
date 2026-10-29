@@ -333,7 +333,16 @@ def _connections(owner_id, project, store, capabilities, *, workspace=False, own
             if connection:
                 st.success(f"Сохранено подключение: {connection.get('display_name') or connection.get('account_id') or PLATFORMS[platform]}")
                 st.caption("Рабочий доступ к публикации проверяется при обращении к площадке. Сохранение подключения само по себе не подтверждает разрешения.")
-                if st.button("Отключить аккаунт", key=key + "_disconnect"):
+                owner_level = bool(
+                    platform == "instagram"
+                    and (connection.get("extra") or {}).get("owner_level")
+                )
+                if owner_level:
+                    st.caption(
+                        "Это общее Instagram-подключение владельца. Оно используется "
+                        "во всех его проектах и одновременно обслуживает Direct/комментарии."
+                    )
+                elif st.button("Отключить аккаунт", key=key + "_disconnect"):
                     try:
                         store.delete_connection(owner_id, project_id, platform)
                         st.rerun()
