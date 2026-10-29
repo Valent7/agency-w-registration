@@ -27,16 +27,17 @@ class StudioNavigationTests(unittest.TestCase):
 
     def test_content_entry_opens_one_form_and_keeps_tools_visible(self):
         app = self.app()
-        self.assertEqual(app.radio(key='content_studio_77_tool').value, 'ready')
+        self.assertEqual(app.radio(key='content_studio_77_tool').value, 'today')
         self.assertNotIn('cf2_start_77', [item.key for item in app.button])
         self.assertFalse(app.tabs)
-        self.assertTrue(any(item.label == 'Создать материал' for item in app.button))
+        self.assertTrue(any(item.label == '✨ Создать пакет дня' for item in app.button))
         self.assertFalse(any(item.label == 'Сохранить проект' for item in app.button))
+        self.assertIn('Сегодняшний контент', app.radio(key='content_studio_77_tool').options)
         self.assertIn('Мои генерации', app.radio(key='content_studio_77_tool').options)
 
     def test_all_sections_open_without_generating_or_hiding_neighbor_controls(self):
         app = self.app()
-        for section in ('texts', 'images', 'carousel', 'video', 'reference', 'speech', 'music', 'library', 'editor',
+        for section in ('today', 'texts', 'images', 'carousel', 'video', 'reference', 'speech', 'music', 'library', 'editor',
                         'prompts', 'search', 'calendar', 'connections', 'project', 'help', 'ready'):
             with self.subTest(section=section):
                 self.choose(app, section)
