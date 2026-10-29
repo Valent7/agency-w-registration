@@ -134,6 +134,37 @@ def _updated_job(previous: dict, changes: dict) -> dict:
     return row
 
 
+
+def _validated_stalled_video_resume(job: dict, now: str, stale_seconds: int = 180) -> str:
+    """Allow an owner to resume only a safely checkpointed stalled master video.
+
+    Every unfinished scene must already have a provider task id. This guarantees
+    that resuming polls existing paid orders instead of creating new scenes.
+    """
+    if not isinstance(job, dict) or job.get("state") != "queued" or job.get("studio_master") is not True:
+        raise StoreError("Продолжить можно только зависшее создание мастер-видео.")
+    production = job.get("production")
+    if not isinstance(production, dict):
+        raise StoreError("Не найдены сохранённые данные видеопроизводства.")
+    if production.get("creation_uncertain") or production.get("starting_index") is not None:
+        raise StoreError("Нельзя безопасно продолжить: прошлый платный заказ не подтверждён.")
+    if production.get("failed_indices"):
+        raise StoreError("Одна из сцен завершилась ошибкой; нужен обычный повтор после проверки.")
+    tasks, clips = production.get("tasks"), production.get("clips")
+    if not isinstance(tasks, list) or not tasks or not isinstance(clips, list) or len(tasks) != len(clips):
+        raise StoreError("Не удалось проверить сохранённые сцены.")
+    for task, clip in zip(tasks, clips):
+        if clip:
+            continue
+        if not isinstance(task, str) or not task.strip():
+            raise StoreError("Продолжение остановлено: не все оплаченные сцены имеют сохранённый номер заказа.")
+    now_dt = datetime.fromisoformat(_time(now))
+    updated_dt = datetime.fromisoformat(_time(job.get("updated_at")))
+    if (now_dt - updated_dt).total_seconds() < stale_seconds:
+        raise StoreError("Задача ещё не считается зависшей. Дайте фоновой проверке завершиться.")
+    return now_dt.isoformat()
+
+
 def _safe_connection(row: dict | sqlite3.Row) -> dict:
     result = dict(row)
     result.pop("token_encrypted", None)
@@ -403,6 +434,31 @@ class SQLiteStore(_StoreBase):
             values = [_json(row[key]) if key == "data" else row[key] for key in keys]
             db.execute(f"UPDATE content_factory_jobs SET {','.join(key+'=?' for key in keys)} WHERE owner_id=? AND id=?", [*values, owner_id, job_id])
             return _unpack(row)
+
+    def resume_stalled_video_job(self, owner_id: int, job_id: str, now: str, stale_seconds: int = 180) -> dict:
+        owner_id, job_id = _owner(owner_id), _id(job_id)
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM content_factory_jobs WHERE owner_id=? AND id=?",
+                (owner_id, job_id),
+            ).fetchone()
+            job = _unpack(row)
+            if not job:
+                raise StoreError("Задача создания видео не найдена.")
+            resume_at = _validated_stalled_video_resume(job, now, stale_seconds)
+            changed = db.execute(
+                "UPDATE content_factory_jobs SET lease_owner=NULL, lease_until=NULL, available_at=?, updated_at=? WHERE owner_id=? AND id=? AND updated_at=? AND state='queued'",
+                (resume_at, resume_at, owner_id, job_id, job["updated_at"]),
+            ).rowcount
+            if changed != 1:
+                raise StoreError("Состояние видео уже изменилось. Обновите страницу.")
+            return _unpack(
+                db.execute(
+                    "SELECT * FROM content_factory_jobs WHERE owner_id=? AND id=?",
+                    (owner_id, job_id),
+                ).fetchone()
+            )
 
     def claim_job(self, worker_id: str, now: str, lease_seconds: int = 900, owner_id: int | None = None, project_id: str | None = None) -> dict | None:
         now = _time(now)
@@ -693,6 +749,33 @@ class SupabaseStore(_StoreBase):
         result = self._request("PATCH", "/rest/v1/content_factory_jobs", params=params, json={key: value for key, value in row.items() if key not in _IMMUTABLE}, prefer="return=representation")
         if not result:
             raise StoreError("Материал изменён или уже обрабатывается. Обновите список.")
+        return _unpack(result[0])
+
+    def resume_stalled_video_job(self, owner_id: int, job_id: str, now: str, stale_seconds: int = 180) -> dict:
+        owner_id, job_id = _owner(owner_id), _id(job_id)
+        job = self.get_job(owner_id, job_id)
+        if not job:
+            raise StoreError("Задача создания видео не найдена.")
+        resume_at = _validated_stalled_video_resume(job, now, stale_seconds)
+        result = self._request(
+            "PATCH",
+            "/rest/v1/content_factory_jobs",
+            params={
+                "owner_id": f"eq.{owner_id}",
+                "id": f"eq.{job_id}",
+                "state": "eq.queued",
+                "updated_at": "eq." + _time(job["updated_at"]),
+            },
+            json={
+                "lease_owner": None,
+                "lease_until": None,
+                "available_at": resume_at,
+                "updated_at": resume_at,
+            },
+            prefer="return=representation",
+        )
+        if not result:
+            raise StoreError("Состояние видео уже изменилось. Обновите страницу.")
         return _unpack(result[0])
 
     def claim_job(self, worker_id: str, now: str, lease_seconds: int = 900, owner_id: int | None = None, project_id: str | None = None) -> dict | None:
