@@ -11,11 +11,16 @@ GitHub, Supabase, App Secret или чужим данным.
 - Основное приложение Meta: **Agency W** (публичный ID `1101869308929738`).
 - Instagram Login client: **Agency W-IG** (публичный ID `2153768211848484`).
 - Instagram API with Instagram Login — **без обязательной связи с Facebook Page**.
-- Запрашиваемые scopes: `instagram_business_basic`,
+- Один owner-level Instagram Login запрашивает scopes:
+  `instagram_business_basic`, `instagram_business_content_publish`,
   `instagram_business_manage_messages`, `instagram_business_manage_comments`.
-- Скриншоты Meta показывают **«Готово к тестированию»**, а не одобренный
-  доступ к аккаунтам любых сторонних пользователей. Процедура App Review
-  (шаг 5) не завершена.
+  После успешного подключения один и тот же профессиональный аккаунт используется
+  Контент-заводом для разрешённых публикаций и Неоной для входящих Direct/комментариев.
+  Владелец не вводит Instagram ID вручную: native `user_id` получает сервер после OAuth.
+- Это не обход Meta. Скриншоты Meta показывают **«Готово к тестированию»**, а не
+  одобренный доступ к аккаунтам любых сторонних пользователей. Для массового
+  подключения партнёров Агентства нужные permissions/features должны получить
+  соответствующий доступ через App Review / Advanced Access у Meta.
 - Администраторский Instagram `@ai_v_ton` ранее успешно отправлял ответы
   Неоны через Direct (подтверждено боевым webhook/логами). Это **не доказывает**
   работоспособность для произвольных сторонних аккаунтов.
