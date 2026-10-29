@@ -61,18 +61,37 @@ def _connect_url(owner_id, project_id, platform):
 
 
 @st.fragment(run_every=45)
-def _oauth_connect_button(owner_id, project_id, platform, reconnect=False):
-    # The signed handoff expires after two minutes. Refresh its href while the
-    # cabinet is open, independently of unsaved project fields or media work.
-    # Minting a link only signs local configuration; it never calls a provider.
+def _oauth_connect_button(owner_id, project_id, platform, reconnect=False, owner_name=""):
+    # Instagram is an owner-level Agency connection: one login is reused for
+    # publishing and incoming Direct/comments. Threads remains project-scoped.
     display = "Instagram" if platform == "instagram" else "Threads"
-    connect_url = _connect_url(owner_id, project_id, platform)
+    if platform == "instagram":
+        try:
+            from content_factory_runtime import get_owner_instagram_connect_url
+            connect_url = get_owner_instagram_connect_url(owner_id, owner_name)
+        except Exception:
+            connect_url = None
+    else:
+        connect_url = _connect_url(owner_id, project_id, platform)
     if connect_url:
         verb = "Переподключить" if reconnect else "Подключить"
         st.link_button(f"{verb} {display}", connect_url, type="primary", width="stretch")
-        st.caption(f"Откроется {display}. Войдите в свой аккаунт и разрешите Контент-заводу публиковать материалы.")
+        if platform == "instagram":
+            st.caption(
+                "Откроется официальный вход Instagram. Агентство само получит ID "
+                "профессионального аккаунта и запросит разрешения для публикаций, "
+                "Direct и комментариев. Вручную искать ID не нужно."
+            )
+        else:
+            st.caption(
+                f"Откроется {display}. Войдите в свой аккаунт и разрешите "
+                "Контент-заводу публиковать материалы."
+            )
     elif not reconnect:
-        st.info(f"Подключение {display} через вход в аккаунт пока не настроено. Администратор может подготовить его или подключить аккаунт вручную.")
+        st.info(
+            f"Подключение {display} через вход в аккаунт пока не настроено. "
+            "Администратору нужно завершить OAuth-настройку."
+        )
 
 
 def _seed_project(target_profile=None):
@@ -295,7 +314,7 @@ def _create_material(owner_id, project, store, service, capabilities, *, format_
             _action_error("Не удалось создать материал", exc)
 
 
-def _connections(owner_id, project, store, capabilities, *, workspace=False):
+def _connections(owner_id, project, store, capabilities, *, workspace=False, owner_name=""):
     if not project:
         st.info("Сначала создайте проект в разделе «Настройки проекта»." if workspace else "Сначала создайте проект во вкладке «Проект».")
         return
@@ -321,10 +340,21 @@ def _connections(owner_id, project, store, capabilities, *, workspace=False):
                     except Exception as exc:
                         _action_error("Не удалось отключить аккаунт", exc)
             if platform in {"instagram", "threads"}:
-                _oauth_connect_button(owner_id, project_id, platform, reconnect=bool(connection))
+                _oauth_connect_button(
+                    owner_id, project_id, platform,
+                    reconnect=bool(connection), owner_name=owner_name,
+                )
                 if platform == "instagram":
-                    st.caption("Для публикаций подходит профессиональный Instagram-аккаунт.")
-                manual = st.expander("Подключить вручную", expanded=False)
+                    if connection and (connection.get("extra") or {}).get("owner_level"):
+                        st.success("Один аккаунт используется для публикаций и входящих Direct/комментариев.")
+                    st.caption(
+                        "Нужен профессиональный Instagram Business или Creator. "
+                        "ID система получает сама после входа."
+                    )
+                manual = st.expander(
+                    "Ручное подключение — только технический резерв",
+                    expanded=False,
+                )
             else:
                 st.caption("Подключение сообщества ВК выполняет его администратор. Посты, фото и видео размещаются на стене сообщества.")
                 manual = st.container()
@@ -621,7 +651,7 @@ def _render_content_autopilot_legacy(owner_id: int, owner_name: str, target_prof
             _project_form(owner_id, project, service, target_profile)
             _video_connection_form(owner_id, project, capabilities)
         with accounts_tab:
-            _connections(owner_id, project, store, capabilities)
+            _connections(owner_id, project, store, capabilities, owner_name=owner_name)
         with calendar_tab:
             _calendar(owner_id, project, service, store, jobs, capabilities)
         with materials_tab:
@@ -714,5 +744,8 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
         _project_form(owner_id, project, service, target_profile)
         _video_connection_form(owner_id, project, capabilities)
     else:
-        _connections(owner_id, project, store, capabilities, workspace=True)
+        _connections(
+            owner_id, project, store, capabilities,
+            workspace=True, owner_name=owner_name,
+        )
     return project
