@@ -576,7 +576,20 @@ class SupabaseStore(_StoreBase):
             encrypted = str(row.get("access_token_encrypted") or "").strip()
             if not encrypted:
                 return None
-            result["access_token"] = self._decrypt(encrypted)
+            # agency_instagram_connections is encrypted by the Instagram
+            # webhook service with the shared FERNET_KEY. Do not assume the
+            # Content Factory's optional CONTENT_FACTORY_FERNET_KEY is equal.
+            instagram_key = str(os.environ.get("FERNET_KEY") or "").strip()
+            if not instagram_key:
+                raise StoreError("Не настроен общий ключ Instagram-подключений.")
+            try:
+                result["access_token"] = Fernet(
+                    instagram_key.encode("utf-8")
+                ).decrypt(encrypted.encode("utf-8")).decode("utf-8")
+            except (InvalidToken, ValueError, TypeError):
+                raise StoreError(
+                    "Instagram-подключение не удалось открыть. Переподключите аккаунт."
+                ) from None
         return result
 
     def save_connection(self, owner_id: int, project_id: str, platform: str, account_id: str, display_name: str, access_token: str, extra: dict | None = None) -> dict:
