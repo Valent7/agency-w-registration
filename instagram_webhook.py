@@ -45,6 +45,7 @@ INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
 INSTAGRAM_API_VERSION = os.getenv("INSTAGRAM_API_VERSION", "v23.0").strip() or "v23.0"
 INSTAGRAM_OAUTH_SCOPES = (
     "instagram_business_basic,"
+    "instagram_business_content_publish,"
     "instagram_business_manage_messages,"
     "instagram_business_manage_comments"
 )
