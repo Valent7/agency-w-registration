@@ -487,25 +487,47 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
 
         if stale_seconds >= 180:
             minutes = max(3, int(stale_seconds // 60))
-            st.error(
-                "❌ Видео пока не создано. Причина: фоновая обработка перестала "
-                f"обновлять статус после передачи видеосервису ({minutes} мин без обновлений)."
+            production = job.get("production") if isinstance(job.get("production"), dict) else None
+            tasks = production.get("tasks") if isinstance(production, dict) else None
+            has_saved_video_orders = bool(
+                isinstance(tasks, list)
+                and tasks
+                and any(isinstance(task, str) and task.strip() for task in tasks)
             )
-            st.caption(
-                "Это не нормальное длительное ожидание: задача зависла между проверками. "
-                "Сценарий и уже созданные данные сохранены; повторно разбирать образец не нужно."
-            )
-            if st.button("▶️ Продолжить создание", key=key + "_resume_stalled_master", width="stretch"):
-                try:
-                    service.resume_stalled_video(owner_id, job_id)
-                    st.success("Задача возвращена на проверку уже заказанных сцен.")
-                    st.rerun()
-                except Exception as exc:
-                    from content_factory_core import FactoryError
-                    if isinstance(exc, FactoryError):
-                        st.error("Продолжение не запущено: " + str(exc))
-                    else:
-                        st.error("Продолжение не запущено: внутренняя ошибка производства.")
+            if error:
+                st.error("❌ Видео пока не создано. Причина: " + error)
+            elif not production:
+                st.error(
+                    "❌ Видео пока не создано. Причина: производство видеосцен не было "
+                    "зафиксировано после запуска. До безопасного продолжения нужно заново "
+                    "проверить условия запуска — без повторного разбора сценария."
+                )
+            else:
+                st.error(
+                    "❌ Видео пока не создано. Причина: фоновая обработка перестала "
+                    f"обновлять статус ({minutes} мин без обновлений)."
+                )
+            if has_saved_video_orders:
+                st.caption(
+                    "Номера уже заказанных видеосцен сохранены. Можно безопасно проверить "
+                    "эти же сцены без повторного заказа."
+                )
+                if st.button("▶️ Продолжить создание", key=key + "_resume_stalled_master", width="stretch"):
+                    try:
+                        service.resume_stalled_video(owner_id, job_id)
+                        st.success("Задача возвращена на проверку уже заказанных сцен.")
+                        st.rerun()
+                    except Exception as exc:
+                        from content_factory_core import FactoryError
+                        if isinstance(exc, FactoryError):
+                            st.error("Продолжение не запущено: " + str(exc))
+                        else:
+                            st.error("Продолжение не запущено: внутренняя ошибка производства.")
+            else:
+                st.caption(
+                    "Сценарий сохранён. Другой образец брать не нужно. Сначала требуется "
+                    "повторный запуск производства из уже утверждённого сценария."
+                )
             return
 
         st.info("🎬 " + (progress_text or "Видео принято в работу. Создаём сцены и озвучку."))
