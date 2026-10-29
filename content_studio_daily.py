@@ -111,7 +111,8 @@ def _build_prompt(project, topic, goal, channels, formats):
 3) для Zoom не дави: сначала польза/причина, затем мягкое приглашение;
 4) Instagram — живо и визуально; Threads — короче и разговорнее;
    VK — чуть подробнее; LinkedIn — профессионально, но без канцелярита;
-   WhatsApp Status — очень коротко;
+   WhatsApp Status — один короткий готовый статус без служебных слов и без фразы
+   «ссылка в профиле»; если нужен отклик, предложи написать владельцу слово «Презентация»;
 5) Reels: сильный первый кадр/фраза, затем 3–5 смысловых шагов и один CTA;
 6) карусель: 5 слайдов, на каждом одна короткая мысль;
 7) Stories/Status: 3 коротких кадра, которые понятны без длинного пояснения.
@@ -366,10 +367,20 @@ def _channel_package_text(pack, channel, formats):
     """Prepare one clean copy/paste package for a single social channel."""
     if channel not in CHANNELS:
         return ""
-    parts = [CHANNELS[channel], "Готово к публикации"]
 
     posts = pack.get("post") if isinstance(pack.get("post"), dict) else {}
     post = _clean(posts.get(channel), 6000)
+
+    # WhatsApp Status must be literally ready to paste. Do not mix an alternate
+    # "post" version, labels or service text into the downloaded/copyable body.
+    if channel == "whatsapp":
+        if "story" in formats and isinstance(pack.get("story"), dict):
+            status = _clean(pack["story"].get("status"), 700)
+            if status:
+                return status
+        return post
+
+    parts = [CHANNELS[channel], "Готово к публикации"]
     if post:
         parts += ["", "ТЕКСТ", post]
 
@@ -397,12 +408,6 @@ def _channel_package_text(pack, channel, formats):
                 parts.extend(f"{index}. {slide}" for index, slide in enumerate(slides[:5], 1))
                 if carousel.get("caption"):
                     parts += ["", "Подпись:", str(carousel["caption"])]
-
-    elif channel == "whatsapp":
-        if "story" in formats and isinstance(pack.get("story"), dict):
-            status = _clean(pack["story"].get("status"), 700)
-            if status:
-                parts += ["", "STATUS", status]
 
     elif channel == "vk":
         if "reel" in formats and isinstance(pack.get("reel"), dict):
