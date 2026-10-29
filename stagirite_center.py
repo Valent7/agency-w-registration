@@ -5681,6 +5681,101 @@ def ensure_weekly_candidates_for_neona(
     }
 
 
+def remove_candidate_from_daily_neonia(
+    owner_id: int,
+    candidate_id: int,
+    task_id: str = "",
+) -> dict[str, Any]:
+    """Remove an unsent candidate from today's Stagirite batch.
+
+    This only updates Stagirite's work queue. The durable "never suggest again"
+    exclusion is stored in the owner's encrypted workspace by the UI.
+    """
+    owner_id = int(owner_id)
+    candidate_id = int(candidate_id)
+    task_id = str(task_id or "").strip()
+
+    tasks, _ = _load_tasks(owner_id)
+    task = None
+    if task_id:
+        task = next(
+            (item for item in tasks if str(item.get("id") or "") == task_id),
+            None,
+        )
+    if not isinstance(task, dict):
+        task = _active_weekly_meeting_task(owner_id) or _daily_candidate_task(owner_id)
+    if not isinstance(task, dict):
+        return {"ok": False, "removed": False, "candidate_ids": []}
+
+    result = (
+        dict(task.get("result"))
+        if isinstance(task.get("result"), dict)
+        else {}
+    )
+    container_key, goal = _candidate_feed_container(result)
+    today_key = datetime.now(BERLIN).date().isoformat()
+    daily_batches = (
+        dict(goal.get("daily_batches"))
+        if isinstance(goal.get("daily_batches"), dict)
+        else {}
+    )
+    today_info = (
+        dict(daily_batches.get(today_key))
+        if isinstance(daily_batches.get(today_key), dict)
+        else {}
+    )
+
+    candidate_ids = [
+        cid for cid in _normalize_int_ids(today_info.get("candidate_ids", []))
+        if cid != candidate_id
+    ]
+    approved_ids = [
+        cid for cid in _normalize_int_ids(today_info.get("approved_ids", []))
+        if cid != candidate_id
+    ]
+    removed = (
+        len(candidate_ids) != len(_normalize_int_ids(today_info.get("candidate_ids", [])))
+        or len(approved_ids) != len(_normalize_int_ids(today_info.get("approved_ids", [])))
+    )
+
+    today_info["candidate_ids"] = candidate_ids
+    today_info["approved_ids"] = approved_ids
+    today_info["complete"] = len(candidate_ids) >= int(goal.get("daily_target") or 5)
+    today_info["removed_candidate_ids"] = sorted(
+        set(_normalize_int_ids(today_info.get("removed_candidate_ids", []))) | {candidate_id}
+    )
+    today_info["updated_at"] = datetime.now(UTC).isoformat()
+    daily_batches[today_key] = today_info
+    goal["daily_batches"] = daily_batches
+    result[container_key] = goal
+
+    result["selected_candidate_ids"] = [
+        cid for cid in _normalize_int_ids(result.get("selected_candidate_ids", []))
+        if cid != candidate_id
+    ]
+    progress = (
+        dict(result.get("contact_progress"))
+        if isinstance(result.get("contact_progress"), dict)
+        else {}
+    )
+    progress.pop(str(candidate_id), None)
+    result["contact_progress"] = progress
+
+    resolved_task_id = str(task.get("id") or "")
+    _update_task(
+        owner_id,
+        resolved_task_id,
+        {"status": "В работе", "result": result},
+    )
+    return {
+        "ok": True,
+        "removed": removed,
+        "candidate_ids": candidate_ids,
+        "approved_ids": approved_ids,
+        "task_id": resolved_task_id,
+    }
+
+
 def accept_weekly_candidates_for_neona(
     owner_id: int,
     task_id: str,
