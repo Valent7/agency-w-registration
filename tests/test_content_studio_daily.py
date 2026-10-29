@@ -104,17 +104,55 @@ class DailyContentTests(unittest.TestCase):
         self.assertEqual(len(jobs), 6)
         self.assertFalse(any("WhatsApp" in item or "LinkedIn" in item for item in skipped))
 
-    def test_pack_markdown_contains_channel_specific_copy(self):
-        text = daily._pack_markdown(
+    def test_pack_text_is_plain_readable_text_with_real_line_breaks(self):
+        text = daily._pack_text(
             PACK,
             ["instagram", "whatsapp", "linkedin"],
             ["reel", "story", "post", "carousel"],
         )
-        self.assertIn("## Reels / короткое видео", text)
-        self.assertIn("## Stories / Status", text)
-        self.assertIn("### WhatsApp Status", text)
-        self.assertIn("### LinkedIn", text)
-        self.assertIn("## Карусель", text)
+        self.assertIn("REELS / КОРОТКОЕ ВИДЕО", text)
+        self.assertIn("STORIES / STATUS", text)
+        self.assertIn("WhatsApp Status", text)
+        self.assertIn("LinkedIn", text)
+        self.assertIn("КАРУСЕЛЬ", text)
+        self.assertIn("\n", text)
+        self.assertNotIn("# ", text)
+        self.assertNotIn("\\n", text)
+
+
+    def test_weekly_plan_is_seven_owner_editable_days_with_allowed_goals(self):
+        from datetime import date, timedelta
+        dates = [date(2026, 10, 29) + timedelta(days=i) for i in range(7)]
+        raw = {
+            "focus": "Вернуть человеку время",
+            "days": [
+                {"topic": f"Тема {i + 1}", "goal": goal}
+                for i, goal in enumerate(
+                    ["value", "engage", "zoom", "story", "value", "engage", "unknown"]
+                )
+            ],
+        }
+        plan = daily._normalise_weekly_plan(raw, dates)
+        self.assertEqual(len(plan["days"]), 7)
+        self.assertEqual(plan["days"][0]["date"], "2026-10-29")
+        self.assertEqual(plan["days"][0]["day"], "Четверг")
+        self.assertEqual(plan["days"][2]["goal"], "zoom")
+        self.assertEqual(plan["days"][6]["goal"], "value")
+        text = daily._weekly_plan_text(plan)
+        self.assertIn("ПЛАН КОНТЕНТА НА 7 ДНЕЙ", text)
+        self.assertNotIn("\\n", text)
+
+    def test_weekly_prompt_makes_stagirite_adviser_not_final_approver(self):
+        from datetime import date, timedelta
+        dates = [date(2026, 10, 29) + timedelta(days=i) for i in range(7)]
+        text = daily._build_weekly_plan_prompt(
+            PROJECT,
+            "В среду презентация; нужен живой контент",
+            dates,
+        )
+        self.assertIn("окончательное решение", text)
+        self.assertIn("Пожелание владельца", text)
+        self.assertIn("Допустимые goal", text)
 
     def test_prompt_uses_project_facts_and_zoom_goal_without_invented_claims(self):
         text = daily._build_prompt(
