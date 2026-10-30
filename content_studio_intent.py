@@ -222,7 +222,8 @@ def compile_production_prompt(intent: dict, project: dict | None, *, extra: dict
         raise IntentError(str(exc)) from None
     if not isinstance(data, dict):
         raise IntentError("Не удалось подготовить производственный промт.")
-    production_prompt = _clean_text(data.get("production_prompt"), 12000)
+    prompt_limit = 3000 if isinstance(extra, dict) and extra.get("reference_video") is True else 6000
+    production_prompt = _clean_text(data.get("production_prompt"), prompt_limit)
     plan = _short_list(data.get("production_plan"), maximum_items=10, maximum_chars=800)
     criteria = _short_list(data.get("quality_criteria"), maximum_items=10, maximum_chars=800)
     if not plan:
