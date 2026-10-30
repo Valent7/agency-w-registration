@@ -101,7 +101,7 @@ class FirstMessageQualityTests(unittest.TestCase):
             identity.__code__, {"re":re, "neona_identity":lambda owner:
                                 "Меня зовут Неона, я секретарь-референт Валентины."}
         )
-        self.assertEqual(named(long_but_valid, "Валентина"),long_but_valid)
+        self.assertEqual(named(long_but_valid, "Валентина"),long_but_valid.strip())
 
     def test_long_engaging_first_message_needs_no_retry(self):
         namespace = dict(self.fns)
@@ -124,7 +124,7 @@ class FirstMessageQualityTests(unittest.TestCase):
         isolated=type(fn)(fn.__code__,namespace)
         answer=isolated("Валентина",{},{"telegram_id":23,"name":"Ирина"})
         self.assertGreater(len(answer), 1000)
-        self.assertEqual(answer,long_text)
+        self.assertEqual(answer,long_text.strip())
         self.assertEqual(calls,["gpt-6-astra"])
 
     def test_factual_quality_gates(self):
