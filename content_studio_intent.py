@@ -266,16 +266,26 @@ def compile_production_prompt(intent: dict, project: dict | None, *, extra: dict
     }
     try:
         data = generator._structured(instructions, json.dumps(payload, ensure_ascii=False), max_tokens=4500)
-    except GenerationError as exc:
-        raise IntentError(str(exc)) from None
+    except GenerationError:
+        # The owner's approved intent is already sufficient to continue.
+        # A failure of the prompt-architect pass must never create a dead end.
+        data = {}
     if not isinstance(data, dict):
         data = {}
-    prompt_limit = 6000
+
     raw_prompt = data.get("production_prompt")
-    if not isinstance(raw_prompt, str) or not raw_prompt.strip() or len(raw_prompt) > prompt_limit:
-        production_prompt = _fallback_production_prompt(intent, project, extra)
+    if isinstance(raw_prompt, str):
+        production_prompt = raw_prompt.replace("\x00", " ").strip()
     else:
-        production_prompt = _clean_text(raw_prompt, prompt_limit)
+        production_prompt = ""
+    if not production_prompt:
+        production_prompt = _fallback_production_prompt(intent, project, extra)
+    elif len(production_prompt) > 5800:
+        # Preserve the beginning and all key requirements without rejecting
+        # an otherwise valid approved brief.
+        production_prompt = production_prompt[:5800].rstrip()
+    if not production_prompt.strip():
+        production_prompt = _fallback_production_prompt(intent, project, extra)
     plan = _short_list(data.get("production_plan"), maximum_items=10, maximum_chars=800)
     criteria = _short_list(data.get("quality_criteria"), maximum_items=10, maximum_chars=800)
     if not plan:
