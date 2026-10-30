@@ -3,7 +3,7 @@
 Active group authors are the primary source; personal contacts never fill gaps.
 """
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import neonia_daily_source as policy
@@ -141,12 +141,14 @@ class DailyWorkerTests(unittest.TestCase):
             self.assertEqual(chat["title"],"Preferred Group")
             self.assertIn(111,excluded)
             return ([{
-                "telegram_id":i,"name":str(i),"source_chat_id":9211,
+                "telegram_id":i,"name":str(i),"username":f"author{i}","source_chat_id":9211,
                 "source_chat_title":"Preferred Group","source_type":"telegram_chat",
                 "source":"Telegram-чат: Preferred Group",
                 "public_info":"Обсуждает бизнес, команду и автоматизацию рабочих процессов в публичном сообщении.",
                 "group_messages":["Как автоматизировать работу команды и освободить время для клиентов?"],
                 "activity_eligible":True,"telegram_activity_label":"писал сегодня",
+                "last_seen_at":datetime.now(timezone.utc).isoformat(),
+                "activity_precision":"group_message_exact",
                 "_stagirite_activity_tier":0,"has_message_history":False,"recent_messages":[],
             } for i in range(201,207)],120)
         async def should_not_need_members(*args,**kwargs):
@@ -178,6 +180,37 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertFalse(worker._local_business_signal(
             {"public_info":"Доброе утро всем","group_messages":[]}))
 
+    def test_group_author_requires_freshness_and_username(self):
+        now = datetime(2026, 10, 30, 7, tzinfo=timezone.utc)
+        base = {
+            "username":"active_person", "activity_precision":"group_message_exact",
+            "last_seen_at":now.isoformat(),
+        }
+        self.assertTrue(worker._eligible_group_author(base, now))
+        self.assertFalse(worker._eligible_group_author(
+            {**base, "username":""}, now))
+        self.assertFalse(worker._eligible_group_author(
+            {**base, "last_seen_at":(now-timedelta(days=30)).isoformat()}, now))
+        self.assertFalse(worker._eligible_group_author(
+            {**base, "activity_precision":"unknown"}, now))
+        self.assertFalse(worker._eligible_group_author(
+            {**base, "last_seen_at":"unknown"}, now))
+
+    def test_rank_rejects_unreachable_and_stale_even_if_model_likes_them(self):
+        now=datetime.now(timezone.utc)
+        def card(uid, age_days, username):
+            return {
+                "telegram_id":uid, "username":username, "name":str(uid),
+                "last_seen_at":(now-timedelta(days=age_days)).isoformat(),
+                "activity_precision":"group_message_exact",
+                "source_chat_id":9211, "group_messages":["Рутина и бизнес"],
+            }
+        results=worker._rank_active_group_authors(
+            self.storage.state,self.storage,
+            [card(201,0,"good201"),card(202,90,"old202"),
+             card(203,0,"")],5)
+        self.assertEqual([item["telegram_id"] for item in results],[201])
+
     def test_missing_group_no_fallback(self):
         self.storage.state["selected_source_chat"]=9999
         result=worker.process(77,"fake",self.storage.state,self.storage)
@@ -185,6 +218,11 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertFalse(self.storage.task_exists)
 
     def test_already_prepared_batch_stays_same(self):
+        self.storage.state["candidates"] = [{
+            "telegram_id":i, "username":f"author{i}", "source_chat_id":9211,
+            "activity_precision":"group_message_exact",
+            "last_seen_at":datetime.now(timezone.utc).isoformat(),
+        } for i in range(201, 206)]
         self.storage.task_exists=True
         day=worker.datetime.now(worker.BERLIN).date().isoformat()
         self.storage.tasks["row"]={"id":"abc",
