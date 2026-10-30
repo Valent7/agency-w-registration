@@ -720,17 +720,28 @@ class Generator:
             content = self._proofread(clean_project, job, content)
             report("review", "Стагирит проверяет смысл, факты и пользу текста.")
             review = self._review_copy(clean_project, job, content)
-            if not review["approved"]:
-                report("copy", "Автор дорабатывает текст по замечаниям Стагирита.")
+            # Resolve semantic defects automatically before any paid image/video request.
+            # Two bounded revisions are enough to correct unsupported claims without
+            # creating an unbounded model loop or changing the owner's approved idea.
+            semantic_revisions_left = 2
+            while not review["approved"] and semantic_revisions_left > 0:
+                semantic_revisions_left -= 1
+                report(
+                    "copy",
+                    "Автор сам исправляет конкретные замечания Стагирита без изменения утверждённого замысла.",
+                )
                 content = self._copy(clean_project, job, previous=content, review=review)
                 report("proofread", "Корректор проверяет исправленный текст.")
                 content = self._proofread(clean_project, job, content)
-                report("review", "Стагирит проверяет исправленный текст.")
+                report("review", "Стагирит повторно проверяет смысл и факты.")
                 review = self._review_copy(clean_project, job, content)
             content["quality_review"] = review
             if not review["approved"]:
-                raise GenerationError("Стагирит остановил производство: текст требует доработки. "
-                                      + "; ".join(review["issues"])[:600], draft=content)
+                raise GenerationError(
+                    "Стагирит остановил производство после автоматической редакторской доработки: "
+                    + "; ".join(review["issues"])[:600],
+                    draft=content,
+                )
             if reference is not None:
                 content.update(reference_source_job_id=reference["source_job_id"],
                                reference_plan_sha256=reference["fingerprint"], video_style=reference["style"])
