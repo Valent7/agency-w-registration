@@ -94,6 +94,13 @@ def _wallet(project: dict | None) -> dict:
     }
 
 
+def billing_enforced() -> bool:
+    return bool(
+        str(os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        and str(os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+    )
+
+
 def wallet_summary(project: dict | None) -> dict:
     wallet = _wallet(project)
     return {
