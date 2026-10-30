@@ -398,6 +398,43 @@ def build_speech_instructions(project: dict) -> str:
     )
 
 
+def _review_issue_text(value: Any) -> str:
+    """Normalize model review issues without making harmless schema variation fatal."""
+    if isinstance(value, str):
+        return _string(value, "замечание", 500)
+    if isinstance(value, dict):
+        parts = []
+        for key in ("quote", "phrase", "location", "issue", "problem", "reason", "fix", "suggestion", "message", "text"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                label = {
+                    "quote": "Фраза",
+                    "phrase": "Фраза",
+                    "location": "Место",
+                    "issue": "Проблема",
+                    "problem": "Проблема",
+                    "reason": "Причина",
+                    "fix": "Исправить",
+                    "suggestion": "Исправить",
+                    "message": "",
+                    "text": "",
+                }[key]
+                text = item.strip().replace("\x00", " ")
+                parts.append((label + ": " if label else "") + text)
+        if not parts:
+            for item in value.values():
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip().replace("\x00", " "))
+        joined = "; ".join(parts).strip()
+        if joined:
+            return joined[:500].rstrip()
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if isinstance(item, (str, int, float)) and str(item).strip()]
+        if parts:
+            return "; ".join(parts)[:500].rstrip()
+    raise EditorialError("Редактор вернул замечание в непонятном формате.")
+
+
 def validate_review(data: Any) -> dict:
     """Reject malformed or contradictory gates instead of treating them as approval."""
     if not isinstance(data, dict) or set(data) != {"approved", "issues", "brief_feedback"}:
@@ -405,7 +442,7 @@ def validate_review(data: Any) -> dict:
     approved, issues = data["approved"], data["issues"]
     if type(approved) is not bool or not isinstance(issues, list) or len(issues) > 12:
         raise EditorialError("Редактор вернул неверный допуск или список замечаний.")
-    checked = [_string(issue, "замечание", 500) for issue in issues]
+    checked = [_review_issue_text(issue) for issue in issues]
     feedback = _string(data["brief_feedback"], "рекомендация", 2000, required=not approved)
     if (approved and checked) or (not approved and not checked):
         raise EditorialError("Решение редактора противоречит замечаниям.")
