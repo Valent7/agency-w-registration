@@ -20,6 +20,28 @@ from neonia_daily_source import (
 
 BERLIN = ZoneInfo("Europe/Berlin")
 UTC = timezone.utc
+MAX_GROUP_ACTIVITY_AGE = timedelta(days=7)
+
+
+def _eligible_group_author(candidate, now=None):
+    """Fail closed: only a reachable person with a recent observed group message."""
+    if not str(candidate.get("username") or "").strip().lstrip("@"):
+        return False
+    if candidate.get("activity_precision") != "group_message_exact":
+        return False
+    raw = str(candidate.get("last_seen_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        seen = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=UTC)
+        current = now or datetime.now(UTC)
+        age = current.astimezone(UTC) - seen.astimezone(UTC)
+        return timedelta(0) <= age <= MAX_GROUP_ACTIVITY_AGE
+    except (ValueError, TypeError, OverflowError):
+        return False
+
 
 
 def _int_set(items):
@@ -129,6 +151,9 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
                 or getattr(sender, "scam", False) or getattr(sender, "fake", False)):
                 continue
 
+            username = str(getattr(sender, "username", "") or "").strip().lstrip("@")
+            if not username:
+                continue
             first_name = str(getattr(sender, "first_name", "") or "").strip()
             last_name = str(getattr(sender, "last_name", "") or "").strip()
             name = " ".join(x for x in (first_name, last_name) if x).strip() or "Без имени"
@@ -136,6 +161,8 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
             if isinstance(raw_date, datetime):
                 if raw_date.tzinfo is None:
                     raw_date = raw_date.replace(tzinfo=UTC)
+                if not timedelta(0) <= datetime.now(UTC) - raw_date.astimezone(UTC) <= MAX_GROUP_ACTIVITY_AGE:
+                    continue
                 local_date = raw_date.astimezone(BERLIN)
                 today = datetime.now(BERLIN).date()
                 if local_date.date() == today:
@@ -146,8 +173,8 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
                     activity_label = f"писал в выбранном чате {local_date:%d.%m.%Y}"
                 last_seen_at = local_date.isoformat()
             else:
-                activity_label = "активный автор выбранного чата"
-                last_seen_at = ""
+                # No reliable timestamp means no proof of current activity.
+                continue
 
             item = authors.get(uid)
             if item is None:
@@ -156,7 +183,7 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
                     "name": name,
                     "first_name": first_name,
                     "last_name": last_name,
-                    "username": str(getattr(sender, "username", "") or "").strip(),
+                    "username": username,
                     "access_hash": getattr(sender, "access_hash", None),
                     "source_chat_id": target,
                     "source_chat_title": str(chat.get("title") or "Telegram-чат"),
@@ -220,6 +247,8 @@ def _rank_active_group_authors(state, storage, authors, desired):
     known_ids = storage._known_contact_ids(state)
     workable = []
     for source in authors:
+        if not _eligible_group_author(source):
+            continue
         state_info = storage._classify_workability(
             source,
             already_sent_ids=sent_ids,
@@ -283,7 +312,15 @@ def _rank_active_group_authors(state, storage, authors, desired):
                 "source_chat_title": str(source.get("source_chat_title") or ""),
                 "source_type": "telegram_chat",
                 "source": str(source.get("source") or ""),
+                # Never trust a model to override observed identity/activity.
+                "username": str(source.get("username") or ""),
+                "activity_eligible": True,
+                "last_seen_at": str(source.get("last_seen_at") or ""),
+                "activity_precision": "group_message_exact",
+                "telegram_activity_label": str(source.get("telegram_activity_label") or ""),
             }
+            if not _eligible_group_author(merged):
+                continue
             if bool(merged.get("selection_blocked")):
                 continue
             if merged.get("business_relevant") is not True:
@@ -435,7 +472,11 @@ def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
     signature=source_signature("chats",chat_id)
     if matches_daily_batch(current,"chats",chat_id) and len(
         _int_set(current.get("candidate_ids",[])))>=5:
-        return True
+        qualified = {int(c["telegram_id"]) for c in candidates
+                     if _eligible_group_author(c)}
+        if all(cid in qualified for cid in
+               _int_set(current.get("candidate_ids",[]))):
+            return True
     if current.get("approved_ids") and not matches_daily_batch(
         current,"chats",chat_id):
         # Do not retract anyone already approved by the owner.
@@ -458,11 +499,12 @@ def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
     confirmed=_int_set(last.get("approved_ids",[]))
     if confirmed and not matches_daily_batch(last,"chats",chat_id):
         return False
-    selected_ids=list(dict.fromkeys(
-        [int(x) for x in last.get("candidate_ids",[])
-         if str(x).isdigit()] if matches_daily_batch(last,"chats",chat_id)
-        else []))
+    # Rebuild from verified source cards, never carry stale legacy IDs forward.
+    # Previously approved IDs remain available for the owner to handle.
+    selected_ids=list(confirmed) if matches_daily_batch(last,"chats",chat_id) else []
     for card in candidates:
+        if not _eligible_group_author(card):
+            continue
         cid=int(card["telegram_id"])
         if cid not in selected_ids:
             selected_ids.append(cid)
@@ -505,7 +547,13 @@ def process(owner_id,session_string,state,storage):
     task, current=_daily_task_source(storage,owner_id,today)
     if matches_daily_batch(current,mode,chat_id) and len(
         _int_set(current.get("candidate_ids",[])))>=5:
-        return {"owner_id":owner_id,"status":"ready","count":5,"source_chat_id":chat_id}
+        current_ids = _int_set(current.get("candidate_ids", []))
+        saved_cards = [x for x in storage._normalize_candidate_list(state.get("candidates", []))
+                       if int(x["telegram_id"]) in current_ids
+                       and int(x.get("source_chat_id") or 0) == chat_id
+                       and _eligible_group_author(x)]
+        if len({int(x["telegram_id"]) for x in saved_cards}) >= 5:
+            return {"owner_id":owner_id,"status":"ready","count":5,"source_chat_id":chat_id}
     if current.get("approved_ids") and not matches_daily_batch(
         current,mode,chat_id):
         return {"owner_id":owner_id,"status":"skip",
@@ -519,6 +567,7 @@ def process(owner_id,session_string,state,storage):
         saved=[x for x in storage._normalize_candidate_list(state.get("candidates",[]))
                if int(x["telegram_id"]) in cached
                and int(x.get("source_chat_id") or 0)==chat_id]
+        saved = [x for x in saved if _eligible_group_author(x)]
         if saved:
             _write_daily_group_task(storage,owner_id,today,chat_id,saved)
             if len(saved)>=5:
@@ -533,7 +582,8 @@ def process(owner_id,session_string,state,storage):
         have=_int_set(current.get("candidate_ids",[]))
         existing_cards=[x for x in storage._normalize_candidate_list(state.get("candidates",[]))
                         if int(x["telegram_id"]) in have
-                        and int(x.get("source_chat_id") or 0)==chat_id]
+                        and int(x.get("source_chat_id") or 0)==chat_id
+                        and _eligible_group_author(x)]
     offset=int((state.get("chat_offsets") or {}).get(str(chat_id)) or 0)
     api_id,api_hash=storage._telegram_api_credentials()
     needed=max(1,5-len(existing_cards))
