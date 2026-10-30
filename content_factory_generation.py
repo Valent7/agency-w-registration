@@ -748,12 +748,31 @@ class Generator:
             ) if job["format"] == "reel" else 1
             report("visual", "Арт-директор разрабатывает сюжет и единый стиль иллюстраций.")
             if reference is not None:
-                frame_count = len(reference["plan"]["visual_plan"]["frames"])
-                # A long voice must not discard an accepted scene or silently
-                # replace the owner's original story before purchasing images.
+                accepted_plan = reference["plan"]["visual_plan"]
+                accepted_count = len(accepted_plan["frames"])
+                required_count = accepted_count
                 if live_client is not None:
-                    scene_durations(duration, frame_count, **duration_options)
-                visual_plan = validate_visual_plan(reference["plan"]["visual_plan"], frame_count=frame_count)
+                    required_count = max(
+                        accepted_count,
+                        min(6 if content.get("target_seconds") != 120 else 16,
+                            max(4, math.ceil((duration + 0.35) / 10))),
+                    )
+                frame_count = required_count
+                if required_count == accepted_count:
+                    visual_plan = validate_visual_plan(accepted_plan, frame_count=accepted_count)
+                else:
+                    report(
+                        "visual",
+                        f"Озвучка длиннее исходного плана. Добавляем {required_count - accepted_count} "
+                        "промежуточные сцены без изменения утверждённой истории.",
+                    )
+                    instructions, input_data = build_visual_prompt(
+                        clean_project, job, content, frame_count=required_count
+                    )
+                    visual_plan = validate_visual_plan(
+                        self._structured(instructions, input_data),
+                        frame_count=required_count,
+                    )
             else:
                 instructions, input_data = build_visual_prompt(clean_project, job, content, frame_count=frame_count)
                 visual_plan = validate_visual_plan(self._structured(instructions, input_data), frame_count=frame_count)
