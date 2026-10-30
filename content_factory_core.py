@@ -224,10 +224,21 @@ class ContentFactoryService:
         except EditorialError as error:
             raise FactoryError(str(error)) from error
         topic = f"Создать собственный ролик по принятому сценарию: {seed['plan']['title']}"
-        return self._create_material(owner_id, project_id, topic, "reel", platforms,
-                                     request_id=request_id, video_style=seed["style"],
-                                     revision={"approved_reference": seed, "review_required": True,
-                                               "checkpoint": {"video_personalization": personalization}})
+        revision = {
+            "approved_reference": seed,
+            "review_required": True,
+            "checkpoint": {"video_personalization": personalization},
+        }
+        if isinstance(reference.get("approved_intent"), dict):
+            revision["approved_intent"] = reference["approved_intent"]
+        if isinstance(reference.get("production_plan"), list):
+            revision["production_plan"] = reference["production_plan"][:12]
+        if isinstance(reference.get("quality_criteria"), list):
+            revision["quality_criteria"] = reference["quality_criteria"][:12]
+        return self._create_material(
+            owner_id, project_id, topic, "reel", platforms,
+            request_id=request_id, video_style=seed["style"], revision=revision,
+        )
 
     def create_master_from_video_reference(self, owner_id, project_id, reference_job_id, *, request_id):
         """Queue one owner-only 9:16 master video, independent of social connections."""
@@ -261,6 +272,12 @@ class ContentFactoryService:
             "studio_master": True,
             "checkpoint": {"video_personalization": personalization},
         }
+        if isinstance(reference.get("approved_intent"), dict):
+            revision["approved_intent"] = reference["approved_intent"]
+        if isinstance(reference.get("production_plan"), list):
+            revision["production_plan"] = reference["production_plan"][:12]
+        if isinstance(reference.get("quality_criteria"), list):
+            revision["quality_criteria"] = reference["quality_criteria"][:12]
         intent = [topic, "reel", "studio-master", revision, video_style]
         fingerprint = sha256(
             json.dumps(intent, ensure_ascii=False, sort_keys=True).encode()
@@ -293,6 +310,9 @@ class ContentFactoryService:
             "approved_reference": seed,
             "review_required": True,
             "studio_master": True,
+            **({"approved_intent": revision["approved_intent"]} if isinstance(revision.get("approved_intent"), dict) else {}),
+            **({"production_plan": revision["production_plan"]} if isinstance(revision.get("production_plan"), list) else {}),
+            **({"quality_criteria": revision["quality_criteria"]} if isinstance(revision.get("quality_criteria"), list) else {}),
         })
         if job.get("request_fingerprint") != fingerprint:
             raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
