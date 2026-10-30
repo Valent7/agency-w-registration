@@ -104,6 +104,7 @@ class Worker:
                     self._finish(job, state="queued", production=production, available_at=iso(self.clock() + timedelta(seconds=60)), error=str(error))
                     result["pending"] += 1
                 else:
+                    self._release_generation_billing(job)
                     self._finish(job, state="failed", production=production, error=str(error), progress={"stage": "failed", "message": "Живое видео требует внимания. Откройте материал, чтобы посмотреть причину."})
                     result["failed"] += 1
                     result["errors"].append(str(error))
@@ -144,6 +145,8 @@ class Worker:
                 fresh = self.store.get_job(job["owner_id"], job["id"]) or job
                 uncertain = bool(fresh.get("checkpoint", {}).get("publish_started"))
                 state = "reconcile" if uncertain else "failed"
+                if state == "failed":
+                    self._release_generation_billing(job)
                 changes = {"state": state, "error": message, "progress": {"stage": "failed", "message": "Материал требует внимания. Откройте его, чтобы посмотреть причину и задать правки."}}
                 if isinstance(error, GenerationError) and isinstance(error.draft, dict):
                     changes["content"] = error.draft
@@ -153,6 +156,28 @@ class Worker:
                 result[state] += 1
                 result["errors"].append(message)
         return result
+
+    def _release_generation_billing(self, job):
+        try:
+            from content_factory_billing import billing_enforced, release_usage
+            if not billing_enforced():
+                return
+            fresh = self.store.get_job(job["owner_id"], job["id"]) or job
+            checkpoint = fresh.get("checkpoint") if isinstance(fresh.get("checkpoint"), dict) else {}
+            if checkpoint.get("generation_complete") or checkpoint.get("billing_settled"):
+                return
+            reference = str(fresh.get("billing_reference") or "").strip()
+            if reference:
+                release_usage(
+                    self.store,
+                    fresh["owner_id"],
+                    fresh["project_id"],
+                    reference=reference,
+                    now=iso(self.clock()),
+                )
+        except Exception:
+            # Billing cleanup must not hide the original production error.
+            pass
 
     def _update(self, job, **changes):
         return self.store.update_job(job["owner_id"], job["id"], changes, lease_owner=self.worker_id)
@@ -309,6 +334,35 @@ class Worker:
         def save_source(filename, data, mime_type):
             return self.store.put_asset(job["owner_id"], job["project_id"], job["id"], filename, data, mime_type)
 
+        billing_reference = "video:" + str(job["id"])
+
+        def reserve_billing(details):
+            from content_factory_billing import (
+                billing_enforced,
+                quote_runway_credits,
+                reserve_usage,
+            )
+            if not billing_enforced():
+                return
+            if not isinstance(details, dict):
+                raise ValueError("Не удалось рассчитать стоимость видео.")
+            quote = quote_runway_credits(details.get("credits"))
+            reserve_usage(
+                self.store,
+                job["owner_id"],
+                job["project_id"],
+                quote["amount_cents"],
+                reference=billing_reference,
+                kind="video",
+                label=quote["label"],
+                now=iso(self.clock()),
+            )
+            self._update(
+                job,
+                billing_reference=billing_reference,
+                billing_quote=quote,
+            )
+
         def load_source(asset):
             from pathlib import PurePosixPath
             parts = PurePosixPath(str(asset.get("storage_path") or "")).parts
@@ -321,8 +375,16 @@ class Worker:
             return self.store.read_asset(job["owner_id"], asset)
 
         if getattr(self.generator, "supports_live_video_resume", False) is True:
-            content, generated_assets = self.generator.generate(project, request, progress=progress, production=production,
-                save_production=save_production, save_source=save_source, load_source=load_source)
+            content, generated_assets = self.generator.generate(
+                project,
+                request,
+                progress=progress,
+                production=production,
+                save_production=save_production,
+                save_source=save_source,
+                load_source=load_source,
+                billing_reserve=reserve_billing,
+            )
         elif getattr(self.generator, "supports_progress", False) is True:
             content, generated_assets = self.generator.generate(project, request, progress=progress)
         else:
@@ -338,6 +400,24 @@ class Worker:
                                                asset["filename"], asset["data"], asset["mime_type"]))
             self._update(job, assets=list(assets))
         checkpoint["generation_complete"] = True
+        try:
+            from content_factory_billing import billing_enforced, settle_usage
+            fresh_for_billing = self.store.get_job(job["owner_id"], job["id"]) or job
+            reference = str(fresh_for_billing.get("billing_reference") or "").strip()
+            if billing_enforced() and reference:
+                settle_usage(
+                    self.store,
+                    job["owner_id"],
+                    job["project_id"],
+                    reference=reference,
+                    now=iso(self.clock()),
+                )
+                checkpoint["billing_settled"] = True
+        except Exception as exc:
+            from content_factory_billing import BillingError
+            if isinstance(exc, BillingError):
+                raise ValueError("Видео создано, но не удалось завершить внутренний расчёт. Повторное списание остановлено.") from None
+            raise
         latest = self.store.get_project(job["owner_id"], job["project_id"])
         state = "ready" if (latest.get("review_required") or job.get("review_required") or not latest.get("automation_enabled")) else "scheduled"
         self._finish(job, content=content, assets=assets, state=state, checkpoint=checkpoint,
