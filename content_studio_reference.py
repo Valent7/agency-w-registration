@@ -231,7 +231,7 @@ def _plain(value, label, maximum, *, optional=False):
 def _parameters(project, goal, style):
     if not isinstance(project, dict) or not isinstance(style, str) or style not in _STYLES:
         raise ReferenceError("Выберите живое видео или мультфильм для своего проекта.")
-    goal = _plain(goal, "ваша задача", 3000, optional=True)
+    goal = _plain(goal, "ваша задача", 6000, optional=True)
     limits = {"name": 120, "product": 6000, "audience": 3000, "language": 80,
               "tone": 1000, "facts": 6000, "visual_style": 2000, "avoid": 2000,
               "goal": 2000, "cta": 500, "website": 500}
