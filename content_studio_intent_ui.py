@@ -79,6 +79,14 @@ def render_intent_review(key: str, *, kind: str, project: dict, extra: dict | No
     if not isinstance(intent, dict) or not raw:
         return None
 
+    stored_fp = st.session_state.get(key + "_intent_fp")
+    current_fp = _fingerprint(raw, kind, extra)
+    if not stored_fp or stored_fp != current_fp:
+        st.session_state.pop(key + "_production", None)
+        st.session_state.pop(key + "_approved", None)
+        st.info("Условия изменились после разбора замысла. Нажмите «Понять мой замысел» ещё раз, чтобы утвердить уже новые условия.")
+        return None
+
     st.markdown("### 2. Проверьте, правильно ли я Вас поняла")
     with st.container(border=True):
         for label, value in human_summary(intent):
