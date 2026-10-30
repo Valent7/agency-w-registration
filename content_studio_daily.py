@@ -782,73 +782,115 @@ def render_daily_content_hub(owner_id, project, store, service, ask_ai_fn):
             key=f"daily_content_{owner_id}_{project['id']}_formats",
         )
 
-    st.markdown("### 3. Создать пакет")
+    intent_key = f"daily_content_{owner_id}_{project['id']}_intent"
+    st.markdown("### 3. Проверить смысл")
     disabled = len(_clean(topic, 4000)) < 10 or not channels or not formats
     if st.button(
-        "✨ Создать пакет дня",
+        "1. Понять мой замысел",
         type="primary",
         width="stretch",
         disabled=disabled,
-        key=f"daily_content_{owner_id}_{project['id']}_create",
+        key=f"daily_content_{owner_id}_{project['id']}_understand",
     ):
-        fingerprint = hashlib.sha256(json.dumps(
-            [topic.strip(), goal, sorted(channels), sorted(formats), project.get("id")],
-            ensure_ascii=False,
-            sort_keys=True,
-        ).encode("utf-8")).hexdigest()
-        pending_key = f"daily_content_{owner_id}_{project['id']}_pending"
-        pending = st.session_state.get(pending_key)
-        if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
-            pending = {"fingerprint": fingerprint, "id": uuid.uuid4().hex}
-            st.session_state[pending_key] = pending
+        from content_studio_intent_ui import begin_intent
+        begin_intent(
+            intent_key,
+            typed_text=topic,
+            audio=None,
+            kind="text",
+            project=project,
+            extra={
+                "daily_package": True,
+                "goal": goal,
+                "channels": sorted(channels),
+                "formats": sorted(formats),
+            },
+        )
 
-        try:
-            package = pending.get("package")
-            if not isinstance(package, dict):
-                with st.spinner("Собираю единый пакет контента…"):
-                    system = (
-                        "Ты — редактор Контент-завода Агентства W. "
-                        "Создавай полезный, человеческий, точный контент без выдуманных фактов, "
-                        "доходов, клиентов и неподтверждённых обещаний. Верни только валидный JSON."
-                    )
-                    answer = ask_ai_fn(
-                        system,
-                        _build_prompt(project, topic.strip(), goal, channels, formats),
-                    )
-                    package = _normalise_pack(_extract_json(answer), channels, formats)
-                    pending["package"] = package
-                    st.session_state[pending_key] = pending
+    from content_studio_intent_ui import render_intent_review
+    production = render_intent_review(
+        intent_key,
+        kind="text",
+        project=project,
+        extra={
+            "daily_package": True,
+            "goal": goal,
+            "channels": sorted(channels),
+            "formats": sorted(formats),
+        },
+    )
 
-            package_text = _pack_text(package, channels, formats)
-            from content_studio_catalog import save_studio_result
-            save_studio_result(
-                store,
-                owner_id,
-                project["id"],
-                "text",
-                "Пакет дня — " + datetime.now(
-                    ZoneInfo(project.get("timezone") or "Europe/Berlin")
-                ).strftime("%d.%m.%Y"),
-                text=package_text,
-                request_id="daily-pack-" + pending["id"][:24],
-            )
-            st.session_state[f"daily_content_{owner_id}_{project['id']}_latest"] = {
-                "pack": package,
-                "text": package_text,
-                "channels": list(channels),
-                "formats": list(formats),
-            }
-            st.session_state[f"daily_content_{owner_id}_notice"] = (
-                "Пакет дня готов и сохранён в «Моих генерациях». "
-                "Ничего автоматически не опубликовано."
-            )
-            st.rerun()
-        except DailyContentError as error:
-            st.error(str(error))
-        except Exception:
-            st.error(
-                "Не удалось собрать пакет дня. Сохранённые материалы не затронуты; повторите создание."
-            )
+    if isinstance(production, dict):
+        st.markdown("### 4. Создать пакет")
+        if st.button(
+            "✨ Создать пакет дня по утверждённому замыслу",
+            type="primary",
+            width="stretch",
+            key=f"daily_content_{owner_id}_{project['id']}_create",
+        ):
+            production_prompt = str(production.get("production_prompt") or "").strip()
+            fingerprint = hashlib.sha256(json.dumps(
+                [production_prompt, goal, sorted(channels), sorted(formats), project.get("id")],
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")).hexdigest()
+            pending_key = f"daily_content_{owner_id}_{project['id']}_pending"
+            pending = st.session_state.get(pending_key)
+            if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
+                pending = {"fingerprint": fingerprint, "id": uuid.uuid4().hex}
+                st.session_state[pending_key] = pending
+
+            try:
+                package = pending.get("package")
+                if not isinstance(package, dict):
+                    with st.spinner("Собираю единый пакет по утверждённому замыслу…"):
+                        system = (
+                            "Ты — редактор Контент-завода Агентства W. Утверждённый производственный бриф "
+                            "является главным источником смысла. Создавай полезный, человеческий, точный контент "
+                            "без выдуманных фактов, доходов, клиентов и неподтверждённых обещаний. "
+                            "Верни только валидный JSON."
+                        )
+                        answer = ask_ai_fn(
+                            system,
+                            _build_prompt(project, production_prompt, goal, channels, formats),
+                        )
+                        package = _normalise_pack(_extract_json(answer), channels, formats)
+                        pending["package"] = package
+                        st.session_state[pending_key] = pending
+
+                package_text = _pack_text(package, channels, formats)
+                from content_studio_catalog import save_studio_result
+                save_studio_result(
+                    store,
+                    owner_id,
+                    project["id"],
+                    "text",
+                    "Пакет дня — " + datetime.now(
+                        ZoneInfo(project.get("timezone") or "Europe/Berlin")
+                    ).strftime("%d.%m.%Y"),
+                    text=package_text,
+                    request_id="daily-pack-" + pending["id"][:24],
+                )
+                st.session_state[f"daily_content_{owner_id}_{project['id']}_latest"] = {
+                    "pack": package,
+                    "text": package_text,
+                    "channels": list(channels),
+                    "formats": list(formats),
+                    "approved_intent": production.get("approved_intent"),
+                    "production_plan": production.get("production_plan"),
+                    "quality_criteria": production.get("quality_criteria"),
+                }
+                st.session_state[f"daily_content_{owner_id}_notice"] = (
+                    "Пакет дня готов по утверждённому замыслу и сохранён в «Моих генерациях». "
+                    "Ничего автоматически не опубликовано."
+                )
+                st.rerun()
+            except DailyContentError as error:
+                st.error(str(error))
+            except Exception:
+                st.error(
+                    "Не удалось собрать пакет дня. Сохранённые материалы не затронуты; повторите создание."
+                )
 
     latest = st.session_state.get(f"daily_content_{owner_id}_{project['id']}_latest")
     if isinstance(latest, dict) and latest.get("text") and isinstance(latest.get("pack"), dict):
