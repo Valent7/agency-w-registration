@@ -375,15 +375,19 @@ class Worker:
             return self.store.read_asset(job["owner_id"], asset)
 
         if getattr(self.generator, "supports_live_video_resume", False) is True:
+            live_kwargs = {
+                "progress": progress,
+                "production": production,
+                "save_production": save_production,
+                "save_source": save_source,
+                "load_source": load_source,
+            }
+            if getattr(self.generator, "supports_billing_reserve", False) is True:
+                live_kwargs["billing_reserve"] = reserve_billing
             content, generated_assets = self.generator.generate(
                 project,
                 request,
-                progress=progress,
-                production=production,
-                save_production=save_production,
-                save_source=save_source,
-                load_source=load_source,
-                billing_reserve=reserve_billing,
+                **live_kwargs,
             )
         elif getattr(self.generator, "supports_progress", False) is True:
             content, generated_assets = self.generator.generate(project, request, progress=progress)
