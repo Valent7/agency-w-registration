@@ -45,6 +45,34 @@ def _project_context(project: dict) -> dict:
     return result
 
 
+def _approved_intent_context(value: Any) -> dict:
+    if not isinstance(value, dict):
+        raise EditorialError("Утверждённый замысел должен быть объектом.")
+    allowed = {
+        "version", "kind", "raw_request", "main_idea", "desired_result", "audience",
+        "must_have", "must_not", "style", "emotional_effect", "format_notes",
+        "assumptions", "unclear",
+    }
+    result = {}
+    for key in allowed:
+        if key not in value:
+            continue
+        item = value[key]
+        if isinstance(item, str):
+            result[key] = _string(item, "замысел " + key, 12000, required=False)
+        elif isinstance(item, list):
+            checked = []
+            for part in item[:12]:
+                if isinstance(part, str) and part.strip():
+                    checked.append(_string(part, "замысел " + key, 1000))
+            result[key] = checked
+        elif key == "version" and type(item) is int:
+            result[key] = item
+    if not result.get("main_idea") or not result.get("desired_result"):
+        raise EditorialError("В утверждённом замысле нет главной мысли или результата.")
+    return result
+
+
 def _job_context(job: dict) -> dict:
     if (not isinstance(job, dict)
             or not isinstance(job.get("format"), str) or job["format"] not in FORMATS
@@ -61,6 +89,24 @@ def _job_context(job: dict) -> dict:
     if job.get("approved_reference") is not None:
         seed = validate_reference_seed(job["approved_reference"], platform=job["platform"])
         context["approved_storyboard"] = {"style": seed["style"], "plan": seed["plan"]}
+    if job.get("approved_intent") is not None:
+        context["approved_intent"] = _approved_intent_context(job["approved_intent"])
+    if job.get("production_plan") is not None:
+        if not isinstance(job["production_plan"], list):
+            raise EditorialError("План производства повреждён.")
+        context["production_plan"] = [
+            _string(item, "пункт плана", 1000)
+            for item in job["production_plan"][:12]
+            if isinstance(item, str) and item.strip()
+        ]
+    if job.get("quality_criteria") is not None:
+        if not isinstance(job["quality_criteria"], list):
+            raise EditorialError("Критерии качества повреждены.")
+        context["quality_criteria"] = [
+            _string(item, "критерий качества", 1000)
+            for item in job["quality_criteria"][:12]
+            if isinstance(item, str) and item.strip()
+        ]
     return context
 
 
@@ -116,6 +162,10 @@ def build_copy_prompt(project: dict, job: dict, *, previous: dict | None = None,
         "Ты — автор и выпускающий редактор контент-завода. Создай законченный материал "
         "для конкретной аудитории и проекта из задания. Не подменяй чужой проект Агентством W. "
         + DATA_RULES +
+        "Если в задании есть approved_intent, это уже утверждённый владельцем смысл. "
+        "Он имеет приоритет над кратким topic: нельзя менять главную мысль, желаемый результат, "
+        "обязательные элементы, запреты, аудиторию и эмоциональный эффект ради более удобного сюжета. "
+        "production_plan задаёт согласованный путь производства, quality_criteria — признаки успеха. "
         "Сначала выбери одну мысль, полезную именно этой аудитории, и раскрой её через "
         "узнаваемую ситуацию, понятный пример или конкретное действие. Начало должно вызывать "
         "интерес честной конкретикой; не начинай с перечня услуг. Строй связную историю: "
@@ -369,6 +419,9 @@ def build_visual_prompt(project: dict, job: dict, content: dict, *, frame_count:
     instructions = (
         "Ты — арт-директор контент-завода. На основе готового материала создай конкретный "
         "визуальный замысел для профессиональной серии изображений. " + DATA_RULES +
+        "Если в задании есть approved_intent, визуал обязан сохранять утверждённый владельцем "
+        "герой, ситуацию, обязательные элементы, запреты и желаемый эмоциональный эффект. "
+        "quality_criteria используй как контроль результата. "
         "Визуал должен передавать смысл через наблюдаемую сцену, действие или уместную "
         "наглядную метафору. Нельзя ограничиваться формулами «красивый бизнес», «технологии», "
         "«инновационный ИИ» или набором абстрактных сияющих объектов. Не рисуй роботов, "
