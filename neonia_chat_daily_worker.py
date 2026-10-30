@@ -318,6 +318,7 @@ def _rank_active_group_authors(state, storage, authors, desired):
                 "last_seen_at": str(source.get("last_seen_at") or ""),
                 "activity_precision": "group_message_exact",
                 "telegram_activity_label": str(source.get("telegram_activity_label") or ""),
+                "actuality": "активен в выбранном чате за последние 7 дней",
             }
             if not _eligible_group_author(merged):
                 continue
