@@ -45,8 +45,16 @@ def _fingerprint(project, video_bytes, goal, style, target_seconds=45):
 def _save(owner_id, project, store, result):
     from content_studio_catalog import save_reference_result
     try:
-        job = save_reference_result(store, owner_id, project["id"], result["report"],
-                                    request_id=result["request_id"])
+        job = save_reference_result(
+            store,
+            owner_id,
+            project["id"],
+            result["report"],
+            request_id=result["request_id"],
+            approved_intent=result.get("approved_intent"),
+            production_plan=result.get("production_plan"),
+            quality_criteria=result.get("quality_criteria"),
+        )
         if (not isinstance(job, dict) or not job.get("id")
                 or job.get("studio_complete") is not True):
             raise ReferenceUiError("Сохранение разбора пока не подтверждено.")
@@ -73,6 +81,9 @@ def _load_saved(owner_id, project, store, key):
             "report": report, "request_id": uuid.uuid4().hex, "fingerprint": None,
             "saved_job_id": job["id"], "save_failed": False, "create_requests": {},
             "scenario_approved": True,
+            "approved_intent": copy.deepcopy(job.get("approved_intent")) if isinstance(job.get("approved_intent"), dict) else None,
+            "production_plan": copy.deepcopy(job.get("production_plan")) if isinstance(job.get("production_plan"), list) else [],
+            "quality_criteria": copy.deepcopy(job.get("quality_criteria")) if isinstance(job.get("quality_criteria"), list) else [],
             "video_personalization": copy.deepcopy((job.get("checkpoint") or {}).get("video_personalization") or {}),
         }
     except Exception:
