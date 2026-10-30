@@ -298,6 +298,11 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
     with st.container(key=f"studio_mobile_{owner_id}"):
         st.selectbox("Раздел завода", list(TOOLS), format_func=TOOLS.get,
                      key=mobile_key, on_change=_mobile_navigation, args=(owner_id, mobile_key))
+
+    store, service, project = _context(owner_id)
+    if not store or not project:
+        return
+
     navigation, workspace = st.columns([1.15, 5.85], gap="large")
     with navigation, st.container(key=f"studio_nav_{owner_id}"):
         logo = Path(__file__).resolve().parent / "assets" / "agency_w_icon.png"
@@ -316,11 +321,9 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
             pass
         if tool == "today":
             from content_studio_daily import render_daily_content_hub
-            store, service, project = _context(owner_id)
             render_daily_content_hub(owner_id, project, store, service, ask_ai_fn)
         elif tool in {"texts", "images", "speech", "reference", "prompts"}:
             from content_studio_templates import apply_template_handoff
-            store, _, project = _context(owner_id)
             if project:
                 apply_template_handoff(owner_id, project, st.session_state)
             if tool == "reference":
@@ -351,7 +354,6 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
             render_content_autopilot(owner_id, owner_name, target_profile=target_profile, section=tool)
         elif tool == "music":
             from content_studio_music_ui import render_music_tool
-            store, _, project = _context(owner_id)
             render_music_tool(owner_id, project, store)
         elif tool == "help":
             _help(owner_id)
