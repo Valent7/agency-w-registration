@@ -264,10 +264,14 @@ def _create_material(owner_id, project, store, service, capabilities, *, format_
         format_key = key + "_format"
         if formats and st.session_state.get(format_key) not in formats:
             st.session_state[format_key] = formats[0]
-    st.markdown("#### Что создаём?")
+
+    st.markdown("#### 1. Расскажите, что Вы хотите")
     results_location = "в разделе «Мои генерации»" if workspace else "во вкладке «Материалы»"
     settings_location = "в разделе «Настройки проекта»" if workspace else "во вкладке «Проект»"
-    st.caption("Опишите идею обычными словами. Завод подготовит текст и оформление для выбранных площадок. Готовый результат появится " + results_location + ".")
+    st.caption(
+        "Пишите или говорите обычными словами. Сначала завод выделит главный смысл и покажет его Вам. "
+        "Никакой платный генератор на этом шаге не запускается."
+    )
     if not platforms:
         connections_location = "в разделе «Площадки»" if workspace else "во вкладке «Площадки»"
         st.info("Подключите хотя бы одну площадку " + connections_location + ", чтобы создать материал для неё.")
@@ -275,44 +279,132 @@ def _create_material(owner_id, project, store, service, capabilities, *, format_
         st.info("Этот формат пока не выбран для проекта. Включите его в настройках проекта.")
     if not capabilities.get("ai_configured"):
         st.info("Создание станет доступно после подключения ИИ-сервиса администратором.")
+
     with st.form(key + "_form"):
-        topic = st.text_area("Ваша задача", placeholder="Например: покажи предпринимателю, как освободить вечер от повторяющихся задач. Объясни на конкретном примере и пригласи обсудить его задачу.", max_chars=6000, height=120, key=key + "_topic")
+        topic = st.text_area(
+            "Ваше желание",
+            placeholder=(
+                "Например: хочу ролик, где уставший предприниматель тонет в сообщениях, "
+                "а потом передаёт рутину ИИ и спокойно уходит гулять. Главное — ощущение освобождённого времени, "
+                "без роботов и рекламы в лоб."
+            ),
+            max_chars=6000,
+            height=150,
+            key=key + "_topic",
+        )
+        voice_wish = st.audio_input("🎙️ Или наговорите желание", key=key + "_voice_wish")
         live_mode = video_style in {"live", "cartoon"} or project.get("video_mode", "illustrated") == "live"
         video_label = "Мультфильм" if video_style == "cartoon" else "Живое видео" if live_mode else "Ролик из иллюстраций"
         format_label = lambda value: video_label if value == "reel" else FORMATS.get(value, value)
-        content_format = st.radio("Формат материала", formats, format_func=format_label, horizontal=True, key=key + "_format") if formats else None
-        selected = st.multiselect("Где разместить", platforms, default=platforms, format_func=PLATFORMS.get, key=key + "_platforms")
+        content_format = st.radio(
+            "Формат материала",
+            formats,
+            format_func=format_label,
+            horizontal=True,
+            key=key + "_format",
+        ) if formats else None
+        selected = st.multiselect(
+            "Где разместить",
+            platforms,
+            default=platforms,
+            format_func=PLATFORMS.get,
+            key=key + "_platforms",
+        )
         live_missing = live_mode and content_format == "reel" and not capabilities.get("live_video_configured")
-        if live_mode and content_format == "reel":
-            st.caption("Завод создаст сцены с настоящим движением. Работа видеосервиса оплачивается отдельно от Render и генерации текста.")
-        submitted = st.form_submit_button("Создать материал", type="primary", width="stretch", disabled=not (platforms and formats and capabilities.get("ai_configured")) or live_missing)
+        submitted = st.form_submit_button(
+            "1. Понять мой замысел",
+            type="primary",
+            width="stretch",
+            disabled=not (platforms and formats and capabilities.get("ai_configured")) or live_missing,
+        )
+
     if live_missing:
         connection_location = "Настройки проекта → Подключение живого видео" if workspace else "Проект → Подключение живого видео"
         st.info("Для живого видео подключите видеосервис: «" + connection_location + "». Ролик из картинок вместо него не создаётся.")
+
+    if content_format:
+        intent_kind = {"post": "text", "carousel": "carousel", "reel": "video"}.get(content_format, "text")
+    else:
+        intent_kind = "text"
+    extra = {
+        "content_format": content_format,
+        "platforms": sorted(selected) if isinstance(selected, list) else [],
+        "video_style": video_style,
+        "video_mode": "live" if live_mode else "illustrated",
+    }
+
+    if submitted:
+        if live_missing:
+            return
+        from content_studio_intent_ui import begin_intent
+        begin_intent(
+            key,
+            typed_text=topic,
+            audio=voice_wish,
+            kind=intent_kind,
+            project=project,
+            extra=extra,
+        )
+
+    from content_studio_intent_ui import render_intent_review
+    production = render_intent_review(
+        key,
+        kind=intent_kind,
+        project=project,
+        extra=extra,
+    )
+
     if project.get("review_required"):
         st.caption("Перед публикацией завод дождётся вашего утверждения " + results_location + ".")
     elif project.get("automation_enabled"):
         st.caption("Автопилот включён: готовый материал после проверки качества будет опубликован автоматически.")
     else:
         st.caption("Автопилот на паузе: завод подготовит материал и сохранит его здесь. Для публикации включите автопилот " + settings_location + ".")
-    if submitted:
-        if live_missing:
-            return
-        # Reusing the ID for the same submitted brief protects a double click,
-        # a rerun, or retry after an ambiguous storage response from duplication.
-        fingerprint = sha256(repr((topic.strip(), content_format, sorted(selected), project.get("video_mode", "illustrated") if content_format == "reel" else None, video_style)).encode()).hexdigest()
-        pending = st.session_state.get(key + "_request")
-        if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
-            pending = {"id": uuid.uuid4().hex, "fingerprint": fingerprint}
-            st.session_state[key + "_request"] = pending
-        try:
-            options = {"video_style": video_style} if content_format == "reel" and video_style is not None else {}
-            jobs = service.create_material(owner_id, project["id"], topic, content_format, selected, request_id=pending["id"], **options)
-            st.session_state[f"cf_auto_{owner_id}_notice"] = f"Задача сохранена. Завод подготовит материалы для {len(jobs)} площадок. Результат появится {results_location}."
-            st.rerun()
-        except Exception as exc:
-            _action_error("Не удалось создать материал", exc)
 
+    if isinstance(production, dict):
+        st.markdown("### 4. Создать материал")
+        create = st.button(
+            "✨ Создать по утверждённому замыслу",
+            type="primary",
+            width="stretch",
+            key=key + "_create_approved",
+            disabled=not bool(selected),
+        )
+        if create:
+            production_prompt = str(production.get("production_prompt") or "").strip()
+            fingerprint = sha256(repr((
+                production_prompt,
+                content_format,
+                sorted(selected),
+                project.get("video_mode", "illustrated") if content_format == "reel" else None,
+                video_style,
+                production.get("approved_intent"),
+            )).encode()).hexdigest()
+            pending = st.session_state.get(key + "_request")
+            if not isinstance(pending, dict) or pending.get("fingerprint") != fingerprint:
+                pending = {"id": uuid.uuid4().hex, "fingerprint": fingerprint}
+                st.session_state[key + "_request"] = pending
+            try:
+                options = {"video_style": video_style} if content_format == "reel" and video_style is not None else {}
+                jobs = service.create_material(
+                    owner_id,
+                    project["id"],
+                    production_prompt,
+                    content_format,
+                    selected,
+                    request_id=pending["id"],
+                    approved_intent=production.get("approved_intent"),
+                    production_plan=production.get("production_plan"),
+                    quality_criteria=production.get("quality_criteria"),
+                    **options,
+                )
+                st.session_state[f"cf_auto_{owner_id}_notice"] = (
+                    f"Задача сохранена по утверждённому замыслу. Завод подготовит материалы для {len(jobs)} площадок. "
+                    f"Результат появится {results_location}."
+                )
+                st.rerun()
+            except Exception as exc:
+                _action_error("Не удалось создать материал", exc)
 
 def _connections(owner_id, project, store, capabilities, *, workspace=False, owner_name=""):
     if not project:
