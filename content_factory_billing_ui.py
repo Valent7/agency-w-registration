@@ -6,6 +6,7 @@ import streamlit as st
 
 from content_factory_billing import (
     BillingError,
+    billing_enforced,
     create_stripe_checkout,
     format_eur,
     wallet_summary,
@@ -29,6 +30,8 @@ def _secret(name: str) -> str:
 
 
 def render_wallet_panel(owner_id: int, project: dict | None, store) -> None:
+    if not billing_enforced():
+        return
     if not isinstance(project, dict) or store is None:
         return
 
