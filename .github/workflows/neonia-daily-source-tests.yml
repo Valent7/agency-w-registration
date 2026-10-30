@@ -12,6 +12,7 @@ on:
       - "workspace_persistence.py"
       - "tests/test_neonia_daily_source.py"
       - "tests/test_neona_first_message_quality.py"
+      - "tests/test_neona_candidate_deletion.py"
       - ".github/workflows/neonia-daily-source-tests.yml"
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - "workspace_persistence.py"
       - "tests/test_neonia_daily_source.py"
       - "tests/test_neona_first_message_quality.py"
+      - "tests/test_neona_candidate_deletion.py"
       - ".github/workflows/neonia-daily-source-tests.yml"
   workflow_dispatch:
 
@@ -46,3 +48,5 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_neonia_daily_source.py' -v
       - name: Test first-message quality and name repetition
         run: python -m unittest discover -s tests -p 'test_neona_first_message_quality.py' -v
+      - name: Test one-click Neona candidate deletion
+        run: python -m unittest discover -s tests -p 'test_neona_candidate_deletion.py' -v
