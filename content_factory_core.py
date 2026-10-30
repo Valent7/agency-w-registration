@@ -175,15 +175,31 @@ class ContentFactoryService:
                     self.store.update_job(owner_id, job["id"], changes, expected_updated_at=job.get("updated_at"))
         return project
 
-    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id, video_style=None):
+    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id, video_style=None,
+                        approved_intent=None, production_plan=None, quality_criteria=None):
         """Queue an explicit brief without enabling scheduled publication.
 
         The request ID survives an ambiguous response or UI rerun. The worker
         may prepare these jobs while the project's publication schedule is off,
         but the usual publication and owner-review checks still apply.
         """
-        return self._create_material(owner_id, project_id, topic, content_format, platforms,
-                                     request_id=request_id, video_style=video_style)
+        revision = {}
+        if approved_intent is not None:
+            if not isinstance(approved_intent, dict):
+                raise FactoryError("Утверждённый замысел повреждён. Подготовьте его заново.")
+            revision["approved_intent"] = approved_intent
+        if production_plan is not None:
+            if not isinstance(production_plan, list):
+                raise FactoryError("План производства повреждён. Подготовьте промт заново.")
+            revision["production_plan"] = production_plan[:12]
+        if quality_criteria is not None:
+            if not isinstance(quality_criteria, list):
+                raise FactoryError("Критерии качества повреждены. Подготовьте промт заново.")
+            revision["quality_criteria"] = quality_criteria[:12]
+        return self._create_material(
+            owner_id, project_id, topic, content_format, platforms,
+            request_id=request_id, video_style=video_style, revision=revision or None,
+        )
 
     def create_from_video_reference(self, owner_id, project_id, reference_job_id, *, platforms, request_id):
         """Queue the owner's accepted original storyboard, never the source pixels."""
