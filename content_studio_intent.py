@@ -170,6 +170,39 @@ def interpret_intent(raw_request: str, kind: str, project: dict | None, *, extra
     }
 
 
+def _fallback_production_prompt(intent: dict, project: dict | None, extra: dict | None = None) -> str:
+    """Deterministic compact brief when the prompt architect overflows its field."""
+    context = _project(project)
+    parts = [
+        "Создай материал строго по утверждённому замыслу владельца.",
+        "Главная мысль: " + str(intent.get("main_idea") or ""),
+        "Желаемый результат: " + str(intent.get("desired_result") or ""),
+        "Аудитория: " + str(intent.get("audience") or ""),
+        "Стиль: " + str(intent.get("style") or ""),
+        "Эмоциональный эффект: " + str(intent.get("emotional_effect") or ""),
+        "Требования формата: " + str(intent.get("format_notes") or ""),
+    ]
+    must_have = [str(x) for x in (intent.get("must_have") or []) if str(x).strip()]
+    must_not = [str(x) for x in (intent.get("must_not") or []) if str(x).strip()]
+    if must_have:
+        parts.append("Обязательно: " + "; ".join(must_have))
+    if must_not:
+        parts.append("Нельзя: " + "; ".join(must_not))
+    if context.get("visual_style"):
+        parts.append("Визуальный стиль проекта: " + context["visual_style"])
+    if context.get("facts"):
+        parts.append("Подтверждённые факты проекта: " + context["facts"][:1400])
+    if context.get("avoid"):
+        parts.append("Ограничения проекта: " + context["avoid"][:900])
+    if isinstance(extra, dict) and extra.get("reference_video") is True:
+        parts.append(
+            "Видео-образец передаётся отдельно. Используй его только как ориентир структуры и темпа; "
+            "не проси ссылку или таймкоды. Сохрани новый оригинальный сюжет. "
+            "Если логотип Агентства W должен быть виден в виртуальном офисе, размести его естественно в фоне."
+        )
+    return "\n".join(part for part in parts if part.strip())[:5800]
+
+
 def compile_production_prompt(intent: dict, project: dict | None, *, extra: dict | None = None) -> dict:
     """Turn an OWNER-APPROVED intent into a provider-ready production brief."""
     if not isinstance(intent, dict) or intent.get("version") != 1:
@@ -236,9 +269,13 @@ def compile_production_prompt(intent: dict, project: dict | None, *, extra: dict
     except GenerationError as exc:
         raise IntentError(str(exc)) from None
     if not isinstance(data, dict):
-        raise IntentError("Не удалось подготовить производственный промт.")
+        data = {}
     prompt_limit = 6000
-    production_prompt = _clean_text(data.get("production_prompt"), prompt_limit)
+    raw_prompt = data.get("production_prompt")
+    if not isinstance(raw_prompt, str) or not raw_prompt.strip() or len(raw_prompt) > prompt_limit:
+        production_prompt = _fallback_production_prompt(intent, project, extra)
+    else:
+        production_prompt = _clean_text(raw_prompt, prompt_limit)
     plan = _short_list(data.get("production_plan"), maximum_items=10, maximum_chars=800)
     criteria = _short_list(data.get("quality_criteria"), maximum_items=10, maximum_chars=800)
     if not plan:
