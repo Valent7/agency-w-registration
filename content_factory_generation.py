@@ -638,7 +638,8 @@ class Generator:
         return content, [{"data": video, "mime_type": "video/mp4", "filename": "live_reel.mp4"}]
 
     def generate(self, project, job, *, progress=None, production=None,
-                 save_production=None, save_source=None, load_source=None):
+                 save_production=None, save_source=None, load_source=None,
+                 billing_reserve=None):
         from agency_video_branding import VideoBrandingError, check_video_logo, video_branding_proof
         from content_factory_editorial import (
             PROJECT_LIMITS, EditorialError, build_image_prompt, build_visual_prompt, validate_visual_plan,
@@ -777,6 +778,13 @@ class Generator:
                             "Изображения и видеосцены не запускались. Сократите ролик или пополните баланс.",
                             draft=content,
                         )
+                    if callable(billing_reserve):
+                        billing_reserve({
+                            "provider": "runway",
+                            "credits": credits,
+                            "model": str(getattr(live_client, "model", ""))[:80],
+                            "scene_seconds": list(planned_seconds or []),
+                        })
             artwork = []
             # One correction for the whole deliverable bounds image spending.
             corrections_left = 1
