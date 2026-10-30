@@ -308,6 +308,13 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
         tool = st.radio("Раздел завода", list(TOOLS), format_func=TOOLS.get, key=key, label_visibility="collapsed")
     with workspace:
         st.markdown("## " + TOOLS[tool])
+        try:
+            from content_factory_billing_ui import render_wallet_panel
+            wallet_store, _, wallet_project = _context(owner_id)
+            render_wallet_panel(owner_id, wallet_project, wallet_store)
+        except Exception:
+            # Billing must never hide the Content Factory itself.
+            pass
         if tool == "today":
             from content_studio_daily import render_daily_content_hub
             store, service, project = _context(owner_id)
