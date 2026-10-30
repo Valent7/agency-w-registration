@@ -362,6 +362,7 @@ class Generator:
 
     supports_progress = True
     supports_live_video_resume = True
+    supports_billing_reserve = True
     can_resume_video = staticmethod(can_resume_video)
 
     def __init__(self, api_key: str, text_model: str = "gpt-5", image_model: str = "gpt-image-2.5-sunburst",
