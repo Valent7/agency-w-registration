@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 
 import streamlit as st
 
@@ -176,6 +177,25 @@ def render_music_tool(owner_id, project, store):
 
     prompt = _prompt(description, kind, mood)
 
+    from content_factory_billing import (
+        BillingError,
+        billing_enforced,
+        format_eur,
+        quote_music,
+        release_usage,
+        reserve_usage,
+        settle_usage,
+    )
+    try:
+        billing_quote = quote_music(
+            DURATIONS[duration_label],
+            api_key=_secret("ELEVENLABS_API_KEY"),
+        )
+        st.caption("Ориентировочная себестоимость трека: " + format_eur(billing_quote["amount_cents"]))
+    except BillingError as exc:
+        billing_quote = None
+        st.caption("Стоимость сейчас не рассчитана: " + str(exc))
+
     st.markdown("### 2. Создайте")
     create = st.button(
         "✨ Создать музыку",
@@ -185,7 +205,24 @@ def render_music_tool(owner_id, project, store):
         key=f"studio_music_{owner_id}_{project['id']}_create",
     )
     if create:
+        billing_ref = "music:" + uuid.uuid4().hex
+        reserved = False
+        now = datetime.now(timezone.utc).isoformat()
         try:
+            if billing_enforced():
+                if not billing_quote:
+                    raise BillingError("Стоимость музыки не рассчитана. Создание остановлено, чтобы не списать неверную сумму.")
+                reserve_usage(
+                    store,
+                    owner_id,
+                    project["id"],
+                    billing_quote["amount_cents"],
+                    reference=billing_ref,
+                    kind="music",
+                    label=billing_quote["label"],
+                    now=now,
+                )
+                reserved = True
             with st.spinner("Создаю музыку…"):
                 _generate(
                     owner_id,
@@ -196,14 +233,39 @@ def render_music_tool(owner_id, project, store):
                     DURATIONS[duration_label],
                     kind == "Инструментальная",
                 )
-            st.success("Музыка готова.")
+            if reserved:
+                settle_usage(
+                    store,
+                    owner_id,
+                    project["id"],
+                    reference=billing_ref,
+                    actual_cents=billing_quote["amount_cents"],
+                    now=datetime.now(timezone.utc).isoformat(),
+                )
+            st.success(
+                "Музыка готова."
+                + ((" Списано " + format_eur(billing_quote["amount_cents"]) + ".") if reserved else "")
+            )
             st.rerun()
         except Exception as error:
+            if reserved:
+                try:
+                    release_usage(
+                        store,
+                        owner_id,
+                        project["id"],
+                        reference=billing_ref,
+                        now=datetime.now(timezone.utc).isoformat(),
+                    )
+                except Exception:
+                    pass
             from content_studio_music_provider import MusicProviderError
-            if isinstance(error, MusicProviderError):
+            if isinstance(error, BillingError):
+                st.error(str(error))
+            elif isinstance(error, MusicProviderError):
                 st.error(str(error))
             else:
-                st.error("Не удалось создать музыку. Повторите попытку.")
+                st.error("Не удалось создать музыку. Деньги не списаны; повторите попытку.")
 
     _render_step_three(owner_id, project, store)
 
