@@ -3051,12 +3051,47 @@ def _restore_instagram_subscriptions_on_startup() -> None:
     )
 
 
+async def billing_stripe_webhook(request: Request):
+    """Credit partner wallets only from a verified Stripe server event."""
+    from content_factory_billing import BillingError, apply_stripe_event, verify_stripe_event
+    from content_factory_runtime import build_store
+
+    try:
+        payload = await request.body()
+        event = verify_stripe_event(
+            payload,
+            request.headers.get("stripe-signature", ""),
+            os.getenv("STRIPE_WEBHOOK_SECRET", ""),
+        )
+    except BillingError:
+        return PlainTextResponse("Invalid payment notification", status_code=400)
+    except Exception:
+        return PlainTextResponse("Invalid payment notification", status_code=400)
+
+    try:
+        applied = apply_stripe_event(
+            build_store(),
+            event,
+            now=datetime.now(timezone.utc).isoformat(),
+        )
+    except BillingError as exc:
+        print("BILLING_STRIPE_REJECTED:", type(exc).__name__, flush=True)
+        return PlainTextResponse("Payment could not be applied", status_code=422)
+    except Exception as exc:
+        # 500 tells Stripe to retry later; never log the payload or payment details.
+        print("BILLING_STRIPE_RETRY:", type(exc).__name__, flush=True)
+        return PlainTextResponse("Temporary billing error", status_code=500)
+
+    return JSONResponse({"received": True, "applied": bool(applied)})
+
+
 routes = [
     Route("/", health, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
     Route("/privacy", privacy, methods=["GET"]),
     Route("/terms", terms, methods=["GET"]),
     Route("/data-deletion", data_deletion, methods=["GET"]),
+    Route("/billing/stripe/webhook", billing_stripe_webhook, methods=["POST"]),
     Route("/instagram/oauth-config", instagram_oauth_config, methods=["GET"]),
     Route("/instagram/connect", instagram_connect, methods=["GET"]),
     Route("/instagram/callback", instagram_oauth_callback, methods=["GET"]),
