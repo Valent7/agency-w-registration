@@ -366,6 +366,37 @@ class SQLiteStore(_StoreBase):
                 self._insert(db, "content_factory_projects", row)
             return _unpack(row)
 
+    def update_project_if_current(self, owner_id: int, project_id: str, changes: dict, expected_updated_at: str) -> dict:
+        owner_id, project_id = _owner(owner_id), _id(project_id)
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = _unpack(
+                db.execute(
+                    "SELECT * FROM content_factory_projects WHERE owner_id=? AND id=?",
+                    (owner_id, project_id),
+                ).fetchone()
+            )
+            if not previous:
+                raise StoreError("Проект не найден у этого владельца.")
+            if _time(previous.get("updated_at")) != _time(expected_updated_at):
+                raise StoreError("Настройки проекта уже изменились. Повторите операцию.")
+            row = _project_row(owner_id, {**changes, "id": project_id}, previous)
+            changed = db.execute(
+                "UPDATE content_factory_projects SET data=?,automation_enabled=?,updated_at=? "
+                "WHERE owner_id=? AND id=? AND updated_at=?",
+                (
+                    _json(row["data"]),
+                    row["automation_enabled"],
+                    row["updated_at"],
+                    owner_id,
+                    project_id,
+                    previous["updated_at"],
+                ),
+            ).rowcount
+            if changed != 1:
+                raise StoreError("Настройки проекта уже изменились. Повторите операцию.")
+            return _unpack(row)
+
     def get_project(self, owner_id: int, project_id: str) -> dict | None:
         with self._db() as db:
             result = _unpack(db.execute("SELECT * FROM content_factory_projects WHERE owner_id=? AND id=?", (_owner(owner_id), _id(project_id))).fetchone())
@@ -636,6 +667,29 @@ class SupabaseStore(_StoreBase):
             result = self._request("POST", "/rest/v1/content_factory_projects", json=row, prefer="return=representation")
         if not result:
             raise StoreError("Не удалось сохранить проект.")
+        return _unpack(result[0])
+
+    def update_project_if_current(self, owner_id: int, project_id: str, changes: dict, expected_updated_at: str) -> dict:
+        owner_id, project_id = _owner(owner_id), _id(project_id)
+        previous = self.get_project(owner_id, project_id)
+        if not previous:
+            raise StoreError("Проект не найден у этого владельца.")
+        if _time(previous.get("updated_at")) != _time(expected_updated_at):
+            raise StoreError("Настройки проекта уже изменились. Повторите операцию.")
+        row = _project_row(owner_id, {**changes, "id": project_id}, previous)
+        result = self._request(
+            "PATCH",
+            "/rest/v1/content_factory_projects",
+            params={
+                "owner_id": f"eq.{owner_id}",
+                "id": f"eq.{project_id}",
+                "updated_at": "eq." + _time(expected_updated_at),
+            },
+            json={key: value for key, value in row.items() if key not in {"id", "owner_id", "created_at"}},
+            prefer="return=representation",
+        )
+        if not result:
+            raise StoreError("Настройки проекта уже изменились. Повторите операцию.")
         return _unpack(result[0])
 
     def get_project(self, owner_id: int, project_id: str) -> dict | None:
