@@ -506,9 +506,18 @@ class ContentFactoryService:
         review = (job.get("content") or {}).get("quality_review")
         incomplete = checkpoint.get("pipeline_version") == 2 and checkpoint.get("generation_complete") is not True
         regenerate = incomplete or bool(production_changes) or (isinstance(review, dict) and review.get("approved") is False)
-        # Retain already-created provider containers, but a deliberate retry may
-        # start a failed generation again. It consumes a new daily reservation.
-        checkpoint.pop("generation_started", None)
+        # A studio master that failed before any provider production existed did
+        # not spend Runway credits and must not consume another daily reservation.
+        safe_preprovider_retry = bool(
+            job.get("studio_master")
+            and checkpoint.get("generation_started")
+            and not isinstance(production, dict)
+        )
+        if safe_preprovider_retry:
+            checkpoint["safe_preprovider_retry"] = True
+        else:
+            checkpoint.pop("generation_started", None)
+            checkpoint.pop("safe_preprovider_retry", None)
         checkpoint.pop("retry_count", None)
         if regenerate:
             checkpoint.pop("generation_complete", None)
