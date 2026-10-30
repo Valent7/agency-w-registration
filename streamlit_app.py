@@ -6072,8 +6072,6 @@ def neona_first_message_blockers(message, contact=None):
     problems = []
     if not message:
         return ["Пустое сообщение"]
-    if len(message) > 360:
-        problems.append("Первое сообщение слишком длинное (более 360 знаков)")
     if message.count("?") > 1:
         problems.append("В первом сообщении больше одного вопроса")
     lowered = message.casefold()
@@ -6257,7 +6255,7 @@ def ensure_neona_identity(message, owner_name):
             message = f"{identity} {message}".strip()
 
     message = re.sub(r"\s{2,}", " ", message).strip()
-    return message[:1000]
+    return message
 
 def generate_neona_first_message(
     owner_name,
@@ -6324,12 +6322,14 @@ def generate_neona_first_message(
     if result and not neona_first_message_blockers(result, contact):
         return result
 
-    # One bounded quality retry; an unsupported offer or overlong text is
-    # never sent as a "successful" generated draft.
+    # Retry only for genuinely unsafe or low-quality content, never
+    # because a useful first message exceeds an arbitrary character count.
     retry = ask_openai(
-        system_prompt + "\nОБЯЗАТЕЛЬНО: не более 350 знаков, "
-        "2–3 коротких предложения, один вопрос, без тестов, кейсов, "
-        "компенсационных планов, доходов и повторения имени.",
+        system_prompt + "\nВАЖНО: главное — интересный, живой, "
+        "достоверный текст, обращённый к конкретному человеку. "
+        "Длину выбирай по смыслу, без лимита символов или предложений. "
+        "Не повторяй имя, не придумывай тесты, кейсы, доходы "
+        "и компенсационные планы. Не превращай сообщение в рекламный монолог.",
         request, model=first_model,
     ).strip()
     if retry.startswith("Ошибка OpenAI:"):
