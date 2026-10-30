@@ -211,6 +211,49 @@ class DailyWorkerTests(unittest.TestCase):
              card(203,0,"")],5)
         self.assertEqual([item["telegram_id"] for item in results],[201])
 
+    def test_minimum_fit_and_evidence_are_mandatory(self):
+        now = datetime.now(timezone.utc)
+        candidate = {
+            "telegram_id":220, "username":"real_person", "score":50,
+            "activity_precision":"group_message_exact",
+            "last_seen_at":now.isoformat(),
+            "business_relevant":True,
+            "business_evidence":["публичная просьба автоматизировать работу"],
+            "work_state":"available","selection_blocked":False,
+        }
+        self.assertTrue(worker._recommended_group_candidate(candidate))
+        self.assertFalse(worker._recommended_group_candidate({**candidate,"score":49}))
+        self.assertFalse(worker._recommended_group_candidate({**candidate,"business_evidence":[]}))
+        self.assertFalse(worker._recommended_group_candidate({**candidate,"business_relevant":False}))
+        self.assertFalse(worker._recommended_group_candidate({**candidate,"username":""}))
+
+    def test_shortage_never_filled_by_inactive_group_members(self):
+        async def only_two(session,apiid,hash,chat,excluded,desired,message_limit):
+            now = datetime.now(timezone.utc).isoformat()
+            return ([{
+                "telegram_id":i, "name":str(i), "username":f"author{i}",
+                "source_chat_id":9211, "source_chat_title":"Preferred Group",
+                "source_type":"telegram_chat", "source":"Telegram-чат: Preferred Group",
+                "public_info":"Рутина и автоматизация", "group_messages":["Много рутины в работе"],
+                "activity_eligible":True,"activity_precision":"group_message_exact",
+                "last_seen_at":now, "telegram_activity_label":"писал сегодня",
+                "has_message_history":False, "recent_messages":[],
+            } for i in (221,222)], 120)
+        async def members(*args,**kwargs):
+            return ([{"telegram_id":333,"name":"Inactive group member",
+                      "username":"old_member","telegram_activity_label":"время неизвестно"}],
+                    300,10,False)
+        with patch.object(worker,"_read_active_group_authors",new=only_two), \
+             patch.object(worker,"_read_selected_members",new=members):
+            result=worker.process(77,"fake",self.storage.state,self.storage)
+        self.assertEqual(result["status"],"incomplete")
+        self.assertEqual(result["count"],2)
+        self.assertEqual(result["missing"],3)
+        batch=self.storage.tasks["row"]["result"]["daily_candidate_feed"]["daily_batches"][
+            worker.datetime.now(worker.BERLIN).date().isoformat()]
+        self.assertEqual(len(batch["candidate_ids"]),2)
+        self.assertNotIn(333,batch["candidate_ids"])
+
     def test_missing_group_no_fallback(self):
         self.storage.state["selected_source_chat"]=9999
         result=worker.process(77,"fake",self.storage.state,self.storage)
@@ -222,6 +265,8 @@ class DailyWorkerTests(unittest.TestCase):
             "telegram_id":i, "username":f"author{i}", "source_chat_id":9211,
             "activity_precision":"group_message_exact",
             "last_seen_at":datetime.now(timezone.utc).isoformat(),
+            "business_relevant":True, "business_evidence":["доказательство рутины"],
+            "score":75,"work_state":"available","selection_blocked":False,
         } for i in range(201, 206)]
         self.storage.task_exists=True
         day=worker.datetime.now(worker.BERLIN).date().isoformat()
