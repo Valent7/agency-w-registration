@@ -15,6 +15,7 @@ def load_editor_functions():
         "normalize_neona_first_greeting",
         "neona_first_message_blockers",
         "generate_neona_first_message",
+        "ensure_neona_identity",
     }
     selected = [node for node in tree.body
                 if isinstance(node, ast.FunctionDef) and node.name in names]
@@ -86,7 +87,47 @@ class FirstMessageQualityTests(unittest.TestCase):
         self.assertIn("Мы помогаем",result)
         self.assertEqual(chosen,["gpt-6-astra"])
 
-    def test_factual_and_length_gates(self):
+    def test_length_is_not_a_quality_blocker(self):
+        check = self.fns["neona_first_message_blockers"]
+        long_but_valid = (
+            "Здравствуйте! Меня зовут Неона, я секретарь-референт. "
+            "Я хотела рассказать о том, как освободить время от рутины. "
+            + "Здесь только подтверждённые сведения и полезный смысл. " * 35
+        )
+        self.assertGreater(len(long_but_valid), 1000)
+        self.assertEqual(check(long_but_valid), [])
+        identity = self.fns["ensure_neona_identity"]
+        named = type(identity)(
+            identity.__code__, {"re":re, "neona_identity":lambda owner:
+                                "Меня зовут Неона, я секретарь-референт Валентины."}
+        )
+        self.assertEqual(named(long_but_valid, "Валентина"),long_but_valid.strip())
+
+    def test_long_engaging_first_message_needs_no_retry(self):
+        namespace = dict(self.fns)
+        calls = []
+        long_text = (
+            "Здравствуйте! Меня зовут Неона, я секретарь-референт. "
+            + "Небольшая история о свободном времени и рутинных задачах. " * 26
+        )
+        def fake_api(prompt, request, model=None):
+            calls.append(model)
+            return long_text
+        namespace.update({
+            "st":SimpleNamespace(secrets={}),
+            "build_neona_first_message_system_prompt":lambda owner:"quality first",
+            "choose_neona_magnet":lambda contact:"Вернуть человеку время",
+            "finalize_neona_first_message":lambda msg,owner,contact:msg,
+            "ask_openai":fake_api,
+        })
+        fn=self.fns["generate_neona_first_message"]
+        isolated=type(fn)(fn.__code__,namespace)
+        answer=isolated("Валентина",{},{"telegram_id":23,"name":"Ирина"})
+        self.assertGreater(len(answer), 1000)
+        self.assertEqual(answer,long_text.strip())
+        self.assertEqual(calls,["gpt-6-astra"])
+
+    def test_factual_quality_gates(self):
         check = self.fns["neona_first_message_blockers"]
         self.assertFalse(check(
             "Здравствуйте! Я Неона, секретарь-референт. "
@@ -94,7 +135,6 @@ class FirstMessageQualityTests(unittest.TestCase):
         ))
         self.assertTrue(check("Давайте сравним компенсационные планы и монетизацию."))
         self.assertTrue(check("У нас есть бесплатный тест вашего AI-ассистента."))
-        self.assertTrue(check("А" * 361))
         self.assertTrue(check("Первый вопрос? Второй вопрос?"))
 
 
