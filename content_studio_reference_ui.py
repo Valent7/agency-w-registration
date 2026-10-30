@@ -371,7 +371,7 @@ def _approved_scenario_form(owner_id, project, store, key, result):
     report = result["report"]
     plan = report["reference_plan"]
 
-    st.markdown("### 2. Проверьте сценарий")
+    st.markdown("### 4. Проверьте сценарий")
     st.caption("Исправьте всё, что хотите. Повторно разбирать видео для этого не нужно.")
     with st.form(key + "_approve_form"):
         title = st.text_input("Название ролика", value=plan["title"], max_chars=150)
@@ -638,7 +638,7 @@ def _show_report(owner_id, project, store, service, key, result):
 
     _approved_scenario_form(owner_id, project, store, key, result)
 
-    st.markdown("### 3. Создать готовое видео")
+    st.markdown("### 5. Создать готовое видео")
     if not (result.get("scenario_approved") and result.get("saved_job_id")):
         st.info("Сначала утвердите сценарий выше.")
         return
@@ -711,19 +711,25 @@ def _show_report(owner_id, project, store, service, key, result):
 
 
 def render_reference_tool(owner_id, project, store, service):
-    """Rendering and storage retries never start a paid model operation."""
+    """Understand the owner's wish before paid reference analysis or video production."""
     from content_studio_tools import _ready
     from content_studio_reference import ReferenceError
+    from content_studio_intent_ui import begin_intent, clear_intent, render_intent_review
 
-    st.subheader("Видео по образцу — 3 шага")
-    st.caption("1. Загрузить образец → 2. Утвердить сценарий → 3. Создать готовое видео. Всё на одной странице.")
+    st.subheader("Видео по образцу")
+    st.caption(
+        "Образец + Ваше желание → проверка смысла → сценарий → утверждение → готовое видео. "
+        "Всё на одной странице."
+    )
     if not _ready(owner_id, project, store) or service is None:
         return
     owner_id = int(owner_id)
     key = _key(owner_id, project)
+    intent_key = key + "_wish"
     _load_saved(owner_id, project, store, key)
     epoch = st.session_state.get(key + "_upload_epoch", 0)
-    st.markdown("### 1. Загрузите видео-образец")
+
+    st.markdown("### 1. Загрузите образец и расскажите, что Вы хотите")
     with st.form(key + "_analysis_form"):
         upload = st.file_uploader(
             "Видео-образец",
@@ -731,15 +737,17 @@ def render_reference_tool(owner_id, project, store, service):
             key=key + f"_file_{epoch}",
         )
         goal = st.text_area(
-            "Что должно говориться в вашем новом видео?",
-            max_chars=3000,
-            height=110,
+            "Ваше желание",
+            max_chars=6000,
+            height=130,
             placeholder=(
-                "Например: Агентство W освобождает время от рутины. "
-                "Сегодня в 20:00 МСК презентация в Zoom. Напишите «Презентация»."
+                "Можно говорить обычными словами. Например: хочу сохранить динамику образца, "
+                "но показать предпринимателя, который устал от рутины, передаёт её ИИ и получает "
+                "свободный вечер. Главное — чувство облегчения и времени для жизни."
             ),
             key=key + "_goal",
         )
+        voice_wish = st.audio_input("🎙️ Или наговорите желание", key=key + "_voice_wish")
         style = st.radio(
             "Вид ролика",
             list(STYLES),
@@ -748,62 +756,132 @@ def render_reference_tool(owner_id, project, store, service):
             key=key + "_style",
         )
         target_seconds = 45
-        submitted = st.form_submit_button(
-            "✨ Подготовить сценарий",
+        understand = st.form_submit_button(
+            "1. Понять мой замысел",
             width="stretch",
             type="primary",
         )
-        st.caption("Короткий вертикальный ролик до минуты. Образец — до 50 МБ и 15 минут.")
+        st.caption(
+            "На этом шаге видео ещё не разбирается и Runway не запускается. "
+            "Сначала система должна правильно понять Вашу мысль."
+        )
+
     with st.expander("Если у вас только ссылка на публикацию", expanded=False):
         st.caption("Автоматическое получение роликов по ссылкам соцсетей пока не подключено. Загрузите сам видеофайл.")
-    if submitted:
+
+    extra = {
+        "reference_video": True,
+        "video_style": style,
+        "target_seconds": target_seconds,
+        "orientation": "vertical",
+    }
+
+    if understand:
         try:
             if upload is None:
-                raise ReferenceUiError("Добавьте видеофайл, который нужно разобрать.")
+                raise ReferenceUiError("Сначала добавьте видео-образец.")
             if getattr(upload, "size", 0) > MAX_VIDEO_BYTES:
                 raise ReferenceUiError("Выберите видео размером до 50 МБ.")
-            video_bytes = upload.getvalue()
-            if not isinstance(video_bytes, bytes) or not video_bytes or len(video_bytes) > MAX_VIDEO_BYTES:
-                raise ReferenceUiError("Выберите непустой видеофайл размером до 50 МБ.")
-            if not 10 <= len(goal.strip()) <= 3000 or "\x00" in goal:
-                raise ReferenceUiError("Опишите тему своего видео: от 10 до 3000 символов.")
-            fingerprint = _fingerprint(project, video_bytes, goal.strip(), style, target_seconds)
-            previous = st.session_state.get(key + "_result")
-            if isinstance(previous, dict) and previous.get("fingerprint") == fingerprint:
-                st.info("Разбор этого образца с этой задачей уже готов ниже.")
-            else:
-                from content_factory_runtime import get_generator
-                from content_studio_reference import analyze_reference_video
-
-                with st.spinner("Изучаем образец и готовим новую историю…"):
-                    duration_options = {"target_seconds": 120} if target_seconds == 120 else {}
-                    report = _report(analyze_reference_video(get_generator(), project, video_bytes,
-                                                             filename=str(getattr(upload, "name", "reference.mp4")),
-                                                             goal=goal.strip(), style=style, **duration_options))
-                if (report["reference_style"] != style or report["source"]["sha256"] != sha256(video_bytes).hexdigest()
-                        or report["reference_plan"].get("target_seconds", 45) != target_seconds):
-                    raise ReferenceUiError("Не удалось связать разбор с выбранным образцом и стилем. Новое видео не запускалось.")
-                result = {
-                    "report": copy.deepcopy(report),
-                    "fingerprint": fingerprint,
-                    "request_id": uuid.uuid4().hex,
-                    "saved_job_id": None,
-                    "save_failed": False,
-                    "create_requests": {},
-                    "scenario_approved": False,
-                    "video_personalization": {},
-                }
-                st.session_state[key + "_result"] = result
+            begin_intent(
+                intent_key,
+                typed_text=goal,
+                audio=voice_wish,
+                kind="video",
+                project=project,
+                extra=extra,
+            )
         except ReferenceUiError as error:
             st.error(str(error))
-        except ReferenceError as error:
-            st.error(str(error))
-        except Exception:
-            st.error("Не удалось разобрать образец. Проверьте, что видео открывается и длится не более 15 минут. Автоматический повтор платного запроса не запускался.")
+
+    production = render_intent_review(
+        intent_key,
+        kind="video",
+        project=project,
+        extra=extra,
+    )
+
+    if isinstance(production, dict):
+        st.markdown("### 3. Подготовить сценарий по образцу")
+        st.caption(
+            "Теперь образец будет разобран уже не по сырой фразе, а по утверждённому профессиональному видеобрифу."
+        )
+        analyse = st.button(
+            "✨ Разобрать образец и подготовить сценарий",
+            width="stretch",
+            type="primary",
+            key=key + "_analyse_approved",
+        )
+        if analyse:
+            try:
+                if upload is None:
+                    raise ReferenceUiError("Добавьте видеофайл, который нужно разобрать.")
+                if getattr(upload, "size", 0) > MAX_VIDEO_BYTES:
+                    raise ReferenceUiError("Выберите видео размером до 50 МБ.")
+                video_bytes = upload.getvalue()
+                if not isinstance(video_bytes, bytes) or not video_bytes or len(video_bytes) > MAX_VIDEO_BYTES:
+                    raise ReferenceUiError("Выберите непустой видеофайл размером до 50 МБ.")
+                production_prompt = str(production.get("production_prompt") or "").strip()
+                if not 10 <= len(production_prompt) <= 12000 or "\x00" in production_prompt:
+                    raise ReferenceUiError("Профессиональный видеобриф повреждён. Утвердите замысел заново.")
+                fingerprint = _fingerprint(project, video_bytes, production_prompt, style, target_seconds)
+                previous = st.session_state.get(key + "_result")
+                if isinstance(previous, dict) and previous.get("fingerprint") == fingerprint:
+                    st.info("Сценарий для этого образца и утверждённого замысла уже готов ниже.")
+                else:
+                    from content_factory_runtime import get_generator
+                    from content_studio_reference import analyze_reference_video
+
+                    with st.spinner("Изучаем образец и строим историю по утверждённому замыслу…"):
+                        duration_options = {"target_seconds": 120} if target_seconds == 120 else {}
+                        report = _report(
+                            analyze_reference_video(
+                                get_generator(),
+                                project,
+                                video_bytes,
+                                filename=str(getattr(upload, "name", "reference.mp4")),
+                                goal=production_prompt,
+                                style=style,
+                                **duration_options,
+                            )
+                        )
+                    if (
+                        report["reference_style"] != style
+                        or report["source"]["sha256"] != sha256(video_bytes).hexdigest()
+                        or report["reference_plan"].get("target_seconds", 45) != target_seconds
+                    ):
+                        raise ReferenceUiError(
+                            "Не удалось связать сценарий с выбранным образцом и утверждённым замыслом. Видео не запускалось."
+                        )
+                    result = {
+                        "report": copy.deepcopy(report),
+                        "fingerprint": fingerprint,
+                        "request_id": uuid.uuid4().hex,
+                        "saved_job_id": None,
+                        "save_failed": False,
+                        "create_requests": {},
+                        "scenario_approved": False,
+                        "video_personalization": {},
+                        "approved_intent": copy.deepcopy(production.get("approved_intent")),
+                        "production_plan": copy.deepcopy(production.get("production_plan") or []),
+                        "quality_criteria": copy.deepcopy(production.get("quality_criteria") or []),
+                    }
+                    st.session_state[key + "_result"] = result
+                    st.rerun()
+            except ReferenceUiError as error:
+                st.error(str(error))
+            except ReferenceError as error:
+                st.error(str(error))
+            except Exception:
+                st.error(
+                    "Не удалось разобрать образец. Автоматический повтор платного запроса не запускался."
+                )
+
     result = st.session_state.get(key + "_result")
     if isinstance(result, dict):
         _show_report(owner_id, project, store, service, key, result)
         if st.button("Взять другой образец", key=key + "_new"):
             st.session_state.pop(key + "_result", None)
+            clear_intent(intent_key)
             st.session_state[key + "_upload_epoch"] = epoch + 1
             st.rerun()
+
