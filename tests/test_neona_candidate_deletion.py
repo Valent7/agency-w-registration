@@ -58,6 +58,11 @@ class DeleteCandidateTests(unittest.TestCase):
             "datetime":datetime,
             "ZoneInfo":ZoneInfo,
             "persist_workspace_if_changed":lambda *a,**k:persisted.append((a,k)),
+            "telegram_id":7,
+            "excluded_candidates_key":"neonia_excluded_candidates_7",
+            "candidates_key":"neonia_candidates_7",
+            "selected_candidates_key":"neonia_selected_candidates_7",
+            "neona_drafts_key":"neona_first_message_drafts_7",
         }
         delete = load_nested_function(
             "streamlit_app.py", "exclude_neonia_candidate", ns)
@@ -83,7 +88,13 @@ class DeleteCandidateTests(unittest.TestCase):
         }
         ns={"st":SimpleNamespace(session_state=store),
             "datetime":datetime,"ZoneInfo":ZoneInfo,
-            "persist_workspace_if_changed":lambda *a,**k:None}
+            "persist_workspace_if_changed":lambda *a,**k:None,
+            "telegram_id":7,
+            "excluded_candidates_key":"neonia_excluded_candidates_7",
+            "candidates_key":"neonia_candidates_7",
+            "selected_candidates_key":"neonia_selected_candidates_7",
+            "neona_drafts_key":"neona_first_message_drafts_7",
+        }
         delete=load_nested_function(
             "streamlit_app.py","exclude_neonia_candidate",ns)
         delete(11)
