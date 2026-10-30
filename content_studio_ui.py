@@ -310,8 +310,7 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
         st.markdown("## " + TOOLS[tool])
         try:
             from content_factory_billing_ui import render_wallet_panel
-            wallet_store, _, wallet_project = _context(owner_id)
-            render_wallet_panel(owner_id, wallet_project, wallet_store)
+            render_wallet_panel(owner_id, project, store)
         except Exception:
             # Billing must never hide the Content Factory itself.
             pass
