@@ -297,7 +297,8 @@ class Worker:
         checkpoint = dict(job.get("checkpoint") or {})
         production = job.get("production")
         live_resume = getattr(self.generator, "supports_live_video_resume", False) is True and self.generator.can_resume_video(production)
-        if checkpoint.get("generation_started") and not live_resume:
+        safe_preprovider_retry = bool(checkpoint.pop("safe_preprovider_retry", False))
+        if checkpoint.get("generation_started") and not live_resume and not safe_preprovider_retry:
             raise ValueError("Прошлая генерация прервалась. Автоматический повтор остановлен; проверьте материал и повторите вручную.")
         if self.generator is None:
             raise ValueError("Не подключён ИИ для создания материалов.")
