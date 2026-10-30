@@ -348,6 +348,7 @@ def ask_openai(
     user_message,
     uploaded_files=None,
     use_web_search=False,
+    model=None,
 ):
     api_key = st.secrets.get("OPENAI_API_KEY")
 
@@ -402,7 +403,7 @@ def ask_openai(
             input_content.insert(0, file_item)
 
         request_body = {
-            "model": "gpt-5-mini",
+            "model": str(model or "gpt-5-mini"),
             "instructions": system_prompt,
             "input": [
                 {
@@ -5953,6 +5954,15 @@ def normalize_neona_first_greeting(message, contact):
             flags=re.IGNORECASE,
         )
 
+    # Remove a second full-name heading generated after the greeting,
+    # e.g. "Валентина, здравствуйте! Валентина Якусевич. Я Неона..."
+    full_name = str(contact.get("name") or "").strip()
+    if full_name and len(full_name.split()) > 1:
+        message = re.sub(
+            rf"^{re.escape(full_name)}\s*[.!,:-]\s*",
+            "", message, count=1, flags=re.IGNORECASE,
+        )
+
     # Если модель начала с нейтрального приветствия, заменяем его единым стандартом.
     message = re.sub(
         r"^(?:здравствуйте|привет)\s*[!,.]?\s*",
@@ -6054,6 +6064,29 @@ def ensure_neona_first_message_signoff(message):
         return message
 
     return f"{message}\n\n{NEONA_FIRST_MESSAGE_SIGNOFF}".strip()
+
+
+def neona_first_message_blockers(message, contact=None):
+    """Structural errors that cannot be approved as a cold first message."""
+    message = str(message or "").strip()
+    problems = []
+    if not message:
+        return ["Пустое сообщение"]
+    if len(message) > 360:
+        problems.append("Первое сообщение слишком длинное (более 360 знаков)")
+    if message.count("?") > 1:
+        problems.append("В первом сообщении больше одного вопроса")
+    lowered = message.casefold()
+    if re.search(r"компенсационн|реферальн|монетизац|окупаемост|доход\b", lowered):
+        problems.append("Первый контакт не должен обсуждать заработок и чужие планы")
+    if re.search(r"бесплатн\w*\s+тест|готов\w*\s+кейс", lowered):
+        problems.append("Нельзя предлагать неподтверждённый бесплатный тест или кейс")
+    contact = contact or {}
+    full_name = str(contact.get("name") or "").strip()
+    if full_name and len(full_name.split()) > 1:
+        if len(re.findall(re.escape(full_name), message, re.IGNORECASE)) > 1:
+            problems.append("Повторяется полное имя адресата")
+    return problems
 
 
 def validate_neona_first_message(message, owner_name):
@@ -6276,24 +6309,42 @@ def generate_neona_first_message(
         f"{json.dumps(safe_contact, ensure_ascii=False)}"
     )
 
-    answer = ask_openai(system_prompt, request).strip()
-
+    # The FIRST-message composer is separate from Neona's live-dialogue worker.
+    # Never let its quality silently depend on the general gpt-5-mini helper.
+    first_model = str(st.secrets.get("NEONA_FIRST_MESSAGE_MODEL") or "gpt-6-astra")
+    answer = ask_openai(system_prompt, request, model=first_model).strip()
     if answer.startswith("Ошибка OpenAI:"):
         raise RuntimeError(answer)
-
-    if not answer:
-        return build_neona_safe_first_message(
-            owner_name,
-            contact,
-        )
-
     if answer.startswith('"') and answer.endswith('"'):
         answer = answer[1:-1].strip()
 
-    return finalize_neona_first_message(
-        answer,
-        owner_name,
-        contact,
+    if answer.startswith("ИИ не сформировал ответ") or answer.startswith("Не удалось связаться с ИИ"):
+        answer = ""
+    result = finalize_neona_first_message(answer, owner_name, contact) if answer else ""
+    if result and not neona_first_message_blockers(result, contact):
+        return result
+
+    # One bounded quality retry; an unsupported offer or overlong text is
+    # never sent as a "successful" generated draft.
+    retry = ask_openai(
+        system_prompt + "\nОБЯЗАТЕЛЬНО: не более 350 знаков, "
+        "2–3 коротких предложения, один вопрос, без тестов, кейсов, "
+        "компенсационных планов, доходов и повторения имени.",
+        request, model=first_model,
+    ).strip()
+    if retry.startswith("Ошибка OpenAI:"):
+        raise RuntimeError(retry)
+    if retry.startswith("ИИ не сформировал ответ") or retry.startswith("Не удалось связаться с ИИ"):
+        retry = ""
+    result = finalize_neona_first_message(retry.strip('"'), owner_name, contact) if retry else ""
+    if result and not neona_first_message_blockers(result, contact):
+        return result
+
+    # Quality first: never replace a failed personal introduction with a
+    # generic sales template and report it as a completed task.
+    raise RuntimeError(
+        "Неона не смогла подготовить качественное первое сообщение. "
+        "Черновик не создан; проверьте данные кандидата и модель."
     )
 
 
@@ -12979,6 +13030,14 @@ if telegram_login_valid or remembered_data:
                                                 "окончательное решение остаётся за вами."
                                             )
 
+                                        quality_blockers = neona_first_message_blockers(
+                                            edited_message.strip(), contact
+                                        )
+                                        if quality_blockers and not draft.get("sent"):
+                                            st.error(
+                                                "Прежде чем утвердить, исправьте: "
+                                                + "; ".join(quality_blockers)
+                                            )
                                         action_columns = st.columns(4)
                                         save_message = action_columns[0].button(
                                             "💾 Сохранить",
@@ -12991,7 +13050,7 @@ if telegram_login_valid or remembered_data:
                                         approve_message = action_columns[1].button(
                                             "✅ Утвердить",
                                             type="primary",
-                                            disabled=bool(draft.get("sent")),
+                                            disabled=bool(draft.get("sent")) or bool(quality_blockers),
                                             key=(
                                                 "neona_approve_agent_draft_"
                                                 f"{telegram_id}_{contact_id}"

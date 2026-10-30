@@ -11,6 +11,7 @@ on:
       - "streamlit_app.py"
       - "workspace_persistence.py"
       - "tests/test_neonia_daily_source.py"
+      - "tests/test_neona_first_message_quality.py"
       - ".github/workflows/neonia-daily-source-tests.yml"
   pull_request:
     paths:
@@ -21,6 +22,7 @@ on:
       - "streamlit_app.py"
       - "workspace_persistence.py"
       - "tests/test_neonia_daily_source.py"
+      - "tests/test_neona_first_message_quality.py"
       - ".github/workflows/neonia-daily-source-tests.yml"
   workflow_dispatch:
 
@@ -42,3 +44,5 @@ jobs:
         run: python -m py_compile neonia_daily_source.py neonia_chat_daily_worker.py telegram_scout_worker.py stagirite_center.py streamlit_app.py workspace_persistence.py
       - name: Test exact selected chat and no fallback
         run: python -m unittest discover -s tests -p 'test_neonia_daily_source.py' -v
+      - name: Test first-message quality and name repetition
+        run: python -m unittest discover -s tests -p 'test_neona_first_message_quality.py' -v

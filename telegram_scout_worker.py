@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 import neonia_chat_daily_worker
+from neonia_daily_source import owner_source
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -31,6 +32,7 @@ UTC = timezone.utc
 BERLIN = ZoneInfo("Europe/Berlin")
 DEFAULT_INTERVAL_SECONDS = 3600
 DAILY_TARGET = 5
+MIN_DAILY_AUDIENCE_FIT_SCORE = 50
 RESERVE_TARGET = 50
 OUTREACH_COOLDOWN_DAYS = 7
 
@@ -906,6 +908,29 @@ business_gate_reason — короткая причина решения.
     return normalized
 
 
+def _qualified_personal_candidate(item: dict[str, Any]) -> bool:
+    """Quality gate for the daily personal-contact shortlist.
+
+    The score is a conservative heuristic (0–100), NOT an empirical
+    probability or a literal percentage of target-audience match.
+    """
+    if not isinstance(item, dict):
+        return False
+    if item.get("business_relevant") is not True:
+        return False
+    evidence = item.get("business_evidence")
+    if not isinstance(evidence, list) or not any(str(v).strip() for v in evidence):
+        return False
+    if item.get("work_state") != "available" or bool(item.get("selection_blocked")):
+        return False
+    if item.get("_stagirite_activity_tier") is None:
+        return False
+    try:
+        return float(item.get("score")) >= MIN_DAILY_AUDIENCE_FIT_SCORE
+    except (TypeError, ValueError):
+        return False
+
+
 def _candidate_priority(item: dict[str, Any]) -> tuple[Any, ...]:
     interest = str(item.get("potential_interest") or "неясно").strip().lower()
     obstacles_text = " ".join(str(value).lower() for value in (item.get("obstacles") or []))
@@ -1216,16 +1241,18 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     owner_id = int(owner_id)
     state, _ = _workspace_state(owner_id)
 
-    # v7+ source choices are persistent. When the owner clicks the green
-    # "every morning" button, the worker MUST fill the selected group-only
-    # queue instead of skipping this owner forever.
+    # v7+ supports *both* selected groups and personal Telegram contacts.
+    # Only route to group worker when that source was actually selected.
+    # The group worker deliberately skips contact mode; routing all v7
+    # accounts to it silently disables the personal daily five.
     try:
-        if int(state.get("schema_version") or 0) >= 7:
-            return neonia_chat_daily_worker.process(
-                owner_id, session_string, state, storage=__import__(__name__)
-            )
+        schema_version = int(state.get("schema_version") or 0)
     except (TypeError, ValueError):
-        pass
+        schema_version = 0
+    if schema_version >= 7 and owner_source(state)[0] == "chats":
+        return neonia_chat_daily_worker.process(
+            owner_id, session_string, state, storage=__import__(__name__)
+        )
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
     if not passport:
         return {"owner_id": owner_id, "status": "skip", "reason": "нет портрета ЦА"}
@@ -1277,6 +1304,9 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     current_today_order = [int(x) for x in (current_batch.get("candidate_ids") or [])]
     approved_today = {int(x) for x in (current_batch.get("approved_ids") or [])}
 
+    existing_candidates = _normalize_candidate_list(state.get("candidates", []))
+    existing_by_id = {int(item["telegram_id"]): item for item in existing_candidates}
+
     # Перепроверяем уже выданную сегодняшнюю пятёрку. Это важно после изменения
     # правил: старый контакт с прежней перепиской должен исчезнуть из холодной пятёрки
     # в тот же день, а не только завтра.
@@ -1299,11 +1329,12 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
             current_state_by_id[int(source["telegram_id"])] = state_info
 
     for cid in current_today_order:
-        if cid in approved_today:
-            safe_current_today.append(cid)
-            continue
         state_info = current_state_by_id.get(cid) or {}
-        if state_info.get("work_state") == "available" and not bool(state_info.get("selection_blocked")):
+        old = existing_by_id.get(cid) or {}
+        current_activity = activity_by_id.get(cid) or {}
+        enriched = {**old, **current_activity,
+                    **state_info, "_stagirite_activity_tier": _activity_tier(current_activity)}
+        if _qualified_personal_candidate(enriched):
             safe_current_today.append(cid)
 
     if len(safe_current_today) >= DAILY_TARGET and len(current_today_order) >= DAILY_TARGET:
@@ -1322,9 +1353,6 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         }
 
     excluded = set(sent_ids) | set(blocked_ids) | set(known_ids) | set(previously_shown) | set(safe_current_today)
-
-    existing_candidates = _normalize_candidate_list(state.get("candidates", []))
-    existing_by_id = {int(item["telegram_id"]): item for item in existing_candidates}
 
     # Сначала пытаемся добрать уже проанализированными кандидатами, но обязательно
     # заново проверяем историю личной переписки перед выдачей.
@@ -1371,13 +1399,14 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
             if state_info.get("work_state") != "available" or bool(state_info.get("selection_blocked")):
                 continue
             old = probe_item.get("_old_candidate") or {}
-            ranked_candidates.append(
-                {
-                    **old,
-                    **{k: v for k, v in probe_item.items() if k != "_old_candidate"},
-                    **state_info,
-                }
-            )
+            candidate = {
+                **old,
+                **{k: v for k, v in probe_item.items() if k != "_old_candidate"},
+                **state_info,
+            }
+            if not _qualified_personal_candidate(candidate):
+                continue
+            ranked_candidates.append(candidate)
             if len(ranked_candidates) >= need_existing:
                 break
 
@@ -1430,6 +1459,7 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
                 if item.get("work_state") == "available"
                 and not bool(item.get("selection_blocked"))
                 and item.get("_stagirite_activity_tier") is not None
+                and _qualified_personal_candidate(item)
             ]
             batch_results.sort(key=_candidate_priority)
             new_results.extend(batch_results)
@@ -1452,7 +1482,7 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     ranked_ids = list(safe_current_today)
     for item in all_ranked:
         cid = int(item["telegram_id"])
-        if cid in latest_sent or cid in latest_blocked:
+        if cid in latest_sent or cid in latest_blocked or not _qualified_personal_candidate(item):
             continue
         if cid not in ranked_ids:
             ranked_ids.append(cid)
@@ -1482,7 +1512,8 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         "owner_id": owner_id,
         "status": "prepared" if batch.get("candidate_ids") else "empty",
         "count": len(batch.get("candidate_ids") or []),
-        "complete": bool(batch.get("complete")),
+        "complete": bool(batch.get("complete")) and len(ranked_ids) >= DAILY_TARGET,
+        "missing": max(0, DAILY_TARGET - len(ranked_ids)),
         "reserve": len(reserve_ids),
         "new_analyzed": len(new_results),
         "removed_old_dialogues": max(0, len(current_today_order) - len(safe_current_today)),
