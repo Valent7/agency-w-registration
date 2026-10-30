@@ -12767,9 +12767,59 @@ if telegram_login_valid or remembered_data:
                                 )
 
                                 with st.container(border=True):
-                                    st.markdown(
-                                        f"#### {number}. {contact.get('name', 'Кандидат')}"
-                                    )
+                                    # Deleting a DRAFT must not be confused with
+                                    # permanently excluding an unwanted candidate.
+                                    # Give every cold candidate a visible one-click
+                                    # removal action directly beside their name.
+                                    card_title, card_controls = st.columns([3, 2])
+                                    with card_title:
+                                        st.markdown(
+                                            f"#### {number}. {contact.get('name', 'Кандидат')}"
+                                        )
+                                    if (
+                                        contact.get("source")
+                                        != "Знакомый — выбран директором"
+                                    ):
+                                        already_contacted = (
+                                            bool(isinstance(draft, dict) and draft.get("sent"))
+                                            or contact_id in sent_ids
+                                        )
+                                        with card_controls:
+                                            remove_card = st.button(
+                                                "🗑️ Удалить кандидата",
+                                                key=(
+                                                    "neona_remove_candidate_card_"
+                                                    f"{telegram_id}_{contact_id}"
+                                                ),
+                                                disabled=already_contacted,
+                                                help=(
+                                                    "Исключить из рекомендаций и удалить "
+                                                    "неотправленный черновик. Уже отправленные "
+                                                    "сообщения сохраняются в истории."
+                                                ),
+                                                use_container_width=True,
+                                            )
+                                        if remove_card:
+                                            removal = remove_candidate_from_daily_neonia(
+                                                telegram_id,
+                                                contact_id,
+                                                str(
+                                                    weekly_neona_day.get("task_id") or ""
+                                                    if isinstance(weekly_neona_day, dict)
+                                                    else ""
+                                                ),
+                                            )
+                                            exclude_neonia_candidate(
+                                                contact_id,
+                                                reason="Удалён владельцем из карточки Неоны",
+                                            )
+                                            st.session_state[
+                                                f"neonia_candidate_removed_notice_{telegram_id}"
+                                            ] = (
+                                                "Кандидат удалён из списка и черновиков. "
+                                                "Неония больше не будет его предлагать."
+                                            )
+                                            st.rerun()
                                     st.caption(
                                         f"{username} · источник: {source_title}"
                                     )
