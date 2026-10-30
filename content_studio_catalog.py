@@ -18,7 +18,8 @@ from content_factory_core import iso, utc_now
 from content_factory_store import StoreError
 
 
-def save_reference_result(store, owner_id, project_id, report, *, request_id):
+def save_reference_result(store, owner_id, project_id, report, *, request_id,
+                          approved_intent=None, production_plan=None, quality_criteria=None):
     """Save a checked analysis, never the competitor's media or a queued video."""
     from content_studio_reference import validate_reference_report
 
@@ -42,6 +43,9 @@ def save_reference_result(store, owner_id, project_id, report, *, request_id):
         "studio_tool": "reference", "studio_complete": False,
         "reference_fingerprint": fingerprint, "content": content, "assets": [],
         "topic": plan["title"], "checkpoint": {}, "error": "",
+        **({"approved_intent": approved_intent} if isinstance(approved_intent, dict) else {}),
+        **({"production_plan": production_plan[:12]} if isinstance(production_plan, list) else {}),
+        **({"quality_criteria": quality_criteria[:12]} if isinstance(quality_criteria, list) else {}),
     })
     if job.get("studio_tool") != "reference" or job.get("reference_fingerprint") != fingerprint:
         raise ValueError("Этот разбор уже сохранён с другими условиями.")
