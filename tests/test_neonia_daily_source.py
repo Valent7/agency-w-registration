@@ -111,6 +111,41 @@ class DummyStorage:
         return [{"updated_at":"v2"}]
 
 
+class PersonalContactRoutingTests(unittest.TestCase):
+    def test_v7_contact_mode_reaches_contact_scan_instead_of_group_skip(self):
+        state = {"schema_version":9,"daily_source_mode":"contacts",
+                 "passport":{"analysis":{"audience":"business"}}}
+        with patch.object(scout_storage, "_workspace_state", return_value=(state, {})), \
+             patch.object(scout_storage, "_current_batch_info",return_value={}), \
+             patch.object(scout_storage, "_fetch_contacts_and_statuses",new=__import__("unittest").mock.AsyncMock(return_value=([],{}))), \
+             patch.object(worker,"process",side_effect=AssertionError("Wrong source worker")):
+            result = scout_storage.process_owner_once(77,"fake")
+        self.assertEqual(result["status"],"empty")
+        self.assertIn("контакты",result["reason"].lower())
+
+    def test_contacts_require_evidence_and_fit_score(self):
+        qualified = {
+            "score":50,"business_relevant":True,
+            "business_evidence":["Visible repeated admin work"],
+            "work_state":"available","selection_blocked":False,
+            "_stagirite_activity_tier":0,
+        }
+        check = scout_storage._qualified_personal_candidate
+        self.assertTrue(check(qualified))
+        self.assertFalse(check({**qualified,"score":49}))
+        self.assertFalse(check({**qualified,"business_evidence":[]}))
+        self.assertFalse(check({**qualified,"_stagirite_activity_tier":None}))
+
+    def test_group_source_still_routes_strictly_to_group(self):
+        state={"schema_version":9,"daily_source_mode":"chats",
+               "selected_source_chat":9211}
+        with patch.object(scout_storage,"_workspace_state",return_value=(state,{})), \
+             patch.object(worker,"process",return_value={"status":"group_routed"}) as called:
+            result = scout_storage.process_owner_once(77,"fake")
+        self.assertEqual(result["status"],"group_routed")
+        called.assert_called_once()
+
+
 class CandidateExclusionTests(unittest.TestCase):
     def test_manual_exclusion_is_a_hard_block_for_future_selection(self):
         state = {
