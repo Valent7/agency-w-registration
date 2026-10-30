@@ -21,6 +21,7 @@ from neonia_daily_source import (
 BERLIN = ZoneInfo("Europe/Berlin")
 UTC = timezone.utc
 MAX_GROUP_ACTIVITY_AGE = timedelta(days=7)
+MIN_DAILY_AUDIENCE_FIT_SCORE = 50
 
 
 def _eligible_group_author(candidate, now=None):
@@ -219,6 +220,30 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
         await client.disconnect()
 
 
+def _recommended_group_candidate(candidate):
+    """One quality gate for freshly generated and stored daily group leads.
+
+    Score is an evidence-based HEURISTIC, not a proven statistical percentage
+    of target-audience match. No evidence => no recommendation.
+    """
+    if not _eligible_group_author(candidate):
+        return False
+    if candidate.get("business_relevant") is not True:
+        return False
+    evidence = candidate.get("business_evidence")
+    if not isinstance(evidence, list) or not any(str(x).strip() for x in evidence):
+        return False
+    if candidate.get("selection_blocked") is True:
+        return False
+    if candidate.get("work_state", "available") != "available":
+        return False
+    try:
+        score = float(candidate.get("score"))
+    except (TypeError, ValueError):
+        return False
+    return score >= MIN_DAILY_AUDIENCE_FIT_SCORE
+
+
 def _local_business_signal(context):
     """Conservative no-AI fallback based only on visible group text."""
     text = " ".join([
@@ -320,11 +345,7 @@ def _rank_active_group_authors(state, storage, authors, desired):
                 "telegram_activity_label": str(source.get("telegram_activity_label") or ""),
                 "actuality": "активен в выбранном чате за последние 7 дней",
             }
-            if not _eligible_group_author(merged):
-                continue
-            if bool(merged.get("selection_blocked")):
-                continue
-            if merged.get("business_relevant") is not True:
+            if not _recommended_group_candidate(merged):
                 continue
             ranked.append(merged)
 
@@ -474,7 +495,7 @@ def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
     if matches_daily_batch(current,"chats",chat_id) and len(
         _int_set(current.get("candidate_ids",[])))>=5:
         qualified = {int(c["telegram_id"]) for c in candidates
-                     if _eligible_group_author(c)}
+                     if _recommended_group_candidate(c)}
         if all(cid in qualified for cid in
                _int_set(current.get("candidate_ids",[]))):
             return True
@@ -504,7 +525,7 @@ def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
     # Previously approved IDs remain available for the owner to handle.
     selected_ids=list(confirmed) if matches_daily_batch(last,"chats",chat_id) else []
     for card in candidates:
-        if not _eligible_group_author(card):
+        if not _recommended_group_candidate(card):
             continue
         cid=int(card["telegram_id"])
         if cid not in selected_ids:
@@ -552,7 +573,7 @@ def process(owner_id,session_string,state,storage):
         saved_cards = [x for x in storage._normalize_candidate_list(state.get("candidates", []))
                        if int(x["telegram_id"]) in current_ids
                        and int(x.get("source_chat_id") or 0) == chat_id
-                       and _eligible_group_author(x)]
+                       and _recommended_group_candidate(x)]
         if len({int(x["telegram_id"]) for x in saved_cards}) >= 5:
             return {"owner_id":owner_id,"status":"ready","count":5,"source_chat_id":chat_id}
     if current.get("approved_ids") and not matches_daily_batch(
@@ -568,7 +589,7 @@ def process(owner_id,session_string,state,storage):
         saved=[x for x in storage._normalize_candidate_list(state.get("candidates",[]))
                if int(x["telegram_id"]) in cached
                and int(x.get("source_chat_id") or 0)==chat_id]
-        saved = [x for x in saved if _eligible_group_author(x)]
+        saved = [x for x in saved if _recommended_group_candidate(x)]
         if saved:
             _write_daily_group_task(storage,owner_id,today,chat_id,saved)
             if len(saved)>=5:
@@ -584,7 +605,7 @@ def process(owner_id,session_string,state,storage):
         existing_cards=[x for x in storage._normalize_candidate_list(state.get("candidates",[]))
                         if int(x["telegram_id"]) in have
                         and int(x.get("source_chat_id") or 0)==chat_id
-                        and _eligible_group_author(x)]
+                        and _recommended_group_candidate(x)]
     offset=int((state.get("chat_offsets") or {}).get(str(chat_id)) or 0)
     api_id,api_hash=storage._telegram_api_credentials()
     needed=max(1,5-len(existing_cards))
@@ -621,14 +642,9 @@ def process(owner_id,session_string,state,storage):
                 )
             )
             scanned += member_scanned
-            # Participant-only cards have no evidence for target-audience ranking.
-            # Keep only locally business-signaled records; usually the active-author
-            # path above supplies the full five.
-            for item in raw_members:
-                if len(cards)>=needed:
-                    break
-                if _local_business_signal(item):
-                    cards.append(item)
+            # A name in a group's member list says nothing about current
+            # activity or target-audience fit. Do not pad the five with it.
+            # This scan can still help gauge source exhaustion.
         except Exception as exc:
             print(
                 f"[NeoniaChat] owner={owner_id} participant fallback unavailable: {type(exc).__name__}",
@@ -640,7 +656,8 @@ def process(owner_id,session_string,state,storage):
             _persist_group_selection(storage,owner_id,mode,chat,[],
                                      new_offset,scanned,exhausted)
         return {"owner_id":owner_id,"status":"empty",
-                "reason":"no target active authors found in selected chat",
+                "count":0,"missing":5,
+                "reason":"Недостаточно проверенных кандидатов: нужна активность, @username, доказательства ЦА и оценка >=50",
                 "source_chat_id":chat_id}
     if not _persist_group_selection(storage,owner_id,mode,chat,cards,
                                     new_offset,scanned,exhausted):
@@ -649,5 +666,10 @@ def process(owner_id,session_string,state,storage):
     combined=existing_cards+cards
     if not _write_daily_group_task(storage,owner_id,today,chat_id,combined):
         return {"owner_id":owner_id,"status":"skip","reason":"daily task update not confirmed"}
-    return {"owner_id":owner_id,"status":"prepared","count":len(combined),
+    qualified_count = len({int(x["telegram_id"]) for x in combined
+                           if _recommended_group_candidate(x)})
+    return {"owner_id":owner_id,
+            "status":"prepared" if qualified_count>=5 else "incomplete",
+            "count":qualified_count,"missing":max(0,5-qualified_count),
+            "reason":"" if qualified_count>=5 else "Качественных кандидатов меньше пяти — подбор не заполнен неподходящими людьми",
             "source_chat_id":chat_id}
