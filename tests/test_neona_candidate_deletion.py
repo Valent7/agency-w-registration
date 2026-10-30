@@ -113,6 +113,7 @@ class DeleteCandidateTests(unittest.TestCase):
           "contact_progress":{"11":{"status":"waiting"},"12":{"status":"waiting"}}}}
         ns={
             "datetime":datetime,"BERLIN":ZoneInfo("Europe/Berlin"),"UTC":timezone.utc,
+            "Any":Any,
             "_load_tasks":lambda owner:([task],None),
             "_active_weekly_meeting_task":lambda owner:task,
             "_daily_candidate_task":lambda owner:task,
