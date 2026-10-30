@@ -94,11 +94,14 @@ def render_intent_review(key: str, *, kind: str, project: dict, extra: dict | No
         if intent.get("unclear"):
             st.warning("Есть моменты, которые система считает неоднозначными. Если смысл всё равно передан верно — можно утвердить. Иначе напишите поправку ниже.")
 
+    correction_key = key + "_correction"
+    if st.session_state.pop(key + "_clear_correction", False):
+        st.session_state[correction_key] = ""
     correction = st.text_area(
         "Что я поняла неправильно или что нужно уточнить?",
         placeholder="Например: главное не бизнес, а ощущение свободного вечера; героиня должна быть женщиной около 60 лет.",
         max_chars=3000,
-        key=key + "_correction",
+        key=correction_key,
     )
     fix_col, approve_col = st.columns([1, 1], gap="medium")
     if fix_col.button("✏️ Учесть мою поправку", width="stretch", key=key + "_reinterpret"):
@@ -114,7 +117,9 @@ def render_intent_review(key: str, *, kind: str, project: dict, extra: dict | No
                 st.session_state[key + "_intent_fp"] = _fingerprint(revised_raw, kind, extra)
                 st.session_state.pop(key + "_production", None)
                 st.session_state.pop(key + "_approved", None)
-                st.session_state[key + "_correction"] = ""
+                # Never mutate the value of a widget after it has been instantiated
+                # in the same Streamlit run. Clear it safely on the next rerun.
+                st.session_state[key + "_clear_correction"] = True
                 st.rerun()
             except IntentError as exc:
                 st.error(str(exc))
@@ -154,5 +159,5 @@ def render_intent_review(key: str, *, kind: str, project: dict, extra: dict | No
 
 
 def clear_intent(key: str) -> None:
-    for suffix in ("_intent", "_intent_raw", "_intent_fp", "_production", "_approved", "_correction"):
+    for suffix in ("_intent", "_intent_raw", "_intent_fp", "_production", "_approved", "_correction", "_clear_correction"):
         st.session_state.pop(key + suffix, None)
