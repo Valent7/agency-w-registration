@@ -6072,8 +6072,8 @@ def neona_first_message_blockers(message, contact=None):
     problems = []
     if not message:
         return ["Пустое сообщение"]
-    if len(message) > 480:
-        problems.append("Первое сообщение слишком длинное (более 480 знаков)")
+    if len(message) > 360:
+        problems.append("Первое сообщение слишком длинное (более 360 знаков)")
     if message.count("?") > 1:
         problems.append("В первом сообщении больше одного вопроса")
     lowered = message.casefold()
@@ -6318,6 +6318,8 @@ def generate_neona_first_message(
     if answer.startswith('"') and answer.endswith('"'):
         answer = answer[1:-1].strip()
 
+    if answer.startswith("ИИ не сформировал ответ") or answer.startswith("Не удалось связаться с ИИ"):
+        answer = ""
     result = finalize_neona_first_message(answer, owner_name, contact) if answer else ""
     if result and not neona_first_message_blockers(result, contact):
         return result
@@ -6332,21 +6334,18 @@ def generate_neona_first_message(
     ).strip()
     if retry.startswith("Ошибка OpenAI:"):
         raise RuntimeError(retry)
+    if retry.startswith("ИИ не сформировал ответ") or retry.startswith("Не удалось связаться с ИИ"):
+        retry = ""
     result = finalize_neona_first_message(retry.strip('"'), owner_name, contact) if retry else ""
     if result and not neona_first_message_blockers(result, contact):
         return result
 
-    # Fail safe: no speculative promises, names or sales scripts.
-    greeting = (
-        f"{candidate_first_name(contact)}, здравствуйте!"
-        if candidate_first_name(contact) else "Здравствуйте!"
+    # Quality first: never replace a failed personal introduction with a
+    # generic sales template and report it as a completed task.
+    raise RuntimeError(
+        "Неона не смогла подготовить качественное первое сообщение. "
+        "Черновик не создан; проверьте данные кандидата и модель."
     )
-    safe = (
-        f"{greeting} {neona_identity(owner_name)} "
-        "В Агентстве W мы помогаем освобождать время от повторяющихся дел. "
-        "Хотели бы узнать, как это работает?"
-    )
-    return finalize_neona_first_message(safe, owner_name, contact)
 
 
 
