@@ -11114,10 +11114,158 @@ if telegram_login_valid or remembered_data:
                                     st.rerun()
 
                         elif daily_candidate_ids:
-                            st.success(
-                                "✅ Сегодняшние кандидаты уже переданы "
-                                "Неоне. Работайте с готовыми сообщениями ниже."
+                            # approved_ids означает только, что кандидат передан
+                            # в рабочий стол Неоны. Зелёный статус показываем
+                            # ТОЛЬКО если реальный черновик первого сообщения
+                            # действительно существует.
+                            drafts_now = st.session_state.get(
+                                neona_drafts_key,
+                                {},
                             )
+                            if not isinstance(drafts_now, dict):
+                                drafts_now = {}
+
+                            approved_today_ids = [
+                                contact_id
+                                for contact_id in daily_candidate_ids
+                                if contact_id in already_approved_daily
+                            ]
+                            ready_message_ids = []
+                            missing_message_ids = []
+                            for contact_id in approved_today_ids:
+                                draft = drafts_now.get(
+                                    contact_id,
+                                    drafts_now.get(str(contact_id), {}),
+                                )
+                                message_text = (
+                                    str(draft.get("message") or "").strip()
+                                    if isinstance(draft, dict)
+                                    else ""
+                                )
+                                if message_text:
+                                    ready_message_ids.append(contact_id)
+                                else:
+                                    missing_message_ids.append(contact_id)
+
+                            if missing_message_ids:
+                                recovery_key = (
+                                    "neona_auto_restore_drafts_"
+                                    f"{telegram_id}_{today_work_date}"
+                                )
+                                attempted = st.session_state.get(
+                                    recovery_key,
+                                    [],
+                                )
+                                if not isinstance(attempted, list):
+                                    attempted = []
+                                to_restore = [
+                                    contact_id
+                                    for contact_id in missing_message_ids
+                                    if contact_id not in attempted
+                                    and contact_id in candidate_by_id
+                                ]
+
+                                passport = st.session_state.get(passport_key)
+                                if to_restore and passport:
+                                    st.session_state[recovery_key] = (
+                                        attempted + to_restore
+                                    )
+                                    restore_contacts = [
+                                        candidate_by_id[contact_id]
+                                        for contact_id in to_restore
+                                    ]
+                                    with st.spinner(
+                                        "Кандидат уже передан Неоне. "
+                                        "Восстанавливаю отсутствующее первое сообщение..."
+                                    ):
+                                        try:
+                                            restored = (
+                                                generate_neona_first_messages(
+                                                    first_name,
+                                                    passport["analysis"],
+                                                    restore_contacts,
+                                                )
+                                            )
+                                        except Exception:
+                                            restored = {}
+
+                                    restored_any = False
+                                    if isinstance(restored, dict):
+                                        for raw_id, draft in restored.items():
+                                            try:
+                                                contact_id = int(raw_id)
+                                            except (TypeError, ValueError):
+                                                continue
+                                            if (
+                                                contact_id not in to_restore
+                                                or not isinstance(draft, dict)
+                                                or not str(
+                                                    draft.get("message") or ""
+                                                ).strip()
+                                            ):
+                                                continue
+                                            previous = drafts_now.get(
+                                                contact_id,
+                                                drafts_now.get(
+                                                    str(contact_id),
+                                                    {},
+                                                ),
+                                            )
+                                            draft = dict(draft)
+                                            draft["revision"] = int(
+                                                (
+                                                    previous.get("revision", 0)
+                                                    if isinstance(previous, dict)
+                                                    else 0
+                                                )
+                                                or 0
+                                            ) + 1
+                                            draft["approved"] = False
+                                            draft["validation_errors"] = []
+                                            draft["status"] = (
+                                                "Сообщение подготовлено"
+                                            )
+                                            drafts_now[contact_id] = draft
+                                            drafts_now.pop(
+                                                str(contact_id),
+                                                None,
+                                            )
+                                            restored_any = True
+
+                                    if restored_any:
+                                        st.session_state[
+                                            neona_drafts_key
+                                        ] = drafts_now
+                                        persist_workspace_if_changed(
+                                            telegram_id,
+                                            force=True,
+                                        )
+                                        st.rerun()
+
+                                st.warning(
+                                    "Кандидат уже передан Неоне, но готового "
+                                    "первого сообщения пока нет. Не считаю "
+                                    "этот этап завершённым."
+                                )
+                                if st.button(
+                                    "🔄 Подготовить сообщение заново",
+                                    key=(
+                                        "neona_retry_missing_draft_"
+                                        f"{telegram_id}_{today_work_date}"
+                                    ),
+                                    use_container_width=True,
+                                ):
+                                    st.session_state.pop(
+                                        recovery_key,
+                                        None,
+                                    )
+                                    st.rerun()
+                            else:
+                                st.success(
+                                    "✅ Кандидаты переданы Неоне, и первые "
+                                    f"сообщения действительно готовы: "
+                                    f"{len(ready_message_ids)}."
+                                )
                         else:
                             message = str(
                                 weekly_neona_day.get("message")
