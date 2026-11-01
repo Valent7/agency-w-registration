@@ -670,8 +670,13 @@ def process(owner_id,session_string,state,storage):
                 flush=True,
             )
 
+    # Diagnostic counts contain no message texts, usernames or credentials.
+    unique_authors = len({int(x["telegram_id"]) for x in authors})
+    unique_deep_authors = len({int(x["telegram_id"]) for x in (deeper_authors if "deeper_authors" in locals() else [])})
     print(
-        f"[NeoniaChat] owner={owner_id} qualified={len(cards)}/{needed} scanned_messages={scanned}",
+        f"[NeoniaChat] owner={owner_id} qualified={len(cards)}/{needed} "
+        f"scanned_messages={scanned} initial_authors={unique_authors} "
+        f"deeper_authors={unique_deep_authors}",
         flush=True,
     )
 
@@ -703,7 +708,13 @@ def process(owner_id,session_string,state,storage):
                                      new_offset,scanned,exhausted)
         return {"owner_id":owner_id,"status":"empty",
                 "count":0,"missing":5,
-                "reason":"Расширенный поиск выполнен, но в доступной истории чата пока меньше 5 людей с активностью, @username, доказательствами ЦА и оценкой >=50",
+                "reason":(
+                    "В доступных сообщениях выбранной группы не обнаружено "
+                    "активных авторов с доступным @username за последние 7 дней"
+                    if unique_authors + unique_deep_authors == 0
+                    else "Активные авторы найдены, но никто не прошёл проверку "
+                         "доступности, деловой релевантности и оценки ЦА >=50"
+                ),
                 "source_chat_id":chat_id}
     if not _persist_group_selection(storage,owner_id,mode,chat,cards,
                                     new_offset,scanned,exhausted):
