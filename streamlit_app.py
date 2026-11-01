@@ -130,7 +130,7 @@ from workspace_persistence import (
 )
 from person_card import render_person_card_2_0, render_neona_magnets_reference
 from scout_center import render_scout_center
-from vk_scout_ui import render_vk_sources
+from vk_scout_ui import render_vk_sources, render_today_vk_candidates
 from vk_scout_oauth import handle_vk_scout_oauth_callback
 from telegram_stories_ui import render_telegram_stories_radar
 from instagram_radar_ui import render_instagram_radar
@@ -8798,6 +8798,25 @@ if telegram_login_valid or remembered_data:
                     yesterday_iso,
                     "🕘 Вчера от Стагирита",
                     False,
+                )
+
+            # Стагирит показывает рабочий результат по всем каналам, а не
+            # объявляет "0", когда Telegram пуст, но VK уже подготовил людей.
+            # Карточки VK интерактивны прямо на странице "День".
+            try:
+                with st.expander(
+                    "💙 VK-кандидаты Неонии на сегодня",
+                    expanded=True,
+                ):
+                    render_today_vk_candidates(
+                        int(telegram_id),
+                        member_code=str(member_code or ""),
+                        ask_openai_fn=ask_openai,
+                    )
+            except Exception as exc:
+                st.caption(
+                    "VK-подборка временно не отобразилась на странице «День»: "
+                    + str(exc)
                 )
 
             selected_candidates = [
