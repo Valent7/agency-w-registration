@@ -1381,12 +1381,24 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         )
         group_status = str(group_result.get("status") or "")
         group_count = int(group_result.get("count") or 0)
-        if group_status != "empty" or group_count > 0:
+        group_reason = str(group_result.get("reason") or "").strip()
+        legacy_switch_block = (
+            group_status == "skip"
+            and "new chat takes effect tomorrow" in group_reason.lower()
+        )
+        # Старое правило "новый чат только завтра" больше не должно останавливать
+        # дневную пятёрку. Уже утверждённые кандидаты сохраняются, а недостающие
+        # места добираются сегодня из других Telegram-источников.
+        if (group_status != "empty" or group_count > 0) and not legacy_switch_block:
             return group_result
-        group_fallback_reason = str(group_result.get("reason") or "выбранная группа не дала кандидатов")
+        group_fallback_reason = (
+            "утверждённый Telegram-кандидат сохранён; недостающие места добираются сегодня"
+            if legacy_switch_block
+            else str(group_result.get("reason") or "выбранная группа не дала кандидатов")
+        )
         print(
-            f"[Telegram Scout] owner={owner_id}: group source empty; "
-            "falling back to owner's Telegram contacts",
+            f"[Telegram Scout] owner={owner_id}: primary Telegram group did not "
+            "complete the daily five; continuing same-day top-up",
             flush=True,
         )
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
