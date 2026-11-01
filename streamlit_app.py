@@ -11300,26 +11300,6 @@ if telegram_login_valid or remembered_data:
                             )
                         )
 
-                    # VK-пятёрка должна быть видна там, где владелец
-                    # реально работает с Неоной, а не только в настройках Неонии
-                    # или на странице «День».
-                    try:
-                        st.divider()
-                        with st.expander(
-                            "💙 VK 5 на сегодня · отбор Неонии",
-                            expanded=True,
-                        ):
-                            render_today_vk_candidates(
-                                int(telegram_id),
-                                member_code=str(member_code or ""),
-                                ask_openai_fn=ask_openai,
-                            )
-                    except Exception as exc:
-                        st.caption(
-                            "VK-пятёрка временно не отобразилась у Неоны: "
-                            + str(exc)
-                        )
-
                     selected_ids = []
                     for contact_id in st.session_state.get(
                         selected_candidates_key,
