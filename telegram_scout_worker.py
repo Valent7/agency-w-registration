@@ -1145,7 +1145,14 @@ def _current_batch_info(owner_id: int) -> dict[str, Any]:
     }
 
 
-def _write_daily_batch(owner_id: int, ranked_ids: list[int], reserve_ids: list[int], *, replace_existing: bool = False) -> dict[str, Any]:
+def _write_daily_batch(
+    owner_id: int,
+    ranked_ids: list[int],
+    reserve_ids: list[int],
+    *,
+    replace_existing: bool = False,
+    fallback_from_group_reason: str = "",
+) -> dict[str, Any]:
     today = datetime.now(BERLIN).date()
     today_key = today.isoformat()
     tasks = _load_tasks(owner_id)
@@ -1194,13 +1201,23 @@ def _write_daily_batch(owner_id: int, ranked_ids: list[int], reserve_ids: list[i
             break
 
     now_iso = datetime.now(UTC).isoformat()
+    fallback_from_group_reason = str(fallback_from_group_reason or "").strip()
+    source_name = (
+        "telegram_contacts_fallback_after_group_empty"
+        if fallback_from_group_reason
+        else "telegram_scout_background"
+    )
     today_info.update(
         {
             "candidate_ids": merged[:daily_target],
             "approved_ids": [cid for cid in approved_ids if cid in merged],
             "prepared_at": str(today_info.get("prepared_at") or now_iso),
             "last_topup_attempt_at": now_iso,
-            "source": "telegram_scout_background",
+            "source": source_name,
+            "source_signature": "contacts",
+            "source_mode": "contacts",
+            "fallback_from_group": bool(fallback_from_group_reason),
+            "group_fallback_reason": fallback_from_group_reason,
             "complete": len(merged) >= daily_target,
         }
     )
@@ -1521,6 +1538,7 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         ranked_ids,
         reserve_ids,
         replace_existing=True,
+        fallback_from_group_reason=group_fallback_reason,
     )
     return {
         "owner_id": owner_id,
@@ -1531,6 +1549,8 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         "reserve": len(reserve_ids),
         "new_analyzed": len(new_results),
         "removed_old_dialogues": max(0, len(current_today_order) - len(safe_current_today)),
+        "fallback_from_group": bool(group_fallback_reason),
+        "group_fallback_reason": group_fallback_reason,
     }
 
 
