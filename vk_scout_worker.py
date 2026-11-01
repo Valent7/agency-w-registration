@@ -31,6 +31,8 @@ from vk_scout_oauth import (
     get_valid_vk_scout_access_token,
 )
 
+from vk_quality_daily import ensure_quality_vk_assignments
+
 from vk_scout import (
     VKScoutError,
     ensure_daily_vk_assignments,
@@ -264,12 +266,11 @@ def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def run_once() -> dict[str, int]:
-    """Один проход последовательной VK-очереди.
+    """Один проход качественного VK-поиска.
 
-    Неония больше не оценивает участников сообществ по ЦА и не сканирует
-    все источники одновременно. Для каждого партнёра берётся текущий источник,
-    выдаются следующие 5 новых людей, затем очередь продолжается с сохранённого
-    места. Закончилось сообщество — функция сама переходит к следующему.
+    Источники владельца обновляются, Неония оценивает публичные профили по
+    сохранённому портрету ЦА, и только прошедшие порог попадают в дневную пятёрку.
+    Первый контакт по-прежнему не отправляется автоматически.
     """
     members = _load_members()
     member_ids: list[int] = []
@@ -377,7 +378,7 @@ def run_once() -> dict[str, int]:
                 f"оценено={score_result.get('analyzed') or 0}, "
                 f"лучший_балл={score_result.get('best_score')}"
             )
-            prepared = ensure_daily_vk_assignments(
+            prepared = ensure_quality_vk_assignments(
                 owner_id,
                 member_code,
                 limit=daily_limit,
@@ -394,7 +395,19 @@ def run_once() -> dict[str, int]:
                         root_owner_id
                     )
                     os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
-                    prepared = ensure_daily_vk_assignments(
+                    scan_result = scan_vk_sources(
+                        owner_id,
+                        per_source=200,
+                        max_sources=min(10, len(sources)),
+                    )
+                    score_result = score_vk_candidates(
+                        owner_id,
+                        target_profile,
+                        ask_openai_fn=_ask_openai,
+                        limit=analysis_limit,
+                    )
+                    stats["analyzed"] += int(score_result.get("analyzed") or 0)
+                    prepared = ensure_quality_vk_assignments(
                         owner_id,
                         member_code,
                         limit=daily_limit,
