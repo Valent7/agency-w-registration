@@ -2793,12 +2793,71 @@ Telegram-предупреждение scam/fake является основан�
     return normalized
 
 
+async def _resolve_first_outreach_entity(
+    client,
+    recipient_telegram_id,
+    recipient_username="",
+    recipient_source_chat_id=None,
+    recipient_access_hash=None,
+):
+    """Resolve an approved first-outreach recipient from contacts or chosen group."""
+    recipient_telegram_id = int(recipient_telegram_id)
+
+    contacts_result = await client(GetContactsRequest(hash=0))
+    for user in contacts_result.users:
+        if int(user.id) == recipient_telegram_id:
+            return user
+
+    try:
+        source_chat_id = int(recipient_source_chat_id or 0)
+    except (TypeError, ValueError):
+        source_chat_id = 0
+    if source_chat_id <= 0:
+        raise RuntimeError(
+            "Этого человека нет в ваших Telegram-контактах и нет подтверждённого "
+            "источника из выбранной Telegram-группы."
+        )
+
+    source_group_found = False
+    async for dialog in client.iter_dialogs(limit=500):
+        if bool(getattr(dialog, "is_group", False)) and int(
+            getattr(dialog.entity, "id", -1)
+        ) == source_chat_id:
+            source_group_found = True
+            break
+    if not source_group_found:
+        raise RuntimeError(
+            "Выбранная Telegram-группа больше недоступна этому аккаунту."
+        )
+
+    if recipient_access_hash not in (None, ""):
+        try:
+            return InputPeerUser(recipient_telegram_id, int(recipient_access_hash))
+        except (TypeError, ValueError):
+            pass
+
+    username = str(recipient_username or "").strip().lstrip("@")
+    if username:
+        try:
+            entity = await client.get_entity(username)
+            if int(getattr(entity, "id", 0) or 0) == recipient_telegram_id:
+                return entity
+        except Exception:
+            pass
+
+    raise RuntimeError(
+        "Telegram видит этого автора в выбранной группе, но сейчас не дал "
+        "достаточных данных для личного сообщения. Выберите другого кандидата."
+    )
+
+
 async def send_telegram_first_message(
     owner_telegram_id,
     recipient_telegram_id,
     recipient_username,
     message,
     recipient_source_chat_id=None,
+    recipient_access_hash=None,
 ):
     """Отправляет одно утверждённое первое сообщение от аккаунта владельца."""
 
@@ -2842,24 +2901,13 @@ async def send_telegram_first_message(
                 "Подключён другой Telegram-аккаунт."
             )
 
-        entity = None
-        contacts_result = await client(
-            GetContactsRequest(hash=0)
+        entity = await _resolve_first_outreach_entity(
+            client,
+            recipient_telegram_id,
+            recipient_username,
+            recipient_source_chat_id,
+            recipient_access_hash,
         )
-        for user in contacts_result.users:
-            if int(user.id) == recipient_telegram_id:
-                entity = user
-                break
-
-        # Для первого холодного обращения Агентство W теперь использует
-        # только реальные Telegram-контакты владельца. Это не попытка
-        # обходить антиспам Telegram через username или участников групп.
-        if entity is None:
-            raise RuntimeError(
-                "Этого человека нет в ваших Telegram-контактах. "
-                "Первое сообщение ему через Telegram не отправляем. "
-                "Выберите другого кандидата или дополнительный канал."
-            )
 
         # Последнее входящее сообщение, существовавшее ДО первого
         # сообщения Агентства W. Всё, что придёт позже, должна обработать Неона.
@@ -13720,6 +13768,9 @@ if telegram_login_valid or remembered_data:
                                                                         draft["message"],
                                                                         contact.get(
                                                                             "source_chat_id"
+                                                                        ),
+                                                                        contact.get(
+                                                                            "access_hash"
                                                                         ),
                                                                     )
                                                                 )
