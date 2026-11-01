@@ -5455,19 +5455,29 @@ def ensure_weekly_candidates_for_neona(
         "neonia_sequential_queue",
         "neonia_group_activity_targeting",
     }
+    today_source = str(today_info.get("source") or "")
     sequential_source = (
-        str(today_info.get("source") or "") in accepted_daily_sources
+        today_source in accepted_daily_sources
         and matches_preference
     )
+    safe_contact_fallback = bool(
+        owner_pref == "chats"
+        and today_source == "telegram_contacts_fallback_after_group_empty"
+        and today_info.get("fallback_from_group")
+        and str(today_info.get("source_signature") or "") == "contacts"
+    )
+    usable_today_source = sequential_source or safe_contact_fallback
 
-    # Never display yesterday's or today's PERSONAL queue as the newly
-    # selected Telegram group. It remains in historical records only.
-    if candidate_ids and not matches_preference:
+    # A normal personal queue must never masquerade as people from the selected
+    # group. The one exception is an explicitly labelled SAFE fallback created
+    # after the selected group returned zero: these are the owner's own Telegram
+    # contacts and the UI must say so plainly.
+    if candidate_ids and not matches_preference and not safe_contact_fallback:
         candidate_ids = []
         approved_ids = []
         today_info = {}
 
-    if owner_pref == "chats" and not force_prepare and not sequential_source:
+    if owner_pref == "chats" and not force_prepare and not usable_today_source:
         return {
             "ok": True, "active": True,
             "task_id": str(task.get("id") or ""),
@@ -5482,8 +5492,25 @@ def ensure_weekly_candidates_for_neona(
             ),
         }
 
-    if candidate_ids and sequential_source and not force_prepare:
+    if candidate_ids and usable_today_source and not force_prepare:
         complete = len(candidate_ids) >= daily_target
+        if safe_contact_fallback:
+            fallback_message = (
+                "В выбранной Telegram-группе сегодня не нашлось подходящих "
+                "адресуемых кандидатов. Чтобы рабочий день не остался пустым, "
+                f"Неония добрала {len(candidate_ids)} из Ваших собственных "
+                "Telegram-контактов по тому же портрету ЦА. "
+                "Это не люди из группы — источник показан честно."
+            )
+        else:
+            fallback_message = (
+                ""
+                if complete
+                else (
+                    f"Сейчас найдено {len(candidate_ids)} из {daily_target}. "
+                    "С найденными людьми уже можно работать; добор не блокирует интерфейс."
+                )
+            )
         return {
             "ok": True,
             "active": True,
@@ -5497,14 +5524,9 @@ def ensure_weekly_candidates_for_neona(
             "daily_target": daily_target,
             "prepared_at": str(today_info.get("prepared_at") or ""),
             "complete": complete,
-            "message": (
-                ""
-                if complete
-                else (
-                    f"Сейчас найдено {len(candidate_ids)} из {daily_target}. "
-                    "С найденными людьми уже можно работать; добор не блокирует интерфейс."
-                )
-            ),
+            "source": today_source,
+            "fallback_from_group": safe_contact_fallback,
+            "message": fallback_message,
         }
 
     if not callable(prepare_candidates_fn):
@@ -5537,7 +5559,7 @@ def ensure_weekly_candidates_for_neona(
     # собранная по активности/ЦА, один раз заменяется новой очередью. Дальше
     # source=neonia_sequential_queue или neonia_group_activity_targeting
     # фиксирует пятёрку до следующего дня.
-    if not sequential_source:
+    if not usable_today_source:
         candidate_ids = []
         approved_ids = []
 
