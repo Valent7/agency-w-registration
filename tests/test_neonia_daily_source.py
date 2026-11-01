@@ -215,15 +215,18 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertFalse(worker._local_business_signal(
             {"public_info":"Доброе утро всем","group_messages":[]}))
 
-    def test_group_author_requires_freshness_and_username(self):
+    def test_group_author_requires_freshness_and_reachable_identity(self):
         now = datetime(2026, 10, 30, 7, tzinfo=timezone.utc)
         base = {
-            "username":"active_person", "activity_precision":"group_message_exact",
+            "username":"active_person", "access_hash":123456789,
+            "activity_precision":"group_message_exact",
             "last_seen_at":now.isoformat(),
         }
         self.assertTrue(worker._eligible_group_author(base, now))
-        self.assertFalse(worker._eligible_group_author(
+        self.assertTrue(worker._eligible_group_author(
             {**base, "username":""}, now))
+        self.assertFalse(worker._eligible_group_author(
+            {**base, "username":"", "access_hash":None}, now))
         self.assertFalse(worker._eligible_group_author(
             {**base, "last_seen_at":(now-timedelta(days=30)).isoformat()}, now))
         self.assertFalse(worker._eligible_group_author(
@@ -260,7 +263,10 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertFalse(worker._recommended_group_candidate({**candidate,"score":49}))
         self.assertFalse(worker._recommended_group_candidate({**candidate,"business_evidence":[]}))
         self.assertFalse(worker._recommended_group_candidate({**candidate,"business_relevant":False}))
-        self.assertFalse(worker._recommended_group_candidate({**candidate,"username":""}))
+        self.assertTrue(worker._recommended_group_candidate(
+            {**candidate,"username":"","access_hash":987654321}))
+        self.assertFalse(worker._recommended_group_candidate(
+            {**candidate,"username":"","access_hash":None}))
 
     def test_shortage_never_filled_by_inactive_group_members(self):
         async def only_two(session,apiid,hash,chat,excluded,desired,message_limit):
