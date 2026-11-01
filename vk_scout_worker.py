@@ -316,15 +316,20 @@ def run_once() -> dict[str, int]:
         _log(f"VK Scout OAuth: {exc}")
         scout_access_token = ""
 
+    target_profiles = _load_target_profiles(member_ids)
+
     stats = {
         "members": len(member_ids),
         "active": 0,
         "source_owners": 0,
         "assignments_ready": 0,
+        "analyzed": 0,
         "errors": 0,
     }
 
     daily_limit = _int_env("VK_SCOUT_DAILY_LIMIT", 5, 1, 5)
+    analysis_limit = _int_env("VK_SCOUT_ANALYSIS_LIMIT", 30, 5, 100)
+    min_score = _int_env("VK_SCOUT_MIN_SCORE", 50, 0, 100)
 
     for owner_id in member_ids:
         if owner_id not in confirmed_ids:
@@ -348,12 +353,35 @@ def run_once() -> dict[str, int]:
             continue
         stats["source_owners"] += 1
 
+        target_profile = target_profiles.get(owner_id)
+        if not target_profile:
+            _log(f"{owner_id}: нет сохранённого живого портрета ЦА — VK-пятёрку не выдаю")
+            continue
+
         try:
+            scan_result = scan_vk_sources(
+                owner_id,
+                per_source=200,
+                max_sources=min(10, len(sources)),
+            )
+            score_result = score_vk_candidates(
+                owner_id,
+                target_profile,
+                ask_openai_fn=_ask_openai,
+                limit=analysis_limit,
+            )
+            stats["analyzed"] += int(score_result.get("analyzed") or 0)
+            _log(
+                f"{owner_id}: Неония проверила VK-пул; "
+                f"найдено={scan_result.get('candidates_found') or 0}, "
+                f"оценено={score_result.get('analyzed') or 0}, "
+                f"лучший_балл={score_result.get('best_score')}"
+            )
             prepared = ensure_daily_vk_assignments(
                 owner_id,
                 member_code,
                 limit=daily_limit,
-                min_score=0,
+                min_score=min_score,
             )
         except VKScoutError as exc:
             text_error = str(exc).lower()
@@ -370,7 +398,7 @@ def run_once() -> dict[str, int]:
                         owner_id,
                         member_code,
                         limit=daily_limit,
-                        min_score=0,
+                        min_score=min_score,
                     )
                 except Exception as retry_exc:
                     stats["errors"] += 1
