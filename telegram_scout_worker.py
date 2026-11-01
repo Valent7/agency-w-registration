@@ -1249,9 +1249,20 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         schema_version = int(state.get("schema_version") or 0)
     except (TypeError, ValueError):
         schema_version = 0
+    group_fallback_reason = ""
     if schema_version >= 7 and owner_source(state)[0] == "chats":
-        return neonia_chat_daily_worker.process(
+        group_result = neonia_chat_daily_worker.process(
             owner_id, session_string, state, storage=__import__(__name__)
+        )
+        group_status = str(group_result.get("status") or "")
+        group_count = int(group_result.get("count") or 0)
+        if group_status != "empty" or group_count > 0:
+            return group_result
+        group_fallback_reason = str(group_result.get("reason") or "выбранная группа не дала кандидатов")
+        print(
+            f"[Telegram Scout] owner={owner_id}: group source empty; "
+            "falling back to owner's Telegram contacts",
+            flush=True,
         )
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
     if not passport:
@@ -1261,7 +1272,10 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
 
     contacts, activity_by_id = asyncio.run(_fetch_contacts_and_statuses(session_string))
     if not contacts:
-        return {"owner_id": owner_id, "status": "empty", "reason": "Telegram не вернул контакты"}
+        result = {"owner_id": owner_id, "status": "empty", "reason": "Telegram не вернул контакты"}
+        if group_fallback_reason:
+            result["group_fallback_reason"] = group_fallback_reason
+        return result
 
     sent_ids = _sent_ids(state)
     blocked_ids = _blocked_ids(state)
