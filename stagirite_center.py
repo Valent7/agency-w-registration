@@ -5292,9 +5292,18 @@ def get_recent_daily_candidates_for_stagirite(
                 if day_key == today.isoformat() and not matches_daily_batch(
                     info, chosen_mode, chosen_chat_id
                 ):
-                    # Historical personal cards must never masquerade as
-                    # today's batch from the explicitly selected group.
-                    continue
+                    safe_contact_fallback = bool(
+                        chosen_mode == "chats"
+                        and str(info.get("source") or "")
+                        == "telegram_contacts_fallback_after_group_empty"
+                        and info.get("fallback_from_group")
+                        and str(info.get("source_signature") or "") == "contacts"
+                    )
+                    # Обычные личные карточки не маскируем под выбранный чат.
+                    # Но явно помеченный безопасный резерв после пустого чата
+                    # должен быть виден в «Сегодня от Стагирита».
+                    if not safe_contact_fallback:
+                        continue
                 current = best.get(day_key)
                 prepared_at = str(info.get("prepared_at") or "")
                 current_at = str((current or {}).get("prepared_at") or "")
