@@ -803,7 +803,7 @@ def _render_today_vk_candidates(
     ask_openai_fn=None,
 ) -> None:
     """Показывает владельцу его сегодняшнюю VK-пятёрку и действия Неоны."""
-    st.markdown("### 💙 VK 5 на сегодня")
+    st.markdown("### 💙 VK 5 на сегодня · отбор Неонии")
 
     try:
         assignments = load_today_vk_assignments(owner_id)
@@ -867,8 +867,8 @@ def _render_today_vk_candidates(
 
     if not assignments:
         st.info(
-            "Сегодня активных карточек VK пока нет. Если источник уже добавлен, "
-            "фоновый VK Scout возьмёт следующих людей по порядку, без отбора по ЦА."
+            "Сегодня качественных VK-кандидатов пока нет. Неония продолжает "
+            "проверять людей из Ваших настроенных VK-сообществ по портрету ЦА."
         )
         return
 
@@ -904,8 +904,10 @@ def _render_today_vk_candidates(
             if place:
                 meta.append(place)
             st.caption(" · ".join(meta))
+            score = int(item.get("score") or 0)
             st.write(
-                "**Почему сегодня:** следующий новый человек в очереди этого сообщества."
+                "**Почему сегодня:** профиль прошёл отбор Неонии по Вашей ЦА"
+                + (f" · оценка {score}/100." if score else ".")
             )
 
             if profile_url:
@@ -1533,4 +1535,17 @@ def render_vk_sources(
     st.caption(
         "Фоновый worker продолжает очередь автоматически. Вступать в открытое "
         "сообщество ради этой очереди не требуется: используется доступный VK API список участников."
+    )
+
+
+def render_today_vk_candidates(
+    owner_id: int,
+    member_code: str = "",
+    ask_openai_fn=None,
+) -> None:
+    """Public compact entry for the Agency W Day page."""
+    _render_today_vk_candidates(
+        int(owner_id),
+        str(member_code or ""),
+        ask_openai_fn=ask_openai_fn,
     )
