@@ -284,6 +284,12 @@ def _rank_active_group_authors(state, storage, authors, desired):
         if enriched.get("work_state") == "available" and not bool(enriched.get("selection_blocked")):
             workable.append(enriched)
 
+    # Сначала анализируем авторов с явными рабочими/бизнес-сигналами.
+    # Сортировка стабильная: внутри каждой группы сохраняется исходная свежесть
+    # сообщений. Это повышает шанс быстро собрать качественную пятёрку, не
+    # ослабляя порог ЦА и не увеличивая число случайных рекомендаций.
+    workable.sort(key=lambda item: 0 if _local_business_signal(item) else 1)
+
     ranked = []
     passport_analysis = passport.get("analysis") or passport.get("profile") or passport
     for start in range(0, len(workable), 10):
@@ -614,7 +620,10 @@ def process(owner_id,session_string,state,storage):
     exhausted=False
 
     # PRIMARY: people who actually write in the selected group. This works even
-    # when Telegram hides the full 12k-member participant list.
+    # when Telegram hides the full member list. The first pass is intentionally
+    # bounded; if it cannot produce the daily five, Neonia automatically goes
+    # deeper instead of returning an empty list after the loudest recent authors.
+    authors=[]
     try:
         authors,scanned=asyncio.run(
             _read_active_group_authors(
@@ -628,6 +637,43 @@ def process(owner_id,session_string,state,storage):
             f"[NeoniaChat] owner={owner_id} active-author scan failed: {type(exc).__name__}",
             flush=True,
         )
+
+    # DEEP PASS: preserve every quality rule (fresh activity, @username,
+    # practical Agency-W evidence and score >= 50) but inspect a substantially
+    # wider slice of the chosen chat when the first pass is too narrow.
+    if len(cards) < needed:
+        try:
+            first_author_ids={int(x["telegram_id"]) for x in authors}
+            deeper_authors,deeper_scanned=asyncio.run(
+                _read_active_group_authors(
+                    session_string,api_id,api_hash,chat,
+                    excluded | first_author_ids,
+                    desired=max(180,(needed-len(cards))*36),
+                    message_limit=8000,
+                )
+            )
+            scanned += deeper_scanned
+            deeper_cards=_rank_active_group_authors(
+                state,storage,deeper_authors,max(1,needed-len(cards))
+            )
+            existing_ids={int(x["telegram_id"]) for x in cards}
+            for item in deeper_cards:
+                cid=int(item["telegram_id"])
+                if cid not in existing_ids:
+                    cards.append(item)
+                    existing_ids.add(cid)
+                if len(cards) >= needed:
+                    break
+        except Exception as exc:
+            print(
+                f"[NeoniaChat] owner={owner_id} deep active-author scan failed: {type(exc).__name__}",
+                flush=True,
+            )
+
+    print(
+        f"[NeoniaChat] owner={owner_id} qualified={len(cards)}/{needed} scanned_messages={scanned}",
+        flush=True,
+    )
 
     # SECONDARY: keep the old participant-list path only as a fallback. It is
     # useful in small open groups, but never falls back to personal contacts.
@@ -657,7 +703,7 @@ def process(owner_id,session_string,state,storage):
                                      new_offset,scanned,exhausted)
         return {"owner_id":owner_id,"status":"empty",
                 "count":0,"missing":5,
-                "reason":"Недостаточно проверенных кандидатов: нужна активность, @username, доказательства ЦА и оценка >=50",
+                "reason":"Расширенный поиск выполнен, но в доступной истории чата пока меньше 5 людей с активностью, @username, доказательствами ЦА и оценкой >=50",
                 "source_chat_id":chat_id}
     if not _persist_group_selection(storage,owner_id,mode,chat,cards,
                                     new_offset,scanned,exhausted):
