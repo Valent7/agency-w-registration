@@ -1254,6 +1254,114 @@ def _write_daily_batch(
     }
 
 
+def _topup_from_other_telegram_groups(
+    owner_id: int,
+    session_string: str,
+    state: dict[str, Any],
+    *,
+    needed: int,
+    excluded_ids: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Добирает Telegram-кандидатов из других доступных групп владельца.
+
+    Выбранная пользователем группа остаётся первым источником. Эта функция
+    включается только если она и личные Telegram-контакты не собрали дневную
+    пятёрку. Качество не снижается: используется тот же фильтр Неонии
+    (активность, деловая релевантность, score >= 50).
+    """
+    needed = max(0, int(needed))
+    if needed <= 0:
+        return []
+
+    mode, selected_chat_id = owner_source(state)
+    if mode != "chats":
+        return []
+
+    excluded = set(excluded_ids or set())
+    try:
+        excluded.update(
+            neonia_chat_daily_worker._from_history(
+                state,
+                __import__(__name__),
+                int(owner_id),
+            )
+        )
+    except Exception:
+        pass
+
+    chats = []
+    for raw in state.get("chats", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("type") not in {"Группа", "Супергруппа"}:
+            continue
+        try:
+            cid = int(raw.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cid <= 0 or cid == int(selected_chat_id or 0):
+            continue
+        chats.append(raw)
+
+    # Сначала более крупные/живые сохранённые группы; максимум 6 за один цикл,
+    # чтобы не перегружать Telegram и не превращать один поиск в бесконечный.
+    chats.sort(
+        key=lambda item: -int(item.get("participants_count") or 0)
+    )
+    api_id, api_hash = _telegram_api_credentials()
+    found: list[dict[str, Any]] = []
+    found_ids: set[int] = set()
+
+    for chat in chats[:6]:
+        if len(found) >= needed:
+            break
+        try:
+            authors, _scanned = asyncio.run(
+                neonia_chat_daily_worker._read_active_group_authors(
+                    session_string,
+                    api_id,
+                    api_hash,
+                    chat,
+                    excluded | found_ids,
+                    desired=max(100, (needed - len(found)) * 24),
+                    message_limit=3500,
+                )
+            )
+            ranked = neonia_chat_daily_worker._rank_active_group_authors(
+                state,
+                __import__(__name__),
+                authors,
+                max(1, needed - len(found)),
+            )
+        except Exception as exc:
+            print(
+                f"[Telegram Scout] owner={owner_id}: alternate group "
+                f"{chat.get('chat_id')} scan failed: {type(exc).__name__}",
+                flush=True,
+            )
+            continue
+
+        for item in ranked:
+            try:
+                candidate_id = int(item.get("telegram_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if candidate_id <= 0 or candidate_id in excluded or candidate_id in found_ids:
+                continue
+            found.append(item)
+            found_ids.add(candidate_id)
+            if len(found) >= needed:
+                break
+
+    if found:
+        print(
+            f"[Telegram Scout] owner={owner_id}: alternate Telegram groups "
+            f"added {len(found)} candidate(s)",
+            flush=True,
+        )
+    return found
+
+
 def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     owner_id = int(owner_id)
     state, _ = _workspace_state(owner_id)
@@ -1540,14 +1648,61 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         replace_existing=True,
         fallback_from_group_reason=group_fallback_reason,
     )
+
+    # Если выбранный Telegram-чат и личные контакты вместе всё ещё дали
+    # меньше пяти, Неония продолжает искать В TELEGRAM — в других доступных
+    # группах владельца. Уже найденные/утверждённые кандидаты сохраняются.
+    current_ids = [int(x) for x in (batch.get("candidate_ids") or [])]
+    missing_after_primary = max(0, DAILY_TARGET - len(current_ids))
+    alternate_group_candidates: list[dict[str, Any]] = []
+    if (
+        missing_after_primary > 0
+        and schema_version >= 7
+        and owner_source(state)[0] == "chats"
+    ):
+        alternate_group_candidates = _topup_from_other_telegram_groups(
+            owner_id,
+            session_string,
+            state,
+            needed=missing_after_primary,
+            excluded_ids=set(current_ids) | set(latest_sent) | set(latest_blocked),
+        )
+        if alternate_group_candidates:
+            _save_workspace_candidates(
+                owner_id,
+                contacts,
+                alternate_group_candidates,
+            )
+            merged_ids = list(current_ids)
+            for item in alternate_group_candidates:
+                cid = int(item["telegram_id"])
+                if cid not in merged_ids:
+                    merged_ids.append(cid)
+                if len(merged_ids) >= DAILY_TARGET:
+                    break
+            batch = _write_daily_batch(
+                owner_id,
+                merged_ids,
+                reserve_ids,
+                replace_existing=True,
+                fallback_from_group_reason=(
+                    group_fallback_reason
+                    or "выбранный Telegram-чат не дал полную пятёрку; добор выполнен из других Telegram-групп"
+                ),
+            )
+            current_ids = [int(x) for x in (batch.get("candidate_ids") or [])]
+
     return {
         "owner_id": owner_id,
-        "status": "prepared" if batch.get("candidate_ids") else "empty",
-        "count": len(batch.get("candidate_ids") or []),
-        "complete": bool(batch.get("complete")) and len(ranked_ids) >= DAILY_TARGET,
-        "missing": max(0, DAILY_TARGET - len(ranked_ids)),
+        "status": "ready" if len(current_ids) >= DAILY_TARGET else (
+            "prepared" if current_ids else "empty"
+        ),
+        "count": len(current_ids),
+        "complete": len(current_ids) >= DAILY_TARGET,
+        "missing": max(0, DAILY_TARGET - len(current_ids)),
         "reserve": len(reserve_ids),
         "new_analyzed": len(new_results),
+        "alternate_group_added": len(alternate_group_candidates),
         "removed_old_dialogues": max(0, len(current_today_order) - len(safe_current_today)),
         "fallback_from_group": bool(group_fallback_reason),
         "group_fallback_reason": group_fallback_reason,
