@@ -588,6 +588,29 @@ def process(owner_id,session_string,state,storage):
                 "reason":"old batch already approved; new chat takes effect tomorrow"}
     progress=state.get("source_progress") or {}
     sig=source_signature(mode,chat_id)
+
+    # Если этот же источник уже полностью проверяли сегодня и он дал ноль,
+    # не перечитываем тысячи тех же сообщений каждый час. Возвращаем
+    # подтверждённый нулевой результат сразу; основной Telegram worker затем
+    # может перейти к безопасному резерву из контактов владельца.
+    if (
+        progress.get("last_batch_date") == today.isoformat()
+        and progress.get("last_batch_source_signature") == sig
+        and not progress.get("last_batch_ids")
+        and int(progress.get("today") or 0) == 0
+        and str(progress.get("selection_method") or "") == "active_group_authors"
+        and progress.get("updated_at")
+    ):
+        return {
+            "owner_id": owner_id,
+            "status": "empty",
+            "count": 0,
+            "missing": 5,
+            "reason": "Эта Telegram-группа уже полностью проверена сегодня и не дала подходящих кандидатов",
+            "source_chat_id": chat_id,
+            "cached_empty": True,
+        }
+
     if (progress.get("last_batch_date")==today.isoformat()
         and progress.get("last_batch_source_signature")==sig
         and progress.get("last_batch_ids")):
