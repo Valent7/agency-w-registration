@@ -25,8 +25,15 @@ MIN_DAILY_AUDIENCE_FIT_SCORE = 50
 
 
 def _eligible_group_author(candidate, now=None):
-    """Fail closed: only a reachable person with a recent observed group message."""
-    if not str(candidate.get("username") or "").strip().lstrip("@"):
+    """Fail closed: only a reachable person with a recent observed group message.
+
+    A public @username is convenient but not required. Telegram can still
+    address a visible group author when the authenticated session observed a
+    valid access_hash for that exact user in the selected group.
+    """
+    username = str(candidate.get("username") or "").strip().lstrip("@")
+    access_hash = candidate.get("access_hash")
+    if not username and access_hash in (None, ""):
         return False
     if candidate.get("activity_precision") != "group_message_exact":
         return False
@@ -153,7 +160,12 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
                 continue
 
             username = str(getattr(sender, "username", "") or "").strip().lstrip("@")
-            if not username:
+            access_hash = getattr(sender, "access_hash", None)
+            # Many real Telegram users do not publish @username. Keep them when
+            # Telegram gives this authenticated session a concrete access_hash:
+            # that is enough to address the exact observed group author later,
+            # after the owner manually approves the first message.
+            if not username and access_hash is None:
                 continue
             first_name = str(getattr(sender, "first_name", "") or "").strip()
             last_name = str(getattr(sender, "last_name", "") or "").strip()
@@ -185,7 +197,7 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
                     "first_name": first_name,
                     "last_name": last_name,
                     "username": username,
-                    "access_hash": getattr(sender, "access_hash", None),
+                    "access_hash": int(access_hash) if access_hash is not None else None,
                     "source_chat_id": target,
                     "source_chat_title": str(chat.get("title") or "Telegram-чат"),
                     "source_type": "telegram_chat",
