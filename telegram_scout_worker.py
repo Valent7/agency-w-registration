@@ -274,6 +274,48 @@ def _save_workspace_candidates(
     return False
 
 
+def _save_candidate_results_only(
+    owner_id: int,
+    new_candidates: list[dict[str, Any]],
+) -> bool:
+    """Merge candidate cards into workspace without rewriting saved contacts."""
+    if not new_candidates:
+        return True
+    for _attempt in range(3):
+        row = _workspace_row(owner_id)
+        if not row:
+            return False
+        current = _decrypt_json(str(row.get("encrypted_state") or ""))
+        if not current:
+            return False
+        current["candidates"] = _merge_candidate_results(
+            current.get("candidates", []),
+            new_candidates,
+        )
+        current["schema_version"] = max(
+            7,
+            int(current.get("schema_version") or 7),
+        )
+        old_updated_at = str(row.get("updated_at") or "")
+        filters: dict[str, Any] = {
+            "telegram_id": f"eq.{int(owner_id)}",
+        }
+        if old_updated_at:
+            filters["updated_at"] = f"eq.{old_updated_at}"
+        changed = _sb_patch(
+            "agency_workspace_states",
+            filters,
+            {
+                "encrypted_state": _encrypt_json(current),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        if changed:
+            return True
+        time.sleep(0.4)
+    return False
+
+
 def _telegram_session_from_row(row: dict[str, Any]) -> str:
     return _decrypt_text(str(row.get("encrypted_session") or ""))
 
@@ -1429,7 +1471,8 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         schema_version = 0
     group_fallback_reason = ""
-    if schema_version >= 7 and owner_source(state)[0] == "chats":
+    chat_mode = schema_version >= 7 and owner_source(state)[0] == "chats"
+    if chat_mode:
         group_result = neonia_chat_daily_worker.process(
             owner_id, session_string, state, storage=__import__(__name__)
         )
@@ -1440,21 +1483,78 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
             group_status == "skip"
             and "new chat takes effect tomorrow" in group_reason.lower()
         )
-        # Старое правило "новый чат только завтра" больше не должно останавливать
-        # дневную пятёрку. Уже утверждённые кандидаты сохраняются, а недостающие
-        # места добираются сегодня из других Telegram-источников.
-        if (group_status != "empty" or group_count > 0) and not legacy_switch_block:
+        if group_status in {"ready"} and group_count >= DAILY_TARGET:
             return group_result
+
+        # В режиме "группы" не вызываем GetContactsRequest до добора из групп:
+        # Telegram может дать FloodWait на адресную книгу, хотя чтение групп
+        # остаётся доступным. Уже найденные/утверждённые ID сохраняются.
+        current_batch = _current_batch_info(owner_id)
+        current_ids = [
+            int(x) for x in (current_batch.get("candidate_ids") or [])
+        ]
+        missing = max(0, DAILY_TARGET - len(current_ids))
+        if missing > 0:
+            alternate = _topup_from_other_telegram_groups(
+                owner_id,
+                session_string,
+                state,
+                needed=missing,
+                excluded_ids=(
+                    set(current_ids)
+                    | _sent_ids(state)
+                    | _blocked_ids(state)
+                ),
+            )
+            if alternate:
+                _save_candidate_results_only(owner_id, alternate)
+                merged_ids = list(current_ids)
+                for item in alternate:
+                    cid = int(item["telegram_id"])
+                    if cid not in merged_ids:
+                        merged_ids.append(cid)
+                    if len(merged_ids) >= DAILY_TARGET:
+                        break
+                batch = _write_daily_batch(
+                    owner_id,
+                    merged_ids,
+                    [],
+                    replace_existing=True,
+                    fallback_from_group_reason=(
+                        "Telegram-пятёрка добрана из нескольких доступных групп"
+                    ),
+                )
+                final_ids = [
+                    int(x) for x in (batch.get("candidate_ids") or [])
+                ]
+                if len(final_ids) >= DAILY_TARGET:
+                    return {
+                        "owner_id": owner_id,
+                        "status": "ready",
+                        "count": len(final_ids),
+                        "complete": True,
+                        "missing": 0,
+                        "alternate_group_added": len(alternate),
+                    }
+                current_ids = final_ids
+
+        # Если группы пока дали меньше пяти, возвращаем честный Telegram-результат
+        # и не блокируем цикл многоминутным FloodWait адресной книги.
         group_fallback_reason = (
-            "утверждённый Telegram-кандидат сохранён; недостающие места добираются сегодня"
-            if legacy_switch_block
-            else str(group_result.get("reason") or "выбранная группа не дала кандидатов")
+            group_reason
+            or "доступные Telegram-группы пока не дали полную пятёрку"
         )
-        print(
-            f"[Telegram Scout] owner={owner_id}: primary Telegram group did not "
-            "complete the daily five; continuing same-day top-up",
-            flush=True,
-        )
+        if current_ids:
+            return {
+                "owner_id": owner_id,
+                "status": "prepared",
+                "count": len(current_ids),
+                "complete": False,
+                "missing": max(0, DAILY_TARGET - len(current_ids)),
+                "fallback_from_group": True,
+                "group_fallback_reason": group_fallback_reason,
+            }
+
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
     if not passport:
         return {"owner_id": owner_id, "status": "skip", "reason": "нет портрета ЦА"}
