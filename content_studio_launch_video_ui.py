@@ -208,6 +208,40 @@ def _build_plan(ask_ai_fn, website, tone, focus, project):
     return _normalize_plan(_extract_json(raw), website, tone, project)
 
 
+def _latest_launch_job(store, owner_id, project_id):
+    """Return the newest durable Site -> video master, independent of browser session."""
+    try:
+        jobs = store.list_jobs(owner_id, project_id, limit=100)
+    except Exception:
+        return None
+    launch_jobs = [
+        job for job in jobs
+        if job.get("studio_master") is True
+        and isinstance(job.get("launch_brief"), dict)
+        and job["launch_brief"].get("scenes")
+    ]
+    if not launch_jobs:
+        return None
+    return max(
+        launch_jobs,
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+    )
+
+
+def _restore_launch_plan(owner_id, project_id, prefix, plan_key, approved_key, job_key, job):
+    brief = dict(job.get("launch_brief") or {})
+    if not brief or not isinstance(brief.get("scenes"), list):
+        raise LaunchVideoError("У последнего задания не сохранился сценарий.")
+    st.session_state[plan_key] = brief
+    st.session_state[approved_key] = True
+    st.session_state[job_key] = job.get("id")
+    for index, scene in enumerate(brief["scenes"], 1):
+        st.session_state[f"{prefix}_scene_{index}"] = str(scene.get("visual") or "")
+        st.session_state[f"{prefix}_scene_text_{index}"] = str(scene.get("text") or "")
+    st.session_state[f"{prefix}_hook"] = str(brief.get("hook") or "")
+    st.session_state[f"{prefix}_share"] = str(brief.get("share_copy") or "")
+
+
 def _edited_plan(owner_id, project_id, plan):
     prefix = f"launch_video_{owner_id}_{project_id}"
     scenes = []
@@ -286,6 +320,35 @@ def render_launch_video_tool(owner_id, project, store, ask_ai_fn):
 
     plan = st.session_state.get(plan_key)
     if not isinstance(plan, dict):
+        last_job = _latest_launch_job(store, owner_id, project_id)
+        if isinstance(last_job, dict):
+            status = str(last_job.get("state") or "")
+            failed_before_video = bool(
+                status == "failed"
+                and not (last_job.get("production") or {}).get("tasks")
+            )
+            with st.container(border=True):
+                st.markdown("**↩️ Последнее задание «Сайт → ролик» сохранено**")
+                brief = last_job.get("launch_brief") or {}
+                st.caption(
+                    ("Остановлено до видеогенерации. " if failed_before_video else "Сохранено в Контент-заводе. ")
+                    + "Сценарий заново вводить не нужно."
+                )
+                if brief.get("hook"):
+                    st.write("Крючок: " + str(brief["hook"]))
+                if st.button(
+                    "↩️ Продолжить последнее задание",
+                    type="primary",
+                    use_container_width=True,
+                    key=prefix + "_restore_last",
+                ):
+                    try:
+                        _restore_launch_plan(
+                            owner_id, project_id, prefix, plan_key, approved_key, job_key, last_job
+                        )
+                        st.rerun()
+                    except LaunchVideoError as exc:
+                        st.error(str(exc))
         return
 
     st.divider()
