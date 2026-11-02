@@ -330,9 +330,12 @@ def render_launch_video_tool(owner_id, project, store, ask_ai_fn):
         "Сначала утверждаем историю; видеосервис не вызывается до Вашей команды."
     )
     st.markdown("### 1. Дайте ссылку")
+    default_website = str(project.get("website") or "").strip()
+    if "agency-w.streamlit.app" in default_website.lower():
+        default_website = "https://agency-w-web.onrender.com"
     website = st.text_input(
         "Сайт или страница проекта",
-        value=str(project.get("website") or ""),
+        value=default_website,
         placeholder="https://...",
         key=prefix + "_website",
     )
