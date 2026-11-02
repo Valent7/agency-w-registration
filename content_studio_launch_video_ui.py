@@ -232,12 +232,23 @@ def _restore_launch_plan(owner_id, project_id, prefix, plan_key, approved_key, j
     brief = dict(job.get("launch_brief") or {})
     if not brief or not isinstance(brief.get("scenes"), list):
         raise LaunchVideoError("У последнего задания не сохранился сценарий.")
+
+    # Old launch jobs may contain six scenes. The current budget allows five,
+    # so compact the durable plan before it is ever shown back to the owner.
+    compacted = _compact_scenes_to_five(brief.get("scenes") or [])
+    brief["scenes"] = compacted
+    brief["duration_seconds"] = sum(int(item.get("seconds") or 0) for item in compacted)
+
     st.session_state[plan_key] = brief
     st.session_state[approved_key] = True
     st.session_state[job_key] = job.get("id")
-    for index, scene in enumerate(brief["scenes"], 1):
+    for index, scene in enumerate(compacted, 1):
         st.session_state[f"{prefix}_scene_{index}"] = str(scene.get("visual") or "")
         st.session_state[f"{prefix}_scene_text_{index}"] = str(scene.get("text") or "")
+    # Remove stale widget values for scene 6+ from previous sessions.
+    for index in range(len(compacted) + 1, 9):
+        st.session_state.pop(f"{prefix}_scene_{index}", None)
+        st.session_state.pop(f"{prefix}_scene_text_{index}", None)
     st.session_state[f"{prefix}_hook"] = str(brief.get("hook") or "")
     st.session_state[f"{prefix}_share"] = str(brief.get("share_copy") or "")
 
@@ -343,6 +354,15 @@ def render_launch_video_tool(owner_id, project, store, ask_ai_fn):
         st.rerun()
 
     plan = st.session_state.get(plan_key)
+    if isinstance(plan, dict) and isinstance(plan.get("scenes"), list) and len(plan["scenes"]) > 5:
+        plan = dict(plan)
+        plan["scenes"] = _compact_scenes_to_five(plan["scenes"])
+        plan["duration_seconds"] = sum(int(item.get("seconds") or 0) for item in plan["scenes"])
+        st.session_state[plan_key] = plan
+        for index in range(len(plan["scenes"]) + 1, 9):
+            st.session_state.pop(f"{prefix}_scene_{index}", None)
+            st.session_state.pop(f"{prefix}_scene_text_{index}", None)
+
     if not isinstance(plan, dict):
         last_job = _latest_launch_job(store, owner_id, project_id)
         if isinstance(last_job, dict):
