@@ -1,11 +1,8 @@
 """Website/project -> short launch-video workflow for Agency W Content Factory.
 
-Planning principles are inspired by latent-spaces/brag (MIT):
-https://github.com/latent-spaces/brag
-This module does not copy its renderer or bundled assets. Agency W keeps its
-existing worker/provider pipeline and borrows the product-thinking discipline:
-hook first, specific evidence, short readable scenes, music direction and
-post-ready share copy.
+This route uses the real latent-spaces/brag workflow through the dedicated
+Agency W content worker. The UI only collects and approves the owner's brief;
+Brag + Hyperframes own the final composition and render.
 """
 from __future__ import annotations
 
@@ -117,7 +114,7 @@ def _normalize_plan(data, website, tone, project):
     if not isinstance(raw_scenes, list):
         raw_scenes = []
     scenes = []
-    for item in raw_scenes[:7]:
+    for item in raw_scenes[:5]:
         if not isinstance(item, dict):
             continue
         visual = _replace_obsolete_agency_url(_clean(item.get("visual"), 900))
@@ -173,7 +170,7 @@ def _build_plan(ask_ai_fn, website, tone, focus, project):
 Принципы:
 - первые 2 секунды — конкретный крючок;
 - зритель после одного просмотра понимает, что это, для кого и в чём польза;
-- 3–6 коротких сцен;
+- 3–5 коротких сцен;
 - показывай конкретный продукт/интерфейс/идею, а не абстрактные AI-картинки;
 - для Агентства W используй ТОЛЬКО реальные названия модулей: Стагирит, Неония, Неона, Контент-завод;
 - НИКОГДА не заменяй модули Агентства W чужими программами или сервисами: Google Calendar, Trello, Gmail, Outlook, Figma, Photoshop и т.п.;
@@ -326,7 +323,7 @@ def render_launch_video_tool(owner_id, project, store, ask_ai_fn):
     job_key = prefix + "_job"
 
     st.caption(
-        "Новый режим по принципу Brag: ссылка → короткая раскадровка → один мастер-ролик. "
+        "Brag: ссылка → короткая раскадровка → один мастер-ролик. "
         "Сначала утверждаем историю; видеосервис не вызывается до Вашей команды."
     )
     st.markdown("### 1. Дайте ссылку")
@@ -514,4 +511,16 @@ def render_launch_video_tool(owner_id, project, store, ask_ai_fn):
             st.error("Не удалось поставить видео в производство: " + type(exc).__name__)
 
     if st.session_state.get(job_key):
-        st.caption("Задание создано: " + str(st.session_state[job_key]))
+        job_id = str(st.session_state[job_key])
+        st.caption("Задание создано: " + job_id)
+        # Показываем результат или точную причину ошибки здесь же, без перехода
+        # в «Мои генерации».
+        from content_studio_reference_ui import _render_master_status
+        _render_master_status(
+            owner_id,
+            project,
+            store,
+            ContentFactoryService(store),
+            prefix + "_brag_status",
+            job_id,
+        )
