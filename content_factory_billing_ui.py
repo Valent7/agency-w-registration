@@ -91,7 +91,7 @@ def render_wallet_panel(owner_id: int, project: dict | None, store) -> None:
                             project["id"],
                             TOPUPS[amount_label],
                             secret_key=_secret("STRIPE_SECRET_KEY"),
-                            return_url=_secret("AGENCY_W_APP_URL") or "https://agency-w.streamlit.app/",
+                            return_url=_secret("AGENCY_W_APP_URL") or "https://agency-w-web.onrender.com/",
                         )
                         st.session_state[f"wallet_{owner_id}_{project['id']}_checkout_url"] = url
                     except BillingError as exc:
