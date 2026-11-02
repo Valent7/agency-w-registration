@@ -5,6 +5,7 @@ from agency_values import render_agency_development
 import requests
 import hashlib
 import hmac
+import jwt
 import base64 as _auth_base64
 from urllib.parse import quote, urlencode
 from datetime import datetime, timedelta, timezone
@@ -8032,6 +8033,7 @@ telegram_data = {
     if st.query_params.get(key) is not None
 }
 received_hash = str(st.query_params.get("hash", "") or "")
+telegram_oidc_token = str(st.query_params.get("tg_id_token", "") or "").strip()
 
 
 def _telegram_bot_secret(name):
@@ -8066,6 +8068,50 @@ def telegram_auth_is_valid(data, received_hash_value):
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(calculated_hash, received_hash_value)
+
+
+def telegram_oidc_auth_data(id_token_value):
+    token = str(id_token_value or "").strip()
+    client_id = str(
+        _telegram_bot_secret("TELEGRAM_CLIENT_ID") or "8680376106"
+    ).strip()
+    if not token or not client_id:
+        return None
+    try:
+        jwks_client = jwt.PyJWKClient(
+            "https://oauth.telegram.org/.well-known/jwks.json",
+            cache_keys=True,
+        )
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=client_id,
+            issuer="https://oauth.telegram.org",
+            options={"require": ["exp", "iat", "iss", "aud"]},
+        )
+        issued_at = int(claims.get("iat") or 0)
+        if not issued_at or abs(int(time.time()) - issued_at) > 3600:
+            return None
+        telegram_id_value = str(claims.get("id") or claims.get("sub") or "").strip()
+        if not telegram_id_value.isdigit():
+            return None
+        first_name_value = str(
+            claims.get("given_name")
+            or claims.get("name")
+            or "Пользователь"
+        ).strip()
+        return {
+            "id": telegram_id_value,
+            "first_name": first_name_value,
+            "last_name": str(claims.get("family_name") or "").strip(),
+            "username": str(claims.get("preferred_username") or "").strip(),
+            "photo_url": str(claims.get("picture") or "").strip(),
+            "auth_date": str(issued_at),
+        }
+    except Exception:
+        return None
 
 
 def _remember_secret():
@@ -8154,7 +8200,7 @@ def set_remember_cookie(token):
           document.cookie = "{REMEMBER_COOKIE_NAME}=" + token
             + "; Max-Age={REMEMBER_MAX_AGE}; Path=/; SameSite=Lax; Secure";
           const url = new URL(window.location.href);
-          ['id','first_name','last_name','username','photo_url','auth_date','hash']
+          ['id','first_name','last_name','username','photo_url','auth_date','hash','tg_id_token']
             .forEach((key) => url.searchParams.delete(key));
           const clean = url.pathname
             + (url.searchParams.toString() ? '?' + url.searchParams.toString() : '');
@@ -8179,43 +8225,58 @@ def clear_remember_cookie_and_open_login():
 
 
 def _render_telegram_widget_login(referral_code_value=""):
-    bot_username = _telegram_bot_secret("TELEGRAM_BOT_USERNAME")
-    bot_token = _telegram_bot_secret("TELEGRAM_BOT_TOKEN")
-    if not bot_username or not bot_token:
-        missing = []
-        if not bot_username:
-            missing.append("TELEGRAM_BOT_USERNAME")
-        if not bot_token:
-            missing.append("TELEGRAM_BOT_TOKEN")
-        st.error(
-            "Вход Telegram на Render ещё не подключён. Не хватает настройки: "
-            + ", ".join(missing)
-            + "."
-        )
+    client_id = str(
+        _telegram_bot_secret("TELEGRAM_CLIENT_ID") or "8680376106"
+    ).strip()
+    if not client_id:
+        st.error("Вход Telegram ещё не подключён: не найден TELEGRAM_CLIENT_ID.")
         return
 
-    auth_url = AGENCY_W_PUBLIC_URL + "/"
-    if referral_code_value:
-        auth_url += "?" + urlencode({"ref": referral_code_value})
+    referral_json = json.dumps(str(referral_code_value or ""))
     st.html(
         f"""
         <div style="display:flex;justify-content:center;margin:0.5rem 0 1rem;">
-          <script async
-            src="https://telegram.org/js/telegram-widget.js?22"
-            data-telegram-login="{html.escape(bot_username, quote=True)}"
-            data-size="large"
-            data-radius="10"
-            data-lang="ru"
-            data-auth-url="{html.escape(auth_url, quote=True)}">
-          </script>
+          <button id="agency-w-telegram-login" type="button"
+            style="border:0;border-radius:10px;padding:12px 22px;cursor:pointer;
+                   font:600 16px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+                   background:#2AABEE;color:white;">
+            Войти через Telegram
+          </button>
         </div>
+        <script src="https://oauth.telegram.org/js/telegram-login.js?3"></script>
+        <script>
+        (() => {{
+          const button = document.getElementById('agency-w-telegram-login');
+          if (!button) return;
+          button.addEventListener('click', () => {{
+            Telegram.Login.auth(
+              {{client_id: {client_id}, scope: ['profile'], lang: 'ru'}},
+              (data) => {{
+                if (!data || data.error || !data.id_token) {{
+                  console.error('Telegram login failed', data && data.error);
+                  return;
+                }}
+                const url = new URL(window.location.href);
+                url.searchParams.set('tg_id_token', data.id_token);
+                const referral = {referral_json};
+                if (referral) url.searchParams.set('ref', referral);
+                window.location.assign(url.toString());
+              }}
+            );
+          }});
+        }})();
+        </script>
         """,
         unsafe_allow_javascript=True,
     )
 
 
 remembered_data = validate_remember_token(_remember_cookie_value())
-telegram_login_valid = telegram_auth_is_valid(telegram_data, received_hash)
+oidc_telegram_data = telegram_oidc_auth_data(telegram_oidc_token)
+legacy_telegram_login_valid = telegram_auth_is_valid(telegram_data, received_hash)
+telegram_login_valid = bool(oidc_telegram_data) or legacy_telegram_login_valid
+if oidc_telegram_data:
+    telegram_data = dict(oidc_telegram_data)
 
 # Telegram нужен только для первого входа на устройстве. После него
 # безопасно подписанный токен устройства действует 30 дней.
