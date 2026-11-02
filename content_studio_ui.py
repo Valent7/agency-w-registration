@@ -349,9 +349,15 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
                 if st.button("Создать своё по видео-образцу", key=f"studio_video_{owner_id}_reference", type="primary"):
                     _navigate(owner_id, "reference")
                 st.caption("Или опишите собственную идею ниже. Создание запускается только по вашей кнопке.")
-            render_content_autopilot(owner_id, owner_name, target_profile=target_profile, section="create",
-                                     format_filter={"carousel": ["carousel"], "video": ["reel"]}.get(tool),
-                                     video_style=st.session_state.get(f"content_studio_{owner_id}_video_style") if tool == "video" else None)
+            render_content_autopilot(
+                owner_id,
+                owner_name,
+                target_profile=target_profile,
+                section="create",
+                format_filter={"carousel": ["carousel"], "video": ["reel"]}.get(tool),
+                video_style=st.session_state.get(f"content_studio_{owner_id}_video_style") if tool == "video" else None,
+                project_id=project["id"],
+            )
         elif tool in {"library", "search"}:
             _library(
                 owner_id,
@@ -366,7 +372,13 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
             render_manual(owner_id, owner_name, ask_ai_fn, generate_illustration_fn,
                           create_avatar_video_fn, get_avatar_video_fn, target_profile=target_profile)
         elif tool in {"calendar", "connections", "project"}:
-            render_content_autopilot(owner_id, owner_name, target_profile=target_profile, section=tool)
+            render_content_autopilot(
+                owner_id,
+                owner_name,
+                target_profile=target_profile,
+                section=tool,
+                project_id=project["id"],
+            )
         elif tool == "music":
             from content_studio_music_ui import render_music_tool
             render_music_tool(owner_id, project, store)
