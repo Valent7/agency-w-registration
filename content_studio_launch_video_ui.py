@@ -94,6 +94,21 @@ def _rebalance_seconds(scenes, target=20):
     return scenes
 
 
+def _replace_obsolete_agency_url(value):
+    text = str(value or "")
+    replacements = (
+        "https://agency-w.streamlit.app/",
+        "https://agency-w.streamlit.app",
+        "http://agency-w.streamlit.app/",
+        "http://agency-w.streamlit.app",
+        "agency-w.streamlit.app/",
+        "agency-w.streamlit.app",
+    )
+    for old in replacements:
+        text = text.replace(old, "agency-w-web.onrender.com")
+    return text
+
+
 def _normalize_plan(data, website, tone, project):
     if not isinstance(data, dict):
         raise LaunchVideoError("ИИ не смог подготовить раскадровку. Нажмите «Заново».")
@@ -105,7 +120,7 @@ def _normalize_plan(data, website, tone, project):
     for item in raw_scenes[:7]:
         if not isinstance(item, dict):
             continue
-        visual = _clean(item.get("visual"), 900)
+        visual = _replace_obsolete_agency_url(_clean(item.get("visual"), 900))
         if not visual:
             continue
         try:
@@ -115,18 +130,18 @@ def _normalize_plan(data, website, tone, project):
         scenes.append({
             "seconds": seconds,
             "visual": visual,
-            "text": _clean(item.get("text"), 400),
-            "motion": _clean(item.get("motion"), 500),
+            "text": _replace_obsolete_agency_url(_clean(item.get("text"), 400)),
+            "motion": _replace_obsolete_agency_url(_clean(item.get("motion"), 500)),
         })
     if len(scenes) < 3:
         raise LaunchVideoError("Получилось слишком мало сцен. Нажмите «Заново».")
     scenes = _rebalance_seconds(scenes, 20)
 
     title = _clean(data.get("title"), 180, project.get("name") or "Проект")
-    hook = _clean(data.get("hook"), 500)
+    hook = _replace_obsolete_agency_url(_clean(data.get("hook"), 500))
     if not hook:
         raise LaunchVideoError("В сценарии нет сильного начала. Нажмите «Заново».")
-    share_copy = _clean(data.get("share_copy"), 1500)
+    share_copy = _replace_obsolete_agency_url(_clean(data.get("share_copy"), 1500))
     if not share_copy:
         share_copy = hook
 
@@ -134,16 +149,16 @@ def _normalize_plan(data, website, tone, project):
         "title": title,
         "website": website,
         "tone": tone,
-        "angle": _clean(data.get("angle"), 900, "Показать пользу проекта через одну конкретную ситуацию."),
+        "angle": _replace_obsolete_agency_url(_clean(data.get("angle"), 900, "Показать пользу проекта через одну конкретную ситуацию.")),
         "hook": hook,
         "duration_seconds": sum(item["seconds"] for item in scenes),
         "scenes": scenes,
-        "music": _clean(
+        "music": _replace_obsolete_agency_url(_clean(
             data.get("music"),
             500,
             "Современная ненавязчивая музыка; монтажные акценты попадают в ритм.",
-        ),
-        "cta": _clean(data.get("cta"), 500, project.get("cta") or ""),
+        )),
+        "cta": _replace_obsolete_agency_url(_clean(data.get("cta"), 500, project.get("cta") or "")),
         "share_copy": share_copy,
     }
 
@@ -202,6 +217,8 @@ def _build_plan(ask_ai_fn, website, tone, focus, project):
         "visual_style": project.get("visual_style"),
         "avoid": project.get("avoid"),
         "brand_color": project.get("brand_color"),
+        # Never leak the obsolete Streamlit URL back through project context.
+        "website": website,
     }
     request = (
         "Сайт проекта: " + website
