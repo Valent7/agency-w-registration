@@ -623,11 +623,11 @@ def ask_claude(
 
 
 def _heygen_secret(*names):
-    """Возвращает первый заполненный HeyGen-секрет из Streamlit Secrets."""
+    """Возвращает первый заполненный HeyGen-секрет из Render/Streamlit."""
     for name in names:
-        value = st.secrets.get(name)
-        if value is not None and str(value).strip():
-            return str(value).strip()
+        value = _runtime_secret(name)
+        if value:
+            return value
     return ""
 
 
