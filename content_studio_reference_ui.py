@@ -477,6 +477,8 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
     progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
     progress_text = str(progress.get("message") or "").strip()
     error = str(job.get("error") or "").strip()
+    checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+    video_engine = str(job.get("video_engine") or checkpoint.get("video_engine") or "").strip().lower()
 
     if state in {"queued", "generating", "scheduled"}:
         # A live-video job should refresh its durable status every few minutes.
@@ -536,16 +538,16 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
                             st.error("Продолжение не запущено: внутренняя ошибка производства.")
             else:
                 st.caption(
-                    "Сценарий сохранён. Другой образец брать не нужно. Runway ещё не получил "
-                    "заказ видеосцен: производство можно безопасно запустить заново из уже "
+                    "Сценарий сохранён. Другой образец брать не нужно. Платный видеодвижок ещё не получил "
+                    "заказ: производство можно безопасно запустить заново из уже "
                     "утверждённого сценария."
                 )
                 if st.button("🔄 Запустить производство снова", key=key + "_restart_unstarted_master", width="stretch"):
                     try:
                         service.restart_unstarted_master_video(owner_id, job_id)
                         st.success(
-                            "Производство перезапущено. Перед заказом сцен система снова "
-                            "проверит баланс Runway и стоимость ролика."
+                            "Производство перезапущено. Перед платным запуском система снова "
+                            "проверит доступность видеодвижка и стоимость ролика."
                         )
                         st.rerun()
                     except Exception as exc:
@@ -590,6 +592,23 @@ def _render_master_status(owner_id, project, store, service, key, job_id):
     if state == "failed":
         reason = error or progress_text or "Видеосервис не завершил создание."
         st.error("❌ Видео не создано. Причина: " + reason)
+
+        billing_words = ("баланс", "средств", "credit", "credits", "quota", "billing", "insufficient")
+        if any(word in reason.casefold() for word in billing_words):
+            if video_engine == "brag":
+                st.link_button(
+                    "💳 Пополнить баланс OpenAI API",
+                    "https://platform.openai.com/settings/organization/billing/overview",
+                    width="stretch",
+                )
+            elif st.button(
+                "💳 Пополнить баланс",
+                key=key + "_open_wallet",
+                width="stretch",
+            ):
+                st.session_state[f"wallet_{owner_id}_{project['id']}_open"] = True
+                st.rerun()
+
         if st.button("Повторить создание", key=key + "_retry_master", width="stretch"):
             try:
                 service.retry(owner_id, job_id)
@@ -762,7 +781,7 @@ def render_reference_tool(owner_id, project, store, service):
             type="primary",
         )
         st.caption(
-            "На этом шаге видео ещё не разбирается и Runway не запускается. "
+            "На этом шаге платная видеогенерация ещё не запускается. "
             "Сначала система должна правильно понять Вашу мысль."
         )
 
