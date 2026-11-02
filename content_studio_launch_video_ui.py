@@ -35,8 +35,8 @@ class LaunchVideoError(ValueError):
 
 def _extract_json(value):
     raw = str(value or "").strip()
-    raw = re.sub(r"^\`\`\`(?:json)?\s*", "", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"\s*\`\`\`$", "", raw)
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
     try:
         data = json.loads(raw)
         return data if isinstance(data, dict) else None
