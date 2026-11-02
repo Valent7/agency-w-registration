@@ -7725,8 +7725,11 @@ try:
 except Exception:
     _agency_user_logged_in = False
 
+_agency_brand_rendered_this_run = False
+
 if not _agency_user_logged_in:
     render_agency_w_logo()
+    _agency_brand_rendered_this_run = True
 
     if referral_code:
         st.success(f"Приглашение партнёра принято: {referral_code}")
@@ -8241,7 +8244,9 @@ if telegram_login_valid or remembered_data:
             greeting = "Добрый вечер"
             greeting_icon = "🌙"
 
-        render_agency_w_logo(compact=True)
+        if not _agency_brand_rendered_this_run:
+            render_agency_w_logo(compact=True)
+            _agency_brand_rendered_this_run = True
 
         st.markdown(
             f"## {greeting}, {first_name}! {greeting_icon}"
