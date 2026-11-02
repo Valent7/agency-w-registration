@@ -282,6 +282,21 @@ class ContentFactoryService:
             "Финал объясняет следующий шаг без давления и спама.",
             "Видеоряд, музыка и монтаж ощущаются как единый короткий ролик.",
         ]
+        agency_identity = " ".join(
+            str(project.get(field) or "")
+            for field in ("name", "product", "website")
+        ).casefold()
+        verified_facts = []
+        if "агентство w" in agency_identity or "agency w" in agency_identity or "agency-w." in agency_identity:
+            verified_facts = [
+                "Стагирит — координатор рабочего процесса Агентства W.",
+                "Неония — ИИ-модуль поиска и отбора кандидатов в Агентстве W.",
+                "Неона — ИИ-модуль подготовки персонализированных первых сообщений; владелец проверяет и утверждает сообщение перед отправкой.",
+                "Контент-завод — модуль Агентства W для подготовки контента и видеоматериалов.",
+                "Стагирит, Неония и Неона — разные модули с разными ролями; сходство названий не является опечаткой.",
+                "Фраза «5 подходящих кандидатов найдены» в этом launch-ролике используется как демонстрация интерфейса и не является гарантией такого результата при каждом запуске.",
+            ]
+
         approved_intent = {
             "version": 1,
             "kind": "video",
@@ -337,6 +352,7 @@ class ContentFactoryService:
             "review_required": True,
             "studio_master": True,
             "launch_brief": brief,
+            "verified_facts": verified_facts,
         })
         if job.get("request_fingerprint") != fingerprint:
             raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
