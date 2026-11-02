@@ -143,7 +143,8 @@ def run_brag(project: dict, job: dict, openai_api_key: str, progress=None) -> tu
         command = [
             "codex",
             "exec",
-            "--full-auto",
+            "--sandbox",
+            "workspace-write",
             "--output-last-message",
             str(result_path),
             prompt,
