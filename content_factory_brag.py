@@ -90,8 +90,14 @@ Creative direction from the owner:
 Hook: {hook or 'Show the strongest real product result immediately.'}
 The product is Agency W. Show the REAL product/interface/code where possible.
 Do not invent fake UI, fake customers, fake metrics, fake testimonials or fake product modules.
-The user especially wants the real workflow: Stagirite/coordination → Neonia/candidate search →
-candidate context → Neona/personalized first message → Content Factory.
+Use the exact real module names in Russian: «Стагирит», «Неония», «Неона», «Контент-завод».
+Never replace Agency W modules with third-party apps such as Google Calendar, Trello, Gmail,
+Outlook, Figma, Photoshop or generic SaaS dashboards.
+Never invent Latinized product names such as StagirIT or Neoniya.
+The user especially wants the real workflow: Стагирит/coordination → Неония/candidate search →
+real candidate context → Неона/personalized first message → Контент-завод.
+If an authenticated internal UI cannot be inspected, explicitly use a real owner-provided Agency W
+screenshot/asset or a truthful branded text scene; do not fabricate the screen.
 The point is to show how AI takes routine work so the person gets time back.
 
 Owner-approved storyboard direction (use as direction, not as permission to invent screens):
