@@ -140,7 +140,7 @@ def _manual_archive(owner_id, packages, query="", kind="all"):
     return bool(manual)
 
 
-def _library(owner_id, owner_name, target_profile, render_manual):
+def _library(owner_id, owner_name, target_profile, render_manual, *, store, service, project):
     from content_factory_autopilot_ui import _materials, STATES
     from content_studio_catalog import list_manual_packages
 
@@ -149,7 +149,10 @@ def _library(owner_id, owner_name, target_profile, render_manual):
     if isinstance(current, dict) and current.get("owner_telegram_id") == owner_id and current.get("items"):
         if not any(item.get("package_id") == current.get("package_id") for item in packages):
             packages.insert(0, current)
-    store, service, project = _context(owner_id)
+    # The project selector is already rendered once by render_content_studio().
+    # Reuse that exact context here instead of calling _context(owner_id) again:
+    # a second selectbox with the same Streamlit key raises
+    # StreamlitDuplicateElementKey when opening "Мои генерации".
     if not store or not project:
         _manual_archive(owner_id, packages)
         return
@@ -350,7 +353,15 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
                                      format_filter={"carousel": ["carousel"], "video": ["reel"]}.get(tool),
                                      video_style=st.session_state.get(f"content_studio_{owner_id}_video_style") if tool == "video" else None)
         elif tool in {"library", "search"}:
-            _library(owner_id, owner_name, target_profile, render_manual)
+            _library(
+                owner_id,
+                owner_name,
+                target_profile,
+                render_manual,
+                store=store,
+                service=service,
+                project=project,
+            )
         elif tool == "editor":
             render_manual(owner_id, owner_name, ask_ai_fn, generate_illustration_fn,
                           create_avatar_video_fn, get_avatar_video_fn, target_profile=target_profile)
