@@ -94,10 +94,10 @@ class CalendarStorageError(RuntimeError):
 
 
 def _supabase_headers() -> dict[str, str]:
-    secret_key = str(st.secrets.get("SUPABASE_SECRET_KEY", "")).strip()
+    secret_key = _runtime_secret("SUPABASE_SECRET_KEY")
     if not secret_key:
         raise CalendarStorageError(
-            "SUPABASE_SECRET_KEY не найден в Streamlit Secrets."
+            "SUPABASE_SECRET_KEY не найден в Render Environment."
         )
 
     return {
@@ -108,10 +108,10 @@ def _supabase_headers() -> dict[str, str]:
 
 
 def _supabase_url() -> str:
-    base_url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+    base_url = _runtime_secret("SUPABASE_URL").rstrip("/")
     if not base_url:
         raise CalendarStorageError(
-            "SUPABASE_URL не найден в Streamlit Secrets."
+            "SUPABASE_URL не найден в Render Environment."
         )
     return base_url
 
