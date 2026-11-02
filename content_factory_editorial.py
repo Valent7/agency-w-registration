@@ -107,7 +107,37 @@ def _job_context(job: dict) -> dict:
             for item in job["quality_criteria"][:12]
             if isinstance(item, str) and item.strip()
         ]
+    # Only system-created launch masters may carry job-scoped verified facts.
+    # They are not accepted from ordinary user-authored jobs.
+    if (
+        job.get("studio_master") is True
+        and isinstance(job.get("launch_brief"), dict)
+        and isinstance(job.get("verified_facts"), list)
+    ):
+        context["verified_facts"] = [
+            _string(item, "подтверждённый факт задания", 800)
+            for item in job["verified_facts"][:12]
+            if isinstance(item, str) and item.strip()
+        ]
     return context
+
+
+def _project_context_for_job(project: dict, context: dict) -> dict:
+    """Merge trusted job-scoped facts into the editor's project facts.
+
+    This does not persist or rewrite the user's project settings. It exists for
+    one system-created launch job only, so the reviewer can distinguish real
+    internal Agency W modules from invented product claims.
+    """
+    result = _project_context(project)
+    verified = context.get("verified_facts")
+    if isinstance(verified, list) and verified:
+        suffix = (
+            "\n\nПодтверждено внутренней системой для этого задания:\n- "
+            + "\n- ".join(verified)
+        )
+        result["facts"] = (str(result.get("facts") or "") + suffix)[-PROJECT_LIMITS["facts"]:]
+    return result
 
 
 def _content_context(content: dict) -> dict:
@@ -324,7 +354,7 @@ def build_proofread_prompt(project: dict, job: dict, content: dict) -> tuple[str
             instructions += " Сохрани target_seconds=120 и весь принятый двухминутный сюжет; не превращай его в короткий ролик."
     else:
         instructions += "}."
-    return instructions, _json({"project": _project_context(project), **context, "content": source})
+    return instructions, _json({"project": _project_context_for_job(project, context), **context, "content": source})
 
 
 def build_review_prompt(project: dict, job: dict, content: dict) -> tuple[str, str]:
@@ -375,7 +405,7 @@ def build_review_prompt(project: dict, job: dict, content: dict) -> tuple[str, s
             "агрессия не являются обязательным признаком энергии. Не подменяй проверку меткой "
             "«всё одобрено»: brief_feedback должно опираться на содержание именно этого ролика."
         )
-    payload = {"project": _project_context(project), **context, "content": _content_context(content)}
+    payload = {"project": _project_context_for_job(project, context), **context, "content": _content_context(content)}
     return instructions, _json(payload)
 
 
@@ -494,7 +524,7 @@ def build_visual_prompt(project: dict, job: dict, content: dict, *, frame_count:
         '"lighting":"освещение, до 500 знаков",'
         '"palette":"палитра и акценты, до 500 знаков"}]}.'
     )
-    payload = {"project": _project_context(project), **context,
+    payload = {"project": _project_context_for_job(project, context), **context,
                "content": _content_context(content), "frame_count": count}
     if project.get("video_mode") == "live" and context["format"] == "reel" and project.get("video_style") == "cartoon":
         instructions += (
