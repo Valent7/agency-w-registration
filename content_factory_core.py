@@ -339,8 +339,9 @@ class ContentFactoryService:
             "requested_by_owner": True,
             "request_id": request_id,
             "request_fingerprint": fingerprint,
-            "video_mode": "live",
-            "video_style": "live",
+            "video_mode": "brag",
+            "video_style": "brag",
+            "video_engine": "brag",
             "content": {"share_copy": share_copy, "launch_brief": brief},
             "assets": [],
             "checkpoint": {},
@@ -353,8 +354,8 @@ class ContentFactoryService:
             "studio_master": True,
             "launch_brief": brief,
             "verified_facts": verified_facts,
-            "max_video_scenes": 5,
-            "max_video_seconds": 22,
+            "brag_format": "vertical",
+            "brag_duration_seconds": 20,
         })
         if job.get("request_fingerprint") != fingerprint:
             raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
