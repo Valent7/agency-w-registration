@@ -141,29 +141,22 @@ def _manual_archive(owner_id, packages, query="", kind="all"):
 
 
 def _repair_legacy_launch_jobs(owner_id, project, store, service, jobs):
-    """Repair old over-budget Site -> video jobs in place.
-
-    No paid video provider was called for these rows. Compact the approved
-    launch brief to five scenes, store the short-video budget, then use the
-    store's guarded pre-provider restart so no duplicate job is created.
-    """
+    """Migrate safe pre-provider Site -> video failures from Runway to real Brag."""
     try:
-        from content_studio_launch_video_ui import _compact_scenes_to_five
         from content_factory_core import iso, utc_now
     except Exception:
         return False
 
     repaired = False
     for job in list(jobs or []):
-        if job.get("studio_master") is not True or job.get("state") != "failed":
+        if (
+            job.get("studio_master") is not True
+            or job.get("state") != "failed"
+            or not isinstance(job.get("launch_brief"), dict)
+            or isinstance(job.get("production"), dict)
+        ):
             continue
-        brief = job.get("launch_brief")
-        if not isinstance(brief, dict):
-            continue
-        scenes = brief.get("scenes")
-        if not isinstance(scenes, list) or len(scenes) <= 5:
-            continue
-        if isinstance(job.get("production"), dict):
+        if str(job.get("video_engine") or "").strip().lower() == "brag":
             continue
         error_text = str(job.get("error") or "").casefold()
         if not any(
@@ -171,34 +164,22 @@ def _repair_legacy_launch_jobs(owner_id, project, store, service, jobs):
             for marker in (
                 "видеосцены не запускались",
                 "изображения и видеосцены не запускались",
-                "озвучка launch-ролика",
+                "кредит",
+                "384",
+                "сократите ролик",
             )
         ):
             continue
-
-        compacted = _compact_scenes_to_five(scenes)
-        corrected = dict(brief)
-        corrected["scenes"] = compacted
-        corrected["duration_seconds"] = min(
-            22,
-            max(15, sum(int(item.get("seconds") or 0) for item in compacted)),
-        )
         try:
             updated = store.update_job(
                 owner_id,
                 job["id"],
                 {
-                    "launch_brief": corrected,
-                    "max_video_scenes": 5,
-                    "max_video_seconds": 22,
-                    "production_plan": [
-                        (
-                            f"Сцена {index}, {item.get('seconds')} сек. "
-                            f"Визуал: {str(item.get('visual') or '')[:700]}. "
-                            f"Текст: {str(item.get('text') or '')[:250]}."
-                        )[:1000]
-                        for index, item in enumerate(compacted, 1)
-                    ],
+                    "video_engine": "brag",
+                    "video_mode": "brag",
+                    "video_style": "brag",
+                    "brag_format": "vertical",
+                    "brag_duration_seconds": 20,
                 },
                 expected_updated_at=job.get("updated_at"),
             )
@@ -240,8 +221,8 @@ def _library(owner_id, owner_name, target_profile, render_manual, *, store, serv
 
     if _repair_legacy_launch_jobs(owner_id, project, store, service, jobs):
         st.success(
-            "Старая 6-сценная попытка автоматически заменена на 5-сценную "
-            "версию под текущий видеобюджет."
+            "Старое задание «Сайт → ролик» переведено с Runway на настоящий Brag. "
+            "Утверждённый сценарий сохранён."
         )
         try:
             jobs = store.list_jobs(owner_id, project["id"], limit=100)
