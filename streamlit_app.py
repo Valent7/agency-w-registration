@@ -2738,6 +2738,7 @@ Telegram-предупреждение scam/fake является основан�
                 "name": source.get("name") or "Без имени",
                 "first_name": source.get("first_name") or "",
                 "username": source.get("username") or "",
+                "access_hash": source.get("access_hash"),
                 "segment": str(
                     item.get("segment") or "Не определён"
                 ),
@@ -2793,12 +2794,93 @@ Telegram-предупреждение scam/fake является основан�
     return normalized
 
 
+async def _resolve_first_outreach_entity(
+    client,
+    recipient_telegram_id,
+    recipient_username="",
+    recipient_source_chat_id=None,
+    recipient_access_hash=None,
+):
+    """Resolve a manually approved first-outreach peer.
+
+    Group candidates are resolved only when they came from a Telegram group
+    that is still visible to the connected owner session. This avoids the
+    old GetContactsRequest bottleneck without bypassing Telegram restrictions.
+    """
+    recipient_telegram_id = int(recipient_telegram_id)
+    username = str(recipient_username or "").strip().lstrip("@")
+
+    try:
+        source_chat_id = int(recipient_source_chat_id or 0)
+    except (TypeError, ValueError):
+        source_chat_id = 0
+
+    if source_chat_id > 0:
+        source_group_visible = False
+        async for dialog in client.iter_dialogs(limit=500):
+            if not bool(getattr(dialog, "is_group", False)):
+                continue
+            if int(getattr(dialog.entity, "id", -1)) == source_chat_id:
+                source_group_visible = True
+                break
+        if not source_group_visible:
+            raise RuntimeError(
+                "Telegram-группа, из которой найден кандидат, сейчас "
+                "недоступна подключённому аккаунту."
+            )
+
+        if recipient_access_hash not in (None, ""):
+            try:
+                return InputPeerUser(
+                    user_id=recipient_telegram_id,
+                    access_hash=int(recipient_access_hash),
+                )
+            except (TypeError, ValueError):
+                pass
+
+        if username:
+            try:
+                entity = await client.get_entity(username)
+                if int(getattr(entity, "id", 0) or 0) == recipient_telegram_id:
+                    return entity
+            except Exception:
+                pass
+
+        raise RuntimeError(
+            "Telegram видит кандидата в исходной группе, но сейчас не дал "
+            "достаточных данных для личного сообщения. Выберите другого "
+            "кандидата или обновите поиск Неонии."
+        )
+
+    # For warm/manual contacts keep the existing contact-only fallback.
+    # Username is tried first so a harmless FloodWait on the address book
+    # does not block an otherwise resolvable known person.
+    if username:
+        try:
+            entity = await client.get_entity(username)
+            if int(getattr(entity, "id", 0) or 0) == recipient_telegram_id:
+                return entity
+        except Exception:
+            pass
+
+    contacts_result = await client(GetContactsRequest(hash=0))
+    for user in contacts_result.users:
+        if int(user.id) == recipient_telegram_id:
+            return user
+
+    raise RuntimeError(
+        "Этого человека нет в ваших Telegram-контактах и нет подтверждённого "
+        "источника из доступной Telegram-группы."
+    )
+
+
 async def send_telegram_first_message(
     owner_telegram_id,
     recipient_telegram_id,
     recipient_username,
     message,
     recipient_source_chat_id=None,
+    recipient_access_hash=None,
 ):
     """Отправляет одно утверждённое первое сообщение от аккаунта владельца."""
 
@@ -2842,24 +2924,13 @@ async def send_telegram_first_message(
                 "Подключён другой Telegram-аккаунт."
             )
 
-        entity = None
-        contacts_result = await client(
-            GetContactsRequest(hash=0)
+        entity = await _resolve_first_outreach_entity(
+            client,
+            recipient_telegram_id,
+            recipient_username,
+            recipient_source_chat_id,
+            recipient_access_hash,
         )
-        for user in contacts_result.users:
-            if int(user.id) == recipient_telegram_id:
-                entity = user
-                break
-
-        # Для первого холодного обращения Агентство W теперь использует
-        # только реальные Telegram-контакты владельца. Это не попытка
-        # обходить антиспам Telegram через username или участников групп.
-        if entity is None:
-            raise RuntimeError(
-                "Этого человека нет в ваших Telegram-контактах. "
-                "Первое сообщение ему через Telegram не отправляем. "
-                "Выберите другого кандидата или дополнительный канал."
-            )
 
         # Последнее входящее сообщение, существовавшее ДО первого
         # сообщения Агентства W. Всё, что придёт позже, должна обработать Неона.
@@ -2903,6 +2974,7 @@ async def send_telegram_first_video(
     recipient_username,
     video_bytes,
     recipient_source_chat_id=None,
+    recipient_access_hash=None,
 ):
     """
     Отправляет ОДНО утверждённое первое видео Неоны от аккаунта владельца.
@@ -2944,20 +3016,13 @@ async def send_telegram_first_video(
                 "Подключите Telegram заново."
             )
 
-        entity = None
-        contacts_result = await client(
-            GetContactsRequest(hash=0)
+        entity = await _resolve_first_outreach_entity(
+            client,
+            recipient_telegram_id,
+            recipient_username,
+            recipient_source_chat_id,
+            recipient_access_hash,
         )
-        for user in contacts_result.users:
-            if int(user.id) == recipient_telegram_id:
-                entity = user
-                break
-
-        if entity is None:
-            raise RuntimeError(
-                "Этого человека нет в ваших Telegram-контактах. "
-                "Первое видео ему через Telegram не отправляем."
-            )
 
         baseline_incoming_message_id = 0
         try:
@@ -13451,10 +13516,31 @@ if telegram_login_valid or remembered_data:
                                                 for rule_error in current_rule_errors:
                                                     st.write(f"• {rule_error}")
 
+                                        quick_send_request_key = (
+                                            "neona_quick_send_request_"
+                                            f"{telegram_id}_{contact_id}"
+                                        )
                                         if draft.get("approved"):
                                             st.success(
                                                 "✅ Сообщение утверждено владельцем"
                                             )
+                                            if not draft.get("sent"):
+                                                st.caption(
+                                                    "Утверждение ещё не отправляет текст. "
+                                                    "Для реальной отправки нажмите кнопку ниже."
+                                                )
+                                                if st.button(
+                                                    "📨 Отправить первое сообщение",
+                                                    type="primary",
+                                                    use_container_width=True,
+                                                    key=(
+                                                        "neona_quick_send_first_"
+                                                        f"{telegram_id}_{contact_id}"
+                                                    ),
+                                                ):
+                                                    st.session_state[
+                                                        quick_send_request_key
+                                                    ] = True
                                         else:
                                             st.warning(
                                                 "Черновик ещё не утверждён."
@@ -13551,6 +13637,9 @@ if telegram_login_valid or remembered_data:
                                                                             video_bytes,
                                                                             contact.get(
                                                                                 "source_chat_id"
+                                                                            ),
+                                                                            contact.get(
+                                                                                "access_hash"
                                                                             ),
                                                                         )
                                                                     )
@@ -13682,6 +13771,9 @@ if telegram_login_valid or remembered_data:
                                                                     video_bytes,
                                                                     contact.get(
                                                                         "source_chat_id"
+                                                                    ),
+                                                                    contact.get(
+                                                                        "access_hash"
                                                                     ),
                                                                 )
                                                             )
@@ -13830,6 +13922,12 @@ if telegram_login_valid or remembered_data:
                                                 "**Или отправить обычным текстом:**"
                                             )
 
+                                            quick_send_requested = bool(
+                                                st.session_state.pop(
+                                                    quick_send_request_key,
+                                                    False,
+                                                )
+                                            )
                                             sent_today = (
                                                 count_first_messages_sent_today(
                                                     sent_log
@@ -13860,14 +13958,15 @@ if telegram_login_valid or remembered_data:
                                                     f"{first_name}. После отправки отменить "
                                                     "его нельзя."
                                                 )
-                                                if st.button(
+                                                send_text_clicked = st.button(
                                                     "📨 Отправить первое сообщение",
                                                     type="primary",
                                                     key=(
                                                         "neona_agent_send_first_message_"
                                                         f"{telegram_id}_{contact_id}"
                                                     ),
-                                                ):
+                                                )
+                                                if send_text_clicked or quick_send_requested:
                                                     try:
                                                         with st.spinner(
                                                             "Отправляем сообщение в Telegram..."
@@ -13887,6 +13986,9 @@ if telegram_login_valid or remembered_data:
                                                                         draft["message"],
                                                                         contact.get(
                                                                             "source_chat_id"
+                                                                        ),
+                                                                        contact.get(
+                                                                            "access_hash"
                                                                         ),
                                                                     )
                                                                 )
@@ -13982,7 +14084,7 @@ if telegram_login_valid or remembered_data:
                                                                 continue
                                                             if candidate_id == contact_id:
                                                                 candidate["status"] = (
-                                                                    "Первое видео-кружок отправлен"
+                                                                    "Первое сообщение отправлено"
                                                                 )
                                                         st.session_state[
                                                             candidates_key
