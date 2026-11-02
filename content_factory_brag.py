@@ -94,6 +94,9 @@ Use the exact real module names in Russian: «Стагирит», «Неония
 Never replace Agency W modules with third-party apps such as Google Calendar, Trello, Gmail,
 Outlook, Figma, Photoshop or generic SaaS dashboards.
 Never invent Latinized product names such as StagirIT or Neoniya.
+Never use the obsolete Agency W URL agency-w.streamlit.app. The current public Agency W URL is
+https://agency-w-web.onrender.com, and the browser address bar should not be emphasized unless it
+adds real value to the story.
 The user especially wants the real workflow: Стагирит/coordination → Неония/candidate search →
 real candidate context → Неона/personalized first message → Контент-завод.
 If an authenticated internal UI cannot be inspected, explicitly use a real owner-provided Agency W
