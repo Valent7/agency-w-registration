@@ -353,6 +353,8 @@ class ContentFactoryService:
             "studio_master": True,
             "launch_brief": brief,
             "verified_facts": verified_facts,
+            "max_video_scenes": 5,
+            "max_video_seconds": 22,
         })
         if job.get("request_fingerprint") != fingerprint:
             raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
