@@ -293,7 +293,125 @@ class Worker:
                      permalink=str(published.get("permalink") or ""), published_at=iso(self.clock()), error="")
         return "published"
 
+    def _generate_brag(self, job, project):
+        """Generate Site -> video jobs with the real latent-spaces/brag workflow."""
+        checkpoint = dict(job.get("checkpoint") or {})
+        safe_preprovider_retry = bool(checkpoint.pop("safe_preprovider_retry", False))
+        if checkpoint.get("generation_started") and not safe_preprovider_retry:
+            raise ValueError(
+                "Прошлый запуск Brag уже начинался. Повтор остановлен, чтобы не создать дубль."
+            )
+
+        local_now = timestamp(self.clock()).astimezone(ZoneInfo(project["timezone"]))
+        reserved = bool(checkpoint.get("generation_started")) or self.store.reserve_generation(
+            job["owner_id"],
+            job["project_id"],
+            f"{job['id']}:{job['attempts']}:brag",
+            local_now.date().isoformat(),
+            int(project.get("max_daily_generations", 6)),
+        )
+        if not reserved:
+            tomorrow = datetime.combine(
+                local_now.date() + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=local_now.tzinfo,
+            )
+            self._finish(
+                job,
+                available_at=iso(tomorrow),
+                error="Дневной лимит создания материалов достигнут.",
+            )
+            return "pending"
+
+        checkpoint["generation_started"] = iso(self.clock())
+        checkpoint["pipeline_version"] = 3
+        checkpoint["video_engine"] = "brag"
+        checkpoint.pop("generation_complete", None)
+        self._update(
+            job,
+            checkpoint=checkpoint,
+            error="",
+            progress={
+                "stage": "brag_start",
+                "message": "Запускаем настоящий Brag: Codex + Hyperframes + FFmpeg.",
+            },
+        )
+
+        def progress(value):
+            self._update(job, progress=dict(value))
+
+        from content_factory_runtime import _configuration
+        from content_factory_brag import run_brag, BragError
+
+        cfg = _configuration()
+        key = str(cfg.get("OPENAI_API_KEY") or "").strip()
+        try:
+            content, generated_assets = run_brag(
+                project,
+                dict(job),
+                key,
+                progress=progress,
+            )
+        except BragError as exc:
+            raise ValueError(str(exc)) from None
+
+        if not isinstance(content, dict) or not str(content.get("text") or "").strip():
+            raise ValueError("Brag не подготовил текст публикации.")
+        if not isinstance(generated_assets, list) or not any(
+            str(asset.get("mime_type") or "").startswith("video/")
+            for asset in generated_assets
+            if isinstance(asset, dict)
+        ):
+            raise ValueError("Brag не вернул готовый MP4.")
+
+        self._update(job, content=content, assets=[], checkpoint=dict(checkpoint))
+        assets = []
+        for asset in generated_assets:
+            saved = self.store.put_asset(
+                job["owner_id"],
+                job["project_id"],
+                job["id"],
+                asset["filename"],
+                asset["data"],
+                asset["mime_type"],
+            )
+            assets.append(saved)
+            self._update(job, assets=list(assets))
+
+        checkpoint["generation_complete"] = True
+        checkpoint["brag_complete"] = True
+        latest = self.store.get_project(job["owner_id"], job["project_id"])
+        state = (
+            "ready"
+            if (
+                latest.get("review_required")
+                or job.get("review_required")
+                or not latest.get("automation_enabled")
+            )
+            else "scheduled"
+        )
+        self._finish(
+            job,
+            content=content,
+            assets=assets,
+            state=state,
+            checkpoint=checkpoint,
+            progress={
+                "stage": "ready",
+                "message": "Brag.mp4 готов к проверке в «Моих генерациях».",
+            },
+            generated_at=iso(self.clock()),
+            available_at=iso(
+                max(timestamp(self.clock()), timestamp(job["scheduled_at"]))
+            ),
+            error="",
+        )
+        return "generated"
+
     def _generate(self, job, project):
+        if str(job.get("video_engine") or "").strip().lower() == "brag":
+            return self._generate_brag(job, project)
+
         checkpoint = dict(job.get("checkpoint") or {})
         production = job.get("production")
         live_resume = getattr(self.generator, "supports_live_video_resume", False) is True and self.generator.can_resume_video(production)
