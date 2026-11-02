@@ -11,6 +11,7 @@ from content_factory_core import ContentFactoryService, FactoryError
 from content_factory_store import SQLiteStore
 from content_studio_launch_video_ui import (
     LaunchVideoError,
+    _latest_launch_job,
     _normalize_plan,
     _safe_website,
 )
@@ -102,6 +103,40 @@ class LaunchVideoTests(unittest.TestCase):
         self.assertEqual(job["video_mode"], "live")
         self.assertGreaterEqual(len(job["production_plan"]), 4)
         self.assertEqual(job["approved_intent"]["main_idea"], BRIEF["hook"])
+
+    def test_last_launch_job_is_recoverable_after_session_loss(self):
+        job = self.service.create_master_from_launch_brief(
+            77,
+            self.project["id"],
+            BRIEF,
+            request_id="launch-test-recover-001",
+        )
+        failed = self.store.update_job(
+            77,
+            job["id"],
+            {"state": "failed", "error": "Редактор остановил до видеогенерации"},
+            expected_updated_at=job["updated_at"],
+        )
+        latest = _latest_launch_job(self.store, 77, self.project["id"])
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest["id"], failed["id"])
+        self.assertEqual(latest["launch_brief"]["hook"], BRIEF["hook"])
+        self.assertEqual(latest["state"], "failed")
+        self.assertFalse((latest.get("production") or {}).get("tasks"))
+
+    def test_agency_launch_master_carries_verified_internal_roles(self):
+        job = self.service.create_master_from_launch_brief(
+            77,
+            self.project["id"],
+            BRIEF,
+            request_id="launch-test-facts-001",
+        )
+        facts = job.get("verified_facts") or []
+        joined = "\n".join(facts)
+        self.assertIn("Неония", joined)
+        self.assertIn("Неона", joined)
+        self.assertIn("Контент-завод", joined)
+        self.assertIn("Стагирит", joined)
 
     def test_same_request_is_idempotent_and_changed_brief_is_rejected(self):
         first = self.service.create_master_from_launch_brief(
