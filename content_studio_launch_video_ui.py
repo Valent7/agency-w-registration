@@ -324,12 +324,57 @@ def render_launch_video_tool(owner_id, project, store, ask_ai_fn):
         "Будет создан один вертикальный мастер 9:16. Он не публикуется автоматически "
         "и сначала появится в «Моих генерациях» для проверки."
     )
-    if st.button("🎬 3. Создать видео", type="primary", use_container_width=True, key=prefix + "_create"):
+
+    existing_job = None
+    existing_job_id = st.session_state.get(job_key)
+    if existing_job_id:
+        try:
+            existing_job = store.get_job(owner_id, existing_job_id)
+        except Exception:
+            existing_job = None
+    if existing_job is None:
+        try:
+            current_plan = _edited_plan(owner_id, project_id, st.session_state[plan_key])
+            for candidate in store.list_jobs(owner_id, project_id, limit=50):
+                if (
+                    candidate.get("studio_master") is True
+                    and isinstance(candidate.get("launch_brief"), dict)
+                    and candidate["launch_brief"].get("website") == current_plan.get("website")
+                    and candidate["launch_brief"].get("hook") == current_plan.get("hook")
+                ):
+                    existing_job = candidate
+                    st.session_state[job_key] = candidate.get("id")
+                    break
+        except Exception:
+            existing_job = None
+
+    failed_before_video = bool(
+        isinstance(existing_job, dict)
+        and existing_job.get("state") == "failed"
+        and not (existing_job.get("production") or {}).get("tasks")
+    )
+    if failed_before_video:
+        st.warning(
+            "Предыдущая попытка была остановлена редактором до заказа видеосцен. "
+            "Кредиты видеосервиса на неё не списывались. Исправленный сценарий можно "
+            "запустить повторно одной кнопкой."
+        )
+
+    create_label = (
+        "🔄 Повторить создание после исправления"
+        if failed_before_video
+        else "🎬 3. Создать видео"
+    )
+    if st.button(create_label, type="primary", use_container_width=True, key=prefix + "_create"):
         try:
             brief = _edited_plan(owner_id, project_id, st.session_state[plan_key])
             request_key = prefix + "_request_id"
             request_id = st.session_state.get(request_key)
-            if not isinstance(request_id, str) or len(request_id) < 8:
+            if failed_before_video:
+                request_id = "launch_" + uuid.uuid4().hex[:20]
+                st.session_state[request_key] = request_id
+                st.session_state.pop(job_key, None)
+            elif not isinstance(request_id, str) or len(request_id) < 8:
                 request_id = "launch_" + uuid.uuid4().hex[:20]
                 st.session_state[request_key] = request_id
             service = ContentFactoryService(store)
