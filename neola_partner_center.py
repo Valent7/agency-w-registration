@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import re
 from urllib.parse import quote
 from datetime import datetime, timedelta
@@ -17,14 +18,32 @@ UTC_TZ = ZoneInfo("UTC")
 MIN_LODGES = 5
 
 
+def _runtime_secret(name, default=""):
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
+def _require_runtime_secret(name):
+    value = _runtime_secret(name)
+    if not value:
+        raise RuntimeError(f"Не найдена настройка {name} в Render Environment.")
+    return value
+
+
 def _now_iso():
     return datetime.now(UTC_TZ).isoformat()
 
 
 def _supabase_headers(prefer=None):
     headers = {
-        "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-        "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+        "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
+        "Authorization": f"Bearer {_require_runtime_secret("SUPABASE_SECRET_KEY")}",
         "Content-Type": "application/json",
     }
     if prefer:
@@ -33,7 +52,7 @@ def _supabase_headers(prefer=None):
 
 
 def _supabase_url(path):
-    return f"{st.secrets['SUPABASE_URL']}/rest/v1/{path.lstrip('/')}"
+    return f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/{path.lstrip('/')}"
 
 
 def _get_json(path, params=None, timeout=15):
@@ -416,7 +435,7 @@ NEOLA_KNOWLEDGE_STATUSES = ("Одобрен", "Черновик", "Архив")
 
 
 def _storage_object_url(bucket, path):
-    base = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+    base = str(_require_runtime_secret("SUPABASE_URL")).rstrip("/")
     safe_bucket = quote(str(bucket), safe="")
     safe_path = quote(str(path), safe="/")
     return f"{base}/storage/v1/object/{safe_bucket}/{safe_path}"
@@ -448,8 +467,8 @@ def _upload_neola_knowledge_file(viewer_telegram_id, uploaded_file):
     response = requests.post(
         _storage_object_url(NEOLA_KNOWLEDGE_BUCKET, storage_path),
         headers={
-            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-            "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+            "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
+            "Authorization": f"Bearer {_require_runtime_secret("SUPABASE_SECRET_KEY")}",
             "Content-Type": mime_type,
             "x-upsert": "false",
         },
@@ -1043,7 +1062,7 @@ def _extract_response_text(data):
 
 def analyze_neoxa_proof(image_bytes, mime_type):
     """ИИ только подсказывает, что видно на скриншоте. Решение принимает владелец Агентства W."""
-    api_key = st.secrets.get("OPENAI_API_KEY")
+    api_key = _runtime_secret("OPENAI_API_KEY")
     if not api_key:
         return {
             "nickname": "",
@@ -1946,7 +1965,7 @@ def _load_neola_messages(telegram_id, limit=30):
 
 
 def _transcribe_audio(audio_file):
-    api_key = st.secrets.get("OPENAI_API_KEY")
+    api_key = _runtime_secret("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY не найден.")
     audio_bytes = audio_file.getvalue()
@@ -1968,7 +1987,7 @@ def _transcribe_audio(audio_file):
 
 
 def _synthesize_speech(text):
-    api_key = st.secrets.get("OPENAI_API_KEY")
+    api_key = _runtime_secret("OPENAI_API_KEY")
     if not api_key or not text:
         return None
     response = requests.post(
