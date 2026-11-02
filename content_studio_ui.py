@@ -140,6 +140,74 @@ def _manual_archive(owner_id, packages, query="", kind="all"):
     return bool(manual)
 
 
+def _repair_legacy_launch_jobs(owner_id, project, store, service, jobs):
+    """One-time self-heal for old 6-scene Site -> video jobs.
+
+    These jobs were approved and queued before the five-scene budget guard
+    existed. If the worker stopped them before any paid video task started,
+    replace them with an idempotent five-scene clone and archive the old row.
+    """
+    try:
+        from content_studio_launch_video_ui import _compact_scenes_to_five
+    except Exception:
+        return False
+
+    repaired = False
+    for job in list(jobs or []):
+        if job.get("studio_master") is not True or job.get("state") != "failed":
+            continue
+        brief = job.get("launch_brief")
+        if not isinstance(brief, dict):
+            continue
+        scenes = brief.get("scenes")
+        if not isinstance(scenes, list) or len(scenes) <= 5:
+            continue
+        if (job.get("production") or {}).get("tasks"):
+            # Never clone a job after paid/remote scene work already started.
+            continue
+        error_text = str(job.get("error") or "")
+        if not any(token in error_text.casefold() for token in ("кредит", "384", "сократите ролик")):
+            continue
+
+        compacted = _compact_scenes_to_five(scenes)
+        if not 3 <= len(compacted) <= 5:
+            continue
+        corrected = dict(brief)
+        corrected["scenes"] = compacted
+        corrected["duration_seconds"] = sum(
+            int(item.get("seconds") or 0) for item in compacted
+        )
+        request_id = "repair_" + str(job.get("id") or "").replace("-", "")[:60]
+        if len(request_id) < 8:
+            continue
+        try:
+            new_job = service.create_master_from_launch_brief(
+                owner_id,
+                project["id"],
+                corrected,
+                request_id=request_id,
+            )
+            store.update_job(
+                owner_id,
+                job["id"],
+                {
+                    "state": "cancelled",
+                    "error": (
+                        "Архивировано автоматически: старая 6-сценная версия "
+                        "заменена 5-сценной задачей "
+                        + str(new_job.get("id") or "")
+                    ),
+                },
+                expected_updated_at=job.get("updated_at"),
+            )
+            repaired = True
+        except Exception:
+            # Idempotent repair: a concurrent refresh or worker must not turn
+            # the library into an error page.
+            continue
+    return repaired
+
+
 def _library(owner_id, owner_name, target_profile, render_manual, *, store, service, project):
     from content_factory_autopilot_ui import _materials, STATES
     from content_studio_catalog import list_manual_packages
@@ -163,6 +231,16 @@ def _library(owner_id, owner_name, target_profile, render_manual, *, store, serv
         st.error("Не удалось загрузить материалы. Сохранённые файлы остаются в вашем проекте.")
         _manual_archive(owner_id, packages)
         return
+
+    if _repair_legacy_launch_jobs(owner_id, project, store, service, jobs):
+        st.success(
+            "Старая 6-сценная попытка автоматически заменена на 5-сценную "
+            "версию под текущий видеобюджет."
+        )
+        try:
+            jobs = store.list_jobs(owner_id, project["id"], limit=100)
+        except Exception:
+            pass
     detail = st.session_state.get(f"content_studio_{owner_id}_detail")
     if detail:
         selected = next((item for item in jobs if item["id"] == detail), None)
