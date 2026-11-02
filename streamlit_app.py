@@ -8038,6 +8038,8 @@ def _telegram_bot_secret(name):
         value = st.secrets.get(name)
     except Exception:
         value = None
+    if not value:
+        value = os.environ.get(name)
     return str(value or "").strip()
 
 
