@@ -334,10 +334,10 @@ def render_agency_w_logo(compact=False):
 
 
 def get_session_cipher():
-    key = st.secrets.get("FERNET_KEY")
+    key = _runtime_secret("FERNET_KEY")
 
     if not key:
-        raise RuntimeError("FERNET_KEY не найден в Streamlit Secrets.")
+        raise RuntimeError("FERNET_KEY не найден в Render Environment.")
 
     return Fernet(str(key).encode())
 
@@ -375,7 +375,7 @@ def ask_openai(
     use_web_search=False,
     model=None,
 ):
-    api_key = st.secrets.get("OPENAI_API_KEY")
+    api_key = _runtime_secret("OPENAI_API_KEY")
 
     if not api_key:
         return "Ключ OpenAI не найден в настройках приложения."
@@ -509,8 +509,8 @@ def ask_claude(
     на резервный OpenAI, не показывая партнёру техническую ошибку.
     """
     api_key = (
-        st.secrets.get("ANTHROPIC_API_KEY")
-        or st.secrets.get("CLAUDE_API_KEY")
+        _runtime_secret("ANTHROPIC_API_KEY")
+        or _runtime_secret("CLAUDE_API_KEY")
     )
     if not api_key:
         return {
@@ -521,8 +521,8 @@ def ask_claude(
         }
 
     model = (
-        st.secrets.get("ANTHROPIC_MODEL")
-        or st.secrets.get("CLAUDE_MODEL")
+        _runtime_secret("ANTHROPIC_MODEL")
+        or _runtime_secret("CLAUDE_MODEL")
         or "claude-sonnet-5"
     )
 
@@ -1522,7 +1522,7 @@ def generate_openai_illustration(
     2) GPT Image создаёт одну сильную editorial-иллюстрацию.
     3) Стагирит проверяет именно смысл и художественную силу.
     """
-    api_key = st.secrets.get("OPENAI_API_KEY")
+    api_key = _runtime_secret("OPENAI_API_KEY")
     if not api_key:
         return {
             "ok": False,
@@ -1807,8 +1807,8 @@ def run_telegram_async(coroutine):
 
 
 def get_telegram_api_credentials():
-    api_id = int(st.secrets["TELEGRAM_API_ID"])
-    api_hash = str(st.secrets["TELEGRAM_API_HASH"])
+    api_id = int(_require_runtime_secret("TELEGRAM_API_ID"))
+    api_hash = str(_require_runtime_secret("TELEGRAM_API_HASH"))
     return api_id, api_hash
 
 
@@ -6399,7 +6399,7 @@ def generate_neona_first_message(
 
     # The FIRST-message composer is separate from Neona's live-dialogue worker.
     # Never let its quality silently depend on the general gpt-5-mini helper.
-    first_model = str(st.secrets.get("NEONA_FIRST_MESSAGE_MODEL") or "gpt-6-astra")
+    first_model = str(_runtime_secret("NEONA_FIRST_MESSAGE_MODEL") or "gpt-6-astra")
     answer = ask_openai(system_prompt, request, model=first_model).strip()
     if answer.startswith("Ошибка OpenAI:"):
         raise RuntimeError(answer)
@@ -6492,16 +6492,16 @@ def _instagram_connect_state(owner_telegram_id: int, owner_name: str) -> str:
     # redirecting to Instagram. Supabase secret is shared by both applications.
     from instagram_auth_handoff import create_signed_handoff
 
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "").strip()
+    key = str(_runtime_secret("SUPABASE_SECRET_KEY") or "").strip()
     if not key:
         raise RuntimeError("Не найден общий ключ авторизации Агентства.")
     return create_signed_handoff(int(owner_telegram_id), owner_name, key)
 
 
 def _instagram_connect_url(owner_telegram_id: int, owner_name: str) -> str:
-    base_url = str(st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
+    base_url = str(_runtime_secret("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
     if not base_url:
-        raise RuntimeError("INSTAGRAM_OAUTH_SERVICE_URL не найден в Streamlit Secrets.")
+        raise RuntimeError("INSTAGRAM_OAUTH_SERVICE_URL не найден в Render Environment.")
     response = requests.get(f"{base_url}/instagram/oauth-config", timeout=10)
     response.raise_for_status()
     oauth_config = response.json() if response.text.strip() else {}
@@ -6576,7 +6576,7 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
             ):
                 try:
                     service_url = str(
-                        st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or ""
+                        _runtime_secret("INSTAGRAM_OAUTH_SERVICE_URL") or ""
                     ).strip().rstrip("/")
                     if not service_url:
                         raise RuntimeError("Не задан сервис Instagram.")
@@ -6724,9 +6724,9 @@ def _instagram_comment_action_state(
     comment_id: str,
     purpose: str,
 ) -> str:
-    key = str(st.secrets.get("FERNET_KEY") or "").strip()
+    key = str(_runtime_secret("FERNET_KEY") or "").strip()
     if not key:
-        raise RuntimeError("FERNET_KEY не найден в Streamlit Secrets.")
+        raise RuntimeError("FERNET_KEY не найден в Render Environment.")
     payload = {
         "owner_id": int(owner_telegram_id),
         "comment_id": str(comment_id or "").strip(),
@@ -6739,7 +6739,7 @@ def _instagram_comment_action_state(
 
 
 def _instagram_comment_service_post(path: str, payload: dict) -> dict:
-    base_url = str(st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
+    base_url = str(_runtime_secret("INSTAGRAM_OAUTH_SERVICE_URL") or "").strip().rstrip("/")
     if not base_url:
         raise RuntimeError("Сервис Instagram ещё не указан в настройках Агентства W.")
     response = requests.post(
