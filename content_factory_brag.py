@@ -65,7 +65,7 @@ def _prompt(project: dict, job: dict) -> str:
     scene_direction = "\n".join(
         f"- {index}. {str(scene.get('visual') or '').strip()} | "
         f"on-screen text: {str(scene.get('text') or '').strip()}"
-        for index, scene in enumerate(scenes[:6], 1)
+        for index, scene in enumerate(scenes[:5], 1)
         if isinstance(scene, dict)
     )
     title = str(brief.get("title") or project.get("name") or "Agency W").strip()
@@ -82,6 +82,7 @@ Invocation intent:
 - tone: {tone}
 - format: vertical
 - duration: 20 seconds (stay within Brag's normal 15–25 second window)
+- scene budget: no more than 5 scenes; do not invent a sixth scene
 - voiceover: off
 - music: on
 - output: the normal brag-output directory with brag.mp4, brag.jpg and share-copy.txt
