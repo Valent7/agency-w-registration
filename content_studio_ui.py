@@ -285,9 +285,21 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
         padding-right: 28px !important;
       }}
       .st-key-studio_mobile_{owner_id} {{ display: none; }}
+      /* Left Content Factory menu: give each radio item breathing room. */
+      .st-key-studio_nav_{owner_id} [role="radiogroup"] {{
+        gap: 7px !important;
+      }}
+      .st-key-studio_nav_{owner_id} [role="radiogroup"] > label {{
+        min-height: 30px !important;
+        padding: 3px 2px !important;
+        margin: 0 !important;
+        align-items: flex-start !important;
+        column-gap: 9px !important;
+      }}
       .st-key-studio_nav_{owner_id} label p {{
         white-space: normal !important;
-        line-height: 1.25 !important;
+        line-height: 1.34 !important;
+        margin: 0 !important;
       }}
       @media (max-width: 900px) {{
         [data-testid="stMainBlockContainer"] {{
