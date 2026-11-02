@@ -5,3 +5,4 @@ cryptography
 pillow
 pypdf
 openai
+PyJWT[crypto]
