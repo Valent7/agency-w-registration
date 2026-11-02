@@ -1,3 +1,4 @@
+import os
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -11,6 +12,24 @@ import uuid
 
 import requests
 import streamlit as st
+
+
+def _runtime_secret(name, default=""):
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
+def _require_runtime_secret(name):
+    value = _runtime_secret(name)
+    if not value:
+        raise RuntimeError(f"Не найдена настройка {name} в Render Environment.")
+    return value
 from agency_access_control import is_agency_access_revoked
 
 from agency_publisher import (
@@ -26,8 +45,8 @@ BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def _config() -> tuple[str, str]:
-    url = str(st.secrets.get("SUPABASE_URL") or "").rstrip("/")
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "")
+    url = str(_runtime_secret("SUPABASE_URL") or "").rstrip("/")
+    key = str(_runtime_secret("SUPABASE_SECRET_KEY") or "")
     if not url or not key:
         raise RuntimeError(
             "Не найдены SUPABASE_URL или SUPABASE_SECRET_KEY."
