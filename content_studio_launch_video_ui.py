@@ -242,6 +242,29 @@ def _restore_launch_plan(owner_id, project_id, prefix, plan_key, approved_key, j
     st.session_state[f"{prefix}_share"] = str(brief.get("share_copy") or "")
 
 
+def _compact_scenes_to_five(scenes):
+    """Preserve the story while fitting the current five-scene video budget."""
+    items = [dict(item) for item in (scenes or []) if isinstance(item, dict)]
+    while len(items) > 5:
+        left = items[-2]
+        right = items[-1]
+        seconds = min(8, int(left.get("seconds") or 0) + int(right.get("seconds") or 0))
+        visual_left = str(left.get("visual") or "").strip()
+        visual_right = str(right.get("visual") or "").strip()
+        text_left = str(left.get("text") or "").strip()
+        text_right = str(right.get("text") or "").strip()
+        motion_left = str(left.get("motion") or "").strip()
+        motion_right = str(right.get("motion") or "").strip()
+        merged = {
+            "seconds": max(2, seconds),
+            "visual": (visual_left + (" Затем: " if visual_left and visual_right else "") + visual_right)[:900],
+            "text": (text_left + (" → " if text_left and text_right else "") + text_right)[:400],
+            "motion": (motion_left + ("; затем " if motion_left and motion_right else "") + motion_right)[:500],
+        }
+        items = items[:-2] + [merged]
+    return items
+
+
 def _edited_plan(owner_id, project_id, plan):
     prefix = f"launch_video_{owner_id}_{project_id}"
     scenes = []
@@ -252,6 +275,7 @@ def _edited_plan(owner_id, project_id, plan):
             "text": st.session_state.get(f"{prefix}_scene_text_{index}", scene.get("text") or ""),
             "motion": scene.get("motion") or "",
         })
+    scenes = _compact_scenes_to_five(scenes)
     return {
         **plan,
         "hook": st.session_state.get(f"{prefix}_hook", plan["hook"]),
