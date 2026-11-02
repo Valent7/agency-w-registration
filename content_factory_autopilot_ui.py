@@ -759,7 +759,7 @@ def _render_content_autopilot_legacy(owner_id: int, owner_name: str, target_prof
             _materials(owner_id, project, jobs, store, service)
 
 
-def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None, *, section=None, format_filter=None, video_style=None):
+def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None, *, section=None, format_filter=None, video_style=None, project_id=None):
     """Render the full existing page or one focused content-studio section.
 
     The default remains the legacy page, including its controls and state keys.
@@ -796,10 +796,25 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
     next_project = st.session_state.pop(f"cf_auto_{owner_id}_next_project", None)
     if next_project in options:
         st.session_state[selection_key] = next_project
-    if st.session_state.get(selection_key) not in options:
-        st.session_state[selection_key] = options[0]
-    selected = st.selectbox("Проект", options, format_func=labels.get, key=selection_key)
-    project = next((item for item in projects if item["id"] == selected), None)
+
+    # Content Studio already rendered the owner-level project selector.
+    # Focused inner sections must reuse that project instead of rendering a
+    # second Streamlit selectbox with the same key.
+    if project_id is not None:
+        project = next(
+            (item for item in projects if str(item["id"]) == str(project_id)),
+            None,
+        )
+    else:
+        if st.session_state.get(selection_key) not in options:
+            st.session_state[selection_key] = options[0]
+        selected = st.selectbox(
+            "Проект",
+            options,
+            format_func=labels.get,
+            key=selection_key,
+        )
+        project = next((item for item in projects if item["id"] == selected), None)
     if not project:
         st.caption("Создайте проект, чтобы сохранять материалы и настройки отдельно.")
         _project_form(owner_id, None, service, target_profile)
