@@ -58,6 +58,10 @@ def _safe_website(value):
         raise LaunchVideoError("Вставьте ссылку на сайт или страницу проекта.")
     if not re.match(r"^https?://", value, flags=re.IGNORECASE):
         value = "https://" + value
+    # Agency W moved from Streamlit Cloud to Render. Never send the obsolete
+    # public URL into new launch videos.
+    if re.match(r"^https?://agency-w\.streamlit\.app/?", value, flags=re.IGNORECASE):
+        value = "https://agency-w-web.onrender.com"
     parsed = urlparse(value)
     host = str(parsed.hostname or "").lower()
     if (
@@ -161,7 +165,8 @@ def _build_plan(ask_ai_fn, website, tone, focus, project):
 - НИКОГДА не придумывай латинские версии названий вроде StagirIT, Neoniya, Neona, если владелец не попросил об этом;
 - не показывай вымышленные интерфейсы, несуществующие кнопки и несуществующие экраны;
 - если реальный внутренний экран Агентства W недоступен из публичной ссылки, прямо укажи в visual: «использовать реальный скриншот/экран Агентства W, предоставленный владельцем», а не подменяй его другой программой;
-- если указан старый домен Streamlit, не делай его частью кадра и не акцентируй URL;
+- старый домен agency-w.streamlit.app больше не использовать вообще; для Агентства W актуальный публичный адрес — https://agency-w-web.onrender.com;
+- URL в кадре показывай только если это действительно помогает истории; по умолчанию адресную строку лучше не акцентировать;
 - темп создаётся движением и монтажом, а не мелькающим текстом;
 - текст должен успевать читаться;
 - каждая сцена должна ощущаться созданной именно для этого проекта;
