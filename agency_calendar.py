@@ -1,3 +1,4 @@
+import os
 """Внутренний календарь встреч Агентства W.
 
 Единый стандарт времени — МСК. В базе время хранится в UTC,
@@ -14,6 +15,24 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 import streamlit as st
+
+
+def _runtime_secret(name, default=""):
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
+def _require_runtime_secret(name):
+    value = _runtime_secret(name)
+    if not value:
+        raise RuntimeError(f"Не найдена настройка {name} в Render Environment.")
+    return value
 
 
 UTC = ZoneInfo("UTC")
