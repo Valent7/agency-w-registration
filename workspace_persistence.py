@@ -1,3 +1,4 @@
+import os
 import hashlib
 import json
 from datetime import datetime
@@ -5,11 +6,29 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+
+
+def _runtime_secret(name, default=""):
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
+def _require_runtime_secret(name):
+    value = _runtime_secret(name)
+    if not value:
+        raise RuntimeError(f"Не найдена настройка {name} в Render Environment.")
+    return value
 from cryptography.fernet import Fernet, InvalidToken
 
 
 def _get_cipher():
-    key = st.secrets.get("FERNET_KEY")
+    key = _runtime_secret("FERNET_KEY")
     if not key:
         raise RuntimeError(
             "FERNET_KEY не найден в Streamlit Secrets."
@@ -616,15 +635,15 @@ def _decrypt_state(encrypted_state):
 def _save_to_supabase(telegram_id, state):
     response = requests.post(
         (
-            f"{st.secrets['SUPABASE_URL']}"
+            f"{_require_runtime_secret("SUPABASE_URL")}"
             "/rest/v1/agency_workspace_states"
             "?on_conflict=telegram_id"
         ),
         headers={
-            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+            "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
             "Authorization": (
                 "Bearer "
-                f"{st.secrets['SUPABASE_SECRET_KEY']}"
+                f"{_require_runtime_secret("SUPABASE_SECRET_KEY")}"
             ),
             "Content-Type": "application/json",
             "Prefer": (
@@ -647,14 +666,14 @@ def _save_to_supabase(telegram_id, state):
 def _load_from_supabase(telegram_id):
     response = requests.get(
         (
-            f"{st.secrets['SUPABASE_URL']}"
+            f"{_require_runtime_secret("SUPABASE_URL")}"
             "/rest/v1/agency_workspace_states"
         ),
         headers={
-            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+            "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
             "Authorization": (
                 "Bearer "
-                f"{st.secrets['SUPABASE_SECRET_KEY']}"
+                f"{_require_runtime_secret("SUPABASE_SECRET_KEY")}"
             ),
         },
         params={
@@ -696,8 +715,8 @@ def persist_neonia_source_preference(telegram_id, mode, selected_chat_id=None,
         if chat_id <= 0:
             raise ValueError("Неверный ID группы.")
 
-    base = str(st.secrets["SUPABASE_URL"]).rstrip("/")
-    key = str(st.secrets["SUPABASE_SECRET_KEY"])
+    base = str(_require_runtime_secret("SUPABASE_URL")).rstrip("/")
+    key = str(_require_runtime_secret("SUPABASE_SECRET_KEY"))
     headers = {
         "apikey": key, "Authorization": "Bearer " + key,
         "Content-Type": "application/json",
