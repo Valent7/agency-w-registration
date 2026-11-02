@@ -98,7 +98,7 @@ def _normalize_plan(data, website, tone, project):
     if not isinstance(raw_scenes, list):
         raw_scenes = []
     scenes = []
-    for item in raw_scenes[:5]:
+    for item in raw_scenes[:7]:
         if not isinstance(item, dict):
             continue
         visual = _clean(item.get("visual"), 900)
@@ -154,7 +154,7 @@ def _build_plan(ask_ai_fn, website, tone, focus, project):
 Принципы:
 - первые 2 секунды — конкретный крючок;
 - зритель после одного просмотра понимает, что это, для кого и в чём польза;
-- 3–5 коротких сцен;
+- 3–6 коротких сцен;
 - показывай конкретный продукт/интерфейс/идею, а не абстрактные AI-картинки;
 - темп создаётся движением и монтажом, а не мелькающим текстом;
 - текст должен успевать читаться;
@@ -233,22 +233,16 @@ def _restore_launch_plan(owner_id, project_id, prefix, plan_key, approved_key, j
     if not brief or not isinstance(brief.get("scenes"), list):
         raise LaunchVideoError("У последнего задания не сохранился сценарий.")
 
-    # Old launch jobs may contain six scenes. The current budget allows five,
-    # so compact the durable plan before it is ever shown back to the owner.
-    compacted = _compact_scenes_to_five(brief.get("scenes") or [])
-    brief["scenes"] = compacted
-    brief["duration_seconds"] = sum(int(item.get("seconds") or 0) for item in compacted)
+    scenes = [dict(item) for item in (brief.get("scenes") or []) if isinstance(item, dict)]
+    brief["scenes"] = scenes
+    brief["duration_seconds"] = sum(int(item.get("seconds") or 0) for item in scenes)
 
     st.session_state[plan_key] = brief
     st.session_state[approved_key] = True
     st.session_state[job_key] = job.get("id")
-    for index, scene in enumerate(compacted, 1):
+    for index, scene in enumerate(scenes, 1):
         st.session_state[f"{prefix}_scene_{index}"] = str(scene.get("visual") or "")
         st.session_state[f"{prefix}_scene_text_{index}"] = str(scene.get("text") or "")
-    # Remove stale widget values for scene 6+ from previous sessions.
-    for index in range(len(compacted) + 1, 9):
-        st.session_state.pop(f"{prefix}_scene_{index}", None)
-        st.session_state.pop(f"{prefix}_scene_text_{index}", None)
     st.session_state[f"{prefix}_hook"] = str(brief.get("hook") or "")
     st.session_state[f"{prefix}_share"] = str(brief.get("share_copy") or "")
 
@@ -286,7 +280,6 @@ def _edited_plan(owner_id, project_id, plan):
             "text": st.session_state.get(f"{prefix}_scene_text_{index}", scene.get("text") or ""),
             "motion": scene.get("motion") or "",
         })
-    scenes = _compact_scenes_to_five(scenes)
     return {
         **plan,
         "hook": st.session_state.get(f"{prefix}_hook", plan["hook"]),
@@ -354,15 +347,6 @@ def render_launch_video_tool(owner_id, project, store, ask_ai_fn):
         st.rerun()
 
     plan = st.session_state.get(plan_key)
-    if isinstance(plan, dict) and isinstance(plan.get("scenes"), list) and len(plan["scenes"]) > 5:
-        plan = dict(plan)
-        plan["scenes"] = _compact_scenes_to_five(plan["scenes"])
-        plan["duration_seconds"] = sum(int(item.get("seconds") or 0) for item in plan["scenes"])
-        st.session_state[plan_key] = plan
-        for index in range(len(plan["scenes"]) + 1, 9):
-            st.session_state.pop(f"{prefix}_scene_{index}", None)
-            st.session_state.pop(f"{prefix}_scene_text_{index}", None)
-
     if not isinstance(plan, dict):
         last_job = _latest_launch_job(store, owner_id, project_id)
         if isinstance(last_job, dict):
