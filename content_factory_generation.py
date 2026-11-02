@@ -748,15 +748,80 @@ class Generator:
             elif job["format"] == "reel":
                 content["video_style"] = clean_project["video_style"]
 
+            # Site -> video is a deliberately bounded short launch format.
+            # Keep its narration and scene count inside the owner's approved
+            # video-credit budget before any Runway scene is ordered.
+            launch_budget_seconds = None
+            launch_scene_cap = None
+            if job.get("studio_master") is True and isinstance(job.get("launch_brief"), dict):
+                try:
+                    launch_budget_seconds = int(job.get("max_video_seconds") or 22)
+                except (TypeError, ValueError):
+                    launch_budget_seconds = 22
+                try:
+                    launch_scene_cap = int(job.get("max_video_scenes") or 5)
+                except (TypeError, ValueError):
+                    launch_scene_cap = 5
+                launch_budget_seconds = max(15, min(22, launch_budget_seconds))
+                launch_scene_cap = max(3, min(5, launch_scene_cap))
+
+                words = str(content.get("narration") or "").split()
+                if len(words) > 50:
+                    report(
+                        "copy",
+                        "Сокращаем озвучку launch-ролика до 45–50 слов, чтобы не выйти за видеобюджет.",
+                    )
+                    budget_review = {
+                        "approved": False,
+                        "issues": [
+                            "Сохрани смысл и подтверждённые факты, но сократи речь диктора "
+                            "до 45–50 слов. Не добавляй новые обещания, сцены или функции."
+                        ],
+                    }
+                    content = self._copy(clean_project, job, previous=content, review=budget_review)
+                    content = self._proofread(clean_project, job, content)
+                    words = str(content.get("narration") or "").split()
+                    if not 45 <= len(words) <= 50:
+                        raise GenerationError(
+                            "Не удалось сократить озвучку launch-ролика до безопасной длительности.",
+                            draft=content,
+                        )
+                    review = self._review_copy(clean_project, job, content)
+                    content["quality_review"] = review
+                    if not review["approved"]:
+                        raise GenerationError(
+                            "После сокращения Стагирит нашёл смысловую ошибку: "
+                            + "; ".join(review["issues"])[:600],
+                            draft=content,
+                        )
+
             speech, duration = None, None
             if live_client is not None:
                 report("video", "Записываем голос, чтобы точно рассчитать длительность живых сцен.")
                 speech = self._request("audio/speech", self._speech_payload(clean_project, content["narration"])).content
                 duration_options = {"target_seconds": 120} if content.get("target_seconds") == 120 else {}
                 duration = speech_duration(speech, **duration_options)
+            if (
+                live_client is not None
+                and launch_budget_seconds is not None
+                and duration is not None
+                and duration > launch_budget_seconds
+            ):
+                raise GenerationError(
+                    f"Озвучка launch-ролика получилась {duration:.1f} сек.; "
+                    f"лимит {launch_budget_seconds} сек. Видеосцены не запускались.",
+                    draft=content,
+                )
+
             frame_count = len(content["slides"]) if job["format"] == "carousel" else (
                 max(4, math.ceil((duration + 0.35) / 10)) if live_client is not None else 4
             ) if job["format"] == "reel" else 1
+            if (
+                job["format"] == "reel"
+                and live_client is not None
+                and launch_scene_cap is not None
+            ):
+                frame_count = min(frame_count, launch_scene_cap)
             report("visual", "Арт-директор разрабатывает сюжет и единый стиль иллюстраций.")
             if reference is not None:
                 accepted_plan = reference["plan"]["visual_plan"]
