@@ -1,4 +1,3 @@
-import os
 """Внутренний календарь встреч Агентства W.
 
 Единый стандарт времени — МСК. В базе время хранится в UTC,
@@ -7,6 +6,8 @@ import os
 """
 
 from __future__ import annotations
+
+import os
 
 import calendar as month_calendar
 from datetime import date, datetime, time as dt_time, timedelta
