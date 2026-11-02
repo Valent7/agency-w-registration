@@ -201,6 +201,147 @@ class ContentFactoryService:
             request_id=request_id, video_style=video_style, revision=revision or None,
         )
 
+    def create_master_from_launch_brief(self, owner_id, project_id, brief, *, request_id):
+        """Queue one owner-reviewed vertical launch video from an approved website brief.
+
+        Inspired by the planning discipline of latent-spaces/brag (MIT): hook
+        first, short scenes, specific product evidence, readable text and a
+        post-ready share caption. Rendering stays inside Agency W's existing
+        worker/provider pipeline.
+        """
+        project = self._project(owner_id, project_id)
+        if not isinstance(brief, dict):
+            raise FactoryError("Сначала подготовьте и утвердите сценарий ролика.")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
+            raise FactoryError("Не удалось определить задачу. Обновите страницу и повторите создание.")
+
+        def clean(value, maximum):
+            value = str(value or "").replace("\x00", " ").strip()
+            if not value or len(value) > maximum:
+                raise FactoryError("Сценарий ролика пустой или слишком длинный.")
+            return value
+
+        title = clean(brief.get("title") or "Короткий ролик о проекте", 180)
+        website = clean(brief.get("website") or project.get("website") or "Сайт проекта", 500)
+        tone = clean(brief.get("tone") or project.get("tone") or "polished", 300)
+        hook = clean(brief.get("hook"), 500)
+        share_copy = clean(brief.get("share_copy") or title, 1500)
+        try:
+            duration = int(brief.get("duration_seconds") or 20)
+        except (TypeError, ValueError):
+            duration = 20
+        if not 15 <= duration <= 25:
+            raise FactoryError("Короткий ролик должен длиться от 15 до 25 секунд.")
+
+        raw_scenes = brief.get("scenes")
+        if not isinstance(raw_scenes, list) or not 3 <= len(raw_scenes) <= 7:
+            raise FactoryError("Для ролика нужно от 3 до 7 коротких сцен.")
+        scenes = []
+        total = 0
+        for index, item in enumerate(raw_scenes, 1):
+            if not isinstance(item, dict):
+                raise FactoryError("Одна из сцен сценария повреждена.")
+            try:
+                seconds = int(item.get("seconds") or 0)
+            except (TypeError, ValueError):
+                seconds = 0
+            if not 2 <= seconds <= 8:
+                raise FactoryError("Каждая сцена должна длиться от 2 до 8 секунд.")
+            visual = clean(item.get("visual"), 900)
+            text = str(item.get("text") or "").replace("\x00", " ").strip()[:450]
+            motion = str(item.get("motion") or "").replace("\x00", " ").strip()[:500]
+            scenes.append({
+                "seconds": seconds,
+                "visual": visual,
+                "text": text,
+                "motion": motion,
+            })
+            total += seconds
+        if not 15 <= total <= 25:
+            raise FactoryError("Суммарная длительность сцен должна быть от 15 до 25 секунд.")
+
+        music = str(brief.get("music") or "Современная ненавязчивая музыка, синхронная монтажу").strip()[:500]
+        cta = str(brief.get("cta") or project.get("cta") or "").strip()[:500]
+        production_plan = []
+        for index, scene in enumerate(scenes, 1):
+            line = (
+                f"Сцена {index}, {scene['seconds']} сек. Визуал: {scene['visual']}. "
+                f"Текст на экране: {scene['text'] or 'без обязательного текста'}. "
+                f"Движение: {scene['motion'] or 'живое естественное движение'}."
+            )
+            production_plan.append(line[:1000])
+        production_plan.extend([
+            ("Музыка: " + music)[:1000],
+            ("Финальный CTA: " + (cta or "без навязчивого призыва"))[:1000],
+        ])
+        quality_criteria = [
+            "Первые 2 секунды содержат понятный и конкретный крючок.",
+            "Ролик показывает именно этот проект и не выдумывает функции, цифры или отзывы.",
+            "В каждой сцене есть осмысленное движение; это не набор неподвижных открыток.",
+            "Текст на экране читается спокойно и не исчезает раньше, чем его можно прочитать.",
+            "Финал объясняет следующий шаг без давления и спама.",
+            "Видеоряд, музыка и монтаж ощущаются как единый короткий ролик.",
+        ]
+        approved_intent = {
+            "version": 1,
+            "kind": "video",
+            "raw_request": f"Создать короткий ролик по сайту {website}",
+            "main_idea": hook,
+            "desired_result": f"{duration}-секундный вертикальный ролик о «{title}» с готовым текстом поста.",
+            "audience": str(project.get("audience") or "Аудитория проекта")[:1200],
+            "must_have": [hook, "Использовать только подтверждённые сведения о проекте."],
+            "must_not": ["Не выдумывать возможности, клиентов, цифры и отзывы.", "Не делать ролик похожим на набор статичных слайдов."],
+            "style": tone,
+            "emotional_effect": "Зритель за один просмотр понимает, что это за проект, чем он полезен и почему стоит узнать больше.",
+            "format_notes": f"Вертикальный 9:16, {duration} секунд. Музыка: {music}. Текст поста: {share_copy}",
+            "assumptions": [],
+            "unclear": [],
+        }
+        topic = (
+            f"Создай короткий вертикальный launch-ролик о проекте «{title}». "
+            f"Источник: {website}. Крючок: {hook}. "
+            f"Тон: {tone}. Продолжительность: {duration} секунд. "
+            f"Текст публикации: {share_copy}"
+        )[:6000]
+
+        intent = [topic, scenes, approved_intent, production_plan, quality_criteria]
+        fingerprint = sha256(json.dumps(intent, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        for previous in self.store.list_jobs(owner_id, project_id, limit=1000):
+            if previous.get("request_id") == request_id and previous.get("request_fingerprint") != fingerprint:
+                raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
+
+        now = iso(self.clock())
+        key = sha256(f"launch-master|{project_id}|{request_id}".encode()).hexdigest()
+        job = self.store.enqueue_job(owner_id, project_id, {
+            # Internal vertical render profile; no social connection is required.
+            "platform": "instagram",
+            "format": "reel",
+            "scheduled_at": now,
+            "available_at": now,
+            "state": "queued",
+            "dedupe_key": key,
+            "topic": topic,
+            "requested_by_owner": True,
+            "request_id": request_id,
+            "request_fingerprint": fingerprint,
+            "video_mode": "live",
+            "video_style": "live",
+            "content": {"share_copy": share_copy, "launch_brief": brief},
+            "assets": [],
+            "checkpoint": {},
+            "error": "",
+            "attempts": 0,
+            "approved_intent": approved_intent,
+            "production_plan": production_plan[:12],
+            "quality_criteria": quality_criteria,
+            "review_required": True,
+            "studio_master": True,
+            "launch_brief": brief,
+        })
+        if job.get("request_fingerprint") != fingerprint:
+            raise FactoryError("Эта задача уже сохранена с другими условиями. Создайте новую задачу.")
+        return job
+
     def create_from_video_reference(self, owner_id, project_id, reference_job_id, *, platforms, request_id):
         """Queue the owner's accepted original storyboard, never the source pixels."""
         from content_factory_editorial import build_reference_seed, EditorialError, validate_reference_plan
