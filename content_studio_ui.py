@@ -141,14 +141,15 @@ def _manual_archive(owner_id, packages, query="", kind="all"):
 
 
 def _repair_legacy_launch_jobs(owner_id, project, store, service, jobs):
-    """One-time self-heal for old 6-scene Site -> video jobs.
+    """Repair old over-budget Site -> video jobs in place.
 
-    These jobs were approved and queued before the five-scene budget guard
-    existed. If the worker stopped them before any paid video task started,
-    replace them with an idempotent five-scene clone and archive the old row.
+    No paid video provider was called for these rows. Compact the approved
+    launch brief to five scenes, store the short-video budget, then use the
+    store's guarded pre-provider restart so no duplicate job is created.
     """
     try:
         from content_studio_launch_video_ui import _compact_scenes_to_five
+        from content_factory_core import iso, utc_now
     except Exception:
         return False
 
@@ -162,48 +163,53 @@ def _repair_legacy_launch_jobs(owner_id, project, store, service, jobs):
         scenes = brief.get("scenes")
         if not isinstance(scenes, list) or len(scenes) <= 5:
             continue
-        if (job.get("production") or {}).get("tasks"):
-            # Never clone a job after paid/remote scene work already started.
+        if isinstance(job.get("production"), dict):
             continue
-        error_text = str(job.get("error") or "")
-        if not any(token in error_text.casefold() for token in ("кредит", "384", "сократите ролик")):
+        error_text = str(job.get("error") or "").casefold()
+        if not any(
+            marker in error_text
+            for marker in (
+                "видеосцены не запускались",
+                "изображения и видеосцены не запускались",
+                "озвучка launch-ролика",
+            )
+        ):
             continue
 
         compacted = _compact_scenes_to_five(scenes)
-        if not 3 <= len(compacted) <= 5:
-            continue
         corrected = dict(brief)
         corrected["scenes"] = compacted
-        corrected["duration_seconds"] = sum(
-            int(item.get("seconds") or 0) for item in compacted
+        corrected["duration_seconds"] = min(
+            22,
+            max(15, sum(int(item.get("seconds") or 0) for item in compacted)),
         )
-        request_id = "repair_" + str(job.get("id") or "").replace("-", "")[:60]
-        if len(request_id) < 8:
-            continue
         try:
-            new_job = service.create_master_from_launch_brief(
-                owner_id,
-                project["id"],
-                corrected,
-                request_id=request_id,
-            )
-            store.update_job(
+            updated = store.update_job(
                 owner_id,
                 job["id"],
                 {
-                    "state": "cancelled",
-                    "error": (
-                        "Архивировано автоматически: старая 6-сценная версия "
-                        "заменена 5-сценной задачей "
-                        + str(new_job.get("id") or "")
-                    ),
+                    "launch_brief": corrected,
+                    "max_video_scenes": 5,
+                    "max_video_seconds": 22,
+                    "production_plan": [
+                        (
+                            f"Сцена {index}, {item.get('seconds')} сек. "
+                            f"Визуал: {str(item.get('visual') or '')[:700]}. "
+                            f"Текст: {str(item.get('text') or '')[:250]}."
+                        )[:1000]
+                        for index, item in enumerate(compacted, 1)
+                    ],
                 },
                 expected_updated_at=job.get("updated_at"),
             )
+            store.restart_unstarted_master_video_job(
+                owner_id,
+                updated["id"],
+                iso(utc_now()),
+                stale_seconds=0,
+            )
             repaired = True
         except Exception:
-            # Idempotent repair: a concurrent refresh or worker must not turn
-            # the library into an error page.
             continue
     return repaired
 
