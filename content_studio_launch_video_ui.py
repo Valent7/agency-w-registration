@@ -98,7 +98,7 @@ def _normalize_plan(data, website, tone, project):
     if not isinstance(raw_scenes, list):
         raw_scenes = []
     scenes = []
-    for item in raw_scenes[:7]:
+    for item in raw_scenes[:5]:
         if not isinstance(item, dict):
             continue
         visual = _clean(item.get("visual"), 900)
@@ -154,7 +154,7 @@ def _build_plan(ask_ai_fn, website, tone, focus, project):
 Принципы:
 - первые 2 секунды — конкретный крючок;
 - зритель после одного просмотра понимает, что это, для кого и в чём польза;
-- 3–6 коротких сцен;
+- 3–5 коротких сцен;
 - показывай конкретный продукт/интерфейс/идею, а не абстрактные AI-картинки;
 - темп создаётся движением и монтажом, а не мелькающим текстом;
 - текст должен успевать читаться;
