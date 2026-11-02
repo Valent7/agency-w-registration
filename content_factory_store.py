@@ -166,27 +166,48 @@ def _validated_stalled_video_resume(job: dict, now: str, stale_seconds: int = 18
 
 
 def _validated_unstarted_master_restart(job: dict, now: str, stale_seconds: int = 180) -> dict:
-    if not isinstance(job, dict) or job.get("state") != "queued" or job.get("studio_master") is not True:
-        raise StoreError("Повторный запуск доступен только для зависшего мастер-видео.")
+    if not isinstance(job, dict) or job.get("studio_master") is not True:
+        raise StoreError("Повторный запуск доступен только для мастер-видео.")
+    state = str(job.get("state") or "")
+    if state not in {"queued", "failed"}:
+        raise StoreError("Это мастер-видео сейчас нельзя безопасно перезапустить.")
     if isinstance(job.get("production"), dict):
         raise StoreError("У видео уже есть сохранённое производство; нужен режим продолжения.")
-    now_dt = datetime.fromisoformat(_time(now))
-    updated_dt = datetime.fromisoformat(_time(job.get("updated_at")))
-    if (now_dt - updated_dt).total_seconds() < stale_seconds:
-        raise StoreError("Задача ещё не считается зависшей.")
     checkpoint = dict(job.get("checkpoint") or {})
     if checkpoint.get("publish_started"):
         raise StoreError("Публикация уже начиналась; повторный запуск остановлен.")
+
+    now_dt = datetime.fromisoformat(_time(now))
+    updated_dt = datetime.fromisoformat(_time(job.get("updated_at")))
+    if state == "queued" and (now_dt - updated_dt).total_seconds() < stale_seconds:
+        raise StoreError("Задача ещё не считается зависшей.")
+
+    if state == "failed":
+        error_text = str(job.get("error") or "").casefold()
+        safe_markers = (
+            "видеосцены не запускались",
+            "изображения и видеосцены не запускались",
+            "озвучка launch-ролика",
+        )
+        if not any(marker in error_text for marker in safe_markers):
+            raise StoreError(
+                "Не подтверждено, что платное создание видео не запускалось; повтор остановлен."
+            )
+
     checkpoint.pop("generation_started", None)
     checkpoint.pop("generation_complete", None)
     checkpoint.pop("retry_count", None)
+    checkpoint["safe_preprovider_retry"] = True
     return {
         "state": "queued",
         "checkpoint": checkpoint,
         "error": "",
         "progress": {
             "stage": "restart",
-            "message": "Производство перезапущено из утверждённого сценария. Перед заказом сцен будет проверен баланс видеосервиса.",
+            "message": (
+                "Производство перезапущено из утверждённого сценария. "
+                "Перед заказом сцен будет повторно проверен видеобюджет."
+            ),
         },
         "lease_owner": None,
         "lease_until": None,
