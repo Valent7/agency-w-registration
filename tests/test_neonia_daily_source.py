@@ -1,6 +1,8 @@
-"""Offline tests for the green Neonia Telegram-group source button.
+"""Offline tests for Neonia's Telegram-group daily source.
 
-Active group authors are the primary source; personal contacts never fill gaps.
+The selected group is primary. If it cannot complete the daily five, other
+accessible Telegram groups may top up the same day. Personal contacts do not
+silently replace group candidates in chat mode.
 """
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -136,14 +138,58 @@ class PersonalContactRoutingTests(unittest.TestCase):
         self.assertFalse(check({**qualified,"business_evidence":[]}))
         self.assertFalse(check({**qualified,"_stagirite_activity_tier":None}))
 
-    def test_group_source_still_routes_strictly_to_group(self):
+    def test_complete_selected_group_returns_without_topup(self):
         state={"schema_version":9,"daily_source_mode":"chats",
                "selected_source_chat":9211}
         with patch.object(scout_storage,"_workspace_state",return_value=(state,{})), \
-             patch.object(worker,"process",return_value={"status":"group_routed"}) as called:
+             patch.object(worker,"process",return_value={
+                 "status":"ready","count":5,"complete":True
+             }) as called, \
+             patch.object(
+                 scout_storage,
+                 "_topup_from_other_telegram_groups",
+                 side_effect=AssertionError("top-up must not run for 5/5"),
+             ):
             result = scout_storage.process_owner_once(77,"fake")
-        self.assertEqual(result["status"],"group_routed")
+        self.assertEqual(result["status"],"ready")
+        self.assertEqual(result["count"],5)
         called.assert_called_once()
+
+    def test_incomplete_selected_group_tops_up_from_other_groups(self):
+        state={"schema_version":9,"daily_source_mode":"chats",
+               "selected_source_chat":9211,
+               "passport":{"analysis":{"audience":"business"}}}
+        alternate=[
+            {"telegram_id":3,"username":"u3","source_chat_id":9212},
+            {"telegram_id":4,"username":"u4","source_chat_id":9212},
+            {"telegram_id":5,"username":"u5","source_chat_id":9213},
+        ]
+        with patch.object(scout_storage,"_workspace_state",return_value=(state,{})), \
+             patch.object(worker,"process",return_value={
+                 "status":"incomplete","count":2,"complete":False,"missing":3
+             }) as called, \
+             patch.object(
+                 scout_storage,"_current_batch_info",
+                 return_value={"candidate_ids":[1,2]},
+             ), \
+             patch.object(
+                 scout_storage,"_topup_from_other_telegram_groups",
+                 return_value=alternate,
+             ) as topup, \
+             patch.object(
+                 scout_storage,"_save_candidate_results_only",
+                 return_value=True,
+             ), \
+             patch.object(
+                 scout_storage,"_write_daily_batch",
+                 return_value={"candidate_ids":[1,2,3,4,5],"complete":True},
+             ):
+            result = scout_storage.process_owner_once(77,"fake")
+        self.assertEqual(result["status"],"ready")
+        self.assertEqual(result["count"],5)
+        self.assertEqual(result["missing"],0)
+        called.assert_called_once()
+        topup.assert_called_once()
 
 
 class CandidateExclusionTests(unittest.TestCase):
