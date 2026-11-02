@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from calendar import monthrange
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -12,9 +13,20 @@ BERLIN = ZoneInfo("Europe/Berlin")
 UTC = timezone.utc
 
 
+def _runtime_secret(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
 def _config() -> tuple[str, str]:
-    url = str(st.secrets.get("SUPABASE_URL") or "").rstrip("/")
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "")
+    url = _runtime_secret("SUPABASE_URL").rstrip("/")
+    key = _runtime_secret("SUPABASE_SECRET_KEY")
     if not url or not key:
         raise RuntimeError("Не найдены SUPABASE_URL или SUPABASE_SECRET_KEY.")
     return url, key
