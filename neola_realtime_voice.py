@@ -1,3 +1,4 @@
+import os
 import base64
 import hashlib
 import hmac
@@ -8,6 +9,24 @@ import json
 
 import requests
 import streamlit as st
+
+
+def _runtime_secret(name, default=""):
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
+def _require_runtime_secret(name):
+    value = _runtime_secret(name)
+    if not value:
+        raise RuntimeError(f"Не найдена настройка {name} в Render Environment.")
+    return value
 from neola_cabinet_map import NEOLA_MISSION, neola_cabinet_knowledge
 
 
@@ -50,8 +69,8 @@ def _knowledge_search_config(telegram_id):
     Вызывается только из штатного серверного экрана голосовой Неолы, который
     рендерится для пользователей с подтверждённой активацией.
     """
-    secret = str(st.secrets.get("NEOLA_KNOWLEDGE_SEARCH_KEY") or "").strip()
-    base = str(st.secrets.get("SUPABASE_URL") or "").strip().rstrip("/")
+    secret = str(_runtime_secret("NEOLA_KNOWLEDGE_SEARCH_KEY") or "").strip()
+    base = str(_runtime_secret("SUPABASE_URL") or "").strip().rstrip("/")
     if not secret or not base:
         raise RuntimeError(
             "Поиск Неолы пока не настроен. Сообщите Директору Агентства W."
@@ -264,7 +283,7 @@ def create_realtime_client_secret(
     daily_greeting_done=False,
     has_target_profile=False,
 ):
-    api_key = st.secrets.get("OPENAI_API_KEY")
+    api_key = _runtime_secret("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY не найден в Streamlit Secrets.")
 
