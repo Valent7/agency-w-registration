@@ -1,3 +1,4 @@
+import os
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +11,24 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+
+
+def _runtime_secret(name, default=""):
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
+def _require_runtime_secret(name):
+    value = _runtime_secret(name)
+    if not value:
+        raise RuntimeError(f"Не найдена настройка {name} в Render Environment.")
+    return value
 from neonia_daily_source import owner_source, source_signature, matches_daily_batch
 from PIL import Image, UnidentifiedImageError
 
@@ -67,8 +86,8 @@ BUFFER_MINUTES = 60
 
 def _supabase_config() -> tuple[str, str]:
     return (
-        str(st.secrets.get("SUPABASE_URL") or "").rstrip("/"),
-        str(st.secrets.get("SUPABASE_SECRET_KEY") or ""),
+        str(_runtime_secret("SUPABASE_URL") or "").rstrip("/"),
+        str(_runtime_secret("SUPABASE_SECRET_KEY") or ""),
     )
 
 
@@ -4880,7 +4899,7 @@ def _process_assignment(
 
 
 def _transcribe_audio(audio_bytes: bytes, filename: str = "stagirite-command.wav") -> str:
-    api_key = str(st.secrets.get("OPENAI_API_KEY") or "")
+    api_key = str(_runtime_secret("OPENAI_API_KEY") or "")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY не найден.")
 
