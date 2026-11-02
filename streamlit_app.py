@@ -34,6 +34,27 @@ from agency_diary import render_agency_diary
 from agency_results import render_agency_results
 import stagirite_center as _stagirite_center
 
+
+def _runtime_secret(name, default=""):
+    """Read config from Streamlit Secrets first, then Render environment."""
+    value = None
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    if value in (None, ""):
+        value = os.environ.get(name, default)
+    return str(value if value is not None else default).strip()
+
+
+def _require_runtime_secret(name):
+    value = _runtime_secret(name)
+    if not value:
+        raise RuntimeError(
+            f"Не найдена настройка {name} в Render Environment."
+        )
+    return value
+
 render_stagirite_center = _stagirite_center.render_stagirite_center
 register_first_message_for_stagirite = getattr(
     _stagirite_center,
@@ -1708,9 +1729,9 @@ def save_member_to_supabase(telegram_data, referral_code):
     }
 
     response = requests.post(
-        f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_members",
+        f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/agency_members",
         headers={
-            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
+            "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
             "Content-Type": "application/json",
             "Prefer": "return=representation",
         },
@@ -1727,7 +1748,7 @@ def save_member_to_supabase(telegram_data, referral_code):
 
 def save_telegram_session_to_supabase(telegram_id, session_string):
     encrypted_session = encrypt_telegram_session(session_string)
-    secret_key = st.secrets["SUPABASE_SECRET_KEY"]
+    secret_key = _require_runtime_secret("SUPABASE_SECRET_KEY")
 
     payload = {
         "telegram_id": int(telegram_id),
@@ -1737,7 +1758,7 @@ def save_telegram_session_to_supabase(telegram_id, session_string):
 
     response = requests.post(
         (
-            f"{st.secrets['SUPABASE_URL']}"
+            f"{_require_runtime_secret("SUPABASE_URL")}"
             "/rest/v1/telegram_sessions?on_conflict=telegram_id"
         ),
         headers={
@@ -1755,10 +1776,10 @@ def save_telegram_session_to_supabase(telegram_id, session_string):
 
 
 def load_telegram_session_from_supabase(telegram_id):
-    secret_key = st.secrets["SUPABASE_SECRET_KEY"]
+    secret_key = _require_runtime_secret("SUPABASE_SECRET_KEY")
 
     response = requests.get(
-        f"{st.secrets['SUPABASE_URL']}/rest/v1/telegram_sessions",
+        f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/telegram_sessions",
         headers={
             "apikey": secret_key,
             
@@ -3149,10 +3170,10 @@ def load_neona_telegram_dialog_states(owner_telegram_id):
     """Загружает сохранённые состояния Telegram-диалогов Неоны из Supabase."""
     owner_telegram_id = int(owner_telegram_id)
     response = requests.get(
-        f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_dialog_states",
+        f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/agency_dialog_states",
         headers={
-            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-            "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+            "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
+            "Authorization": f"Bearer {_require_runtime_secret("SUPABASE_SECRET_KEY")}",
         },
         params={
             "owner_telegram_id": f"eq.{owner_telegram_id}",
@@ -6445,10 +6466,10 @@ def generate_neona_first_messages(
 def _load_instagram_connection(owner_telegram_id: int) -> dict | None:
     try:
         response = requests.get(
-            f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_instagram_connections",
+            f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/agency_instagram_connections",
             headers={
-                "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-                "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+                "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
+                "Authorization": f"Bearer {_require_runtime_secret("SUPABASE_SECRET_KEY")}",
             },
             params={
                 "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
@@ -6680,10 +6701,10 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
 
 def _load_instagram_comments(owner_telegram_id: int) -> list[dict]:
     response = requests.get(
-        f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_instagram_comments",
+        f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/agency_instagram_comments",
         headers={
-            "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-            "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+            "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
+            "Authorization": f"Bearer {_require_runtime_secret("SUPABASE_SECRET_KEY")}",
         },
         params={
             "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
@@ -7902,8 +7923,8 @@ def claim_social_registration_token(token, telegram_id, member_code):
     if not re.fullmatch(r"[A-Za-z0-9_-]{16,160}", clean_token):
         return {"ok": False, "reason": "invalid_token"}
 
-    base = f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_social_registration_links"
-    secret = str(st.secrets["SUPABASE_SECRET_KEY"])
+    base = f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/agency_social_registration_links"
+    secret = str(_require_runtime_secret("SUPABASE_SECRET_KEY"))
     headers = {
         "apikey": secret,
         "Authorization": f"Bearer {secret}",
@@ -7995,10 +8016,10 @@ def claim_social_registration_token(token, telegram_id, member_code):
 def load_member_record(telegram_id):
     try:
         response = requests.get(
-            f"{st.secrets['SUPABASE_URL']}/rest/v1/agency_members",
+            f"{_require_runtime_secret("SUPABASE_URL")}/rest/v1/agency_members",
             headers={
-                "apikey": st.secrets["SUPABASE_SECRET_KEY"],
-                "Authorization": f"Bearer {st.secrets['SUPABASE_SECRET_KEY']}",
+                "apikey": _require_runtime_secret("SUPABASE_SECRET_KEY"),
+                "Authorization": f"Bearer {_require_runtime_secret("SUPABASE_SECRET_KEY")}",
             },
             params={
                 "telegram_id": f"eq.{int(telegram_id)}",
@@ -8037,13 +8058,7 @@ telegram_oidc_token = str(st.query_params.get("tg_id_token", "") or "").strip()
 
 
 def _telegram_bot_secret(name):
-    try:
-        value = st.secrets.get(name)
-    except Exception:
-        value = None
-    if not value:
-        value = os.environ.get(name)
-    return str(value or "").strip()
+    return _runtime_secret(name)
 
 
 def telegram_auth_is_valid(data, received_hash_value):
