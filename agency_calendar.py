@@ -243,7 +243,41 @@ def list_recurring_blocks(owner_telegram_id: int) -> list[dict[str, Any]]:
             f"Не удалось загрузить постоянную занятость: {response.text[:500]}"
         )
     rows = response.json()
-    return rows if isinstance(rows, list) else []
+    rows = rows if isinstance(rows, list) else []
+
+    # Исправляем только старые системные блоки, созданные прежним
+    # ошибочным значением по умолчанию 17:00–18:00 МСК.
+    repaired = False
+    for block in rows:
+        title = str(block.get("title") or "").strip()
+        start_label = str(block.get("start_time") or "")[:5]
+        end_label = str(block.get("end_time") or "")[:5]
+        block_id = str(block.get("id") or "").strip()
+        if (
+            title == "Командная встреча"
+            and start_label == "17:00"
+            and end_label == "18:00"
+            and block_id
+        ):
+            patch = requests.patch(
+                f"{_supabase_url()}/rest/v1/agency_calendar_blocks",
+                headers={
+                    **_supabase_headers(),
+                    "Prefer": "return=minimal",
+                },
+                params={"id": f"eq.{block_id}"},
+                json={
+                    "start_time": "20:00:00",
+                    "end_time": "21:00:00",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+                timeout=30,
+            )
+            if patch.status_code < 400:
+                block["start_time"] = "20:00:00"
+                block["end_time"] = "21:00:00"
+                repaired = True
+    return rows
 
 
 def save_recurring_blocks(
@@ -948,13 +982,13 @@ def _render_recurring_blocks(owner_telegram_id: int) -> None:
     time_columns = st.columns(2)
     block_start = time_columns[0].time_input(
         "Начало по МСК",
-        value=dt_time(17, 0),
+        value=dt_time(20, 0),
         step=1800,
         key="calendar_block_start",
     )
     block_end = time_columns[1].time_input(
         "Окончание по МСК",
-        value=dt_time(18, 0),
+        value=dt_time(21, 0),
         step=1800,
         key="calendar_block_end",
     )
