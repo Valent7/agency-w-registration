@@ -12,6 +12,7 @@ TOOLS = {
     "images": "Изображения",
     "carousel": "Карусели",
     "video": "Видео",
+    "launch": "Сайт → ролик",
     "reference": "Своё по видео-образцу",
     "speech": "Озвучка",
     "music": "Музыка",
@@ -234,7 +235,7 @@ def _preserve_drafts(owner_id):
                 "_visual_style", "_avoid", "_color", "_platforms", "_formats", "_video_mode",
                 "_timezone", "_times", "_days", "_limit", "_review", "_enabled", "_topic",
                 "_format", "_text", "_feedback", "_style", "_target_seconds",
-                "_mood", "_advanced_mood", "_instruments", "_vocals", "_idea", "_kind", "_mode")
+                "_mood", "_advanced_mood", "_instruments", "_vocals", "_idea", "_kind", "_mode", "_focus")
     for key in list(st.session_state):
         scoped = key.startswith((f"studio_tool_{owner_id}_", f"cf_auto_{owner_id}_",
                                  f"studio_reference_{owner_id}_", f"studio_music_{owner_id}_",
@@ -337,6 +338,9 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
                 {"texts": lambda: render_text_tool(owner_id, project, store, ask_ai_fn),
                  "images": lambda: render_image_tool(owner_id, project, store, generate_illustration_fn),
                  "speech": lambda: render_speech_tool(owner_id, project, store)}[tool]()
+        elif tool == "launch":
+            from content_studio_launch_video_ui import render_launch_video_tool
+            render_launch_video_tool(owner_id, project, store, ask_ai_fn)
         elif tool in {"ready", "carousel", "video"}:
             if tool == "video":
                 if st.button("Создать своё по видео-образцу", key=f"studio_video_{owner_id}_reference", type="primary"):
