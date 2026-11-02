@@ -234,8 +234,8 @@ class ContentFactoryService:
             raise FactoryError("Короткий ролик должен длиться от 15 до 25 секунд.")
 
         raw_scenes = brief.get("scenes")
-        if not isinstance(raw_scenes, list) or not 3 <= len(raw_scenes) <= 5:
-            raise FactoryError("Для ролика нужно от 3 до 5 коротких сцен.")
+        if not isinstance(raw_scenes, list) or not 3 <= len(raw_scenes) <= 7:
+            raise FactoryError("Для ролика нужно от 3 до 7 коротких сцен.")
         scenes = []
         total = 0
         for index, item in enumerate(raw_scenes, 1):
