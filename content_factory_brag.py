@@ -40,12 +40,31 @@ def _safe_copy_project(destination: Path) -> None:
     shutil.copytree(source, destination, dirs_exist_ok=True, ignore=ignored)
 
 
-def _subprocess_env(openai_api_key: str, home: Path) -> dict[str, str]:
+def _prepare_codex_home(destination: Path, openai_api_key: str) -> None:
+    source = Path(os.environ.get("CODEX_HOME", "/opt/codex-home"))
+    if source.is_dir():
+        shutil.copytree(
+            source,
+            destination,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("auth.json", ".tmp"),
+        )
+    else:
+        destination.mkdir(parents=True, exist_ok=True)
+    auth_path = destination / "auth.json"
+    auth_path.write_text(
+        json.dumps({"OPENAI_API_KEY": str(openai_api_key)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    auth_path.chmod(0o600)
+
+
+def _subprocess_env(openai_api_key: str, home: Path, codex_home: Path) -> dict[str, str]:
     # Do not forward the worker's Supabase, Telegram, Runway or social keys.
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(home),
-        "CODEX_HOME": os.environ.get("CODEX_HOME", "/opt/codex-home"),
+        "CODEX_HOME": str(codex_home),
         "OPENAI_API_KEY": openai_api_key,
         "HYPERFRAMES_NO_UPDATE_CHECK": "1",
         "HYPERFRAMES_AGENT": "1",
@@ -126,11 +145,13 @@ def run_brag(project: dict, job: dict, openai_api_key: str, progress=None) -> tu
     root = Path(tempfile.mkdtemp(prefix="agency-w-brag-"))
     workspace = root / "workspace"
     home = root / "home"
+    codex_home = root / "codex-home"
     home.mkdir(parents=True, exist_ok=True)
     try:
         if progress:
             progress({"stage": "brag_prepare", "message": "Brag готовит безопасную копию проекта."})
         _safe_copy_project(workspace)
+        _prepare_codex_home(codex_home, str(openai_api_key))
 
         prompt = _prompt(project, job)
         prompt_path = root / "prompt.txt"
@@ -153,7 +174,7 @@ def run_brag(project: dict, job: dict, openai_api_key: str, progress=None) -> tu
         proc = subprocess.run(
             command,
             cwd=workspace,
-            env=_subprocess_env(str(openai_api_key), home),
+            env=_subprocess_env(str(openai_api_key), home, codex_home),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
