@@ -111,6 +111,10 @@ Hook: {hook or 'Show the strongest real product result immediately.'}
 The product is Agency W. Show the REAL product/interface/code where possible.
 Do not invent fake UI, fake customers, fake metrics, fake testimonials or fake product modules.
 Use the exact real module names in Russian: «Стагирит», «Неония», «Неона», «Контент-завод».
+For Agency W branding, the official mark is the repository asset assets/agency_w_icon.png.
+Whenever the brand name «Агентство W» is shown as a visual title or final brand lockup, do not typeset
+a plain text letter W. Use assets/agency_w_icon.png as the W brand mark, preserving its proportions
+and transparency. Do not redraw, restyle or replace this logo with a generic W glyph.
 Never replace Agency W modules with third-party apps such as Google Calendar, Trello, Gmail,
 Outlook, Figma, Photoshop or generic SaaS dashboards.
 Never invent Latinized product names such as StagirIT or Neoniya.
