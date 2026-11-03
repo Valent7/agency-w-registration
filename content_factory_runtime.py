@@ -46,9 +46,11 @@ def build_store():
     cfg = _configuration()
     key = cfg.get("CONTENT_FACTORY_FERNET_KEY") or cfg.get("FERNET_KEY") or ""
     if cfg.get("SUPABASE_URL") and cfg.get("SUPABASE_SECRET_KEY"):
+        print("[content-factory] storage=supabase", flush=True)
         return SupabaseStore(str(cfg["SUPABASE_URL"]), str(cfg["SUPABASE_SECRET_KEY"]), str(key))
     root = Path(str(cfg.get("CONTENT_FACTORY_DATA_DIR") or "/workspace/.cloud-onboarding/content-factory"))
     root.mkdir(parents=True, exist_ok=True)
+    print("[content-factory] storage=local", flush=True)
     return SQLiteStore(str(root / "factory.sqlite3"), str(key))
 
 
