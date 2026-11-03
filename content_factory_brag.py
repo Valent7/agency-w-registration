@@ -143,6 +143,7 @@ def run_brag(project: dict, job: dict, openai_api_key: str, progress=None) -> tu
         command = [
             "codex",
             "exec",
+            "--skip-git-repo-check",
             "--sandbox",
             "workspace-write",
             "--output-last-message",
@@ -153,6 +154,7 @@ def run_brag(project: dict, job: dict, openai_api_key: str, progress=None) -> tu
             command,
             cwd=workspace,
             env=_subprocess_env(str(openai_api_key), home),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
