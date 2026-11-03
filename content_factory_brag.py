@@ -174,8 +174,6 @@ def run_brag(project: dict, job: dict, openai_api_key: str, progress=None) -> tu
             "--skip-git-repo-check",
             "--sandbox",
             "danger-full-access",
-            "--ask-for-approval",
-            "never",
             "--output-last-message",
             str(result_path),
             prompt,
