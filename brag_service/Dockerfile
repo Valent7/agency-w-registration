@@ -5,7 +5,9 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    CODEX_HOME_BASE=/opt/codex-home
+    CODEX_HOME_BASE=/opt/codex-home \
+    MALLOC_ARENA_MAX=2 \
+    NODE_OPTIONS=--max-old-space-size=192
 
 COPY --from=node /usr/local /usr/local
 
@@ -19,7 +21,10 @@ RUN npm install -g @openai/codex@latest \
     && CODEX_HOME="$CODEX_HOME_BASE" codex plugin add brag@brag \
     && codex --version \
     && ffmpeg -version | head -n 1 \
-    && chromium --version
+    && chromium --version \
+    && mv /usr/bin/chromium /usr/bin/chromium-real \
+    && printf '%s\n' '#!/bin/sh' 'exec /usr/bin/chromium-real --headless --no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-background-networking --disable-sync --no-first-run --renderer-process-limit=1 "$@"' > /usr/local/bin/chromium \
+    && chmod +x /usr/local/bin/chromium
 
 WORKDIR /app
 COPY brag_service/requirements.txt /app/requirements.txt
