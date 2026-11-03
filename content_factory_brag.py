@@ -137,8 +137,11 @@ Important:
 1. Inspect the repository first, as the Brag skill requires.
 2. Follow the actual $brag gates and Hyperframes checks.
 3. At least one scene must display actual product UI/copy/key visual.
-4. Render locally with Hyperframes and FFmpeg.
-5. Finish only when brag.mp4 exists and the Brag delivery gate passes.
+4. The owner has already explicitly approved rendering by pressing the Agency W "Create video" button.
+   Do NOT pause after preview and do NOT ask for another approval. Continue through Step 4, run the
+   Hyperframes checks, then render the delivery MP4.
+5. Render locally with Hyperframes and FFmpeg.
+6. Finish only when brag.mp4 exists and the Brag delivery gate passes.
 """
 
 
@@ -195,12 +198,21 @@ def run_brag(project: dict, job: dict, openai_api_key: str, progress=None) -> tu
             )
 
         candidates = sorted(
-            workspace.glob("brag-output*/brag.mp4"),
+            workspace.rglob("brag.mp4"),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
         if not candidates:
-            raise BragError("Brag завершился без файла brag.mp4.")
+            last_message = (
+                result_path.read_text(encoding="utf-8", errors="ignore").strip()
+                if result_path.is_file()
+                else ""
+            )
+            tail = " ".join(last_message.split())[-1500:]
+            raise BragError(
+                "Brag завершился без файла brag.mp4."
+                + (f" Последний ответ Codex: {tail}" if tail else "")
+            )
         video = candidates[0]
         output_dir = video.parent
         if video.stat().st_size <= 0:
