@@ -798,6 +798,24 @@ async def instagram_connection_diagnostics(request: Request):
         # Native user_id matches Direct webhooks. 'id' is only app-scoped.
         native_id = str(profile.get("user_id") or "").strip()
         verified = bool(native_id and native_id == saved_id)
+
+        # Re-confirm the exact webhook fields server-side. This avoids sending
+        # an already-connected owner through the technical OAuth hostname just
+        # to refresh permissions.
+        subscription_verified = False
+        subscription_error = ""
+        if verified:
+            try:
+                _subscribe_instagram_webhooks(saved_id, token)
+                subscription_verified = True
+            except Exception as subscription_exc:
+                subscription_error = type(subscription_exc).__name__
+                print(
+                    "INSTAGRAM_DIAG_SUBSCRIPTION_ERROR:",
+                    {"owner_id": owner_id, "type": subscription_error},
+                    flush=True,
+                )
+
         return JSONResponse(
             {
                 "connected": True, "identity_verified": verified,
@@ -807,7 +825,11 @@ async def instagram_connection_diagnostics(request: Request):
                 "provider_account_id": native_id,
                 "provider_scoped_id": str(profile.get("id") or ""),
                 "reason": "ok" if verified else "different_account",
-                "direct_replies_verified": False,  # identity alone is not a DM round-trip
+                "webhook_subscription_verified": subscription_verified,
+                "webhook_subscription_fields": ["messages", "comments"]
+                    if subscription_verified else [],
+                "webhook_subscription_error": subscription_error,
+                "direct_replies_verified": False,  # only a real DM round-trip proves this
             },
             headers={"Cache-Control": "no-store"},
         )
