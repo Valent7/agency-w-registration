@@ -958,6 +958,7 @@ def initialize_dialog_after_story_reply(
     story_id: int = 0,
     recipient_name: str = "",
     story_reply_message_id: int = 0,
+    story_reply_text: str = "",
 ) -> None:
     """Подключает Неону после вручную отправленного тёплого ответа на Story.
 
@@ -978,6 +979,7 @@ def initialize_dialog_after_story_reply(
             # Actual outbound Story reply. Otherwise the worker mistakes it
             # for an owner takeover and silently skips genuine responses.
             "story_reply_message_id": int(story_reply_message_id or 0),
+            "story_reply_text": str(story_reply_text or "").strip()[:3000],
             "first_message_id": int(story_reply_message_id or 0),
             "recipient_name": str(recipient_name or ""),
             "channel": "telegram",
@@ -1568,6 +1570,34 @@ def _telegram_material_reply(first_name: str, greet: bool) -> str:
         + ". Если что-то откликнется, напишете, что именно?"
     )
 
+def _recent_telegram_dialog_text(
+    messages: list[Any],
+    *,
+    activation_message_id: int = 0,
+    current_message_id: int = 0,
+    limit: int = 8,
+) -> str:
+    """Короткая реальная история Telegram после активации Неоны.
+
+    Нужна для ответов вроде «всё в одном», «да», «это тоже» и т.п., смысл
+    которых невозможно понять без предыдущих реплик. Старую переписку до
+    первого касания Агентства не подмешиваем.
+    """
+    rows: list[str] = []
+    for message in sorted(messages or [], key=lambda item: int(getattr(item, "id", 0) or 0)):
+        message_id = int(getattr(message, "id", 0) or 0)
+        if activation_message_id and message_id < int(activation_message_id):
+            continue
+        if current_message_id and message_id > int(current_message_id):
+            continue
+        text = " ".join(str(getattr(message, "message", "") or "").split())
+        if not text:
+            continue
+        role = "Исходящее сообщение" if bool(getattr(message, "out", False)) else "Человек"
+        rows.append(f"{role}: {text[:1200]}")
+    return "\n".join(rows[-max(2, int(limit or 8)) :])[:7000]
+
+
 def _openai_general_reply(
     config: Config,
     owner_name: str,
@@ -1581,13 +1611,20 @@ def _openai_general_reply(
     )
 
     context = dict(context or {})
-    previous_reply = str(context.get("last_reply_text") or "").strip()
+    previous_reply = str(
+        context.get("last_reply_text")
+        or context.get("story_reply_text")
+        or ""
+    ).strip()
+    recent_dialog = str(context.get("recent_dialog_text") or "").strip()
 
-    # Короткий ответ вроде «Да» можно понять только вместе с предыдущим вопросом Неоны.
-    # Поэтому всегда передаём модели последнюю реплику Неоны, если она сохранена.
+    # Короткий ответ вроде «Да» / «всё в одном» можно понять только вместе
+    # с реальным предыдущим диалогом. История Telegram важнее догадок модели.
     dialog_input = (
-        "Последнее сообщение Неоны:\n"
-        + (previous_reply if previous_reply else "(нет сохранённого предыдущего сообщения)")
+        "Реальный недавний диалог Telegram после первого касания:\n"
+        + (recent_dialog if recent_dialog else "(история пока не сохранена)")
+        + "\n\nПоследнее исходящее сообщение, на которое мог отвечать человек:\n"
+        + (previous_reply if previous_reply else "(см. историю выше)")
         + "\n\nНовое сообщение человека:\n"
         + str(text or "")
         + "\n\nКлючевая проверка перед ответом:\n"
@@ -3489,6 +3526,23 @@ async def sync_owner_once(
                         incoming_parts.append(plain_text)
 
                 combined_text = "\n".join(incoming_parts).strip()
+
+                # Перед каждым смысловым ответом даём Неоне короткий кусок
+                # реальной переписки Telegram, начиная с первого касания.
+                activation_message_id = int(
+                    working_context.get("story_reply_message_id")
+                    or working_context.get("first_message_id")
+                    or allowed[contact_id].get("message_id")
+                    or 0
+                )
+                working_context = {
+                    **working_context,
+                    "recent_dialog_text": _recent_telegram_dialog_text(
+                        all_recent,
+                        activation_message_id=activation_message_id,
+                        current_message_id=int(latest.id),
+                    ),
+                }
 
                 # Если единственное новое содержимое — нераспознанное медиа,
                 # не гоняем его по кругу. Один раз просим прислать заново/текстом
