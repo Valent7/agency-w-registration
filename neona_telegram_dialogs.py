@@ -2340,9 +2340,8 @@ async def sync_owner_once(
                 kind = _telegram_message_kind(message)
                 plain_text = str(getattr(message, "message", "") or "").strip()
 
-                # Берём обычный текст, голос и аудио. Остальные пустые медиа
-                # пока не включаем в диалог Неоны.
-                if not plain_text and kind not in {"voice", "audio"}:
+                # Берём обычный текст, голос, аудио и видео.
+                if not plain_text and kind not in {"voice", "audio", "video"}:
                     continue
 
                 recent.append(message)
@@ -3135,6 +3134,7 @@ async def sync_owner_once(
                 latest = new_messages[-1]
                 incoming_parts: list[str] = []
                 failed_voice_ids: list[int] = []
+                failed_video_ids: list[int] = []
                 working_context = dict(state_context)
 
                 # Голосовое сообщение распознаём максимум ОДИН раз на message_id.
@@ -3251,6 +3251,103 @@ async def sync_owner_once(
                         state = {**state, "context": state_context}
                         continue
 
+                    if kind == "video":
+                        memory_key = (
+                            int(owner_id),
+                            int(contact_id),
+                            int(incoming_id),
+                        )
+                        cached = _video_cache_get(working_context, incoming_id)
+                        if cached is None:
+                            memory_cached = _VIDEO_ANALYSIS_MEMORY_CACHE.get(
+                                memory_key
+                            )
+                            cached = (
+                                dict(memory_cached)
+                                if isinstance(memory_cached, dict)
+                                else None
+                            )
+
+                        if cached is not None:
+                            if (
+                                str(cached.get("status") or "") == "ok"
+                                and str(cached.get("text") or "").strip()
+                            ):
+                                incoming_parts.append(
+                                    str(cached.get("text") or "").strip()
+                                )
+                            else:
+                                failed_video_ids.append(incoming_id)
+                            continue
+
+                        try:
+                            incoming_text = await _incoming_message_text(
+                                config,
+                                incoming_message,
+                            )
+                            if incoming_text:
+                                cache_entry = {
+                                    "status": "ok",
+                                    "text": incoming_text,
+                                    "error": "",
+                                }
+                                _VIDEO_ANALYSIS_MEMORY_CACHE[
+                                    memory_key
+                                ] = cache_entry
+                                working_context = _video_cache_put(
+                                    working_context,
+                                    incoming_id,
+                                    status="ok",
+                                    text=incoming_text,
+                                )
+                                incoming_parts.append(incoming_text)
+                            else:
+                                cache_entry = {
+                                    "status": "failed",
+                                    "text": "",
+                                    "error": "empty_video_analysis",
+                                }
+                                _VIDEO_ANALYSIS_MEMORY_CACHE[
+                                    memory_key
+                                ] = cache_entry
+                                working_context = _video_cache_put(
+                                    working_context,
+                                    incoming_id,
+                                    status="failed",
+                                    error="empty_video_analysis",
+                                )
+                                failed_video_ids.append(incoming_id)
+                        except Exception as exc:
+                            error_text = f"{type(exc).__name__}: {exc}"
+                            cache_entry = {
+                                "status": "failed",
+                                "text": "",
+                                "error": error_text[:500],
+                            }
+                            _VIDEO_ANALYSIS_MEMORY_CACHE[
+                                memory_key
+                            ] = cache_entry
+                            working_context = _video_cache_put(
+                                working_context,
+                                incoming_id,
+                                status="failed",
+                                error=error_text,
+                            )
+                            failed_video_ids.append(incoming_id)
+
+                        _save_dialog_state(
+                            config,
+                            int(owner_id),
+                            contact_id,
+                            last_incoming_id=last_id,
+                            stage=str(state.get("stage") or "idle"),
+                            greeted=bool(state.get("greeted", False)),
+                            context=working_context,
+                        )
+                        state_context = working_context
+                        state = {**state, "context": state_context}
+                        continue
+
                     plain_text = str(
                         getattr(incoming_message, "message", "") or ""
                     ).strip()
@@ -3259,16 +3356,23 @@ async def sync_owner_once(
 
                 combined_text = "\n".join(incoming_parts).strip()
 
-                # Если единственное новое содержимое — нераспознанный voice,
+                # Если единственное новое содержимое — нераспознанное медиа,
                 # не гоняем его по кругу. Один раз просим прислать заново/текстом
                 # и помечаем входящее обработанным.
                 if not combined_text:
-                    if failed_voice_ids:
-                        notice = (
-                            "Не смогла разобрать голосовое сообщение. "
-                            "Пожалуйста, отправьте его ещё раз или напишите "
-                            "коротко текстом."
-                        )
+                    if failed_voice_ids or failed_video_ids:
+                        if failed_video_ids and not failed_voice_ids:
+                            notice = (
+                                "Не смогла уверенно разобрать видео. "
+                                "Если можно, пришлите ролик ещё раз или напишите "
+                                "одной фразой, на что в нём обратить внимание."
+                            )
+                        else:
+                            notice = (
+                                "Не смогла разобрать голосовое сообщение. "
+                                "Пожалуйста, отправьте его ещё раз или напишите "
+                                "коротко текстом."
+                            )
                         notice_id = 0
                         try:
                             sent_notice = await client.send_message(
@@ -3290,7 +3394,8 @@ async def sync_owner_once(
                         final_context = {
                             **working_context,
                             "last_voice_failure_ids": failed_voice_ids[-10:],
-                            "last_voice_failure_at": datetime.now(UTC).isoformat(),
+                            "last_video_failure_ids": failed_video_ids[-10:],
+                            "last_media_failure_at": datetime.now(UTC).isoformat(),
                         }
                         if notice_id:
                             final_context["last_reply_id"] = notice_id
