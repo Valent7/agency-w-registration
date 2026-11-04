@@ -2191,6 +2191,136 @@ def _process_message(
     return reply, new_stage, True, context
 
 
+async def process_reaction_once(
+    owner_id: int,
+    owner_name: str,
+    contact_id: int,
+    reaction: str,
+    reacted_message_id: int,
+    client: TelegramClient,
+) -> bool:
+    """Обрабатывает реакцию человека под исходящим сообщением Неоны."""
+
+    config = load_config()
+    allowed = _allowed_contacts(config, int(owner_id))
+    if int(contact_id) not in allowed:
+        return False
+
+    state = _dialog_state(config, int(owner_id), int(contact_id))
+    if not isinstance(state, dict):
+        return False
+
+    context = (
+        dict(state.get("context"))
+        if isinstance(state.get("context"), dict)
+        else {}
+    )
+    reaction_key = f"{int(reacted_message_id)}:{str(reaction or '').strip()}"
+    if reaction_key == str(context.get("last_reaction_key") or ""):
+        return False
+
+    try:
+        entity = await client.get_entity(int(contact_id))
+        reacted = await client.get_messages(entity, ids=int(reacted_message_id))
+    except Exception:
+        return False
+
+    if reacted is None or not bool(getattr(reacted, "out", False)):
+        return False
+
+    reacted_text = str(getattr(reacted, "message", "") or "").strip()
+    if not reacted_text:
+        reacted_text = str(context.get("last_reply_text") or "").strip()
+
+    reaction_value = str(reaction or "").strip()
+    if not reaction_value:
+        return False
+
+    first_name = _first_name(
+        entity,
+        allowed[int(contact_id)].get("recipient_name", ""),
+    )
+    username = str(getattr(entity, "username", "") or "")
+
+    stage = str(state.get("stage") or "idle")
+    semantic = _emoji_semantic_text(reaction_value, stage)
+    if semantic != reaction_value:
+        incoming_text = semantic
+    else:
+        incoming_text = (
+            f"[Человек поставил реакцию {reaction_value} под сообщением Неоны: "
+            f"«{reacted_text[:1000]}»]"
+        )
+
+    reaction_state = {
+        **state,
+        "context": {
+            **context,
+            "last_reply_text": reacted_text,
+        },
+    }
+
+    reply, new_stage, greeted, new_context = _process_message(
+        config,
+        int(owner_id),
+        owner_name,
+        int(contact_id),
+        first_name,
+        username,
+        incoming_text,
+        datetime.now(UTC),
+        reaction_state,
+    )
+
+    new_context = dict(new_context or {})
+    new_context["last_reaction_key"] = reaction_key
+    new_context["last_reaction_value"] = reaction_value
+    new_context["last_reaction_message_id"] = int(reacted_message_id)
+    new_context["last_reaction_at"] = datetime.now(UTC).isoformat()
+
+    if not reply:
+        _save_dialog_state(
+            config,
+            int(owner_id),
+            int(contact_id),
+            last_incoming_id=int(state.get("last_incoming_message_id") or 0),
+            stage=new_stage,
+            greeted=greeted,
+            context=new_context,
+        )
+        return False
+
+    sent = await client.send_message(
+        entity,
+        reply,
+        parse_mode=None,
+        link_preview=False,
+    )
+    verified = await _verified_sent_message(
+        client,
+        entity,
+        int(contact_id),
+        int(getattr(sent, "id", 0) or 0),
+    )
+    if verified is None:
+        raise DialogError("Не удалось подтвердить ответ Неоны на реакцию.")
+
+    new_context["last_reply_id"] = int(sent.id)
+    new_context["last_reply_text"] = reply
+    new_context["last_reply_verified"] = True
+
+    _save_dialog_state(
+        config,
+        int(owner_id),
+        int(contact_id),
+        last_incoming_id=int(state.get("last_incoming_message_id") or 0),
+        stage=new_stage,
+        greeted=greeted,
+        context=new_context,
+    )
+    return True
+
+
 async def _verified_sent_message(client: TelegramClient, entity, contact_id: int, message_id: int):
     """Проверяет, что исходящее сообщение реально существует именно в нужном личном чате."""
     if not message_id:
