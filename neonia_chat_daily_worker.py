@@ -632,28 +632,9 @@ def process(owner_id,session_string,state,storage):
     progress=state.get("source_progress") or {}
     sig=source_signature(mode,chat_id)
 
-    # Если этот же источник уже полностью проверяли сегодня и он дал ноль,
-    # не перечитываем тысячи тех же сообщений каждый час. Возвращаем
-    # подтверждённый нулевой результат сразу; основной Telegram worker затем
-    # может перейти к безопасному резерву из контактов владельца.
-    if (
-        progress.get("last_batch_date") == today.isoformat()
-        and progress.get("last_batch_source_signature") == sig
-        and not progress.get("last_batch_ids")
-        and int(progress.get("today") or 0) == 0
-        and str(progress.get("selection_method") or "") == "active_group_authors"
-        and progress.get("updated_at")
-    ):
-        return {
-            "owner_id": owner_id,
-            "status": "empty",
-            "count": 0,
-            "missing": 5,
-            "reason": "Эта Telegram-группа уже полностью проверена сегодня и не дала подходящих кандидатов",
-            "source_chat_id": chat_id,
-            "cached_empty": True,
-        }
-
+    # Жёсткое правило Агентства W: частичный/нулевой результат не считается
+    # завершением. Даже если этот источник уже проверялся сегодня, Неония
+    # продолжает углублять поиск, пока не соберёт 5 подходящих кандидатов.
     if (progress.get("last_batch_date")==today.isoformat()
         and progress.get("last_batch_source_signature")==sig
         and progress.get("last_batch_ids")):
@@ -685,45 +666,37 @@ def process(owner_id,session_string,state,storage):
     scanned=0
     exhausted=False
 
-    # PRIMARY: people who actually write in the selected group. This works even
-    # when Telegram hides the full member list. The first pass is intentionally
-    # bounded; if it cannot produce the daily five, Neonia automatically goes
-    # deeper instead of returning an empty list after the loudest recent authors.
-    authors=[]
-    try:
-        authors,scanned=asyncio.run(
-            _read_active_group_authors(
-                session_string,api_id,api_hash,chat,excluded,
-                desired=max(120,needed*24),message_limit=3000,
-            )
-        )
-        cards=_rank_active_group_authors(state,storage,authors,needed)
-    except Exception as exc:
-        print(
-            f"[NeoniaChat] owner={owner_id} active-author scan failed: {type(exc).__name__}",
-            flush=True,
-        )
-
-    # DEEP PASS: preserve every quality rule (fresh activity, @username,
-    # practical Agency-W evidence and score >= 50) but inspect a substantially
-    # wider slice of the chosen chat when the first pass is too narrow.
-    if len(cards) < needed:
+    # HARD TARGET: 5 suitable people. Search progressively deeper in the
+    # exact selected group. A partial result is never treated as complete.
+    cards=[]
+    seen_author_ids=set()
+    scan_passes=(
+        (3000, 160),
+        (8000, 320),
+        (20000, 700),
+        (50000, 1500),
+    )
+    pass_author_counts=[]
+    for pass_no,(message_limit,author_target) in enumerate(scan_passes, start=1):
+        if len(cards) >= needed:
+            break
         try:
-            first_author_ids={int(x["telegram_id"]) for x in authors}
-            deeper_authors,deeper_scanned=asyncio.run(
+            batch_authors,batch_scanned=asyncio.run(
                 _read_active_group_authors(
                     session_string,api_id,api_hash,chat,
-                    excluded | first_author_ids,
-                    desired=max(180,(needed-len(cards))*36),
-                    message_limit=8000,
+                    excluded | seen_author_ids,
+                    desired=max(author_target,(needed-len(cards))*60),
+                    message_limit=message_limit,
                 )
             )
-            scanned += deeper_scanned
-            deeper_cards=_rank_active_group_authors(
-                state,storage,deeper_authors,max(1,needed-len(cards))
+            scanned += batch_scanned
+            pass_author_counts.append(len(batch_authors))
+            seen_author_ids.update(int(x["telegram_id"]) for x in batch_authors)
+            batch_cards=_rank_active_group_authors(
+                state,storage,batch_authors,max(1,needed-len(cards))
             )
             existing_ids={int(x["telegram_id"]) for x in cards}
-            for item in deeper_cards:
+            for item in batch_cards:
                 cid=int(item["telegram_id"])
                 if cid not in existing_ids:
                     cards.append(item)
@@ -732,17 +705,15 @@ def process(owner_id,session_string,state,storage):
                     break
         except Exception as exc:
             print(
-                f"[NeoniaChat] owner={owner_id} deep active-author scan failed: {type(exc).__name__}",
+                f"[NeoniaChat] owner={owner_id} pass={pass_no} "
+                f"scan failed: {type(exc).__name__}",
                 flush=True,
             )
 
     # Diagnostic counts contain no message texts, usernames or credentials.
-    unique_authors = len({int(x["telegram_id"]) for x in authors})
-    unique_deep_authors = len({int(x["telegram_id"]) for x in (deeper_authors if "deeper_authors" in locals() else [])})
     print(
         f"[NeoniaChat] owner={owner_id} qualified={len(cards)}/{needed} "
-        f"scanned_messages={scanned} initial_authors={unique_authors} "
-        f"deeper_authors={unique_deep_authors}",
+        f"scanned_messages={scanned} pass_authors={pass_author_counts}",
         flush=True,
     )
 
@@ -777,7 +748,7 @@ def process(owner_id,session_string,state,storage):
                 "reason":(
                     "В доступных сообщениях выбранной группы не обнаружено "
                     "активных авторов с доступным @username за последние 7 дней"
-                    if unique_authors + unique_deep_authors == 0
+                    if sum(pass_author_counts or [0]) == 0
                     else "Активные авторы найдены, но никто не прошёл проверку "
                          "доступности, деловой релевантности и оценки ЦА >=50"
                 ),
@@ -792,7 +763,11 @@ def process(owner_id,session_string,state,storage):
     qualified_count = len({int(x["telegram_id"]) for x in combined
                            if _recommended_group_candidate(x)})
     return {"owner_id":owner_id,
-            "status":"prepared" if qualified_count>=5 else "incomplete",
+            "status":"prepared" if qualified_count>=5 else "searching",
             "count":qualified_count,"missing":max(0,5-qualified_count),
-            "reason":"" if qualified_count>=5 else "Качественных кандидатов меньше пяти — подбор не заполнен неподходящими людьми",
+            "complete":qualified_count>=5,
+            "reason":"" if qualified_count>=5 else (
+                "Поиск продолжается автоматически до полной пятёрки 5/5. "
+                "Неподходящие кандидаты и AI-конкуренты не используются для заполнения."
+            ),
             "source_chat_id":chat_id}
