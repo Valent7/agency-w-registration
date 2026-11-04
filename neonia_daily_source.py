@@ -5,6 +5,9 @@ personal contacts or another chat. Read and compare the source of saved
 Stagirite daily batches against the owner's durable workspace preference.
 """
 
+CANDIDATE_POLICY_VERSION = "network-non-ai-v2"
+
+
 def owner_source(state):
     mode = str((state or {}).get("daily_source_mode") or "contacts").strip().lower()
     if mode != "chats":
@@ -18,15 +21,20 @@ def owner_source(state):
 
 
 def source_signature(mode, chat_id=None):
+    """Signature includes policy version so stale daily batches are rebuilt."""
     if mode == "contacts":
-        return "contacts"
+        return f"contacts:{CANDIDATE_POLICY_VERSION}"
     if mode == "chats" and chat_id is not None:
         try:
             cid = int(chat_id)
         except (ValueError, TypeError):
-            return "chats:unset"
-        return f"chats:{cid}" if cid > 0 else "chats:unset"
-    return "chats:unset"
+            return f"chats:unset:{CANDIDATE_POLICY_VERSION}"
+        return (
+            f"chats:{cid}:{CANDIDATE_POLICY_VERSION}"
+            if cid > 0
+            else f"chats:unset:{CANDIDATE_POLICY_VERSION}"
+        )
+    return f"chats:unset:{CANDIDATE_POLICY_VERSION}"
 
 
 def matches_daily_batch(batch, mode, chat_id=None):
@@ -35,14 +43,11 @@ def matches_daily_batch(batch, mode, chat_id=None):
     expected = source_signature(mode, chat_id)
     actual = str(batch.get("source_signature") or "")
     if mode == "chats":
-        # Unmarked legacy contact batches are NEVER treated as chat members.
-        return expected != "chats:unset" and actual == expected
-    if actual:
-        return actual == "contacts"
-    # Existing personal-contact batches remain supported for old partners.
-    return str(batch.get("source") or "") in (
-        "neonia_sequential_queue", "telegram_scout_background"
-    )
+        # Old policy signatures are deliberately invalidated after a targeting change.
+        return actual == expected and ":unset:" not in expected
+    # For contacts, only the current policy signature is valid.
+    # This forces today's old AI-heavy batch to be rebuilt once.
+    return actual == expected
 
 
 def selected_chat_details(state):
