@@ -219,6 +219,49 @@ st.set_page_config(
 )
 
 
+AGENCY_W_PUBLIC_URL = "https://agency-w-web.onrender.com"
+LEGACY_STREAMLIT_HOST = "agency-w.streamlit.app"
+
+
+def _redirect_legacy_streamlit_to_render():
+    """Старые ярлыки Streamlit автоматически ведут в новый кабинет Render."""
+    try:
+        current_url = str(st.context.url or "").strip()
+    except Exception:
+        current_url = ""
+
+    if LEGACY_STREAMLIT_HOST not in current_url:
+        return
+
+    query_values = {}
+    try:
+        query_values = dict(st.query_params)
+    except Exception:
+        query_values = {}
+
+    target = AGENCY_W_PUBLIC_URL + "/"
+    if query_values:
+        target += "?" + urlencode(query_values)
+
+    # JS gives the user a true one-click legacy shortcut. The visible link is
+    # a fallback if a browser extension blocks scripted navigation.
+    st.html(
+        "<script>window.location.replace(" + json.dumps(target) + ");</script>",
+        unsafe_allow_javascript=True,
+    )
+    st.markdown("### Агентство W переехало на новый адрес")
+    st.link_button(
+        "Открыть Агентство W",
+        target,
+        use_container_width=True,
+        type="primary",
+    )
+    st.stop()
+
+
+_redirect_legacy_streamlit_to_render()
+
+
 def install_agency_w_app_metadata():
     """Готовит сайт к запуску по фирменной иконке с телефона и компьютера."""
     if st.session_state.get("_agency_w_app_metadata_ready"):
@@ -7898,8 +7941,6 @@ def load_member_record(telegram_id):
 REMEMBER_COOKIE_NAME = "agency_w_device"
 REMEMBER_DAYS = 30
 REMEMBER_MAX_AGE = REMEMBER_DAYS * 24 * 60 * 60
-AGENCY_W_PUBLIC_URL = "https://agency-w-web.onrender.com"
-
 telegram_keys = (
     "id",
     "first_name",
