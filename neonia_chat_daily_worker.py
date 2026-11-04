@@ -583,8 +583,52 @@ def process(owner_id,session_string,state,storage):
             return {"owner_id":owner_id,"status":"ready","count":5,"source_chat_id":chat_id}
     if current.get("approved_ids") and not matches_daily_batch(
         current,mode,chat_id):
-        return {"owner_id":owner_id,"status":"skip",
-                "reason":"old batch already approved; new chat takes effect tomorrow"}
+        # Если изменился только номер политики отбора, сегодняшнюю пятёрку
+        # нужно пересобрать сразу. "Утверждён" здесь означает готовый черновик,
+        # а не отправленное сообщение; реально отправленные люди всё равно
+        # защищены sent_log/workability и повторно не попадут.
+        actual_sig = str(current.get("source_signature") or "")
+        expected_sig = source_signature(mode, chat_id)
+        same_source_old_policy = (
+            (mode == "chats" and chat_id is not None and (
+                actual_sig == f"chats:{int(chat_id)}"
+                or actual_sig.startswith(f"chats:{int(chat_id)}:")
+            ))
+            or (mode == "contacts" and (
+                actual_sig == "contacts"
+                or actual_sig.startswith("contacts:")
+            ))
+        )
+        if same_source_old_policy:
+            current = dict(current)
+            current["approved_ids"] = []
+            current["candidate_ids"] = []
+            current["complete"] = False
+            current["source_signature"] = expected_sig
+            current["policy_rebuild_at"] = datetime.now(UTC).isoformat()
+            # Сохраняем очищенную дневную партию до нового поиска, чтобы UI
+            # не продолжал показывать старых AI-кандидатов во время пересборки.
+            if task and str(task.get("id") or ""):
+                result = dict(task.get("result") or {})
+                key = ("weekly_goal" if isinstance(result.get("weekly_goal"), dict)
+                       else "daily_candidate_feed")
+                goal = dict(result.get(key) or {})
+                batches = dict(goal.get("daily_batches") or {})
+                batches[today.isoformat()] = current
+                goal["daily_batches"] = batches
+                result[key] = goal
+                storage._sb_patch(
+                    "agency_stagirite_tasks",
+                    {"id": f"eq.{str(task.get('id') or '')}"},
+                    {
+                        "status": "В работе",
+                        "result": result,
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+        else:
+            return {"owner_id":owner_id,"status":"skip",
+                    "reason":"old batch already approved; new chat takes effect tomorrow"}
     progress=state.get("source_progress") or {}
     sig=source_signature(mode,chat_id)
 
