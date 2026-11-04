@@ -11,7 +11,7 @@ import os
 import threading
 import time
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 from telethon.sessions import StringSession
 
 import neona_telegram_dialogs as core
@@ -116,6 +116,7 @@ class RealtimePilots:
 
         pending: dict[int, object] = {}
         pending_since: dict[int, float] = {}
+        pending_reactions: dict[tuple[int, int], tuple[int, int, str]] = {}
         changed = asyncio.Event()
         client = TelegramClient(
             StringSession(session), config.telegram_api_id, config.telegram_api_hash
@@ -126,9 +127,9 @@ class RealtimePilots:
             if not event.is_private:
                 return
             message = event.message
-            # Do not trigger a scan on an unsupported media-only event.
+            # Trigger only for content Neona can actually understand.
             kind = core._telegram_message_kind(message)
-            if not str(getattr(message, "message", "") or "").strip() and kind not in ("voice", "audio"):
+            if not str(getattr(message, "message", "") or "").strip() and kind not in ("voice", "audio", "video"):
                 return
             sender_id = int(event.sender_id or 0)
             if not sender_id:
@@ -142,6 +143,47 @@ class RealtimePilots:
             # Only one pending item per sender, even during rapid-fire messages.
             pending[sender_id] = sender
             pending_since.setdefault(sender_id, time.monotonic())
+            changed.set()
+
+        @client.on(events.Raw)
+        async def on_raw_update(update):
+            if not isinstance(update, types.UpdateMessageReactions):
+                return
+
+            peer = getattr(update, "peer", None)
+            contact_id = int(getattr(peer, "user_id", 0) or 0)
+            if contact_id <= 0 or contact_id == int(owner_id):
+                return
+
+            msg_id = int(getattr(update, "msg_id", 0) or 0)
+            if msg_id <= 0:
+                return
+
+            reaction_value = ""
+            reactions = getattr(update, "reactions", None)
+            recent = list(getattr(reactions, "recent_reactions", None) or [])
+            for item in reversed(recent):
+                actor_peer = getattr(item, "peer_id", None)
+                actor_id = int(getattr(actor_peer, "user_id", 0) or 0)
+                if actor_id != contact_id or bool(getattr(item, "my", False)):
+                    continue
+                reaction_obj = getattr(item, "reaction", None)
+                emoticon = str(getattr(reaction_obj, "emoticon", "") or "").strip()
+                if emoticon:
+                    reaction_value = emoticon
+                    break
+                if int(getattr(reaction_obj, "document_id", 0) or 0):
+                    reaction_value = "кастомная emoji-реакция"
+                    break
+
+            if not reaction_value:
+                return
+
+            pending_reactions[(contact_id, msg_id)] = (
+                contact_id,
+                msg_id,
+                reaction_value,
+            )
             changed.set()
 
         await client.connect()
@@ -163,7 +205,7 @@ class RealtimePilots:
 
             while client.is_connected():
                 timeout = max(0.0, next_full_scan - time.monotonic())
-                if not pending and timeout:
+                if not pending and not pending_reactions and timeout:
                     try:
                         await asyncio.wait_for(changed.wait(), timeout=timeout)
                     except asyncio.TimeoutError:
@@ -172,17 +214,19 @@ class RealtimePilots:
                 # Snapshot and clear before awaiting: events arriving during a
                 # scan remain queued for the next iteration.
                 targets = list(pending.values())
+                reaction_events = list(pending_reactions.values())
                 first_event_at = min(pending_since.values()) if pending_since else None
                 pending.clear()
                 pending_since.clear()
+                pending_reactions.clear()
                 changed.clear()
                 full = time.monotonic() >= next_full_scan
 
-                if not targets and not full:
+                if not targets and not reaction_events and not full:
                     continue
 
                 # A modest debounce groups short bursts without a busy poll.
-                if targets and not full:
+                if (targets or reaction_events) and not full:
                     await asyncio.sleep(0.35)
                     # Deduplicate senders that sent again during the debounce.
                     targets_by_id = {
@@ -203,6 +247,35 @@ class RealtimePilots:
                         owner_id, owner_name, client,
                         target_entities=None if full else targets,
                     )
+
+                    reaction_replies = 0
+                    reaction_errors = 0
+                    for contact_id, msg_id, reaction_value in reaction_events:
+                        try:
+                            if await core.process_reaction_once(
+                                owner_id,
+                                owner_name,
+                                contact_id,
+                                reaction_value,
+                                msg_id,
+                                client,
+                            ):
+                                reaction_replies += 1
+                        except Exception as exc:
+                            reaction_errors += 1
+                            print(
+                                f"[NeonaReaction] owner={owner_id} contact={contact_id} "
+                                f"message={msg_id} error={type(exc).__name__}: {exc}",
+                                flush=True,
+                            )
+                    if reaction_events:
+                        print(
+                            f"[NeonaReaction] owner={owner_id} "
+                            f"events={len(reaction_events)} replied={reaction_replies} "
+                            f"errors={reaction_errors}",
+                            flush=True,
+                        )
+
                     if targets and first_event_at is not None:
                         print(
                             f"[NeonaRealtimeLatency] owner={owner_id} "
