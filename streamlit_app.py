@@ -6570,7 +6570,7 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
             st.caption(f"Instagram ID: {recorded_id or 'отсутствует'}")
             diagnostic_key = f"instagram_diagnostic_{int(owner_telegram_id)}"
             if st.button(
-                "🔎 Сверить аккаунт с Instagram",
+                "🔎 Проверить аккаунт и разрешения",
                 key=f"instagram_diag_check_{int(owner_telegram_id)}",
                 use_container_width=True,
             ):
@@ -6607,11 +6607,20 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
                         "Instagram подтвердил, что сохранённый токен относится "
                         f"к аккаунту @{actual_handle or username or 'без имени'}."
                     )
+                    if diagnostic.get("webhook_subscription_verified"):
+                        st.success(
+                            "✅ Разрешения Direct и комментариев активны: "
+                            "Instagram подписан на messages и comments."
+                        )
+                    else:
+                        st.warning(
+                            "Аккаунт подтверждён, но сервер пока не смог повторно "
+                            "подтвердить подписку messages/comments."
+                        )
                     st.info(
-                        "Личность аккаунта подтверждена, но это ещё не проверка "
-                        "доставки и отправки сообщений Direct. "
-                        "Если сообщения не получают ответов, сообщите нам время "
-                        "последнего входящего сообщения."
+                        "Для окончательной проверки Direct отправьте одно сообщение "
+                        "с другого Instagram-аккаунта. Повторно проходить авторизацию "
+                        "через технический адрес не нужно."
                     )
                 elif diagnostic.get("reason") == "different_account":
                     st.error(
@@ -6627,19 +6636,10 @@ def render_instagram_connection(owner_telegram_id: int, owner_name: str) -> bool
         if is_agency_owner(int(owner_telegram_id)):
             with st.expander("Разрешения Instagram", expanded=comments_state == "subscription_warning"):
                 st.caption(
-                    "Если Instagram подключали до появления центра комментариев, "
-                    "один раз обновите разрешения — Direct при этом не отключится."
+                    "Для уже подключённого аккаунта повторная авторизация не нужна. "
+                    "Нажмите выше «Проверить аккаунт и разрешения» — Агентство "
+                    "проверит и восстановит подписки Direct и комментариев на сервере."
                 )
-                try:
-                    refresh_url = _instagram_connect_url(owner_telegram_id, owner_name)
-                    safe_refresh_url = html.escape(refresh_url, quote=True)
-                    st.markdown(
-                        f'<a href="{safe_refresh_url}" target="_blank" '
-                        'rel="noopener noreferrer">🔄 Обновить разрешения Instagram</a>',
-                        unsafe_allow_html=True,
-                    )
-                except Exception as exc:
-                    st.caption(f"Обновление разрешений пока недоступно: {exc}")
         return True
 
     if instagram_result == "access_pending":
