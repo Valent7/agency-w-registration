@@ -160,6 +160,7 @@ from vk_scout_oauth import handle_vk_scout_oauth_callback
 from telegram_stories_ui import render_telegram_stories_radar
 from instagram_radar_ui import render_instagram_radar
 from content_factory_ui import render_content_factory
+from ora_partner_ui import render_ora_partner_center
 import asyncio
 import json
 import re
@@ -9036,7 +9037,7 @@ if telegram_login_valid or remembered_data:
 
                 selected_agent = st.selectbox(
                     "Откройте нужного агента внутри Стагирита",
-                    ["Стагирит", "Неония", "Неона", "Неола", "Разведчик W"],
+                    ["Стагирит", "Неония", "Неона", "Неола", "Ора", "Разведчик W"],
                     key="selected_agent",
                 )
 
@@ -9056,6 +9057,10 @@ if telegram_login_valid or remembered_data:
                 "Неола": (
                     "Проводит онбординг, помогает новичку начать работу "
                     "и сопровождает его после регистрации."
+                ),
+                "Ора": (
+                    "Цифровой сотрудник Telegram-чата: знает проект, хранит его базу знаний, "
+                    "помнит разговоры и ведёт сообщество по календарю."
                 ),
                 "Разведчик W": (
                     "Исследует конкурентов по открытым источникам, проверяет факты, "
@@ -14255,6 +14260,12 @@ if telegram_login_valid or remembered_data:
                     render_scout_center(
                         owner_telegram_id=int(telegram_id),
                         owner_name=first_name,
+                    )
+
+                elif selected_agent == "Ора":
+                    render_ora_partner_center(
+                        int(telegram_id),
+                        str(first_name or "Партнёр"),
                     )
 
                 elif selected_agent == "Неола":
