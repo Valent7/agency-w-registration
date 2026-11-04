@@ -723,22 +723,36 @@ async def _confirmed_story_reply_cursor(
         story_matches = []
         text_matches = []
         expected_normalized = " ".join(str(expected_text or "").split())
+        expected_compact = re.sub(
+            r"[\W_]+", "", expected_normalized.casefold(), flags=re.UNICODE
+        )
         for message in messages:
             if not bool(getattr(message, "out", False)):
                 continue
             reply_header = getattr(message, "reply_to", None)
-            linked_story = int(getattr(reply_header, "reply_to_story_id", 0) or 0)
+            # Telegram represents Story replies as MessageReplyStoryHeader,
+            # where the current schema exposes the id as `story_id`.
+            # Keep the legacy attribute as a compatibility fallback.
+            linked_story = int(
+                getattr(reply_header, "story_id", 0)
+                or getattr(reply_header, "reply_to_story_id", 0)
+                or 0
+            )
             outgoing_text = " ".join(
                 str(getattr(message, "message", "") or "").split()
             )
+            outgoing_compact = re.sub(
+                r"[\W_]+", "", outgoing_text.casefold(), flags=re.UNICODE
+            )
             if story_id > 0 and linked_story == story_id:
                 story_matches.append(message)
-            if expected_normalized and outgoing_text == expected_normalized:
+            if expected_compact and outgoing_compact == expected_compact:
                 text_matches.append(message)
 
-        # Matching exact message text takes priority. A direct story reply may
-        # retain a Telegram Story header even if text gets shortened in UI.
-        matched = text_matches or story_matches
+        # The Story header is the strongest proof that this is the reply the
+        # owner just sent. Text matching remains as a fallback for clients that
+        # omit the Story header in message history.
+        matched = story_matches or text_matches
         if not matched:
             raise TelegramStoriesError(
                 "Не удалось подтвердить отправленное сообщение в этом чате. "
@@ -1059,9 +1073,10 @@ def render_telegram_stories_radar(owner_id: int) -> None:
                 st.caption("У автора нет публичного username — откройте его Story в ленте Telegram.")
 
             st.markdown("**Ответ Неоны:**")
+            if reply_key not in st.session_state:
+                st.session_state[reply_key] = str(item.get("reply") or "")
             st.text_area(
                 "Ответ на Story",
-                value=str(st.session_state.get(reply_key, item.get("reply") or "")),
                 key=reply_key,
                 height=110,
                 label_visibility="collapsed",
