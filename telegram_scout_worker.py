@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 import neonia_chat_daily_worker
-from neonia_daily_source import owner_source
+from neonia_daily_source import owner_source, CANDIDATE_POLICY_VERSION
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -732,6 +732,10 @@ def _build_no_data_candidate(source: dict[str, Any]) -> dict[str, Any]:
         # контакт не попадает в рекомендованную холодную пятёрку.
         "selection_blocked": True,
         "block_reason": "нет подтверждённой бизнес-релевантности",
+        "network_business_signal": False,
+        "ai_provider_or_expert": False,
+        "automation_need_signal": False,
+        "analysis_policy_version": CANDIDATE_POLICY_VERSION,
         "business_relevant": False,
         "business_evidence": [],
         "business_gate_reason": "Недостаточно данных для подтверждения бизнес-релевантности.",
@@ -918,6 +922,10 @@ business_gate_reason — короткая причина решения.
                     if not gate_blocked
                     else (business_gate_reason or "нет подтверждённой бизнес-релевантности")
                 ),
+                "network_business_signal": bool(item.get("network_business_signal") is True),
+                "ai_provider_or_expert": bool(item.get("ai_provider_or_expert") is True),
+                "automation_need_signal": bool(item.get("automation_need_signal") is True),
+                "analysis_policy_version": CANDIDATE_POLICY_VERSION,
                 "business_relevant": business_relevant,
                 "business_evidence": business_evidence,
                 "business_gate_reason": business_gate_reason,
@@ -960,6 +968,12 @@ def _qualified_personal_candidate(item: dict[str, Any]) -> bool:
     probability or a literal percentage of target-audience match.
     """
     if not isinstance(item, dict):
+        return False
+    if str(item.get("analysis_policy_version") or "") != CANDIDATE_POLICY_VERSION:
+        return False
+    if item.get("network_business_signal") is not True:
+        return False
+    if item.get("ai_provider_or_expert") is True:
         return False
     if item.get("business_relevant") is not True:
         return False
@@ -1642,7 +1656,10 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         current_activity = activity_by_id.get(cid) or {}
         enriched = {**old, **current_activity,
                     **state_info, "_stagirite_activity_tier": _activity_tier(current_activity)}
-        if _qualified_personal_candidate(enriched):
+        if (
+            str(old.get("analysis_policy_version") or "") == CANDIDATE_POLICY_VERSION
+            and _qualified_personal_candidate(enriched)
+        ):
             safe_current_today.append(cid)
 
     if len(safe_current_today) >= DAILY_TARGET and len(current_today_order) >= DAILY_TARGET:
@@ -1671,6 +1688,9 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
             continue
         old = existing_by_id.get(cid)
         if not old:
+            continue
+        # Старый анализ не переиспользуем после смены ЦА.
+        if str(old.get("analysis_policy_version") or "") != CANDIDATE_POLICY_VERSION:
             continue
         if bool(old.get("selection_blocked")) or bool(old.get("telegram_warning")):
             continue
@@ -1725,7 +1745,14 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         raw_new = [
             item for item in reserve_contacts
             if int(item["telegram_id"]) not in excluded
-            and int(item["telegram_id"]) not in existing_by_id
+            and (
+                int(item["telegram_id"]) not in existing_by_id
+                or str(
+                    (existing_by_id.get(int(item["telegram_id"])) or {}).get(
+                        "analysis_policy_version"
+                    ) or ""
+                ) != CANDIDATE_POLICY_VERSION
+            )
         ]
 
         for start in range(0, len(raw_new), 10):
