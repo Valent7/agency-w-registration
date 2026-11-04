@@ -3572,7 +3572,7 @@ def _message_mime_type(message) -> str:
 
 
 def _telegram_message_kind(message) -> str:
-    """Надёжно различает обычный текст и Telegram voice/audio."""
+    """Различает текст, voice/audio и обычное/круглое Telegram-видео."""
 
     mime_type = _message_mime_type(message)
 
@@ -3580,10 +3580,16 @@ def _telegram_message_kind(message) -> str:
         return "voice"
     if bool(getattr(message, "audio", False)):
         return "audio"
+    if bool(getattr(message, "video", False)) or bool(
+        getattr(message, "video_note", False)
+    ):
+        return "video"
 
     document = getattr(message, "document", None)
     if document is not None and mime_type.startswith("audio/"):
         return "audio"
+    if document is not None and mime_type.startswith("video/"):
+        return "video"
 
     return "text"
 
@@ -3690,8 +3696,184 @@ def _transcribe_audio(config: Config, path: Path) -> str:
     )
 
 
+def _video_suffix(message) -> str:
+    mime_type = _message_mime_type(message)
+    if "webm" in mime_type:
+        return ".webm"
+    if "quicktime" in mime_type or "mov" in mime_type:
+        return ".mov"
+    return ".mp4"
+
+
+async def _download_video_to_temp(message) -> Path | None:
+    suffix = _video_suffix(message)
+    temp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    temp_path = Path(temp.name)
+    temp.close()
+    try:
+        downloaded = await message.download_media(file=str(temp_path))
+        if not downloaded or not temp_path.exists() or temp_path.stat().st_size <= 0:
+            temp_path.unlink(missing_ok=True)
+            return None
+        return temp_path
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        return None
+
+
+def _ffmpeg_executable() -> str:
+    direct = shutil.which("ffmpeg")
+    if direct:
+        return direct
+    import imageio_ffmpeg
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def _video_duration_seconds(path: Path) -> float:
+    try:
+        import imageio_ffmpeg
+        reader = imageio_ffmpeg.read_frames(str(path), pix_fmt="rgb24")
+        try:
+            meta = next(reader)
+            return max(0.0, float(meta.get("duration") or 0.0))
+        finally:
+            reader.close()
+    except Exception:
+        return 0.0
+
+
+def _extract_video_frames(path: Path, root: Path, count: int = 5) -> list[Path]:
+    ffmpeg = _ffmpeg_executable()
+    duration = _video_duration_seconds(path)
+    if duration > 0.5:
+        fractions = (0.08, 0.28, 0.50, 0.72, 0.92)
+        moments = [max(0.05, min(duration - 0.05, duration * x)) for x in fractions[:count]]
+    else:
+        moments = [0.05]
+    frames: list[Path] = []
+    for index, moment in enumerate(moments, start=1):
+        target = root / f"frame-{index}.jpg"
+        result = subprocess.run(
+            [
+                ffmpeg, "-y", "-loglevel", "error",
+                "-ss", f"{moment:.3f}", "-i", str(path),
+                "-frames:v", "1",
+                "-vf", "scale='min(720,iw)':-2",
+                "-q:v", "4",
+                str(target),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0 and target.exists() and target.stat().st_size > 0:
+            frames.append(target)
+    return frames
+
+
+def _extract_video_audio(path: Path, root: Path) -> Path | None:
+    ffmpeg = _ffmpeg_executable()
+    target = root / "audio.mp3"
+    result = subprocess.run(
+        [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-i", str(path), "-vn",
+            "-ac", "1", "-ar", "16000", "-b:a", "64k",
+            str(target),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=90,
+        check=False,
+    )
+    if result.returncode == 0 and target.exists() and target.stat().st_size > 700:
+        return target
+    target.unlink(missing_ok=True)
+    return None
+
+
+def _extract_openai_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for item in payload.get("output", []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for part in item.get("content", []) or []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                value = str(part.get("text") or "").strip()
+                if value:
+                    parts.append(value)
+    return "\n".join(parts).strip()
+
+
+def _analyze_video_with_model(
+    config: Config,
+    path: Path,
+    *,
+    caption: str = "",
+) -> str:
+    with tempfile.TemporaryDirectory(prefix="neona-video-") as folder:
+        root = Path(folder)
+        frames = _extract_video_frames(path, root, count=5)
+        audio_path = _extract_video_audio(path, root)
+        transcript = ""
+        if audio_path is not None:
+            try:
+                transcript = _transcribe_audio(config, audio_path)
+            except Exception:
+                transcript = ""
+
+        content: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": (
+                    "Проанализируй присланное человеку видео как единое сообщение. "
+                    "Нужно понять не монтаж, а СМЫСЛ: что происходит, что говорится, "
+                    "какая главная мысль/эмоция и что отправитель, вероятно, хочет "
+                    "передать собеседнику. Не выдумывай невидимое и не описывай "
+                    "кадры по отдельности. Верни 2–5 коротких предложений, пригодных "
+                    "как контекст для умного ответа Неоны.\n\n"
+                    f"Подпись к видео: {caption or '(нет)'}\n"
+                    f"Распознанная речь/звук: {transcript or '(речи нет или не распознана)'}"
+                ),
+            }
+        ]
+        for frame in frames:
+            encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{encoded}",
+                    "detail": "low",
+                }
+            )
+
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {config.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-5-mini",
+                "instructions": (
+                    "Ты анализатор входящих Telegram-видео для Неоны. "
+                    "Дай точный смысловой конспект без рекламы и домыслов."
+                ),
+                "input": [{"role": "user", "content": content}],
+                "store": False,
+            },
+            timeout=180,
+        )
+        response.raise_for_status()
+        summary = _extract_openai_text(response.json())
+        if not summary:
+            raise DialogError("Не удалось понять смысл видео.")
+        return summary
+
+
 async def _incoming_message_text(config: Config, message) -> str:
-    """Возвращает текст обычного сообщения или транскрипцию voice/audio."""
+    """Возвращает смысл входящего текста, аудио или видео."""
 
     plain_text = str(getattr(message, "message", "") or "").strip()
     kind = _telegram_message_kind(message)
@@ -3705,7 +3887,29 @@ async def _incoming_message_text(config: Config, message) -> str:
             return ""
 
         try:
-            return _transcribe_audio(config, temp_path)
+            transcript = _transcribe_audio(config, temp_path)
+            return (
+                "[Голосовое/аудио сообщение. Распознанный смысл речи:]\n"
+                + transcript
+            ).strip()
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    if kind == "video":
+        temp_path = await _download_video_to_temp(message)
+        if temp_path is None:
+            return plain_text
+
+        try:
+            summary = _analyze_video_with_model(
+                config,
+                temp_path,
+                caption=plain_text,
+            )
+            return (
+                "[Видео. Смысл ролика, распознанный по ключевым кадрам и звуку:]\n"
+                + summary
+            ).strip()
         finally:
             temp_path.unlink(missing_ok=True)
 
