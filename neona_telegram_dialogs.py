@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 import threading
 from types import SimpleNamespace
@@ -143,8 +146,10 @@ _LAST_VOICE_DIAGNOSTICS: list[dict] = []
 # Кэш в Supabase (context) переживает перезапуск worker; память защищает от
 # повторной оплаты даже если сохранение состояния временно не удалось.
 VOICE_TRANSCRIPT_CACHE_LIMIT = 20
+VIDEO_ANALYSIS_CACHE_LIMIT = 12
 MAX_MESSAGE_PROCESSING_ATTEMPTS = 3
 _VOICE_TRANSCRIPTION_MEMORY_CACHE: dict[tuple[int, int, int], dict[str, str]] = {}
+_VIDEO_ANALYSIS_MEMORY_CACHE: dict[tuple[int, int, int], dict[str, str]] = {}
 
 # Диагностика Неоны: печатаем подробный снимок только один раз на владельца
 # после каждого запуска worker. На логику диалога и отправку сообщений не влияет.
@@ -209,6 +214,56 @@ def _voice_cache_put(
         VOICE_TRANSCRIPT_CACHE_LIMIT,
     )
     return updated
+
+
+def _video_cache_get(context: dict[str, Any], message_id: int) -> dict[str, str] | None:
+    cache = context.get("video_analysis_cache")
+    if not isinstance(cache, dict):
+        return None
+    entry = cache.get(str(int(message_id)))
+    return dict(entry) if isinstance(entry, dict) else None
+
+
+def _video_cache_put(
+    context: dict[str, Any],
+    message_id: int,
+    *,
+    status: str,
+    text: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    updated = dict(context or {})
+    cache = _trim_context_map(
+        updated.get("video_analysis_cache"),
+        VIDEO_ANALYSIS_CACHE_LIMIT,
+    )
+    cache[str(int(message_id))] = {
+        "status": str(status),
+        "text": str(text or ""),
+        "error": str(error or "")[:500],
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    updated["video_analysis_cache"] = _trim_context_map(
+        cache,
+        VIDEO_ANALYSIS_CACHE_LIMIT,
+    )
+    return updated
+
+
+def _emoji_semantic_text(text: str, stage: str) -> str:
+    """Понимает короткие emoji-ответы в этапах, где человек отвечает да/нет."""
+    value = str(text or "").strip()
+    if not value or any(ch.isalnum() for ch in value):
+        return value
+    if stage not in {"awaiting_confirmation", "awaiting_material_consent"}:
+        return value
+    positive = ("👍", "✅", "👌", "☑️", "🙌")
+    negative = ("👎", "❌", "🚫", "🙅")
+    if any(token in value for token in positive):
+        return "да"
+    if any(token in value for token in negative):
+        return "нет"
+    return value
 
 
 def _processing_attempts_put(
