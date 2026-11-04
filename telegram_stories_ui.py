@@ -799,6 +799,7 @@ def _register_story_reply_for_neona(
         story_id=story_id,
         recipient_name=str(item.get("name") or "Telegram-контакт"),
         story_reply_message_id=story_reply_message_id,
+        story_reply_text=draft_text,
     )
 
     # Неона-worker берёт разрешённые диалоги из рабочего sent_log.
@@ -838,6 +839,138 @@ def _register_story_reply_for_neona(
         "replied",
     )
     persist_workspace_if_changed(int(owner_id), force=True)
+
+
+async def _hydrate_missing_story_reply_texts(
+    owner_id: int,
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Восстанавливает старые тексты Story-ответов прямо из Telegram."""
+    missing = [
+        item for item in items
+        if not str(item.get("reply_text") or "").strip()
+        and int(item.get("message_id") or 0) > 0
+        and int(item.get("telegram_id") or 0) > 0
+    ]
+    if not missing:
+        return items
+
+    session_string = _load_session(int(owner_id))
+    api_id, api_hash = _api_credentials()
+    client = TelegramClient(StringSession(session_string), api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return items
+        for item in missing[:10]:
+            try:
+                entity = await client.get_entity(int(item["telegram_id"]))
+                message = await client.get_messages(
+                    entity,
+                    ids=int(item["message_id"]),
+                )
+                if message is not None and bool(getattr(message, "out", False)):
+                    item["reply_text"] = str(
+                        getattr(message, "message", "") or ""
+                    ).strip()
+            except Exception:
+                continue
+    finally:
+        await client.disconnect()
+    return items
+
+
+def _recent_registered_story_replies(
+    owner_id: int,
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Постоянная история Story-ответов, независимая от Streamlit rerun."""
+    url, key = _supabase_config()
+    try:
+        response = requests.get(
+            f"{url}/rest/v1/agency_dialog_states",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            params={
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "select": "contact_telegram_id,context,updated_at",
+                "order": "updated_at.desc",
+                "limit": 100,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        rows = response.json() if response.text.strip() else []
+    except Exception:
+        return []
+
+    items: list[dict[str, Any]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        context = row.get("context")
+        if not isinstance(context, dict):
+            continue
+        if str(context.get("activated_by") or "") != "telegram_story_reply":
+            continue
+        try:
+            contact_id = int(row.get("contact_telegram_id") or 0)
+            story_id = int(context.get("story_id") or 0)
+            message_id = int(context.get("story_reply_message_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if contact_id <= 0:
+            continue
+        items.append(
+            {
+                "telegram_id": contact_id,
+                "story_id": story_id,
+                "message_id": message_id,
+                "name": str(
+                    context.get("recipient_name")
+                    or context.get("contact_name")
+                    or "Telegram-контакт"
+                ),
+                "reply_text": str(context.get("story_reply_text") or "").strip(),
+                "sent_at": str(
+                    context.get("story_reply_sent_at")
+                    or row.get("updated_at")
+                    or ""
+                ),
+            }
+        )
+        if len(items) >= max(1, int(limit)):
+            break
+
+    try:
+        return _run(_hydrate_missing_story_reply_texts(owner_id, items))
+    except Exception:
+        return items
+
+
+def _render_recent_story_reply_history(owner_id: int) -> None:
+    items = _recent_registered_story_replies(owner_id, limit=8)
+    if not items:
+        return
+    with st.expander(
+        "🧠 Последние ответы на Stories — память Неоны",
+        expanded=False,
+    ):
+        st.caption(
+            "Эти ответы сохраняются после обновления страницы. "
+            "Неона использует их как начало дальнейшего диалога."
+        )
+        for item in items:
+            st.markdown(f"**{str(item.get('name') or 'Telegram-контакт')}**")
+            reply_text = str(item.get("reply_text") or "").strip()
+            if reply_text:
+                st.write(reply_text)
+            else:
+                st.caption("Текст старого ответа не удалось восстановить.")
+            sent_at = _parse_iso_datetime(item.get("sent_at"))
+            if sent_at is not None:
+                st.caption(sent_at.astimezone().strftime("%d.%m.%Y %H:%M"))
+            st.divider()
 
 
 def prepare_telegram_stories_radar(
@@ -1024,6 +1157,8 @@ def render_telegram_stories_radar(owner_id: int) -> None:
             "Уже просмотренная Story не возвращается; выбранный автор получает "
             f"паузу {AUTHOR_COOLDOWN_DAYS} дней."
         )
+
+    _render_recent_story_reply_history(owner_id)
 
     if not stories:
         st.warning(
