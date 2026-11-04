@@ -6,3 +6,4 @@ pillow
 pypdf
 openai
 PyJWT[crypto]
+imageio-ffmpeg
