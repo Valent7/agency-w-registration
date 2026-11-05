@@ -414,6 +414,58 @@ def _has_conflict(
     return False
 
 
+def _conflict_description(
+    start_utc: datetime,
+    end_utc: datetime,
+    meetings: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+    *,
+    exclude_meeting_id: str | None = None,
+) -> str | None:
+    """Возвращает понятное человеку описание первой конфликтующей записи."""
+    for meeting in meetings:
+        meeting_id = str(meeting.get("id") or "")
+        if exclude_meeting_id and meeting_id == str(exclude_meeting_id):
+            continue
+        if not _meeting_is_active(meeting):
+            continue
+        existing_start, existing_end = _meeting_datetimes(meeting)
+        if start_utc < existing_end and end_utc > existing_start:
+            start_msk = existing_start.astimezone(MSK)
+            end_msk = existing_end.astimezone(MSK)
+            name = str(meeting.get("contact_name") or "другая встреча").strip()
+            return (
+                f"{start_msk.strftime('%H:%M')}–{end_msk.strftime('%H:%M')} МСК — "
+                f"встреча «{name}»"
+            )
+
+    start_msk = start_utc.astimezone(MSK)
+    end_msk = end_utc.astimezone(MSK)
+    if start_msk.date() != end_msk.date():
+        return "интервал переходит через полночь"
+
+    candidate_start = start_msk.timetz().replace(tzinfo=None)
+    candidate_end = end_msk.timetz().replace(tzinfo=None)
+    for block in blocks:
+        if not bool(block.get("active", True)):
+            continue
+        try:
+            weekday = int(block.get("weekday"))
+            block_start = _parse_clock(block.get("start_time"))
+            block_end = _parse_clock(block.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        if weekday != start_msk.weekday():
+            continue
+        if candidate_start < block_end and candidate_end > block_start:
+            title = str(block.get("title") or "постоянная занятость").strip()
+            return (
+                f"{block_start.strftime('%H:%M')}–{block_end.strftime('%H:%M')} МСК — "
+                f"«{title}»"
+            )
+    return None
+
+
 def _timezone_choice_for_value(timezone_name: str) -> str:
     for label, value in COMMON_TIMEZONES.items():
         if value and value == timezone_name:
@@ -742,20 +794,18 @@ def _render_meeting_card(meeting: dict[str, Any], key_prefix: str) -> None:
                             new_end_utc + timedelta(minutes=1),
                         )
                         blocks = list_recurring_blocks(owner_id)
-                        if (
-                            _has_conflict(
-                                new_start_utc,
-                                new_end_utc,
-                                other_meetings,
-                                exclude_meeting_id=meeting_id,
-                            )
-                            or _has_recurring_conflict(
-                                new_start_utc, new_end_utc, blocks
-                            )
-                        ):
+                        conflict = _conflict_description(
+                            new_start_utc,
+                            new_end_utc,
+                            other_meetings,
+                            blocks,
+                            exclude_meeting_id=meeting_id,
+                        )
+                        if conflict:
                             st.error(
-                                "Это время пересекается с другой встречей или "
-                                "постоянной занятостью."
+                                "Выбранное время уже занято: "
+                                + conflict
+                                + ". Выберите другое время."
                             )
                         else:
                             update_meeting(
@@ -1177,13 +1227,17 @@ def _render_manual_meeting(owner_telegram_id: int, owner_name: str) -> None:
             end_utc + timedelta(minutes=1),
         )
         blocks = list_recurring_blocks(owner_telegram_id)
-        if (
-            _has_conflict(start_utc, end_utc, meetings)
-            or _has_recurring_conflict(start_utc, end_utc, blocks)
-        ):
+        conflict = _conflict_description(
+            start_utc,
+            end_utc,
+            meetings,
+            blocks,
+        )
+        if conflict:
             st.error(
-                "Это время уже занято другой встречей или постоянной занятостью. "
-                "Измените время либо сначала отредактируйте существующую запись."
+                "Выбранное время уже занято: "
+                + conflict
+                + ". Выберите другое время или измените существующую запись в календаре."
             )
             return
 
