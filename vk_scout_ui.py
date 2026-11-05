@@ -11,6 +11,7 @@ from vk_scout_oauth import (
 )
 
 import vk_scout as _vk_scout
+from vk_scout_worker import top_up_vk_owner_now
 
 from vk_scout import (
     VKScoutError,
@@ -865,6 +866,38 @@ def _render_today_vk_candidates(
             else ""
         )
     )
+
+    if today_count < 5:
+        st.caption(
+            "Если текущих кандидатов мало или прошлые не отвечают, можно не ждать "
+            "фонового цикла — Неония сразу продолжит поиск по Вашим VK-источникам."
+        )
+        if st.button(
+            "🔄 Добрать кандидатов до 5",
+            key=f"vk_top_up_now_{int(owner_id)}",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                with st.spinner("Неония проверяет следующие VK-профили и добирает пятёрку…"):
+                    result = top_up_vk_owner_now(
+                        int(owner_id),
+                        str(member_code or "").strip(),
+                        daily_limit=5,
+                        min_score=50,
+                        analysis_limit=30,
+                    )
+                count = int(result.get("count") or 0)
+                if count >= 5:
+                    st.success("✅ Готово: сегодняшняя VK-пятёрка собрана 5/5.")
+                else:
+                    st.info(
+                        f"Неония продолжила поиск. Сейчас собрано {count}/5; "
+                        f"проверено дополнительно: {int(result.get('analyzed') or 0)}."
+                    )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось выполнить добор VK-кандидатов: {exc}")
 
     if not assignments:
         st.info(
