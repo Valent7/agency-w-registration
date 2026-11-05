@@ -942,7 +942,19 @@ def scan_vk_sources(owner_id: int, *, per_source: int = 200, max_sources: int = 
             for item in page["members"]:
                 unique[int(item["vk_user_id"])] = item
         except Exception as exc:
-            errors.append(f"{source.get('community_name') or source.get('community_id')}: {exc}")
+            error_text = str(exc)
+            errors.append(
+                f"{source.get('community_name') or source.get('community_id')}: {error_text}"
+            )
+            lowered = error_text.casefold()
+            if (
+                "error_code" in lowered
+                or "vk api groups.getmembers: 5" in lowered
+                or "authorization failed" in lowered
+                or "user authorization failed" in lowered
+                or "access token" in lowered
+            ):
+                break
     saved = save_vk_candidates(unique.values())
     return {
         "sources_checked": len(sources),
