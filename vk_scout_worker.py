@@ -329,6 +329,64 @@ def _score_until_daily_five(
     return prepared, total_analyzed, best_score
 
 
+def top_up_vk_owner_now(
+    owner_id: int,
+    member_code: str,
+    *,
+    daily_limit: int = 5,
+    min_score: int = 50,
+    analysis_limit: int = 30,
+) -> dict[str, Any]:
+    """Immediate manual top-up for one owner's VK daily five."""
+    owner_id = int(owner_id)
+    member_code = str(member_code or "").strip()
+
+    profiles = _load_target_profiles([owner_id])
+    target_profile = profiles.get(owner_id)
+    if not target_profile:
+        raise VKScoutError("Не найден сохранённый живой портрет ЦА.")
+
+    sources = load_vk_sources(owner_id)
+    if not sources:
+        raise VKScoutError("Нет активных VK-источников.")
+
+    service_access_token = _env("VK_SERVICE_TOKEN")
+    legacy_access_token = _env("VK_ACCESS_TOKEN")
+    fallback_access_token = service_access_token or legacy_access_token
+
+    try:
+        scout_access_token = get_valid_vk_scout_access_token(owner_id)
+        os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
+    except VKScoutOAuthError:
+        if not fallback_access_token:
+            raise VKScoutError("Нет рабочего VK-токена для добора.")
+        os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
+
+    scan_result = scan_vk_sources(
+        owner_id,
+        per_source=200,
+        max_sources=min(10, len(sources)),
+    )
+    prepared, analyzed_total, best_score = _score_until_daily_five(
+        owner_id,
+        member_code,
+        target_profile,
+        daily_limit=max(1, min(5, int(daily_limit))),
+        min_score=max(0, min(100, int(min_score))),
+        analysis_limit=max(5, min(100, int(analysis_limit))),
+    )
+    return {
+        "ok": True,
+        "count": int(prepared.get("count") or len(prepared.get("assignments") or [])),
+        "complete": bool(prepared.get("complete")),
+        "created": int(prepared.get("created") or 0),
+        "analyzed": int(analyzed_total),
+        "best_score": best_score,
+        "message": str(prepared.get("message") or "").strip(),
+        "scan_found": int(scan_result.get("candidates_found") or 0),
+    }
+
+
 def run_once() -> dict[str, int]:
     """Один проход качественного VK-поиска.
 
