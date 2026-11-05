@@ -310,12 +310,21 @@ def run_once() -> dict[str, int]:
             "Не найден корневой владелец Агентства W для VK Scout OAuth"
         )
 
+    legacy_access_token = _env("VK_ACCESS_TOKEN")
     try:
         scout_access_token = get_valid_vk_scout_access_token(root_owner_id)
         os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
     except VKScoutOAuthError as exc:
-        _log(f"VK Scout OAuth: {exc}")
-        scout_access_token = ""
+        if legacy_access_token:
+            scout_access_token = legacy_access_token
+            os.environ["VK_SCOUT_ACCESS_TOKEN"] = legacy_access_token
+            _log(
+                "VK Scout OAuth недоступен; использую резервный VK_ACCESS_TOKEN "
+                "из прежней Streamlit-схемы"
+            )
+        else:
+            _log(f"VK Scout OAuth: {exc}")
+            scout_access_token = ""
 
     target_profiles = _load_target_profiles(member_ids)
 
@@ -414,9 +423,43 @@ def run_once() -> dict[str, int]:
                         min_score=min_score,
                     )
                 except Exception as retry_exc:
-                    stats["errors"] += 1
-                    _log(f"{owner_id}: VK очередь после обновления токена: {retry_exc}")
-                    continue
+                    if legacy_access_token:
+                        try:
+                            scout_access_token = legacy_access_token
+                            os.environ["VK_SCOUT_ACCESS_TOKEN"] = legacy_access_token
+                            scan_result = scan_vk_sources(
+                                owner_id,
+                                per_source=200,
+                                max_sources=min(10, len(sources)),
+                            )
+                            score_result = score_vk_candidates(
+                                owner_id,
+                                target_profile,
+                                ask_openai_fn=_ask_openai,
+                                limit=analysis_limit,
+                            )
+                            stats["analyzed"] += int(score_result.get("analyzed") or 0)
+                            prepared = ensure_quality_vk_assignments(
+                                owner_id,
+                                member_code,
+                                limit=daily_limit,
+                                min_score=min_score,
+                            )
+                            _log(
+                                f"{owner_id}: VK Scout восстановлен через резервный "
+                                "VK_ACCESS_TOKEN"
+                            )
+                        except Exception as legacy_exc:
+                            stats["errors"] += 1
+                            _log(
+                                f"{owner_id}: резервный VK_ACCESS_TOKEN тоже не сработал: "
+                                f"{legacy_exc}"
+                            )
+                            continue
+                    else:
+                        stats["errors"] += 1
+                        _log(f"{owner_id}: VK очередь после обновления токена: {retry_exc}")
+                        continue
             else:
                 stats["errors"] += 1
                 _log(f"{owner_id}: {exc}")
