@@ -265,6 +265,70 @@ def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+def _score_until_daily_five(
+    owner_id: int,
+    member_code: str,
+    target_profile: dict[str, Any],
+    *,
+    daily_limit: int,
+    min_score: int,
+    analysis_limit: int,
+) -> tuple[dict[str, Any], int, int | None]:
+    """Keep scoring fresh VK profiles until today's 5/5 is complete or pool is exhausted."""
+    total_analyzed = 0
+    best_score: int | None = None
+
+    prepared = ensure_quality_vk_assignments(
+        owner_id,
+        member_code,
+        limit=daily_limit,
+        min_score=min_score,
+    )
+    if prepared.get("complete"):
+        return prepared, total_analyzed, best_score
+
+    # score_vk_candidates excludes profiles already scored for this owner, so
+    # every round advances through the fresh pool instead of repeating the same 30.
+    for round_no in range(1, 26):
+        score_result = score_vk_candidates(
+            owner_id,
+            target_profile,
+            ask_openai_fn=_ask_openai,
+            limit=analysis_limit,
+        )
+        analyzed_now = int(score_result.get("analyzed") or 0)
+        total_analyzed += analyzed_now
+
+        try:
+            round_best = int(score_result.get("best_score"))
+        except (TypeError, ValueError):
+            round_best = None
+        if round_best is not None:
+            best_score = round_best if best_score is None else max(best_score, round_best)
+
+        prepared = ensure_quality_vk_assignments(
+            owner_id,
+            member_code,
+            limit=daily_limit,
+            min_score=min_score,
+        )
+        _log(
+            f"{owner_id}: VK отбор раунд={round_no}; "
+            f"оценено_в_раунде={analyzed_now}; всего_оценено={total_analyzed}; "
+            f"готово={prepared.get('count') or 0}/{daily_limit}; "
+            f"лучший_балл={round_best}"
+        )
+        if prepared.get("complete"):
+            break
+
+        # No fresh rows left: score_vk_candidates switched to reanalysis.
+        # Re-running the same pool would only spend money without finding new people.
+        if analyzed_now <= 0 or str(score_result.get("mode") or "") == "повторный анализ":
+            break
+
+    return prepared, total_analyzed, best_score
+
+
 def run_once() -> dict[str, int]:
     """Один проход качественного VK-поиска.
 
@@ -381,24 +445,20 @@ def run_once() -> dict[str, int]:
             )
             for scan_error in scan_result.get("errors") or []:
                 _log(f"{owner_id}: VK источник: {scan_error}")
-            score_result = score_vk_candidates(
+            prepared, analyzed_total, best_score = _score_until_daily_five(
                 owner_id,
+                member_code,
                 target_profile,
-                ask_openai_fn=_ask_openai,
-                limit=analysis_limit,
+                daily_limit=daily_limit,
+                min_score=min_score,
+                analysis_limit=analysis_limit,
             )
-            stats["analyzed"] += int(score_result.get("analyzed") or 0)
+            stats["analyzed"] += analyzed_total
             _log(
                 f"{owner_id}: Неония проверила VK-пул; "
                 f"найдено={scan_result.get('candidates_found') or 0}, "
-                f"оценено={score_result.get('analyzed') or 0}, "
-                f"лучший_балл={score_result.get('best_score')}"
-            )
-            prepared = ensure_quality_vk_assignments(
-                owner_id,
-                member_code,
-                limit=daily_limit,
-                min_score=min_score,
+                f"оценено={analyzed_total}, "
+                f"лучший_балл={best_score}"
             )
         except VKScoutError as exc:
             text_error = str(exc).lower()
@@ -416,19 +476,15 @@ def run_once() -> dict[str, int]:
                         per_source=200,
                         max_sources=min(10, len(sources)),
                     )
-                    score_result = score_vk_candidates(
-                        owner_id,
-                        target_profile,
-                        ask_openai_fn=_ask_openai,
-                        limit=analysis_limit,
-                    )
-                    stats["analyzed"] += int(score_result.get("analyzed") or 0)
-                    prepared = ensure_quality_vk_assignments(
+                    prepared, analyzed_total, _ = _score_until_daily_five(
                         owner_id,
                         member_code,
-                        limit=daily_limit,
+                        target_profile,
+                        daily_limit=daily_limit,
                         min_score=min_score,
+                        analysis_limit=analysis_limit,
                     )
+                    stats["analyzed"] += analyzed_total
                 except Exception as retry_exc:
                     if fallback_access_token:
                         try:
@@ -439,19 +495,15 @@ def run_once() -> dict[str, int]:
                                 per_source=200,
                                 max_sources=min(10, len(sources)),
                             )
-                            score_result = score_vk_candidates(
-                                owner_id,
-                                target_profile,
-                                ask_openai_fn=_ask_openai,
-                                limit=analysis_limit,
-                            )
-                            stats["analyzed"] += int(score_result.get("analyzed") or 0)
-                            prepared = ensure_quality_vk_assignments(
+                            prepared, analyzed_total, _ = _score_until_daily_five(
                                 owner_id,
                                 member_code,
-                                limit=daily_limit,
+                                target_profile,
+                                daily_limit=daily_limit,
                                 min_score=min_score,
+                                analysis_limit=analysis_limit,
                             )
+                            stats["analyzed"] += analyzed_total
                             _log(
                                 f"{owner_id}: VK Scout восстановлен через резервный "
                                 + ("VK_SERVICE_TOKEN" if service_access_token else "VK_ACCESS_TOKEN")
