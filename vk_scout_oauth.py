@@ -372,6 +372,7 @@ def _vk_scout_error_requires_reconnect(message: Any) -> bool:
         "refresh_token expired",
         "refresh token revoked",
         "refresh_token revoked",
+        "client is blocked",
     )
     return any(marker in text for marker in fatal_markers)
 
