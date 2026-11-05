@@ -310,18 +310,23 @@ def run_once() -> dict[str, int]:
             "Не найден корневой владелец Агентства W для VK Scout OAuth"
         )
 
+    service_access_token = _env("VK_SERVICE_TOKEN")
     legacy_access_token = _env("VK_ACCESS_TOKEN")
+    fallback_access_token = service_access_token or legacy_access_token
     try:
         scout_access_token = get_valid_vk_scout_access_token(root_owner_id)
         os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
     except VKScoutOAuthError as exc:
-        if legacy_access_token:
-            scout_access_token = legacy_access_token
-            os.environ["VK_SCOUT_ACCESS_TOKEN"] = legacy_access_token
-            _log(
-                "VK Scout OAuth недоступен; использую резервный VK_ACCESS_TOKEN "
-                "из прежней Streamlit-схемы"
-            )
+        if fallback_access_token:
+            scout_access_token = fallback_access_token
+            os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
+            if service_access_token:
+                _log("VK Scout OAuth недоступен; использую VK_SERVICE_TOKEN приложения")
+            else:
+                _log(
+                    "VK Scout OAuth недоступен; использую резервный VK_ACCESS_TOKEN "
+                    "из прежней Streamlit-схемы"
+                )
         else:
             _log(f"VK Scout OAuth: {exc}")
             scout_access_token = ""
@@ -425,10 +430,10 @@ def run_once() -> dict[str, int]:
                         min_score=min_score,
                     )
                 except Exception as retry_exc:
-                    if legacy_access_token:
+                    if fallback_access_token:
                         try:
-                            scout_access_token = legacy_access_token
-                            os.environ["VK_SCOUT_ACCESS_TOKEN"] = legacy_access_token
+                            scout_access_token = fallback_access_token
+                            os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
                             scan_result = scan_vk_sources(
                                 owner_id,
                                 per_source=200,
@@ -449,7 +454,7 @@ def run_once() -> dict[str, int]:
                             )
                             _log(
                                 f"{owner_id}: VK Scout восстановлен через резервный "
-                                "VK_ACCESS_TOKEN"
+                                + ("VK_SERVICE_TOKEN" if service_access_token else "VK_ACCESS_TOKEN")
                             )
                         except Exception as legacy_exc:
                             stats["errors"] += 1
