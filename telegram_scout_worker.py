@@ -1338,6 +1338,51 @@ async def _accessible_group_ids(
         await client.disconnect()
 
 
+async def _accessible_group_catalog(
+    session_string: str,
+) -> list[dict[str, Any]]:
+    """Return the owner's currently accessible Telegram groups as live scan sources."""
+    api_id, api_hash = _telegram_api_credentials()
+    client = TelegramClient(StringSession(session_string), api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return []
+        rows: list[dict[str, Any]] = []
+        async for dialog in client.iter_dialogs(limit=500):
+            if not bool(getattr(dialog, "is_group", False)):
+                continue
+            try:
+                cid = int(getattr(dialog.entity, "id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if cid <= 0:
+                continue
+            title = str(
+                getattr(dialog, "name", "")
+                or getattr(dialog.entity, "title", "")
+                or "Telegram-чат"
+            ).strip()
+            try:
+                participants = int(
+                    getattr(dialog.entity, "participants_count", 0) or 0
+                )
+            except (TypeError, ValueError):
+                participants = 0
+            rows.append(
+                {
+                    "chat_id": cid,
+                    "title": title,
+                    "type": "Супергруппа",
+                    "participants_count": participants,
+                    "_live_dialog": True,
+                }
+            )
+        return rows
+    finally:
+        await client.disconnect()
+
+
 def _topup_from_other_telegram_groups(
     owner_id: int,
     session_string: str,
@@ -1374,18 +1419,24 @@ def _topup_from_other_telegram_groups(
         pass
 
     try:
-        accessible_ids = asyncio.run(
+        live_chats = asyncio.run(
             asyncio.wait_for(
-                _accessible_group_ids(session_string),
-                timeout=20,
+                _accessible_group_catalog(session_string),
+                timeout=30,
             )
         )
+        accessible_ids = {
+            int(item.get("chat_id") or 0)
+            for item in live_chats
+            if int(item.get("chat_id") or 0) > 0
+        }
     except Exception as exc:
         print(
             f"[Telegram Scout] owner={owner_id}: cannot list accessible groups: "
             f"{type(exc).__name__}",
             flush=True,
         )
+        live_chats = []
         accessible_ids = set()
 
     chats = []
@@ -1413,6 +1464,31 @@ def _topup_from_other_telegram_groups(
             flush=True,
         )
 
+    # Добавляем живые группы прямо из текущей Telegram-сессии, даже если старый
+    # список кабинета их ещё не содержит. Неония не должна оставаться на 0/5
+    # только потому, что сохранённый перечень чатов устарел.
+    known_chat_ids = {
+        int(item.get("chat_id") or 0)
+        for item in chats
+        if int(item.get("chat_id") or 0) > 0
+    }
+    for raw in live_chats:
+        try:
+            cid = int(raw.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cid <= 0 or cid == int(selected_chat_id or 0) or cid in known_chat_ids:
+            continue
+        chats.append(raw)
+        known_chat_ids.add(cid)
+
+    if live_chats:
+        print(
+            f"[Telegram Scout] owner={owner_id}: live accessible groups="
+            f"{len(live_chats)}, scan queue={len(chats)}",
+            flush=True,
+        )
+
     # Сначала более крупные/живые доступные группы. Неония проходит несколько
     # источников, но на каждый ставит тайм-аут, чтобы один чат не блокировал день.
     chats.sort(
@@ -1422,7 +1498,7 @@ def _topup_from_other_telegram_groups(
     found: list[dict[str, Any]] = []
     found_ids: set[int] = set()
 
-    for chat in chats[:10]:
+    for chat in chats[:20]:
         if len(found) >= needed:
             break
         try:
@@ -1434,10 +1510,10 @@ def _topup_from_other_telegram_groups(
                         api_hash,
                         chat,
                         excluded | found_ids,
-                        desired=max(80, (needed - len(found)) * 20),
-                        message_limit=1800,
+                        desired=max(60, (needed - len(found)) * 20),
+                        message_limit=900,
                     ),
-                    timeout=18,
+                    timeout=30,
                 )
             )
             ranked = neonia_chat_daily_worker._rank_active_group_authors(
