@@ -174,6 +174,8 @@ def ensure_quality_vk_assignments(
     skipped_partner = 0
     insert_errors = 0
     lost_races = 0
+    eligible_attempts = 0
+    created_ids: list[int] = []
 
     for uid in ordered_ids:
         if not free_positions:
@@ -194,6 +196,7 @@ def ensure_quality_vk_assignments(
             skipped_partner += 1
             continue
 
+        eligible_attempts += 1
         candidate = candidates.get(uid) or {}
         score_row = score_by_id.get(uid) or {}
         position = free_positions[0]
@@ -248,6 +251,7 @@ def ensure_quality_vk_assignments(
             continue
 
         created += 1
+        created_ids.append(uid)
         active_ids.add(uid)
         processed.add(uid)
         global_used.add(uid)
@@ -255,6 +259,7 @@ def ensure_quality_vk_assignments(
 
     final_rows = load_today_vk_assignments(owner_id)
     count = min(len(final_rows), limit)
+    final_ids = [_int(row.get("vk_user_id")) for row in final_rows]
     return {
         "ok": True,
         "assignments": final_rows[:limit],
@@ -274,6 +279,11 @@ def ensure_quality_vk_assignments(
             "skipped_partner": skipped_partner,
             "insert_errors": insert_errors,
             "lost_races": lost_races,
+            "eligible_attempts": eligible_attempts,
+            "created": created,
+            "created_ids": created_ids[:10],
+            "final_count": count,
+            "final_ids": final_ids[:10],
         },
         "message": (
             f"VK-пятёрка Неонии: {count}/{limit}. "
