@@ -374,6 +374,8 @@ def run_once() -> dict[str, int]:
                 per_source=200,
                 max_sources=min(10, len(sources)),
             )
+            for scan_error in scan_result.get("errors") or []:
+                _log(f"{owner_id}: VK источник: {scan_error}")
             score_result = score_vk_candidates(
                 owner_id,
                 target_profile,
