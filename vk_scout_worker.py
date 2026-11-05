@@ -350,7 +350,8 @@ def _score_until_daily_five(
             f"{owner_id}: VK отбор раунд={round_no}; "
             f"оценено_в_раунде={analyzed_now}; всего_оценено={total_analyzed}; "
             f"готово={prepared.get('count') or 0}/{daily_limit}; "
-            f"лучший_балл={round_best}"
+            f"лучший_балл={round_best}; "
+            f"диагностика={prepared.get('diagnostics') or {}}"
         )
         if prepared.get("complete"):
             break
