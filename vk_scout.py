@@ -850,18 +850,131 @@ def _normalize_vk_user(row: dict[str, Any], source_community_id: int | None = No
     }
 
 
+def fetch_vk_active_commenters(
+    source: dict[str, Any] | int,
+    *,
+    post_limit: int = 12,
+    comment_limit: int = 100,
+    max_people: int = 250,
+) -> dict[str, Any]:
+    """Fallback source: active human authors from public community discussions.
+
+    Used when VK no longer allows groups.getMembers for the current token.
+    Reads only public wall posts/comments and then enriches the visible user IDs.
+    """
+    cid = int(source.get("community_id")) if isinstance(source, dict) else abs(int(source))
+    wall = _vk_api(
+        "wall.get",
+        owner_id=-abs(cid),
+        count=max(1, min(25, int(post_limit))),
+    )
+    wall = wall if isinstance(wall, dict) else {}
+    posts = wall.get("items") or []
+
+    user_ids: list[int] = []
+    seen: set[int] = set()
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        try:
+            post_id = int(post.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if post_id <= 0:
+            continue
+        try:
+            comments = _vk_api(
+                "wall.getComments",
+                owner_id=-abs(cid),
+                post_id=post_id,
+                count=max(1, min(100, int(comment_limit))),
+                extended=1,
+                fields=",".join(VK_PROFILE_FIELDS),
+            )
+        except Exception:
+            continue
+        comments = comments if isinstance(comments, dict) else {}
+
+        # extended=1 normally returns profile objects; prefer them because this
+        # avoids an extra API request and keeps the data source explicitly public.
+        for row in comments.get("profiles") or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                uid = int(row.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            user_ids.append(uid)
+            if len(user_ids) >= max_people:
+                break
+        if len(user_ids) >= max_people:
+            break
+
+        # Some VK responses omit profiles. Recover IDs from visible comments.
+        for row in comments.get("items") or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                uid = int(row.get("from_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            user_ids.append(uid)
+            if len(user_ids) >= max_people:
+                break
+        if len(user_ids) >= max_people:
+            break
+
+    members: list[dict[str, Any]] = []
+    if user_ids:
+        try:
+            profiles = enrich_vk_profiles(user_ids)
+        except Exception:
+            profiles = []
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            enriched = dict(item)
+            enriched["source_community_id"] = cid
+            members.append(enriched)
+
+    return {
+        "community_id": cid,
+        "total": len(user_ids),
+        "returned_count": len(members),
+        "members": members,
+        "source_mode": "public_commenters",
+    }
+
+
 def fetch_vk_members(source: dict[str, Any] | int, *, offset: int = 0, count: int = 200) -> dict[str, Any]:
     cid = int(source.get("community_id")) if isinstance(source, dict) else abs(int(source))
     offset = max(0, int(offset))
     count = max(1, min(1000, int(count)))
-    response = _vk_api(
-        "groups.getMembers",
-        group_id=cid,
-        offset=offset,
-        count=count,
-        fields=",".join(VK_PROFILE_FIELDS),
-    )
-    response = response if isinstance(response, dict) else {}
+    try:
+        response = _vk_api(
+            "groups.getMembers",
+            group_id=cid,
+            offset=offset,
+            count=count,
+            fields=",".join(VK_PROFILE_FIELDS),
+        )
+        response = response if isinstance(response, dict) else {}
+    except VKScoutError as exc:
+        text_error = str(exc).casefold()
+        if "groups.getmembers: 15" in text_error or "access denied" in text_error:
+            return fetch_vk_active_commenters(
+                source,
+                post_limit=12,
+                comment_limit=100,
+                max_people=max(50, min(250, count)),
+            )
+        raise
     raw_items = response.get("items") or []
     members = []
     for index, row in enumerate(raw_items):
