@@ -2877,6 +2877,46 @@ def _vk_invitation_semantic_context(
     }
 
 
+
+_VK_FIRST_TOUCH_FORBIDDEN_OFFER_PATTERNS = (
+    r"(?i)\\bwildberries\\b",
+    r"(?i)\\bozon\\b",
+    r"(?i)маркетплейс",
+    r"(?i)продвиж",
+    r"(?i)реклам",
+    r"(?i)увелич(?:ить|иваем|ение)\\s+продаж",
+    r"(?i)привлеч(?:ь|ение|иваем)\\s+(?:больше\\s+)?покупател",
+    r"(?i)сделать\\s+(?:ваш[ау]?\\s+)?(?:страниц|карточк)",
+    r"(?i)вывести\\s+.*(?:в\\s+топ|на\\s+первые)",
+)
+
+def _vk_safe_first_touch(first_name: str) -> str:
+    greeting = f"{first_name}, здравствуйте!" if first_name else "Здравствуйте!"
+    return (
+        f"{greeting} Я — Неона, секретарь-референт Агентства W. "
+        "Мы помогаем передавать повторяющиеся рабочие задачи ИИ, чтобы освобождать время "
+        "для более важных дел. Есть у вас задача, которую вы бы с удовольствием больше не делали сами?"
+    )
+
+
+def _vk_first_touch_requires_fallback(message: str) -> bool:
+    """Fail closed when the draft invents an Agency W service or concrete result.
+
+    Personalization may mention a confirmed occupation/context, but the OFFER itself
+    in the first VK touch is intentionally limited to Agency W's verified core value:
+    reducing repetitive work with AI and returning time to the person.
+    """
+    text = re.sub(r"\\s+", " ", str(message or "")).strip()
+    if not text:
+        return True
+
+    # The first offer must stay inside the verified Agency W value proposition.
+    if not re.search(r"(?i)(рутин|повторяющ|освобод|врем|\\bии\\b|искусственн.{0,12}интеллект|автоматиз)", text):
+        return True
+
+    return any(re.search(pattern, text) for pattern in _VK_FIRST_TOUCH_FORBIDDEN_OFFER_PATTERNS)
+
+
 def prepare_vk_invitation(
     assignment_id: int,
     member_code: str,
@@ -2934,7 +2974,11 @@ def prepare_vk_invitation(
   в контексте. Представляйся нейтрально: «Я — Неона, секретарь-референт Агентства W»;
 - обращаться только по имени, без фамилии;
 - 1–3 коротких естественных предложения;
-- одна понятная польза Агентства W, без списка функций;
+- единственная допустимая польза Агентства W в первом сообщении:
+  передать повторяющиеся рабочие задачи ИИ, сократить рутину и освободить человеку время;
+- НЕ приписывай Агентству W услуги по продвижению, рекламе, маркетплейсам, Wildberries,
+  Ozon, продажам, оформлению карточек/страниц, поисковой выдаче или любому другому
+  конкретному бизнес-результату, даже если такой контекст есть у самого кандидата;
 - ровно один простой вопрос, и он должен быть последним предложением;
 - не давать ссылку в первом сообщении;
 - без давления, срочности, обещаний дохода, результата или гарантированных партнёров.
@@ -2955,13 +2999,10 @@ def prepare_vk_invitation(
             + json.dumps(semantic_context, ensure_ascii=False, indent=2)
         )
         message = str(ask_openai_fn(system, request) or "").strip()
+        if _vk_first_touch_requires_fallback(message):
+            message = _vk_safe_first_touch(first_name)
     else:
-        greeting = f"{first_name}, здравствуйте!" if first_name else "Здравствуйте!"
-        message = (
-            f"{greeting} Я — Неона, секретарь-референт Агентства W. "
-            "Мы помогаем освобождать время от повторяющихся рабочих задач с помощью ИИ-команды. "
-            "Вам было бы интересно коротко посмотреть, что из этого могло бы пригодиться именно вам?"
-        )
+        message = _vk_safe_first_touch(first_name)
 
     now = datetime.now(UTC).isoformat()
     _sb_patch(
