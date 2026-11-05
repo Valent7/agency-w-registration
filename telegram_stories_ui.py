@@ -12,6 +12,9 @@ import io
 import json
 import os
 import re
+import subprocess
+import tempfile
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,6 +22,7 @@ import requests
 import streamlit as st
 from cryptography.fernet import Fernet, InvalidToken
 from PIL import Image
+import imageio_ffmpeg
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.stories import GetAllStoriesRequest
@@ -145,25 +149,148 @@ def _compress_preview(raw: bytes) -> tuple[str, str] | tuple[None, None]:
         return None, None
 
 
-async def _download_story_preview(client: TelegramClient, story: Any) -> tuple[str | None, str | None, str]:
-    """Best-effort visual preview: photo itself or a video/document thumbnail."""
+def _transcribe_story_audio(audio_path: Path) -> str:
+    """Low-cost best-effort speech transcription for a short Telegram Story."""
+    api_key = _secret("OPENAI_API_KEY")
+    if not api_key or not audio_path.exists() or audio_path.stat().st_size <= 0:
+        return ""
+    try:
+        with audio_path.open("rb") as handle:
+            response = requests.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (audio_path.name, handle, "audio/mpeg")},
+                data={
+                    "model": _secret(
+                        "TELEGRAM_STORIES_TRANSCRIBE_MODEL",
+                        "gpt-4o-mini-transcribe",
+                    )
+                    or "gpt-4o-mini-transcribe"
+                },
+                timeout=120,
+            )
+        if not response.ok:
+            return ""
+        data = response.json() if response.text.strip() else {}
+        return re.sub(r"\\s+", " ", str(data.get("text") or "")).strip()[:4000]
+    except Exception:
+        return ""
+
+
+def _extract_story_video_context(raw_video: bytes) -> tuple[list[dict[str, str]], str]:
+    """Extract several visual moments plus speech from a short Story video."""
+    if not raw_video:
+        return [], ""
+    # Keep the radar bounded: Telegram Stories are short, but never let one
+    # unexpectedly large file consume the web process.
+    if len(raw_video) > 80 * 1024 * 1024:
+        return [], ""
+
+    frames: list[dict[str, str]] = []
+    transcript = ""
+    try:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return [], ""
+
+    with tempfile.TemporaryDirectory(prefix="neona_story_") as tmp:
+        tmpdir = Path(tmp)
+        video_path = tmpdir / "story.mp4"
+        audio_path = tmpdir / "story_audio.mp3"
+        video_path.write_bytes(raw_video)
+
+        # Sample beginning, middle-ish and later moments. Failed timestamps are
+        # harmless on very short clips; at least the first valid frame remains.
+        for index, seconds in enumerate((0.2, 2.5, 5.0, 8.0), start=1):
+            frame_path = tmpdir / f"frame_{index}.jpg"
+            try:
+                subprocess.run(
+                    [
+                        ffmpeg, "-y", "-loglevel", "error",
+                        "-ss", str(seconds), "-i", str(video_path),
+                        "-frames:v", "1", "-vf", "scale='min(768,iw)':-2",
+                        "-q:v", "4", str(frame_path),
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=20,
+                )
+                if frame_path.exists() and frame_path.stat().st_size > 500:
+                    b64, mime = _compress_preview(frame_path.read_bytes())
+                    if b64:
+                        frames.append(
+                            {"preview_b64": b64, "preview_mime": mime or "image/jpeg"}
+                        )
+            except Exception:
+                continue
+
+        try:
+            subprocess.run(
+                [
+                    ffmpeg, "-y", "-loglevel", "error",
+                    "-i", str(video_path), "-vn",
+                    "-ac", "1", "-ar", "16000", "-b:a", "48k",
+                    str(audio_path),
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=40,
+            )
+            transcript = _transcribe_story_audio(audio_path)
+        except Exception:
+            transcript = ""
+
+    # Deduplicate identical frames (static Story/video).
+    unique: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for frame in frames:
+        marker = str(frame.get("preview_b64") or "")[:160]
+        if not marker or marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(frame)
+    return unique[:4], transcript
+
+
+async def _download_story_preview(
+    client: TelegramClient,
+    story: Any,
+) -> tuple[str | None, str | None, str, list[dict[str, str]], str]:
+    """Read Story media: photo, or several video frames plus speech."""
     media = getattr(story, "media", None)
     if media is None:
-        return None, None, "без медиа"
+        return None, None, "без медиа", [], ""
 
     media_name = media.__class__.__name__.lower()
     is_photo = "photo" in media_name or getattr(media, "photo", None) is not None
-    is_document = "document" in media_name or getattr(media, "document", None) is not None
+    document = getattr(media, "document", None)
+    is_document = "document" in media_name or document is not None
+    mime_type = str(getattr(document, "mime_type", "") or "").casefold()
+    is_video = is_document and (
+        mime_type.startswith("video/")
+        or any("video" in attr.__class__.__name__.lower()
+               for attr in (getattr(document, "attributes", None) or []))
+    )
 
     raw: bytes | None = None
     label = "медиа"
+    frames: list[dict[str, str]] = []
+    transcript = ""
     try:
         if is_photo:
             label = "фото"
             raw = await client.download_media(media, file=bytes)
+        elif is_video:
+            label = "видео"
+            raw_video = await client.download_media(media, file=bytes)
+            if raw_video:
+                frames, transcript = _extract_story_video_context(raw_video)
+                if frames:
+                    raw = base64.b64decode(frames[0]["preview_b64"])
         elif is_document:
-            label = "видео/медиа"
-            # For videos, use a thumbnail instead of downloading the whole file.
+            label = "медиа"
             try:
                 raw = await client.download_media(media, file=bytes, thumb=-1)
             except Exception:
@@ -171,10 +298,11 @@ async def _download_story_preview(client: TelegramClient, story: Any) -> tuple[s
     except Exception:
         raw = None
 
-    if not raw:
-        return None, None, label
-    preview_b64, mime = _compress_preview(raw)
-    return preview_b64, mime, label
+    preview_b64, mime = _compress_preview(raw) if raw else (None, None)
+    if frames and not preview_b64:
+        preview_b64 = frames[0]["preview_b64"]
+        mime = frames[0]["preview_mime"]
+    return preview_b64, mime, label, frames, transcript
 
 
 def _story_rotation_key(owner_id: int) -> str:
@@ -456,9 +584,13 @@ async def fetch_telegram_story_feed(
             caption = str(
                 getattr(story, "caption", "") or ""
             ).strip()
-            preview_b64, preview_mime, media_kind = (
-                await _download_story_preview(client, story)
-            )
+            (
+                preview_b64,
+                preview_mime,
+                media_kind,
+                video_frames,
+                audio_transcript,
+            ) = await _download_story_preview(client, story)
             username = str(
                 getattr(user, "username", "") or ""
             ).strip()
@@ -482,6 +614,8 @@ async def fetch_telegram_story_feed(
                     "media_kind": media_kind,
                     "preview_b64": preview_b64,
                     "preview_mime": preview_mime,
+                    "video_frames": video_frames,
+                    "audio_transcript": audio_transcript,
                     "date": (
                         _story_date(story) or now
                     ).astimezone(UTC).isoformat(),
@@ -557,11 +691,38 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "caption": item.get("caption"),
                 "media_kind": item.get("media_kind"),
                 "has_visual_preview": bool(item.get("preview_b64")),
+                "video_frame_count": len(item.get("video_frames") or []),
+                "audio_transcript": str(item.get("audio_transcript") or "")[:4000],
                 "contact": bool(item.get("contact")),
                 "mutual_contact": bool(item.get("mutual_contact")),
             }
         )
-        if item.get("preview_b64"):
+        story_frames = list(item.get("video_frames") or [])
+        if story_frames:
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        f"Следующие кадры идут по времени из ВИДЕО Story story_index={idx}, "
+                        f"автор: {item.get('name') or 'контакт'}. "
+                        "Оцени общий сюжет по серии кадров, а не один случайный кадр."
+                    ),
+                }
+            )
+            for frame in story_frames[:4]:
+                if not frame.get("preview_b64"):
+                    continue
+                content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": (
+                            f"data:{frame.get('preview_mime') or 'image/jpeg'};"
+                            f"base64,{frame['preview_b64']}"
+                        ),
+                        "detail": "low",
+                    }
+                )
+        elif item.get("preview_b64"):
             content.append(
                 {
                     "type": "input_text",
@@ -604,7 +765,11 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
 - открытый вопрос уместен, когда он продолжает смысл. Например: «Вы всегда придерживались такой позиции или пришли к ней с опытом?»;
 - НЕ задавай формальные вопросы только ради вопроса: «Куда вы ехали?», «Где это?», «Что за машина?», если сама Story не про поездку, место или машину;
 - не пиши дежурные фразы вроде «Спасибо, что поделились», «Классная сторис», «Приятно было увидеть» как самостоятельный ответ;
-- опирайся только на реально видимый кадр/превью и подпись; ничего не выдумывай;
+- для ВИДЕО используй ВСЮ доступную информацию: серию кадров по времени + расшифровку речи + подпись;
+- один кадр видео не равен смыслу ролика: сначала собери общий сюжет из нескольких кадров и речи;
+- если видео есть, НИКОГДА не называй Story «пустой», «без содержания» или «без медиа» только из-за отсутствия подписи;
+- если технически не удалось получить ни кадры, ни речь, не выдумывай смысл и не пиши автору про «пустую Story» — лучше не выдавай рекомендацию для этой Story;
+- опирайся только на реально видимые кадры, расшифрованную речь и подпись; ничего не выдумывай;
 - не пропускай автора только потому, что Story короткая: найди самый простой естественный повод ответить;
 - если информации мало, используй короткий вопрос по реально видимому или написанному, без догадок;
 - ответ 1–2 коротких предложения, живой, конкретный, без лести и без канцелярита;
@@ -662,8 +827,23 @@ def _analyze_story_feed(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
         reply = re.sub(r"\s+", " ", str(item.get("reply") or "")).strip()
         if not reply:
             continue
-        seen.add(index)
         source = stories[index - 1]
+        source_has_grounding = bool(
+            str(source.get("caption") or "").strip()
+            or source.get("preview_b64")
+            or source.get("video_frames")
+            or str(source.get("audio_transcript") or "").strip()
+        )
+        if not source_has_grounding:
+            continue
+        # Hard guard against the exact class of embarrassing hallucination seen
+        # when a video thumbnail failed to load.
+        if re.search(
+            r"(?i)(пуст(?:ая|ой)\\s+сторис|всё\\s+в\\s+порядке|что-то\\s+показать\\??)",
+            reply,
+        ):
+            continue
+        seen.add(index)
         recommendations.append(
             {
                 **source,
