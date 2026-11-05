@@ -1166,6 +1166,16 @@ def score_vk_candidates(
     )
     already_scored: set[int] = set()
     partner_vk_ids = _partner_vk_ids()
+
+    # Не тратим ИИ-анализ на людей, которых финальный quality gate всё равно
+    # не имеет права выдать: уже показанных этому владельцу, занятых где-либо
+    # в Агентстве или уже ставших партнёрами.
+    unavailable_ids = (
+        _owner_processed_vk_ids(owner_id)
+        | _used_vk_ids()
+        | partner_vk_ids
+    )
+
     for item in scored_rows:
         try:
             already_scored.add(int(item.get("vk_user_id")))
@@ -1195,7 +1205,7 @@ def score_vk_candidates(
                 uid = int(candidate.get("vk_user_id"))
             except (TypeError, ValueError):
                 continue
-            if uid in already_scored or uid in partner_vk_ids:
+            if uid in already_scored or uid in unavailable_ids:
                 continue
             rows.append(candidate)
             if len(rows) >= analysis_limit:
@@ -1216,7 +1226,7 @@ def score_vk_candidates(
                 uid = int(item.get("vk_user_id") or 0)
             except (TypeError, ValueError):
                 continue
-            if uid > 0 and uid not in partner_vk_ids:
+            if uid > 0 and uid not in unavailable_ids:
                 stale_ids.append(uid)
             if len(stale_ids) >= max(analysis_limit * 10, 300):
                 break
@@ -1238,7 +1248,7 @@ def score_vk_candidates(
                     candidate
                     for candidate in rows
                     if str(candidate.get("vk_user_id") or "").isdigit()
-                    and int(candidate.get("vk_user_id")) not in partner_vk_ids
+                    and int(candidate.get("vk_user_id")) not in unavailable_ids
                 ],
                 key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
             )[:analysis_limit]
