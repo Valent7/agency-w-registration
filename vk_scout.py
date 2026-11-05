@@ -37,6 +37,8 @@ VK_PROFILE_FIELDS = (
     "last_seen",
     "online",
     "can_write_private_message",
+    "occupation",
+    "career",
 )
 ACTIVE_ASSIGNMENT_STATUSES = (
     "reserved",
@@ -845,6 +847,16 @@ def _normalize_vk_user(row: dict[str, Any], source_community_id: int | None = No
             "online": row.get("online"),
             "last_seen": last_seen or None,
             "is_closed": row.get("is_closed"),
+            "occupation": (
+                row.get("occupation")
+                if isinstance(row.get("occupation"), dict)
+                else None
+            ),
+            "career": (
+                row.get("career")
+                if isinstance(row.get("career"), list)
+                else None
+            ),
         },
         "last_enriched_at": datetime.now(UTC).isoformat(),
     }
@@ -1088,6 +1100,8 @@ def _candidate_public_view(item: dict[str, Any]) -> dict[str, Any]:
         "domain": item.get("domain"),
         "online": raw.get("online"),
         "last_seen": raw.get("last_seen"),
+        "occupation": raw.get("occupation"),
+        "career": raw.get("career"),
         "can_write_private_message": item.get("can_write_private_message"),
         "source_community_id": item.get("source_community_id"),
     }
