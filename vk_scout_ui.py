@@ -897,7 +897,20 @@ def _render_today_vk_candidates(
                     )
                 st.rerun()
             except Exception as exc:
-                st.error(f"Не удалось выполнить добор VK-кандидатов: {exc}")
+                error_text = str(exc or "")
+                lowered = error_text.casefold()
+                if (
+                    "openai временно недоступен" in lowered
+                    or "503" in lowered
+                    or "502" in lowered
+                    or "429" in lowered
+                ):
+                    st.warning(
+                        "OpenAI временно не ответил. Очередь VK сохранена — "
+                        "нажмите «Добрать кандидатов до 5» ещё раз."
+                    )
+                else:
+                    st.error(f"Не удалось выполнить добор VK-кандидатов: {error_text}")
 
     if not assignments:
         st.info(
