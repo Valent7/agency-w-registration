@@ -2092,10 +2092,11 @@ def _vk_post_material(post: dict[str, Any]) -> str:
 
 
 def _vk_user_api(account_owner_id: int, method: str, **params: Any) -> Any:
-    """Вызывает VK API именно пользовательским VK ID токеном владельца кабинета.
+    """VK API for public wall reads, preferring the app service token.
 
-    Для wall.get групповой токен не подходит: VK API 5.199 допускает user/service.
-    Токен берём из уже существующего VK Scout OAuth и при необходимости обновляем.
+    The service token keeps warm-up/feed tools independent from the blocked
+    legacy VK ID OAuth application. If it is unavailable, fall back to the
+    owner's VK ID token for backwards compatibility.
     """
     from vk_scout_oauth import (
         force_refresh_vk_scout_access_token,
@@ -2127,20 +2128,38 @@ def _vk_user_api(account_owner_id: int, method: str, **params: Any) -> Any:
             return err, code
         return data.get("response"), None
 
-    token = get_valid_vk_scout_access_token(int(account_owner_id))
-    result, error_code = request_with(token)
-    if error_code == 5:
-        # VK иногда привязывает свежий access token к IP выдачи. Наш OAuth-модуль
-        # уже умеет безопасно обновлять rotating refresh token с IP текущего worker.
-        token = force_refresh_vk_scout_access_token(int(account_owner_id))
-        result, error_code = request_with(token)
+    service_token = str(os.getenv("VK_SERVICE_TOKEN") or "").strip()
+    if service_token:
+        result, error_code = request_with(service_token)
+        if error_code is None:
+            return result
+        # For public wall methods a service token should normally work. If VK
+        # rejects this specific method, try owner OAuth only as a compatibility
+        # fallback before surfacing the error.
+        service_error = result if isinstance(result, dict) else {}
+    else:
+        service_error = {}
 
-    if error_code is not None:
+    try:
+        token = get_valid_vk_scout_access_token(int(account_owner_id))
+        result, error_code = request_with(token)
+        if error_code == 5:
+            token = force_refresh_vk_scout_access_token(int(account_owner_id))
+            result, error_code = request_with(token)
+        if error_code is None:
+            return result
         err = result if isinstance(result, dict) else {}
         raise VKScoutError(
             f"VK API {method}: {error_code} — {err.get('error_msg') or 'ошибка VK'}"
         )
-    return result
+    except Exception as oauth_exc:
+        if service_token and service_error:
+            code = int(service_error.get("error_code") or 0) or None
+            raise VKScoutError(
+                f"VK API {method}: {code or '—'} — "
+                f"{service_error.get('error_msg') or 'сервисный ключ не дал доступ'}"
+            ) from oauth_exc
+        raise
 
 
 def fetch_public_vk_posts(
