@@ -225,36 +225,69 @@ def _extract_response_text(data: dict[str, Any]) -> str:
 def _ask_openai(system_prompt: str, user_message: str) -> str:
     api_key = _required_env("OPENAI_API_KEY")
     model = _env("VK_SCOUT_OPENAI_MODEL", "gpt-5-mini") or "gpt-5-mini"
+    url = "https://api.openai.com/v1/responses"
+    payload = {
+        "model": model,
+        "instructions": str(system_prompt or ""),
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": str(user_message or ""),
+                    }
+                ],
+            }
+        ],
+        "store": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
 
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "instructions": str(system_prompt or ""),
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": str(user_message or ""),
-                        }
-                    ],
-                }
-            ],
-            "store": False,
-        },
-        timeout=180,
-    )
-    response.raise_for_status()
-    answer = _extract_response_text(response.json())
-    if not answer:
-        raise RuntimeError("OpenAI не вернул текст")
-    return answer
+    retryable = {429, 500, 502, 503, 504}
+    delays = (0, 2, 5, 10)
+    last_error: Exception | None = None
+
+    for attempt, delay in enumerate(delays, start=1):
+        if delay:
+            time.sleep(delay)
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=120,
+            )
+            if response.status_code in retryable:
+                last_error = RuntimeError(
+                    f"OpenAI временно недоступен: HTTP {response.status_code}"
+                )
+                _log(
+                    f"OpenAI временный сбой HTTP {response.status_code}; "
+                    f"повтор {attempt}/{len(delays)}"
+                )
+                continue
+            response.raise_for_status()
+            answer = _extract_response_text(response.json())
+            if not answer:
+                raise RuntimeError("OpenAI не вернул текст")
+            return answer
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt >= len(delays):
+                break
+            _log(
+                f"OpenAI запрос временно не выполнен ({type(exc).__name__}); "
+                f"повтор {attempt}/{len(delays)}"
+            )
+
+    raise RuntimeError(
+        "OpenAI временно недоступен. Неония не потеряла очередь кандидатов — "
+        "повторите «Добрать кандидатов» через несколько секунд."
+    ) from last_error
 
 
 def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
