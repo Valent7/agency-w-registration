@@ -1160,6 +1160,7 @@ def score_vk_candidates(
         {
             "owner_telegram_id": f"eq.{owner_id}",
             "select": "vk_user_id,analyzed_at",
+            "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc",
             "limit": 5000,
         },
     )
@@ -1203,27 +1204,46 @@ def score_vk_candidates(
             break
         offset += page_size
 
-    # Когда весь доступный пул уже пройден, разрешаем повторный анализ свежих
-    # профилей. Это полезно после обновления публичных данных или портрета ЦА.
+    # Когда весь доступный пул уже пройден, переоцениваем САМЫЕ ДАВНО
+    # анализировавшиеся профили. После изменения портрета/политики это позволяет
+    # пройти всю старую базу по новым правилам, а не крутить одни и те же 30.
     reanalysis = False
     if not rows:
         reanalysis = True
-        rows = _sb_get(
-            "agency_vk_candidates",
-            {
-                "can_write_private_message": "eq.true",
-                "source_community_id": source_filter,
-                "select": "*",
-                "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
-                "limit": analysis_limit,
-            },
-        )
-        rows = [
-            candidate
-            for candidate in rows
-            if str(candidate.get("vk_user_id") or "").isdigit()
-            and int(candidate.get("vk_user_id")) not in partner_vk_ids
-        ][:analysis_limit]
+        stale_ids: list[int] = []
+        for item in scored_rows:
+            try:
+                uid = int(item.get("vk_user_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if uid > 0 and uid not in partner_vk_ids:
+                stale_ids.append(uid)
+            if len(stale_ids) >= max(analysis_limit * 10, 300):
+                break
+
+        if stale_ids:
+            rows = _sb_get(
+                "agency_vk_candidates",
+                {
+                    "vk_user_id": "in.(" + ",".join(str(x) for x in stale_ids) + ")",
+                    "can_write_private_message": "eq.true",
+                    "source_community_id": source_filter,
+                    "select": "*",
+                    "limit": len(stale_ids),
+                },
+            )
+            rank = {uid: pos for pos, uid in enumerate(stale_ids)}
+            rows = sorted(
+                [
+                    candidate
+                    for candidate in rows
+                    if str(candidate.get("vk_user_id") or "").isdigit()
+                    and int(candidate.get("vk_user_id")) not in partner_vk_ids
+                ],
+                key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
+            )[:analysis_limit]
+        else:
+            rows = []
 
     profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
     system_prompt = f"""
