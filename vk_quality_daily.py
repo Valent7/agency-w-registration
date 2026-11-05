@@ -167,13 +167,31 @@ def ensure_quality_vk_assignments(
     global_used = _used_vk_ids()
     partner_ids = _partner_vk_ids()
     created = 0
+    skipped_not_qualified = 0
+    skipped_active = 0
+    skipped_processed = 0
+    skipped_global_used = 0
+    skipped_partner = 0
+    insert_errors = 0
+    lost_races = 0
 
     for uid in ordered_ids:
         if not free_positions:
             break
-        if uid not in qualified_ids or uid in active_ids:
+        if uid not in qualified_ids:
+            skipped_not_qualified += 1
             continue
-        if uid in processed or uid in global_used or uid in partner_ids:
+        if uid in active_ids:
+            skipped_active += 1
+            continue
+        if uid in processed:
+            skipped_processed += 1
+            continue
+        if uid in global_used:
+            skipped_global_used += 1
+            continue
+        if uid in partner_ids:
+            skipped_partner += 1
             continue
 
         candidate = candidates.get(uid) or {}
@@ -196,6 +214,7 @@ def ensure_quality_vk_assignments(
         try:
             rows = _sb_post("agency_vk_assignments", payload)
         except Exception:
+            insert_errors += 1
             continue
         created_row = rows[0] if rows else payload
 
@@ -225,6 +244,7 @@ def ensure_quality_vk_assignments(
                     },
                 )
             global_used.add(uid)
+            lost_races += 1
             continue
 
         created += 1
@@ -241,6 +261,20 @@ def ensure_quality_vk_assignments(
         "created": created,
         "complete": count >= limit,
         "qualified_pool": len(qualified_ids),
+        "diagnostics": {
+            "scores_gte_min": len(ordered_ids),
+            "qualified_source_pool": len(qualified_ids),
+            "processed_count": len(processed),
+            "global_used_count": len(global_used),
+            "partner_count": len(partner_ids),
+            "skipped_not_qualified": skipped_not_qualified,
+            "skipped_active": skipped_active,
+            "skipped_processed": skipped_processed,
+            "skipped_global_used": skipped_global_used,
+            "skipped_partner": skipped_partner,
+            "insert_errors": insert_errors,
+            "lost_races": lost_races,
+        },
         "message": (
             f"VK-пятёрка Неонии: {count}/{limit}. "
             f"Все показанные кандидаты имеют оценку ЦА не ниже {min_score}."
