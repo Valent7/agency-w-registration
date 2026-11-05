@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -1365,10 +1366,19 @@ def render_vk_sources(
 
     connected = bool(connection.get("connected"))
     needs_reconnect = bool(connection.get("needs_reconnect"))
-    vk_ready = connected and not needs_reconnect
+    service_mode = str(os.getenv("VK_SCOUT_SERVICE_MODE", "") or "").strip().casefold() in {
+        "1", "true", "yes", "on"
+    }
+    vk_ready = (connected and not needs_reconnect) or service_mode
     auth_key = f"vk_scout_auth_url_{owner_id}"
 
-    if vk_ready:
+    if service_mode:
+        st.success("🟢 VK Scout подключён через сервисный ключ приложения")
+        st.caption(
+            "Поиск кандидатов работает через новый VK_SERVICE_TOKEN. "
+            "Старое заблокированное приложение VK ID больше не останавливает Неонию."
+        )
+    elif vk_ready:
         st.success("🟢 VK Scout авторизован через VK ID")
         expires_at = str(connection.get("access_expires_at") or "").strip()
         if expires_at:
