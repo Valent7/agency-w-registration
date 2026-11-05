@@ -263,6 +263,7 @@ def ensure_quality_vk_assignments(
     return {
         "ok": True,
         "assignments": final_rows[:limit],
+        "count": count,
         "created": created,
         "complete": count >= limit,
         "qualified_pool": len(qualified_ids),
