@@ -1126,6 +1126,26 @@ def score_vk_candidates(
     owner_id = int(owner_id)
     analysis_limit = max(1, min(100, int(limit)))
 
+    # Анализируем только людей из VK-источников именно этого владельца.
+    # agency_vk_candidates — общий пул Агентства, поэтому без этого фильтра
+    # Неония могла поставить высокий балл человеку из чужого сообщества, а
+    # quality gate затем закономерно не выдавал его владельцу: получалось 0/5.
+    owner_source_ids = {
+        abs(int(source.get("community_id") or 0))
+        for source in load_vk_sources(owner_id)
+        if str(source.get("community_id") or "").lstrip("-").isdigit()
+        and abs(int(source.get("community_id") or 0)) > 0
+    }
+    if not owner_source_ids:
+        return {
+            "ok": True,
+            "analyzed": 0,
+            "best_score": None,
+            "mode": "нет источников",
+            "message": "Нет активных VK-источников владельца.",
+        }
+    source_filter = "in.(" + ",".join(str(x) for x in sorted(owner_source_ids)) + ")"
+
     # В ежедневный анализ допускаем только профили, которым VK прямо разрешает
     # отправить личное сообщение. Профили с закрытыми сообщениями сохраняются
     # в базе как найденные, но Неония не тратит на них анализ и не выдаёт их
@@ -1160,6 +1180,7 @@ def score_vk_candidates(
             "agency_vk_candidates",
             {
                 "can_write_private_message": "eq.true",
+                "source_community_id": source_filter,
                 "select": "*",
                 "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
                 "limit": page_size,
@@ -1191,6 +1212,7 @@ def score_vk_candidates(
             "agency_vk_candidates",
             {
                 "can_write_private_message": "eq.true",
+                "source_community_id": source_filter,
                 "select": "*",
                 "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
                 "limit": analysis_limit,
