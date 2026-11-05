@@ -317,7 +317,7 @@ def _rank_active_group_authors(state, storage, authors, desired):
                             "business_relevant": True,
                             "business_evidence": ["активное публичное сообщение по деловой/проектной теме"],
                             "business_gate_reason": "Локальный резервный фильтр по публичному сообщению.",
-                            "score": 45,
+                            "score": 50,
                             "recommendation": "Решает владелец",
                             "selection_blocked": False,
                             "block_reason": "",
