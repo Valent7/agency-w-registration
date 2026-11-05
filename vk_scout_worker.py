@@ -306,6 +306,7 @@ def _score_until_daily_five(
     daily_limit: int,
     min_score: int,
     analysis_limit: int,
+    max_rounds: int = 25,
 ) -> tuple[dict[str, Any], int, int | None]:
     """Keep scoring fresh VK profiles until today's 5/5 is complete or pool is exhausted."""
     total_analyzed = 0
@@ -322,7 +323,7 @@ def _score_until_daily_five(
 
     # score_vk_candidates excludes profiles already scored for this owner, so
     # every round advances through the fresh pool instead of repeating the same 30.
-    for round_no in range(1, 26):
+    for round_no in range(1, max(1, int(max_rounds)) + 1):
         score_result = score_vk_candidates(
             owner_id,
             target_profile,
@@ -407,6 +408,7 @@ def top_up_vk_owner_now(
         daily_limit=max(1, min(5, int(daily_limit))),
         min_score=max(0, min(100, int(min_score))),
         analysis_limit=max(5, min(100, int(analysis_limit))),
+        max_rounds=3,
     )
     return {
         "ok": True,
