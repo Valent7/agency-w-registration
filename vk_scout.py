@@ -1269,6 +1269,48 @@ def score_vk_candidates(
         else:
             rows = []
 
+    # Перед ИИ-анализом обновляем только выбранную партию публичных профилей.
+    # В старой базе у многих людей сохранены лишь имя/город; occupation/career
+    # позволяют новой широкой ЦА оценивать обычные профессии не вслепую.
+    if rows:
+        try:
+            selected_ids = [
+                int(candidate.get("vk_user_id") or 0)
+                for candidate in rows
+                if str(candidate.get("vk_user_id") or "").isdigit()
+            ]
+            refreshed = enrich_vk_profiles(selected_ids)
+            refreshed_by_id = {
+                int(item.get("vk_user_id")): item
+                for item in refreshed
+                if str(item.get("vk_user_id") or "").isdigit()
+            }
+            enriched_rows: list[dict[str, Any]] = []
+            for candidate in rows:
+                uid = int(candidate.get("vk_user_id") or 0)
+                fresh = refreshed_by_id.get(uid)
+                if fresh:
+                    merged = {
+                        **candidate,
+                        **fresh,
+                        "source_community_id": candidate.get("source_community_id"),
+                    }
+                    fresh_raw = fresh.get("raw_profile") if isinstance(fresh.get("raw_profile"), dict) else {}
+                    old_raw = candidate.get("raw_profile") if isinstance(candidate.get("raw_profile"), dict) else {}
+                    merged["raw_profile"] = {**old_raw, **fresh_raw}
+                    enriched_rows.append(merged)
+                else:
+                    enriched_rows.append(candidate)
+            rows = enriched_rows
+            try:
+                save_vk_candidates(rows)
+            except Exception:
+                pass
+        except Exception:
+            # Обогащение полезно, но его временный сбой не должен останавливать
+            # сам отбор — используем уже сохранённые публичные данные.
+            pass
+
     profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
     system_prompt = f"""
 Ты — Неония, аналитик и селектор целевой аудитории Агентства W.
