@@ -1374,17 +1374,29 @@ def render_vk_sources(
         if expires_at:
             st.caption("Access token обновляется worker автоматически. Ручная замена каждый час не нужна.")
     else:
+        blocked_client = False
         if connected and needs_reconnect:
-            st.error("🔴 VK Scout нужно переподключить через VK ID")
-            st.caption(
-                "Сохранённый refresh token больше не действует. Это не ошибка Радара: "
-                "нужно один раз заново подтвердить доступ VK, после чего новая пара токенов сохранится автоматически."
-            )
             last_error = str(connection.get("last_error") or "").strip()
-            if last_error:
-                st.caption(f"Последний ответ VK: {last_error}")
-            button_label = "🔄 Переподключить VK Scout"
-            button_key = f"vk_scout_reauth_start_{owner_id}"
+            blocked_client = "client is blocked" in last_error.casefold()
+            if blocked_client:
+                st.error("🔴 Приложение VK ID, через которое работает VK Scout, заблокировано")
+                st.caption(
+                    "Ваш личный профиль VK не заблокирован. Повторное нажатие "
+                    "«Переподключить» не поможет: сначала нужно восстановить само "
+                    "приложение VK ID или заменить его рабочим приложением."
+                )
+                if last_error:
+                    st.caption(f"Последний ответ VK: {last_error}")
+            else:
+                st.error("🔴 VK Scout нужно переподключить через VK ID")
+                st.caption(
+                    "Сохранённый refresh token больше не действует. Это не ошибка Радара: "
+                    "нужно один раз заново подтвердить доступ VK, после чего новая пара токенов сохранится автоматически."
+                )
+                if last_error:
+                    st.caption(f"Последний ответ VK: {last_error}")
+                button_label = "🔄 Переподключить VK Scout"
+                button_key = f"vk_scout_reauth_start_{owner_id}"
         else:
             st.info(
                 "Чтобы читать участников публичных VK-сообществ, один раз авторизуйте "
@@ -1393,25 +1405,26 @@ def render_vk_sources(
             button_label = "🔐 Подключить VK Scout"
             button_key = f"vk_scout_auth_start_{owner_id}"
 
-        if st.button(
-            button_label,
-            key=button_key,
-            type="primary",
-            use_container_width=True,
-        ):
-            try:
-                st.session_state[auth_key] = begin_vk_scout_authorization(owner_id)
-            except Exception as exc:
-                st.error(f"Не удалось начать авторизацию VK Scout: {exc}")
-
-        auth_url = str(st.session_state.get(auth_key) or "").strip()
-        if auth_url:
-            st.link_button(
-                "Продолжить авторизацию в VK",
-                auth_url,
+        if not blocked_client:
+            if st.button(
+                button_label,
+                key=button_key,
+                type="primary",
                 use_container_width=True,
-            )
-            st.caption("После разрешения VK вернёт вас обратно в Агентство W.")
+            ):
+                try:
+                    st.session_state[auth_key] = begin_vk_scout_authorization(owner_id)
+                except Exception as exc:
+                    st.error(f"Не удалось начать авторизацию VK Scout: {exc}")
+
+            auth_url = str(st.session_state.get(auth_key) or "").strip()
+            if auth_url:
+                st.link_button(
+                    "Продолжить авторизацию в VK",
+                    auth_url,
+                    use_container_width=True,
+                )
+                st.caption("После разрешения VK вернёт вас обратно в Агентство W.")
 
     if vk_ready:
         _render_vk_dialog_center(
