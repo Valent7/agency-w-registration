@@ -1083,6 +1083,7 @@ def scan_vk_sources(
 ) -> dict[str, Any]:
     sources = load_vk_sources(owner_id)[:max(1, min(50, int(max_sources)))]
     unique: dict[int, dict[str, Any]] = {}
+    active_context_ids: set[int] = set()
     errors: list[str] = []
     for source in sources:
         try:
@@ -1111,6 +1112,8 @@ def scan_vk_sources(
                         new_raw = item.get("raw_profile") if isinstance(item.get("raw_profile"), dict) else {}
                         merged["raw_profile"] = {**old_raw, **new_raw}
                         unique[uid] = merged
+                        if new_raw.get("public_comment_samples"):
+                            active_context_ids.add(uid)
                 except Exception as active_exc:
                     errors.append(
                         f"{source.get('community_name') or source.get('community_id')}: "
@@ -1135,6 +1138,8 @@ def scan_vk_sources(
         "sources_checked": len(sources),
         "candidates_found": len(unique),
         "candidates_saved": saved,
+        "active_context_count": len(active_context_ids),
+        "active_context_ids": sorted(active_context_ids),
         "errors": errors,
     }
 
@@ -1279,6 +1284,7 @@ def score_vk_candidates(
     *,
     ask_openai_fn: Callable[..., Any] | None,
     limit: int = 30,
+    priority_ids: Iterable[int] | None = None,
 ) -> dict[str, Any]:
     if ask_openai_fn is None:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
@@ -1353,10 +1359,56 @@ def score_vk_candidates(
             pass
 
     rows: list[dict[str, Any]] = []
+
+    # Profiles just enriched with substantive public comments must be rescored
+    # immediately even if an old sparse score already exists. Otherwise new
+    # evidence is saved but never affects today's selection.
+    priority_list: list[int] = []
+    for value in priority_ids or []:
+        try:
+            uid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in priority_list and uid not in unavailable_ids:
+            priority_list.append(uid)
+    if priority_list:
+        for start in range(0, len(priority_list), 200):
+            chunk = priority_list[start:start + 200]
+            page = _sb_get(
+                "agency_vk_candidates",
+                {
+                    "vk_user_id": "in.(" + ",".join(str(x) for x in chunk) + ")",
+                    "can_write_private_message": "eq.true",
+                    "source_community_id": source_filter,
+                    "select": "*",
+                    "limit": len(chunk),
+                },
+            )
+            rank = {uid: pos for pos, uid in enumerate(priority_list)}
+            page = sorted(
+                [
+                    candidate for candidate in page
+                    if str(candidate.get("vk_user_id") or "").isdigit()
+                    and int(candidate.get("vk_user_id")) not in unavailable_ids
+                ],
+                key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
+            )
+            rows.extend(page)
+            if len(rows) >= analysis_limit:
+                rows = rows[:analysis_limit]
+                break
+
     page_size = 200
     offset = 0
+    selected_ids = {
+        int(candidate.get("vk_user_id") or 0)
+        for candidate in rows
+        if str(candidate.get("vk_user_id") or "").isdigit()
+    }
     # Ограничиваем число страниц, чтобы worker не мог случайно читать бесконечный пул.
     for _ in range(25):
+        if len(rows) >= analysis_limit:
+            break
         page = _sb_get(
             "agency_vk_candidates",
             {
@@ -1375,9 +1427,10 @@ def score_vk_candidates(
                 uid = int(candidate.get("vk_user_id"))
             except (TypeError, ValueError):
                 continue
-            if uid in already_scored or uid in unavailable_ids:
+            if uid in already_scored or uid in unavailable_ids or uid in selected_ids:
                 continue
             rows.append(candidate)
+            selected_ids.add(uid)
             if len(rows) >= analysis_limit:
                 break
         if len(rows) >= analysis_limit or len(page) < page_size:
@@ -1387,7 +1440,7 @@ def score_vk_candidates(
     # Когда весь доступный пул уже пройден, переоцениваем САМЫЕ ДАВНО
     # анализировавшиеся профили. После изменения портрета/политики это позволяет
     # пройти всю старую базу по новым правилам, а не крутить одни и те же 30.
-    reanalysis = False
+    reanalysis = bool(priority_list and rows)
     if not rows:
         reanalysis = True
         stale_ids: list[int] = []
