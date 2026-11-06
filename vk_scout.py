@@ -1086,48 +1086,56 @@ def scan_vk_sources(
     active_context_ids: set[int] = set()
     errors: list[str] = []
     for source in sources:
+        # Member-list refresh and active-comment discovery are deliberately
+        # independent. A timeout in groups.getMembers must never prevent the
+        # fallback that reads public discussion activity.
+        member_error = None
         try:
             page = fetch_vk_members(source, count=per_source)
             for item in page["members"]:
                 unique[int(item["vk_user_id"])] = item
-
-            # Когда обычные карточки слишком пустые, добираем активных авторов
-            # публичных комментариев вместе с небольшими текстовыми фрагментами.
-            # Это даёт Неонии реальные рабочие сигналы вместо имени+города.
-            if include_active_context:
-                try:
-                    active_page = fetch_vk_active_commenters(
-                        source,
-                        post_limit=6,
-                        comment_limit=60,
-                        max_people=min(120, max(40, int(per_source))),
-                    )
-                    for item in active_page.get("members") or []:
-                        uid = int(item.get("vk_user_id") or 0)
-                        if uid <= 0:
-                            continue
-                        previous = unique.get(uid) or {}
-                        merged = {**previous, **item}
-                        old_raw = previous.get("raw_profile") if isinstance(previous.get("raw_profile"), dict) else {}
-                        new_raw = item.get("raw_profile") if isinstance(item.get("raw_profile"), dict) else {}
-                        merged["raw_profile"] = {**old_raw, **new_raw}
-                        unique[uid] = merged
-                        if new_raw.get("public_comment_samples"):
-                            active_context_ids.add(uid)
-                except Exception as active_exc:
-                    errors.append(
-                        f"{source.get('community_name') or source.get('community_id')}: "
-                        f"active-context: {active_exc}"
-                    )
         except Exception as exc:
+            member_error = exc
             error_text = str(exc)
             errors.append(
                 f"{source.get('community_name') or source.get('community_id')}: {error_text}"
             )
-            lowered = error_text.casefold()
+
+        # Когда обычные карточки слишком пустые, добираем активных авторов
+        # публичных комментариев вместе с небольшими текстовыми фрагментами.
+        # Этот путь выполняется даже если groups.getMembers только что упал.
+        if include_active_context:
+            try:
+                active_page = fetch_vk_active_commenters(
+                    source,
+                    post_limit=3,
+                    comment_limit=60,
+                    max_people=min(100, max(40, int(per_source))),
+                )
+                for item in active_page.get("members") or []:
+                    uid = int(item.get("vk_user_id") or 0)
+                    if uid <= 0:
+                        continue
+                    previous = unique.get(uid) or {}
+                    merged = {**previous, **item}
+                    old_raw = previous.get("raw_profile") if isinstance(previous.get("raw_profile"), dict) else {}
+                    new_raw = item.get("raw_profile") if isinstance(item.get("raw_profile"), dict) else {}
+                    merged["raw_profile"] = {**old_raw, **new_raw}
+                    unique[uid] = merged
+                    if new_raw.get("public_comment_samples"):
+                        active_context_ids.add(uid)
+            except Exception as active_exc:
+                errors.append(
+                    f"{source.get('community_name') or source.get('community_id')}: "
+                    f"active-context: {active_exc}"
+                )
+
+        # Authentication failures are global; ordinary timeouts are source-local
+        # and must not block active-comment fallback or the next configured source.
+        if member_error is not None:
+            lowered = str(member_error).casefold()
             if (
-                "error_code" in lowered
-                or "vk api groups.getmembers: 5" in lowered
+                "vk api groups.getmembers: 5" in lowered
                 or "authorization failed" in lowered
                 or "user authorization failed" in lowered
                 or "access token" in lowered
