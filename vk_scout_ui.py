@@ -22,7 +22,7 @@ from vk_scout import (
     load_today_vk_assignments,
     load_vk_sources,
     mark_vk_invited,
-    prepare_vk_feed_radar,
+    prepare_vk_feed_links,
     prepare_vk_invitation,
     prepare_vk_warmup_comment,
     register_published_vk_comment,
@@ -682,82 +682,95 @@ def _render_vk_feed_radar(
     owner_id: int,
     ask_openai_fn=None,
 ) -> None:
-    """Comments from the owner's actual VK Home -> Feed."""
-    state_key = f"vk_feed_radar_{int(owner_id)}"
+    """No-OAuth helper for comments under posts copied from the user's VK feed."""
+    state_key = f"vk_feed_links_{int(owner_id)}"
     result = st.session_state.get(state_key)
 
     st.markdown("### 🌿 Лента VK · комментарии для утепления")
     st.caption(
-        "Это именно Ваша обычная «Лента» VK — посты друзей, подписок и сообществ, "
-        "которые VK показывает Вам на главной. Она не зависит от сегодняшних кандидатов 5/5 "
-        "и не ограничивается добавленными в Агентство сообществами."
+        "VK больше не даёт новым приложениям читать персональную ленту автоматически. "
+        "Поэтому здесь нет VK ID и нет заблокированного приложения: откройте свою обычную "
+        "ленту VK, скопируйте ссылки на 1–5 подходящих постов — Неона сама прочитает их "
+        "через уже работающий сервисный доступ и подготовит комментарии."
+    )
+
+    st.link_button(
+        "🌐 Открыть мою ленту VK",
+        "https://vk.com/feed",
+        use_container_width=True,
+    )
+
+    raw_key = f"vk_feed_links_input_{int(owner_id)}"
+    raw = st.text_area(
+        "Ссылки на посты из моей ленты VK",
+        key=raw_key,
+        height=150,
+        placeholder=(
+            "Вставьте по одной ссылке на строку, например:\n"
+            "https://vk.com/wall-123456_789\n"
+            "https://vk.com/wall987654_321"
+        ),
+        help="Можно вставить от 1 до 5 ссылок на обычные публичные посты из Вашей ленты.",
     )
 
     cols = st.columns([2.2, 1])
     with cols[0]:
         if st.button(
-            "🔎 Прочитать мою ленту VK",
-            key=f"vk_feed_radar_run_{int(owner_id)}",
+            "💬 Подготовить комментарии",
+            key=f"vk_feed_links_run_{int(owner_id)}",
             type="primary",
             use_container_width=True,
         ):
+            values = [
+                line.strip()
+                for line in str(raw or "").replace(",", "\n").splitlines()
+                if line.strip()
+            ]
             try:
-                with st.spinner("Неона читает Вашу ленту VK и выбирает лучшие точки касания…"):
-                    result = prepare_vk_feed_radar(
+                with st.spinner("Неона читает выбранные посты и пишет комментарии…"):
+                    result = prepare_vk_feed_links(
                         int(owner_id),
+                        values,
                         ask_openai_fn=ask_openai_fn,
-                        count=15,
+                        limit=5,
                     )
                 st.session_state[state_key] = result
                 for idx, item in enumerate(result.get("recommendations") or []):
-                    st.session_state[f"vk_feed_radar_comment_{int(owner_id)}_{idx}"] = str(
+                    st.session_state[f"vk_feed_link_comment_{int(owner_id)}_{idx}"] = str(
                         item.get("comment") or ""
                     )
                 st.rerun()
             except Exception as exc:
-                st.error(f"Не удалось прочитать личную ленту VK: {exc}")
+                st.error(f"Не удалось прочитать выбранные посты VK: {exc}")
     with cols[1]:
         if isinstance(result, dict) and st.button(
             "🧹 Очистить",
-            key=f"vk_feed_radar_clear_{int(owner_id)}",
+            key=f"vk_feed_links_clear_{int(owner_id)}",
             use_container_width=True,
         ):
             st.session_state.pop(state_key, None)
+            st.session_state[raw_key] = ""
             for key in list(st.session_state.keys()):
-                if str(key).startswith(f"vk_feed_radar_comment_{int(owner_id)}_"):
+                if str(key).startswith(f"vk_feed_link_comment_{int(owner_id)}_"):
                     st.session_state.pop(key, None)
             st.rerun()
 
     if not isinstance(result, dict):
-        st.caption(
-            "Неона готовит комментарии, но не публикует их сама: Вы открываете нужный пост "
-            "в своей ленте и размещаете комментарий от своего VK."
-        )
-        return
-
-    checked = int(result.get("checked") or 0)
-    sources_checked = int(result.get("sources_checked") or 0)
-    commentable = int(result.get("commentable") or 0)
-    recommendations = list(result.get("recommendations") or [])
-    access_error = str(result.get("access_error") or "").strip()
-
-    if access_error:
-        st.error(
-            "VK не разрешил Агентству прочитать Вашу личную ленту через текущий доступ."
-        )
-        st.caption(access_error)
         st.info(
-            "Это уже не вопрос кандидатов или сообществ. Если VK потребует другой тип доступа, "
-            "Агентство покажет здесь точную причину, а не ложный результат «0 постов»."
+            "Два шага: 1) откройте свою ленту VK; 2) вставьте сюда ссылки на посты, "
+            "которые хотите прокомментировать. Никакой повторной авторизации VK не требуется."
         )
         return
-
-    st.caption(
-        f"В ленте просмотрено: {checked} · источников в этих постах: {sources_checked} · "
-        f"доступны для комментария: {commentable} · комментариев подготовлено: {len(recommendations)}"
-    )
 
     message = str(result.get("message") or "").strip()
+    recommendations = list(result.get("recommendations") or [])
+    invalid = list(result.get("invalid") or [])
+
+    if invalid:
+        st.warning(
+            "Не удалось распознать некоторые строки как ссылки на VK-посты: "
+            + "; ".join(invalid[:3])
+        )
     if message and not recommendations:
         st.info(message)
 
@@ -768,31 +781,23 @@ def _render_vk_feed_radar(
         preview = str(item.get("material") or "").strip()
         reason = str(item.get("reason") or "").strip()
         source_type = str(item.get("source_type") or "").strip()
-        edit_key = f"vk_feed_radar_comment_{int(owner_id)}_{idx}"
+        edit_key = f"vk_feed_link_comment_{int(owner_id)}_{idx}"
 
         with st.container(border=True):
             st.markdown(f"#### {author}")
             if source_type:
-                st.caption("Друг / подписка" if source_type == "person" else "Сообщество из Вашей ленты")
+                st.caption("Человек" if source_type == "person" else "Сообщество")
 
             links = st.columns(2)
             with links[0]:
                 if profile_url:
-                    st.link_button(
-                        "Открыть автора",
-                        profile_url,
-                        use_container_width=True,
-                    )
+                    st.link_button("Открыть автора", profile_url, use_container_width=True)
             with links[1]:
                 if post_url:
-                    st.link_button(
-                        "Открыть пост в VK",
-                        post_url,
-                        use_container_width=True,
-                    )
+                    st.link_button("Открыть пост VK", post_url, use_container_width=True)
 
             if reason:
-                st.caption(f"Почему здесь стоит прокомментировать: {reason}")
+                st.caption(f"Почему здесь уместен комментарий: {reason}")
             if preview:
                 short = preview if len(preview) <= 520 else preview[:517].rstrip() + "..."
                 st.caption(f"Публикация: {short}")
@@ -804,11 +809,6 @@ def _render_vk_feed_radar(
                 height=110,
             )
 
-            st.caption(
-                "Скопируйте комментарий, откройте пост и опубликуйте его от своего VK. "
-                "Здесь нет предложения Агентства — это естественное первое касание."
-            )
-
             _render_vk_comment_followup(
                 int(owner_id),
                 int(item.get("owner_id") or 0),
@@ -817,16 +817,16 @@ def _render_vk_feed_radar(
                 author,
                 post_url=post_url,
                 post_text=preview,
-                source="personal_feed",
+                source="personal_feed_link",
                 assignment_id=None,
                 ask_openai_fn=ask_openai_fn,
-                ui_scope=f"personal_feed_{idx}",
+                ui_scope=f"personal_feed_link_{idx}",
             )
 
     if recommendations:
         st.success(
-            "✅ Это комментарии из Вашей реальной VK-ленты. Кандидаты могут молчать неделями — "
-            "утепление всё равно продолжается через живые публикации, которые Вы и так видите в VK."
+            "✅ Комментарии подготовлены по постам из Вашей настоящей ленты VK — "
+            "без VK ID и без заблокированного приложения."
         )
 
 
