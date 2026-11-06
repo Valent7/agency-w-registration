@@ -2921,13 +2921,13 @@ def _parse_vk_feed_reference(value: str) -> dict[str, Any] | None:
         return None
 
     match = re.search(
-        r"(?:^|/|\\b)(wall|clip|video)(-?\\d+)_(\\d+)",
+        r"(?:^|/|\b)(wall|clip|video)(-?\d+)_(\d+)",
         text,
         flags=re.IGNORECASE,
     )
     if not match:
         # Backwards-compatible raw wall reference: -123_456
-        raw_match = re.search(r"(^|\\s)(-?\\d+)_(\\d+)(?:$|\\s)", text)
+        raw_match = re.search(r"(^|\s)(-?\d+)_(\d+)(?:$|\s)", text)
         if not raw_match:
             return None
         kind = "wall"
@@ -2999,8 +2999,8 @@ def _vk_public_actor(owner_id: int) -> tuple[str, str, str]:
 
 def _vk_video_material(video: dict[str, Any], *, kind: str) -> str:
     """Ground Neona in VK's public clip/video metadata without inventing visuals."""
-    title = re.sub(r"\\s+", " ", str(video.get("title") or "")).strip()
-    description = re.sub(r"\\s+", " ", str(video.get("description") or "")).strip()
+    title = re.sub(r"\s+", " ", str(video.get("title") or "")).strip()
+    description = re.sub(r"\s+", " ", str(video.get("description") or "")).strip()
     parts: list[str] = []
     label = "Клип" if kind == "clip" else "Видео"
     if title:
@@ -3259,13 +3259,13 @@ def prepare_vk_feed_links(
         item = by_key.get(key)
         if not item or key in used:
             continue
-        comment = re.sub(r"\\s+", " ", str(choice.get("comment") or "")).strip()
+        comment = re.sub(r"\s+", " ", str(choice.get("comment") or "")).strip()
         if not comment:
             continue
         recommendations.append({
             **item,
             "assignment_id": None,
-            "reason": re.sub(r"\\s+", " ", str(choice.get("reason") or "")).strip(),
+            "reason": re.sub(r"\s+", " ", str(choice.get("reason") or "")).strip(),
             "comment": comment,
         })
         used.add(key)
