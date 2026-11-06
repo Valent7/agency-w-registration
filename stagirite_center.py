@@ -6962,13 +6962,21 @@ def _render_result(
             st.session_state.get(video_state_key)
         )
         telegram_destinations: list[dict[str, Any]] = []
+        telegram_destinations_error = ""
         if callable(list_publisher_destinations):
             try:
                 telegram_destinations = list_publisher_destinations(
                     owner_id
                 )
-            except Exception:
+            except Exception as exc:
                 telegram_destinations = []
+                telegram_destinations_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+        else:
+            telegram_destinations_error = (
+                "Модуль Telegram Publisher не подключён."
+            )
 
         saved_text = str(
             result.get("edited_content")
@@ -7785,6 +7793,24 @@ def _render_result(
             if (
                 is_approved
                 and not source_changed
+                and not telegram_destinations
+            ):
+                if telegram_destinations_error:
+                    st.warning(
+                        "Кнопка публикации в Telegram временно недоступна: "
+                        "Агентство не смогло прочитать реестр ваших чатов."
+                    )
+                    with st.expander("Техническая причина"):
+                        st.code(telegram_destinations_error)
+                else:
+                    st.info(
+                        "Подключённые Telegram-чаты сейчас не найдены. "
+                        "Проверьте раздел «Команда → Мои площадки»."
+                    )
+
+            if (
+                is_approved
+                and not source_changed
                 and telegram_destinations
             ):
                 content_image_mode_label = st.radio(
@@ -7831,7 +7857,7 @@ def _render_result(
                         "площадк(а/и)."
                     )
                 elif st.button(
-                    f"📡 Опубликовать пост с иллюстрацией во всех моих Telegram-площадках ({len(tg_ids)})",
+                    f"📡 Разместить в {len(tg_ids)} чатах пост и иллюстрацию",
                     key=f"stagirite_publish_telegram_image_{task_id}",
                     use_container_width=True,
                     type="primary",
