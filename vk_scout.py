@@ -1185,6 +1185,11 @@ def _deterministic_public_work_signals(candidate: dict[str, Any]) -> dict[str, A
         evidence.append("VK: рабочий статус — " + status[:180])
         work_text_parts.append(status)
 
+    meaningful_comments = [
+        " ".join(str(sample or "").split()).strip()
+        for sample in comment_samples[:3]
+        if len(" ".join(str(sample or "").split()).strip()) >= 20
+    ]
     comment_markers = work_markers + (
         "клиент", "команд", "заказ", "заявк", "встреч", "консультац",
         "работа", "работаю", "сопровожд", "обучен", "курс", "презентац",
@@ -1198,7 +1203,9 @@ def _deterministic_public_work_signals(candidate: dict[str, Any]) -> dict[str, A
             if len(evidence) >= 3:
                 break
 
-    combined = " ".join(work_text_parts).casefold()
+    # For AI-provider exclusion inspect all meaningful public comments too,
+    # not only those that matched work markers.
+    combined = " ".join(work_text_parts + meaningful_comments).casefold()
     ai_provider = bool(
         re.search(r"\b(?:ai|gpt)\b", combined)
         or "нейросет" in combined
@@ -1215,6 +1222,12 @@ def _deterministic_public_work_signals(candidate: dict[str, Any]) -> dict[str, A
 
     return {
         "has_public_work": bool(evidence),
+        "has_active_public_context": bool(meaningful_comments),
+        "active_comment_evidence": (
+            "VK: активный публичный комментарий — " + meaningful_comments[0][:180]
+            if meaningful_comments
+            else ""
+        ),
         "evidence": evidence[:3],
         "ai_provider_or_expert": ai_provider,
         "network_business_signal": network_signal,
@@ -1544,6 +1557,23 @@ automation_need_signal=true означает, что из его реально�
                 item["business_evidence"] = (
                     work_signals["evidence"] + existing_evidence
                 )[:3]
+            elif work_signals["has_active_public_context"]:
+                # A real, substantive public comment in a source explicitly
+                # selected by this owner is enough for a borderline 50% cold lead.
+                # It proves active communication, not purchase intent; Neona must
+                # qualify the actual need in conversation.
+                item["business_relevant"] = True
+                item["automation_need_signal"] = True
+                existing_evidence = item.get("business_evidence")
+                if not isinstance(existing_evidence, list):
+                    existing_evidence = []
+                item["business_evidence"] = (
+                    [work_signals["active_comment_evidence"]] + existing_evidence
+                )[:3]
+                if not str(item.get("business_gate_reason") or "").strip():
+                    item["business_gate_reason"] = (
+                        "Активен содержательным публичным комментарием в выбранном целевом VK-источнике."
+                    )
 
             score, _, business_evidence, business_gate_reason = apply_business_gate(
                 item,
