@@ -7294,9 +7294,9 @@ def _render_result(
                             f"{type(exc).__name__}: {exc}"
                         )
 
-            # Telegram-площадки владельца. Если иллюстрация уже готова,
-            # кнопка будет ниже непосредственно под иллюстрацией.
-            if telegram_destinations and not has_current_image:
+            # Telegram-площадки владельца: всегда даём открыть список,
+            # выбрать нужные, убрать старые и найти новые.
+            if telegram_destinations:
                 all_tg_ids = [
                     int(item.get("chat_id"))
                     for item in telegram_destinations
@@ -7305,6 +7305,32 @@ def _render_result(
                 clean_tg_text = str(
                     result.get("edited_content") or draft
                 ).strip()
+
+                content_image_mode = "photo"
+                if has_current_image:
+                    content_image_mode_label = st.radio(
+                        "Как отправить эту иллюстрацию в Telegram",
+                        options=[
+                            "🖼️ Обычная картинка",
+                            "🏷️ Стикер Telegram",
+                        ],
+                        horizontal=True,
+                        key=(
+                            f"stagirite_content_image_mode_"
+                            f"{task_id}"
+                        ),
+                        help=(
+                            "В режиме стикера текст отправится один раз, "
+                            "а прозрачная иллюстрация — отдельным "
+                            "Telegram-стикером."
+                        ),
+                    )
+                    content_image_mode = (
+                        "sticker"
+                        if content_image_mode_label
+                        == "🏷️ Стикер Telegram"
+                        else "photo"
+                    )
 
                 manager_key = (
                     f"stagirite_tg_manager_open_{task_id}"
@@ -7421,13 +7447,20 @@ def _render_result(
                                     f"{type(exc).__name__}: {exc}"
                                 )
 
-                        tg_hash = _telegram_publication_hash(
-                            clean_tg_text
-                            + (
+                        telegram_hash_text = clean_tg_text
+                        if has_current_image:
+                            telegram_hash_text += (
                                 f"\n[telegram_image_mode="
                                 f"{content_image_mode}]"
+                            )
+
+                        tg_hash = _telegram_publication_hash(
+                            telegram_hash_text,
+                            (
+                                current_image_for_publish
+                                if has_current_image
+                                else None
                             ),
-                            current_image,
                             selected_tg_ids,
                         ) if selected_tg_ids else ""
 
@@ -7459,8 +7492,12 @@ def _render_result(
                             )
                         elif st.button(
                             (
-                                "🚀 Разместить пост и иллюстрацию "
-                                f"в выбранных чатах "
+                                (
+                                    "🚀 Разместить пост и иллюстрацию "
+                                    if has_current_image
+                                    else "🚀 Разместить пост "
+                                )
+                                + f"в выбранных чатах "
                                 f"({len(selected_tg_ids)})"
                             ),
                             key=(
@@ -7479,7 +7516,11 @@ def _render_result(
                                     publish_to_publisher_destinations(
                                         owner_id,
                                         clean_tg_text,
-                                        image_bytes=current_image,
+                                        image_bytes=(
+                                            current_image_for_publish
+                                            if has_current_image
+                                            else None
+                                        ),
                                         destination_ids=selected_tg_ids,
                                         image_mode=content_image_mode,
                                     )
