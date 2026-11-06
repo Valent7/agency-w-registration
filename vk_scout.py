@@ -3283,6 +3283,96 @@ def prepare_vk_feed_links(
 
 
 
+def prepare_vk_feed_manual_text(
+    value: str,
+    manual_text: str,
+    *,
+    ask_openai_fn: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Fallback for feed items visible in the user's browser but hidden from VK API."""
+    ref = _parse_vk_feed_reference(str(value or "").strip())
+    text_value = re.sub(r"\s+", " ", str(manual_text or "")).strip()
+    if not ref:
+        return {
+            "recommendations": [],
+            "message": "Не удалось распознать ссылку VK.",
+        }
+    if not text_value:
+        return {
+            "recommendations": [],
+            "message": "Вставьте текст или подпись выбранной публикации.",
+        }
+
+    owner_id = int(ref["owner_id"])
+    item_id = int(ref["item_id"])
+    kind = str(ref["kind"])
+    try:
+        author_name, profile_url, source_type = _vk_public_actor(owner_id)
+    except Exception:
+        author_name = "Автор публикации"
+        profile_url = ""
+        source_type = "person" if owner_id > 0 else "community"
+
+    prefix = "wall" if kind == "wall" else kind
+    post_url = f"https://vk.com/{prefix}{owner_id}_{item_id}"
+
+    comment = ""
+    reason = ""
+    if ask_openai_fn is not None:
+        system = """
+Ты — Неона. Владелец Агентства W сам открыл публикацию в своей обычной ленте VK,
+но VK API не дал серверу прочитать её. Поэтому владелец вручную передал реальный
+текст/подпись публикации.
+
+Напиши один естественный комментарий от лица владельца.
+Правила:
+- 1–2 коротких предложения;
+- опирайся только на переданный текст;
+- можно добавить тёплое наблюдение, лёгкий юмор или короткий вопрос;
+- не упоминай Агентство W, ИИ, автоматизацию, доход, партнёрство, регистрацию,
+  презентацию, встречу и любые продажи;
+- без ссылок и без шаблонов вроде «Отличный пост»;
+- если это подпись к клипу/видео, не выдумывай содержание ролика сверх текста.
+
+Верни ТОЛЬКО JSON:
+{"reason":"почему комментарий уместен","comment":"готовый комментарий"}
+""".strip()
+        request = (
+            f"Тип публикации: {kind}\n"
+            f"Автор: {author_name}\n"
+            f"Текст публикации:\n{text_value}"
+        )
+        parsed = _extract_json_object(ask_openai_fn(system, request))
+        reason = re.sub(r"\s+", " ", str(parsed.get("reason") or "")).strip()
+        comment = re.sub(r"\s+", " ", str(parsed.get("comment") or "")).strip()
+
+    if not comment:
+        comment = (
+            "Интересная мысль — особенно то, как она звучит без лишних украшений. "
+            "Иногда именно такие простые формулировки и цепляют сильнее всего."
+        )
+
+    item = {
+        "content_kind": kind,
+        "item_id": item_id,
+        "post_id": item_id,
+        "owner_id": owner_id,
+        "author_name": author_name,
+        "profile_url": profile_url,
+        "post_url": post_url,
+        "source_type": source_type,
+        "material": text_value,
+        "reason": reason,
+        "comment": comment,
+        "assignment_id": None,
+    }
+    return {
+        "items": [item],
+        "recommendations": [item],
+        "message": "Комментарий подготовлен по тексту, который Вы вставили вручную.",
+    }
+
+
 def fetch_vk_personal_feed(
     owner_id: int,
     *,
