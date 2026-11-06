@@ -2905,23 +2905,114 @@ def fetch_vk_candidate_feed(
     }
 
 
-def _parse_vk_post_reference(value: str) -> tuple[int, int] | None:
-    """Extract owner_id/post_id from a normal VK post link."""
+def _parse_vk_feed_reference(value: str) -> dict[str, Any] | None:
+    """Extract a supported public item reference from a VK feed link.
+
+    Supported:
+    - wall posts: /wall-123_456
+    - clips: /clip-123_456
+    - videos: /video-123_456
+
+    VK's home feed freely mixes these formats, so the UI must not pretend that
+    every selected item is a wall post.
+    """
     text = str(value or "").strip()
     if not text:
         return None
-    # Accept https://vk.com/wall-123_456, vk.com/wall123_456 and raw -123_456.
-    match = re.search(r"(?:wall)?(-?\d+)_(\d+)", text, flags=re.IGNORECASE)
+
+    match = re.search(
+        r"(?:^|/|\\b)(wall|clip|video)(-?\\d+)_(\\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
     if not match:
-        return None
+        # Backwards-compatible raw wall reference: -123_456
+        raw_match = re.search(r"(^|\\s)(-?\\d+)_(\\d+)(?:$|\\s)", text)
+        if not raw_match:
+            return None
+        kind = "wall"
+        owner_raw = raw_match.group(2)
+        item_raw = raw_match.group(3)
+    else:
+        kind = match.group(1).casefold()
+        owner_raw = match.group(2)
+        item_raw = match.group(3)
+
     try:
-        owner_id = int(match.group(1))
-        post_id = int(match.group(2))
+        owner_id = int(owner_raw)
+        item_id = int(item_raw)
     except (TypeError, ValueError):
         return None
-    if owner_id == 0 or post_id <= 0:
+    if owner_id == 0 or item_id <= 0:
         return None
-    return owner_id, post_id
+
+    return {
+        "kind": kind,
+        "owner_id": owner_id,
+        "item_id": item_id,
+        "original": text,
+    }
+
+
+def _vk_public_actor(owner_id: int) -> tuple[str, str, str]:
+    """Return display name, profile URL and source type for a public VK owner."""
+    owner_id = int(owner_id)
+    if owner_id > 0:
+        try:
+            response = _vk_api(
+                "users.get",
+                user_ids=str(owner_id),
+                fields="screen_name",
+            )
+        except Exception:
+            response = []
+        row = response[0] if isinstance(response, list) and response else {}
+        first_name = str(row.get("first_name") or "").strip() if isinstance(row, dict) else ""
+        last_name = str(row.get("last_name") or "").strip() if isinstance(row, dict) else ""
+        screen_name = str(row.get("screen_name") or "").strip() if isinstance(row, dict) else ""
+        name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {owner_id}"
+        url = f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/id{owner_id}"
+        return name, url, "person"
+
+    gid = abs(owner_id)
+    try:
+        response = _vk_api(
+            "groups.getById",
+            group_ids=str(gid),
+            fields="screen_name",
+        )
+    except Exception:
+        response = {}
+    if isinstance(response, dict):
+        rows = response.get("groups") or response.get("items") or []
+    else:
+        rows = response or []
+    row = rows[0] if isinstance(rows, list) and rows else {}
+    name = str(row.get("name") or "").strip() if isinstance(row, dict) else ""
+    screen_name = str(row.get("screen_name") or "").strip() if isinstance(row, dict) else ""
+    return (
+        name or f"VK-сообщество {gid}",
+        f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/club{gid}",
+        "community",
+    )
+
+
+def _vk_video_material(video: dict[str, Any], *, kind: str) -> str:
+    """Ground Neona in VK's public clip/video metadata without inventing visuals."""
+    title = re.sub(r"\\s+", " ", str(video.get("title") or "")).strip()
+    description = re.sub(r"\\s+", " ", str(video.get("description") or "")).strip()
+    parts: list[str] = []
+    label = "Клип" if kind == "clip" else "Видео"
+    if title:
+        parts.append(f"{label}: {title}")
+    if description:
+        parts.append(f"Описание: {description}")
+    if not parts:
+        parts.append(
+            f"{label} без доступного текстового описания. "
+            "Неона не должна выдумывать содержание ролика."
+        )
+    return " ".join(parts)
 
 
 def prepare_vk_feed_links(
@@ -2931,22 +3022,26 @@ def prepare_vk_feed_links(
     ask_openai_fn: Callable[..., Any] | None = None,
     limit: int = 5,
 ) -> dict[str, Any]:
-    """Prepare comments for 1-5 post links copied from the owner's visible VK feed.
+    """Prepare comments for 1-5 items copied from the owner's visible VK feed.
 
-    This deliberately uses the working service-token path for public post reads
-    and does not touch the blocked legacy VK ID application.
+    Supports ordinary wall posts plus VK clips/videos. Public content is read
+    through the working service-token path; blocked legacy VK ID is never used.
     """
-    refs: list[tuple[int, int]] = []
+    refs: list[dict[str, Any]] = []
     invalid: list[str] = []
     for raw in values:
         text = str(raw or "").strip()
         if not text:
             continue
-        parsed = _parse_vk_post_reference(text)
+        parsed = _parse_vk_feed_reference(text)
         if not parsed:
             invalid.append(text[:160])
             continue
-        if parsed not in refs:
+        key = (parsed["kind"], parsed["owner_id"], parsed["item_id"])
+        if all(
+            (item["kind"], item["owner_id"], item["item_id"]) != key
+            for item in refs
+        ):
             refs.append(parsed)
         if len(refs) >= max(1, min(5, int(limit))):
             break
@@ -2956,88 +3051,154 @@ def prepare_vk_feed_links(
             "items": [],
             "recommendations": [],
             "invalid": invalid,
-            "message": "Вставьте ссылку хотя бы на один пост из Вашей ленты VK.",
+            "message": (
+                "Вставьте ссылку хотя бы на один обычный пост, клип или видео "
+                "из Вашей ленты VK."
+            ),
         }
 
-    posts_param = ",".join(f"{owner}_{post}" for owner, post in refs)
-    response = _vk_api(
-        "wall.getById",
-        posts=posts_param,
-        extended=1,
-        fields="first_name,last_name,screen_name,name",
-    )
-    if isinstance(response, dict):
-        raw_items = response.get("items") or response.get("posts") or []
-        profiles_raw = response.get("profiles") or []
-        groups_raw = response.get("groups") or []
-    else:
-        raw_items = response or []
-        profiles_raw = []
-        groups_raw = []
-
-    profiles = {
-        int(row.get("id") or 0): row
-        for row in profiles_raw
-        if isinstance(row, dict) and str(row.get("id") or "").lstrip("-").isdigit()
-    }
-    groups = {
-        int(row.get("id") or 0): row
-        for row in groups_raw
-        if isinstance(row, dict) and str(row.get("id") or "").lstrip("-").isdigit()
-    }
-
     items: list[dict[str, Any]] = []
-    wanted_keys = set(refs)
-    for post in raw_items:
-        if not isinstance(post, dict):
-            continue
+    read_errors: list[str] = []
+
+    wall_refs = [item for item in refs if item["kind"] == "wall"]
+    if wall_refs:
+        posts_param = ",".join(
+            f"{item['owner_id']}_{item['item_id']}"
+            for item in wall_refs
+        )
         try:
-            post_id = int(post.get("id") or 0)
-            post_owner = int(post.get("owner_id") or 0)
-        except (TypeError, ValueError):
-            continue
-        if (post_owner, post_id) not in wanted_keys:
-            continue
+            response = _vk_api(
+                "wall.getById",
+                posts=posts_param,
+                extended=1,
+                fields="first_name,last_name,screen_name,name",
+            )
+        except Exception as exc:
+            read_errors.append(f"Обычные посты: {exc}")
+            response = []
 
-        material = _vk_post_material(post)
-        if not material:
-            continue
-
-        if post_owner > 0:
-            profile = profiles.get(post_owner) or {}
-            first_name = str(profile.get("first_name") or "").strip()
-            last_name = str(profile.get("last_name") or "").strip()
-            author_name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {post_owner}"
-            screen_name = str(profile.get("screen_name") or "").strip()
-            profile_url = f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/id{post_owner}"
-            source_type = "person"
+        if isinstance(response, dict):
+            raw_items = response.get("items") or response.get("posts") or []
+            profiles_raw = response.get("profiles") or []
+            groups_raw = response.get("groups") or []
         else:
-            gid = abs(post_owner)
-            group = groups.get(gid) or {}
-            author_name = str(group.get("name") or "").strip() or f"VK-сообщество {gid}"
-            screen_name = str(group.get("screen_name") or "").strip()
-            profile_url = f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/club{gid}"
-            source_type = "community"
+            raw_items = response or []
+            profiles_raw = []
+            groups_raw = []
 
+        profiles = {
+            int(row.get("id") or 0): row
+            for row in profiles_raw
+            if isinstance(row, dict) and str(row.get("id") or "").lstrip("-").isdigit()
+        }
+        groups = {
+            int(row.get("id") or 0): row
+            for row in groups_raw
+            if isinstance(row, dict) and str(row.get("id") or "").lstrip("-").isdigit()
+        }
+        wanted_keys = {
+            (int(item["owner_id"]), int(item["item_id"]))
+            for item in wall_refs
+        }
+
+        for post in raw_items:
+            if not isinstance(post, dict):
+                continue
+            try:
+                post_id = int(post.get("id") or 0)
+                post_owner = int(post.get("owner_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (post_owner, post_id) not in wanted_keys:
+                continue
+            material = _vk_post_material(post)
+            if not material:
+                continue
+
+            if post_owner > 0:
+                profile = profiles.get(post_owner) or {}
+                first_name = str(profile.get("first_name") or "").strip()
+                last_name = str(profile.get("last_name") or "").strip()
+                author_name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {post_owner}"
+                screen_name = str(profile.get("screen_name") or "").strip()
+                profile_url = f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/id{post_owner}"
+                source_type = "person"
+            else:
+                gid = abs(post_owner)
+                group = groups.get(gid) or {}
+                author_name = str(group.get("name") or "").strip() or f"VK-сообщество {gid}"
+                screen_name = str(group.get("screen_name") or "").strip()
+                profile_url = f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/club{gid}"
+                source_type = "community"
+
+            items.append({
+                "content_kind": "wall",
+                "item_id": post_id,
+                "post_id": post_id,
+                "owner_id": post_owner,
+                "date": int(post.get("date") or 0),
+                "author_name": author_name,
+                "profile_url": profile_url,
+                "post_url": f"https://vk.com/wall{post_owner}_{post_id}",
+                "source_type": source_type,
+                "material": material,
+            })
+
+    for ref in refs:
+        if ref["kind"] not in {"clip", "video"}:
+            continue
+        owner = int(ref["owner_id"])
+        item_id = int(ref["item_id"])
+        try:
+            response = _vk_api(
+                "video.get",
+                videos=f"{owner}_{item_id}",
+                extended=1,
+            )
+        except Exception as exc:
+            read_errors.append(f"{ref['original'][:80]}: {exc}")
+            continue
+
+        if isinstance(response, dict):
+            rows = response.get("items") or response.get("videos") or []
+        else:
+            rows = response or []
+        video = rows[0] if isinstance(rows, list) and rows else None
+        if not isinstance(video, dict):
+            read_errors.append(f"{ref['original'][:80]}: VK не вернул данные клипа/видео")
+            continue
+
+        material = _vk_video_material(video, kind=ref["kind"])
+        author_name, profile_url, source_type = _vk_public_actor(owner)
+        prefix = "clip" if ref["kind"] == "clip" else "video"
+        canonical_url = f"https://vk.com/{prefix}{owner}_{item_id}"
         items.append({
-            "post_id": post_id,
-            "owner_id": post_owner,
-            "date": int(post.get("date") or 0),
+            "content_kind": ref["kind"],
+            "item_id": item_id,
+            # Reuse downstream key fields, but UI must not register clip/video
+            # as a wall-comment thread.
+            "post_id": item_id,
+            "owner_id": owner,
+            "date": int(video.get("date") or 0),
             "author_name": author_name,
             "profile_url": profile_url,
-            "post_url": f"https://vk.com/wall{post_owner}_{post_id}",
+            "post_url": canonical_url,
             "source_type": source_type,
             "material": material,
         })
 
     if not items:
+        detail = ""
+        if read_errors:
+            detail = " Причина: " + "; ".join(read_errors[:2])
         return {
             "items": [],
             "recommendations": [],
             "invalid": invalid,
+            "read_errors": read_errors,
             "message": (
-                "VK не отдал содержимое этих ссылок. Проверьте, что это обычные публичные "
-                "посты из ленты, а не реклама или закрытая запись."
+                "VK не отдал содержимое выбранных ссылок. Поддерживаются обычные "
+                "посты, клипы и публичные видео." + detail
             ),
         }
 
@@ -3045,6 +3206,7 @@ def prepare_vk_feed_links(
         {
             "post_id": int(item["post_id"]),
             "owner_id": int(item["owner_id"]),
+            "content_kind": item.get("content_kind") or "wall",
             "author_name": item["author_name"],
             "source_type": item["source_type"],
             "content": item["material"],
@@ -3055,24 +3217,25 @@ def prepare_vk_feed_links(
     parsed: list[dict[str, Any]] = []
     if ask_openai_fn is not None:
         system = """
-Ты — Неона. Перед тобой несколько публичных постов, которые владелец Агентства W
-сам выбрал прямо из своей обычной ленты VK.
+Ты — Неона. Перед тобой несколько публичных материалов, которые владелец Агентства W
+сам выбрал прямо из своей обычной ленты VK. Это могут быть обычные посты, клипы или видео.
 
-Для каждого подходящего поста напиши один естественный комментарий от лица владельца.
+Для каждого подходящего материала напиши один естественный комментарий от лица владельца.
 Правила:
 - 1–2 коротких предложения;
-- опирайся на конкретную мысль поста;
+- опирайся ТОЛЬКО на реально доступный текст, заголовок или описание;
 - можно добавить тёплое наблюдение, лёгкий юмор или короткий вопрос;
 - не упоминай Агентство W, ИИ, автоматизацию, доход, партнёрство, регистрацию,
   презентацию, встречу и любые продажи;
 - без ссылок и без шаблонов вроде «Отличный пост»;
-- если по тексту нечего сказать по существу — пропусти пост;
-- не выдумывай содержание фото/видео, если оно не описано в доступном тексте.
+- если у клипа/видео нет текста или описания, НЕ выдумывай, что в нём происходит;
+  такой материал лучше пропустить;
+- комментарии должны быть разными по мысли и формулировке.
 
 Верни ТОЛЬКО JSON-массив:
 [{"post_id":123,"owner_id":456,"reason":"почему уместно","comment":"готовый комментарий"}]
 """.strip()
-        request = "ПОСТЫ ИЗ ЛИЧНОЙ ЛЕНТЫ VK:\n" + json.dumps(
+        request = "МАТЕРИАЛЫ ИЗ ЛИЧНОЙ ЛЕНТЫ VK:\n" + json.dumps(
             public_view,
             ensure_ascii=False,
             indent=2,
@@ -3087,19 +3250,22 @@ def prepare_vk_feed_links(
     used: set[tuple[int, int]] = set()
     for choice in parsed:
         try:
-            key = (int(choice.get("owner_id") or 0), int(choice.get("post_id") or 0))
+            key = (
+                int(choice.get("owner_id") or 0),
+                int(choice.get("post_id") or 0),
+            )
         except (TypeError, ValueError):
             continue
         item = by_key.get(key)
         if not item or key in used:
             continue
-        comment = re.sub(r"\s+", " ", str(choice.get("comment") or "")).strip()
+        comment = re.sub(r"\\s+", " ", str(choice.get("comment") or "")).strip()
         if not comment:
             continue
         recommendations.append({
             **item,
             "assignment_id": None,
-            "reason": re.sub(r"\s+", " ", str(choice.get("reason") or "")).strip(),
+            "reason": re.sub(r"\\s+", " ", str(choice.get("reason") or "")).strip(),
             "comment": comment,
         })
         used.add(key)
@@ -3108,10 +3274,13 @@ def prepare_vk_feed_links(
         "items": items,
         "recommendations": recommendations,
         "invalid": invalid,
+        "read_errors": read_errors,
         "message": (
-            f"Постов прочитано: {len(items)}; комментариев подготовлено: {len(recommendations)}."
+            f"Материалов прочитано: {len(items)}; "
+            f"комментариев подготовлено: {len(recommendations)}."
         ),
     }
+
 
 
 def fetch_vk_personal_feed(
