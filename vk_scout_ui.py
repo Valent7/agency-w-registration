@@ -682,30 +682,32 @@ def _render_vk_feed_radar(
     owner_id: int,
     ask_openai_fn=None,
 ) -> None:
-    """Ручной тест нашей ленты из свежих постов отобранных Неонией людей."""
+    """Fresh VK community feed for warm, non-sales engagement."""
     state_key = f"vk_feed_radar_{int(owner_id)}"
     result = st.session_state.get(state_key)
 
-    st.markdown("### 🌿 Радар свежих постов VK")
+    st.markdown("### 🌿 Лента VK · комментарии для утепления")
     st.caption(
-        "Неона собирает до 10 самых свежих публичных постов людей, которых уже отобрала по ЦА. "
-        "10 просмотренных постов не означают 10 комментариев: она выбирает только естественные касания."
+        "Неона больше не ждёт публикаций сегодняшних кандидатов. Она читает свежие посты "
+        "в Ваших подключённых VK-сообществах и готовит до 5 содержательных комментариев "
+        "от Вашего лица. Это отдельный поток от VK 5/5."
     )
 
     cols = st.columns([2.2, 1])
     with cols[0]:
         if st.button(
-            "🔎 Собрать 10 свежих постов",
+            "🔎 Собрать свежую ленту VK",
             key=f"vk_feed_radar_run_{int(owner_id)}",
             type="primary",
             use_container_width=True,
         ):
             try:
-                result = prepare_vk_feed_radar(
-                    int(owner_id),
-                    ask_openai_fn=ask_openai_fn,
-                    count=10,
-                )
+                with st.spinner("Неона читает свежую ленту и выбирает лучшие точки касания…"):
+                    result = prepare_vk_feed_radar(
+                        int(owner_id),
+                        ask_openai_fn=ask_openai_fn,
+                        count=15,
+                    )
                 st.session_state[state_key] = result
                 for idx, item in enumerate(result.get("recommendations") or []):
                     st.session_state[f"vk_feed_radar_comment_{int(owner_id)}_{idx}"] = str(
@@ -713,7 +715,7 @@ def _render_vk_feed_radar(
                     )
                 st.rerun()
             except Exception as exc:
-                st.error(f"Не удалось собрать радар свежих постов VK: {exc}")
+                st.error(f"Не удалось собрать свежую ленту VK: {exc}")
     with cols[1]:
         if isinstance(result, dict) and st.button(
             "🧹 Очистить",
@@ -728,19 +730,19 @@ def _render_vk_feed_radar(
 
     if not isinstance(result, dict):
         st.caption(
-            "Сейчас это безопасный тест нашей собственной ленты: Неона читает публичные стены "
-            "отобранных людей и предлагает комментарии, сама в VK ничего не публикует."
+            "Комментарии публикуются вручную из Вашего VK. Неона только читает доступный "
+            "публичный текст поста и пишет уместный вариант — без рекламы и без массовых шаблонов."
         )
         return
 
     checked = int(result.get("checked") or 0)
-    people = int(result.get("people") or 0)
+    sources_checked = int(result.get("sources_checked") or 0)
     commentable = int(result.get("commentable") or 0)
     recommendations = list(result.get("recommendations") or [])
 
     st.caption(
-        f"Свежих постов собрано: {checked} · авторов: {people} · "
-        f"доступны для комментария: {commentable} · Неона выбрала: {len(recommendations)}"
+        f"Сообществ просмотрено: {sources_checked} · свежих постов: {checked} · "
+        f"можно комментировать: {commentable} · комментариев подготовлено: {len(recommendations)}"
     )
 
     message = str(result.get("message") or "").strip()
@@ -748,30 +750,36 @@ def _render_vk_feed_radar(
         st.info(message)
 
     for idx, item in enumerate(recommendations):
-        author = str(item.get("author_name") or "VK-контакт").strip()
+        community = str(item.get("community_name") or item.get("author_name") or "VK-сообщество").strip()
         post_url = str(item.get("post_url") or "").strip()
-        profile_url = str(item.get("profile_url") or "").strip()
+        community_url = str(item.get("profile_url") or "").strip()
         preview = str(item.get("material") or "").strip()
-        signal = str(item.get("business_signal") or "").strip()
         reason = str(item.get("reason") or "").strip()
         edit_key = f"vk_feed_radar_comment_{int(owner_id)}_{idx}"
 
         with st.container(border=True):
-            st.markdown(f"#### {author}")
+            st.markdown(f"#### {community}")
+
             links = st.columns(2)
             with links[0]:
-                if profile_url:
-                    st.link_button("Открыть профиль", profile_url, use_container_width=True)
+                if community_url:
+                    st.link_button(
+                        "Открыть сообщество",
+                        community_url,
+                        use_container_width=True,
+                    )
             with links[1]:
                 if post_url:
-                    st.link_button("Открыть пост", post_url, use_container_width=True)
+                    st.link_button(
+                        "Открыть пост и комментарии",
+                        post_url,
+                        use_container_width=True,
+                    )
 
-            if signal:
-                st.write(f"**Почему человек интересен:** {signal}")
             if reason:
-                st.caption(f"Почему Неона выбрала этот пост: {reason}")
+                st.caption(f"Почему здесь стоит появиться: {reason}")
             if preview:
-                short = preview if len(preview) <= 420 else preview[:417].rstrip() + "..."
+                short = preview if len(preview) <= 520 else preview[:517].rstrip() + "..."
                 st.caption(f"Публикация: {short}")
 
             comment = st.text_area(
@@ -781,23 +789,31 @@ def _render_vk_feed_radar(
                 height=110,
             )
 
+            st.caption(
+                "Скопируйте комментарий, откройте пост и опубликуйте его от своего VK. "
+                "Он не содержит предложения Агентства — это живое первое касание в ленте."
+            )
+
             _render_vk_comment_followup(
                 int(owner_id),
                 int(item.get("owner_id") or 0),
                 int(item.get("post_id") or 0),
                 str(comment or "").strip(),
-                str(item.get("first_name") or ""),
+                community,
                 post_url=post_url,
                 post_text=preview,
-                source="radar",
+                source="feed",
                 assignment_id=None,
                 ask_openai_fn=ask_openai_fn,
+                ui_scope=f"feed_{idx}",
             )
 
-    st.caption(
-        "Первый комментарий по-прежнему публикуете вы. После кнопки «Комментарий опубликован» "
-        "Неона следит за этой веткой и подхватывает реальные ответы человека."
-    )
+    if recommendations:
+        st.success(
+            "✅ Лента работает отдельно от кандидатов: даже если сегодняшние 5 ничего не публикуют, "
+            "у Вас остаются свежие точки для естественных комментариев."
+        )
+
 
 def _render_today_vk_candidates(
     owner_id: int,
