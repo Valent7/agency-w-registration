@@ -702,15 +702,15 @@ def _render_vk_feed_radar(
 
     raw_key = f"vk_feed_links_input_{int(owner_id)}"
     raw = st.text_area(
-        "Ссылки на посты из моей ленты VK",
+        "Ссылки на посты, клипы или видео из моей ленты VK",
         key=raw_key,
         height=150,
         placeholder=(
             "Вставьте по одной ссылке на строку, например:\n"
             "https://vk.com/wall-123456_789\n"
-            "https://vk.com/wall987654_321"
+            "https://vk.ru/clip-227478486_456239079"
         ),
-        help="Можно вставить от 1 до 5 ссылок на обычные публичные посты из Вашей ленты.",
+        help="Можно вставить от 1 до 5 ссылок на обычные публичные посты, клипы или видео из Вашей ленты.",
     )
 
     cols = st.columns([2.2, 1])
@@ -809,19 +809,26 @@ def _render_vk_feed_radar(
                 height=110,
             )
 
-            _render_vk_comment_followup(
-                int(owner_id),
-                int(item.get("owner_id") or 0),
-                int(item.get("post_id") or 0),
-                str(comment or "").strip(),
-                author,
-                post_url=post_url,
-                post_text=preview,
-                source="personal_feed_link",
-                assignment_id=None,
-                ask_openai_fn=ask_openai_fn,
-                ui_scope=f"personal_feed_link_{idx}",
-            )
+            content_kind = str(item.get("content_kind") or "wall").strip().casefold()
+            if content_kind == "wall":
+                _render_vk_comment_followup(
+                    int(owner_id),
+                    int(item.get("owner_id") or 0),
+                    int(item.get("post_id") or 0),
+                    str(comment or "").strip(),
+                    author,
+                    post_url=post_url,
+                    post_text=preview,
+                    source="personal_feed_link",
+                    assignment_id=None,
+                    ask_openai_fn=ask_openai_fn,
+                    ui_scope=f"personal_feed_link_{idx}",
+                )
+            else:
+                st.caption(
+                    "Для клипа/видео: скопируйте комментарий и опубликуйте его под роликом. "
+                    "Наблюдение за веткой ответов пока включено только для обычных VK-постов."
+                )
 
     if recommendations:
         st.success(
