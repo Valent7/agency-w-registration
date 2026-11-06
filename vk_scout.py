@@ -2905,6 +2905,194 @@ def fetch_vk_candidate_feed(
     }
 
 
+def fetch_vk_personal_feed(
+    owner_id: int,
+    *,
+    count: int = 20,
+    max_age_days: int = 7,
+) -> dict[str, Any]:
+    """Reads the owner's real VK Home -> Feed via newsfeed.get.
+
+    This is intentionally different from configured scout communities and from
+    today's candidate five. It mirrors the user's normal VK feed: friends,
+    subscriptions and communities mixed together by VK.
+    """
+    owner_id = int(owner_id)
+    wanted = max(1, min(30, int(count)))
+    now_ts = int(datetime.now(UTC).timestamp())
+    start_time = now_ts - max(1, int(max_age_days)) * 24 * 60 * 60
+
+    commented_rows = _sb_get(
+        "agency_vk_comment_threads",
+        {
+            "owner_telegram_id": f"eq.{owner_id}",
+            "select": "post_owner_id,post_id",
+            "limit": 5000,
+        },
+    )
+    commented_keys: set[tuple[int, int]] = set()
+    for row in commented_rows:
+        try:
+            commented_keys.add(
+                (int(row.get("post_owner_id") or 0), int(row.get("post_id") or 0))
+            )
+        except (TypeError, ValueError):
+            continue
+
+    try:
+        response = _vk_user_api(
+            owner_id,
+            "newsfeed.get",
+            filters="post",
+            count=50,
+            start_time=start_time,
+            end_time=now_ts,
+            return_banned=0,
+            fields="first_name,last_name,screen_name,name",
+        )
+    except Exception as exc:
+        return {
+            "items": [],
+            "checked": 0,
+            "sources_checked": 0,
+            "commentable": 0,
+            "already_commented_posts": len(commented_keys),
+            "errors": [str(exc)],
+            "access_error": str(exc),
+            "feed_source": "personal",
+        }
+
+    if not isinstance(response, dict):
+        return {
+            "items": [],
+            "checked": 0,
+            "sources_checked": 0,
+            "commentable": 0,
+            "already_commented_posts": len(commented_keys),
+            "errors": ["VK вернул неожиданный ответ newsfeed.get"],
+            "access_error": "VK вернул неожиданный ответ newsfeed.get",
+            "feed_source": "personal",
+        }
+
+    profiles = {
+        int(item.get("id") or 0): item
+        for item in (response.get("profiles") or [])
+        if isinstance(item, dict) and int(item.get("id") or 0) > 0
+    }
+    groups = {
+        int(item.get("id") or 0): item
+        for item in (response.get("groups") or [])
+        if isinstance(item, dict) and int(item.get("id") or 0) > 0
+    }
+
+    items: list[dict[str, Any]] = []
+    source_ids_seen: set[int] = set()
+
+    for item in response.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "post").strip().casefold()
+        if item_type not in {"post", "wall"}:
+            continue
+        try:
+            if int(item.get("marked_as_ads") or 0) == 1:
+                continue
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            source_id = int(
+                item.get("source_id")
+                or item.get("owner_id")
+                or item.get("from_id")
+                or 0
+            )
+            post_id = int(item.get("post_id") or item.get("id") or 0)
+            post_date = int(item.get("date") or 0)
+        except (TypeError, ValueError):
+            continue
+        if source_id == 0 or post_id <= 0 or post_date <= 0:
+            continue
+        if post_date < start_time:
+            continue
+        if (source_id, post_id) in commented_keys:
+            continue
+
+        comments = item.get("comments") if isinstance(item.get("comments"), dict) else {}
+        can_post_value = comments.get("can_post")
+        if can_post_value is not None:
+            try:
+                if int(can_post_value) != 1:
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+        material = _vk_post_material(item)
+        if not material:
+            # Neona must comment only on content she can actually understand.
+            continue
+
+        if source_id > 0:
+            profile = profiles.get(source_id) or {}
+            first_name = str(profile.get("first_name") or "").strip()
+            last_name = str(profile.get("last_name") or "").strip()
+            author_name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {source_id}"
+            screen_name = str(profile.get("screen_name") or "").strip()
+            profile_url = (
+                f"https://vk.com/{screen_name}"
+                if screen_name
+                else f"https://vk.com/id{source_id}"
+            )
+            source_type = "person"
+        else:
+            gid = abs(source_id)
+            group = groups.get(gid) or {}
+            author_name = str(group.get("name") or "").strip() or f"VK-сообщество {gid}"
+            screen_name = str(group.get("screen_name") or "").strip()
+            profile_url = (
+                f"https://vk.com/{screen_name}"
+                if screen_name
+                else f"https://vk.com/club{gid}"
+            )
+            first_name = author_name
+            source_type = "community"
+
+        source_ids_seen.add(source_id)
+        items.append({
+            "post_id": post_id,
+            "owner_id": source_id,
+            "date": post_date,
+            "is_person": source_id > 0,
+            "source_type": source_type,
+            "can_comment": True,
+            "author_name": author_name,
+            "first_name": first_name,
+            "profile_status": "",
+            "profile_url": profile_url,
+            "post_url": f"https://vk.com/wall{source_id}_{post_id}",
+            "material": material,
+            "score": 0,
+            "fit_summary": "Свежая публикация из личной ленты VK владельца.",
+        })
+        if len(items) >= wanted:
+            break
+
+    return {
+        "items": items,
+        "checked": len(items),
+        "checked_candidates": 0,
+        "pool_size": len(items),
+        "people": sum(1 for item in items if item.get("is_person")),
+        "sources_checked": len(source_ids_seen),
+        "commentable": len(items),
+        "already_commented_posts": len(commented_keys),
+        "errors": [],
+        "access_error": "",
+        "feed_source": "personal",
+        "next_from": str(response.get("next_from") or ""),
+    }
+
+
 def fetch_vk_source_feed(
     owner_id: int,
     *,
@@ -3069,14 +3257,8 @@ def prepare_vk_feed_radar(
     ask_openai_fn: Callable[..., Any] | None = None,
     count: int = 15,
 ) -> dict[str, Any]:
-    """Builds a real VK engagement feed from configured communities.
-
-    Unlike the old candidate-only radar, this does not wait for today's five
-    candidates to publish on their own walls. It uses fresh commentable posts
-    from the owner's configured VK sources and drafts grounded, non-sales
-    comments for manual publication.
-    """
-    feed = fetch_vk_source_feed(int(owner_id), count=count)
+    """Prepares warm comments from the owner's real VK personal news feed."""
+    feed = fetch_vk_personal_feed(int(owner_id), count=count)
     items = list(feed.get("items") or [])
     eligible = [
         item for item in items
@@ -3084,13 +3266,24 @@ def prepare_vk_feed_radar(
         and str(item.get("material") or "").strip()
     ]
 
+    access_error = str(feed.get("access_error") or "").strip()
+    if access_error:
+        return {
+            **feed,
+            "recommendations": [],
+            "message": (
+                "VK не дал Агентству прочитать Вашу личную ленту через текущий доступ. "
+                "Причина: " + access_error
+            ),
+        }
+
     if not items:
         return {
             **feed,
             "recommendations": [],
             "message": (
-                "В подключённых VK-сообществах сейчас не найдено свежих публикаций "
-                "с открытыми комментариями и доступным текстом."
+                "Личная лента VK прочитана, но среди последних публикаций Неона не нашла "
+                "постов с доступным содержанием, к которым можно подготовить комментарий."
             ),
         }
 
@@ -3098,7 +3291,8 @@ def prepare_vk_feed_radar(
         {
             "post_id": int(item["post_id"]),
             "owner_id": int(item["owner_id"]),
-            "community_name": item.get("community_name") or item.get("author_name") or "",
+            "author_name": item.get("author_name") or "",
+            "source_type": item.get("source_type") or "",
             "date": int(item.get("date") or 0),
             "content": item.get("material") or "",
         }
@@ -3108,35 +3302,33 @@ def prepare_vk_feed_radar(
     parsed: list[dict[str, Any]] = []
     if ask_openai_fn is not None:
         system = """
-Ты — Неона, помощник владельца Агентства W по естественному присутствию в VK.
-Сейчас перед тобой СВЕЖАЯ ЛЕНТА из подключённых целевых VK-сообществ.
-Это НЕ список сегодняшних кандидатов. Цель — быть заметным в живой ленте,
-поддерживать нормальное человеческое общение и постепенно знакомиться с людьми,
-которые читают и обсуждают эти публикации.
+Ты — Неона, помощник владельца Агентства W по естественному общению во VK.
+Перед тобой настоящая ЛИЧНАЯ ЛЕНТА VK владельца: посты друзей, подписок и сообществ,
+которые VK показывает человеку в обычном разделе «Лента».
 
-Выбери до 5 публикаций, где есть что сказать по существу.
+Твоя задача — выбрать до 5 публикаций, где владелец может естественно появиться
+с содержательным человеческим комментарием.
 
-Правила комментария:
+Правила:
 - 1–2 коротких естественных предложения;
 - писать от лица владельца кабинета, НЕ от имени Неоны;
 - обязательно опираться на конкретную мысль из публикации;
-- можно добавить умное наблюдение, лёгкий юмор или короткий вопрос;
+- можно добавить умное наблюдение, тёплую реакцию, лёгкий юмор или короткий вопрос;
 - вопрос только если он действительно приглашает к разговору;
-- не упоминать Агентство W, ИИ, автоматизацию, бизнес-предложение, доход,
-  партнёрство, регистрацию, презентацию или встречу;
+- не упоминать Агентство W, ИИ, автоматизацию, доход, партнёрство, регистрацию,
+  презентацию, встречу или бизнес-предложение;
 - не рекламировать себя и не вставлять ссылки;
 - не писать пустые шаблоны «Отличный пост», «Полностью согласна», «Спасибо за пост»;
-- не спорить агрессивно, не читать нотации и не провоцировать конфликт;
-- если публикация не даёт содержательного повода — пропусти её;
+- не спорить агрессивно и не провоцировать конфликт;
+- рекламные публикации и посты без понятного содержания пропускай;
 - комментарии должны отличаться друг от друга по мысли и формулировке.
 
-Наша цель — не количество ради количества, но при наличии нормальных публикаций
-старайся выбрать 3–5 хороших комментариев за один проход.
+При наличии хороших публикаций старайся выбрать 3–5 комментариев за один проход.
 
 Верни ТОЛЬКО JSON-массив:
-[{"post_id":123,"owner_id":-456,"reason":"почему здесь уместно","comment":"готовый комментарий"}]
+[{"post_id":123,"owner_id":456,"reason":"почему здесь уместно","comment":"готовый комментарий"}]
 """.strip()
-        request = "СВЕЖАЯ ЛЕНТА VK-СООБЩЕСТВ:\n" + json.dumps(
+        request = "ЛИЧНАЯ ЛЕНТА VK ВЛАДЕЛЬЦА:\n" + json.dumps(
             public_view,
             ensure_ascii=False,
             indent=2,
@@ -3165,7 +3357,7 @@ def prepare_vk_feed_radar(
         recommendations.append({
             **source,
             "assignment_id": None,
-            "business_signal": str(source.get("fit_summary") or "").strip(),
+            "business_signal": "",
             "reason": re.sub(r"\s+", " ", str(choice.get("reason") or "")).strip(),
             "comment": comment,
         })
@@ -3178,8 +3370,7 @@ def prepare_vk_feed_radar(
         "eligible": len(eligible),
         "recommendations": recommendations,
         "message": (
-            f"Источников просмотрено: {int(feed.get('sources_checked') or 0)}; "
-            f"свежих постов в ленте: {len(items)}; "
+            f"В личной ленте просмотрено: {len(items)}; "
             f"Неона подготовила комментариев: {len(recommendations)}."
         ),
     }
