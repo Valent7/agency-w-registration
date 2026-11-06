@@ -1450,11 +1450,62 @@ def render_vk_sources(
     auth_key = f"vk_scout_auth_url_{owner_id}"
 
     if service_mode:
-        st.success("🟢 VK Scout подключён через сервисный ключ приложения")
+        st.success("🟢 Поиск кандидатов VK подключён через сервисный ключ")
         st.caption(
-            "Поиск кандидатов работает через новый VK_SERVICE_TOKEN. "
-            "Старое заблокированное приложение VK ID больше не останавливает Неонию."
+            "Этот доступ нужен Неонии для поиска и выдачи VK 5/5. "
+            "Он не даёт права читать Вашу персональную «Ленту» VK."
         )
+
+        # Personal Home -> Feed is a different capability: VK requires the
+        # owner's own user authorization. Keep it visibly separate from the
+        # service-token status so a green candidate-search banner never implies
+        # that the personal feed is connected too.
+        if connected and not needs_reconnect:
+            st.success("🟢 Моя личная лента VK подключена через VK ID")
+            expires_at = str(connection.get("access_expires_at") or "").strip()
+            if expires_at:
+                st.caption(
+                    "Пользовательский доступ нужен только для Вашей личной ленты "
+                    "и автоматически обновляется worker."
+                )
+        else:
+            last_error = str(connection.get("last_error") or "").strip()
+            st.error("🔴 Моя личная лента VK пока не подключена")
+            if connected and needs_reconnect:
+                st.caption(
+                    "Сохранённый пользовательский доступ устарел. Нужно один раз "
+                    "заново подтвердить вход через VK ID."
+                )
+            else:
+                st.caption(
+                    "Для чтения именно Вашей обычной «Ленты» VK нужен отдельный "
+                    "пользовательский доступ через Ваш VK ID."
+                )
+            if last_error:
+                st.caption(f"Последний ответ VK: {last_error}")
+
+            if st.button(
+                "🔐 Подключить мою ленту VK",
+                key=f"vk_personal_feed_auth_start_{owner_id}",
+                type="primary",
+                use_container_width=True,
+            ):
+                try:
+                    st.session_state[auth_key] = begin_vk_scout_authorization(owner_id)
+                except Exception as exc:
+                    st.error(f"Не удалось начать подключение личной ленты VK: {exc}")
+
+            auth_url = str(st.session_state.get(auth_key) or "").strip()
+            if auth_url:
+                st.link_button(
+                    "Продолжить вход через VK ID",
+                    auth_url,
+                    use_container_width=True,
+                )
+                st.caption(
+                    "Подтвердите доступ в VK. После возврата в Агентство W "
+                    "кнопка «Прочитать мою ленту VK» сможет работать."
+                )
     elif vk_ready:
         st.success("🟢 VK Scout авторизован через VK ID")
         expires_at = str(connection.get("access_expires_at") or "").strip()
