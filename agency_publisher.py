@@ -14,11 +14,25 @@ from PIL import Image, UnidentifiedImageError
 UTC = ZoneInfo("UTC")
 
 
+def _runtime_secret(name: str, default: str = "") -> str:
+    """Render-first runtime configuration with a safe legacy fallback."""
+    value = os.environ.get(name)
+    if value not in (None, ""):
+        return str(value).strip()
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value if value is not None else default).strip()
+
+
 def _supabase_config() -> tuple[str, str]:
-    url = str(st.secrets.get("SUPABASE_URL") or "").rstrip("/")
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "")
+    url = _runtime_secret("SUPABASE_URL").rstrip("/")
+    key = _runtime_secret("SUPABASE_SECRET_KEY")
     if not url or not key:
-        raise RuntimeError("Не найдены настройки Supabase.")
+        raise RuntimeError(
+            "Не найдены SUPABASE_URL / SUPABASE_SECRET_KEY в Render Environment."
+        )
     return url, key
 
 
@@ -35,12 +49,10 @@ def _db_headers(prefer: str | None = None) -> dict[str, str]:
 
 
 def _bot_token() -> str:
-    token = str(
-        st.secrets.get("AGENCY_W_PUBLISHER_BOT_TOKEN") or ""
-    ).strip()
+    token = _runtime_secret("AGENCY_W_PUBLISHER_BOT_TOKEN")
     if not token:
         raise RuntimeError(
-            "Не найден AGENCY_W_PUBLISHER_BOT_TOKEN в Streamlit Secrets."
+            "Не найден AGENCY_W_PUBLISHER_BOT_TOKEN в Render Environment."
         )
     return token
 
@@ -55,9 +67,11 @@ def _telegram_api_base() -> str:
     потому что он снова ограничит загрузку больших видео.
     """
     default_local_base = "https://agency-w-telegram-api.onrender.com"
-    base = str(
-        st.secrets.get("AGENCY_W_TELEGRAM_API_BASE")
-        or os.environ.get("AGENCY_W_TELEGRAM_API_BASE")
+    base = (
+        _runtime_secret(
+            "AGENCY_W_TELEGRAM_API_BASE",
+            default_local_base,
+        )
         or default_local_base
     ).strip().rstrip("/")
     return base or default_local_base
