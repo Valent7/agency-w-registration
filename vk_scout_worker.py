@@ -397,11 +397,8 @@ def top_up_vk_owner_now(
             raise VKScoutError("Нет рабочего VK-токена для добора.")
         os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
 
-    scan_result = scan_vk_sources(
-        owner_id,
-        per_source=200,
-        max_sources=min(10, len(sources)),
-    )
+    # Сначала используем уже сохранённый большой пул. Кнопка «Добрать»
+    # не должна ждать VK API, если в базе уже есть тысячи профилей.
     prepared, analyzed_total, best_score = _score_until_daily_five(
         owner_id,
         member_code,
@@ -409,8 +406,33 @@ def top_up_vk_owner_now(
         daily_limit=max(1, min(5, int(daily_limit))),
         min_score=max(0, min(100, int(min_score))),
         analysis_limit=max(5, min(100, int(analysis_limit))),
-        max_rounds=3,
+        max_rounds=5,
     )
+    scan_result = {"candidates_found": 0}
+    if not prepared.get("complete"):
+        try:
+            scan_result = scan_vk_sources(
+                owner_id,
+                per_source=200,
+                max_sources=min(10, len(sources)),
+            )
+        except Exception as exc:
+            _log(f"{owner_id}: обновление VK отложено; работаю из сохранённого пула: {exc}")
+            scan_result = {"candidates_found": 0, "errors": [str(exc)]}
+        if int(scan_result.get("candidates_found") or 0) > 0:
+            prepared2, analyzed2, best2 = _score_until_daily_five(
+                owner_id,
+                member_code,
+                target_profile,
+                daily_limit=max(1, min(5, int(daily_limit))),
+                min_score=max(0, min(100, int(min_score))),
+                analysis_limit=max(5, min(100, int(analysis_limit))),
+                max_rounds=3,
+            )
+            prepared = prepared2
+            analyzed_total += analyzed2
+            if best2 is not None:
+                best_score = best2 if best_score is None else max(best_score, best2)
     return {
         "ok": True,
         "count": int(prepared.get("count") or len(prepared.get("assignments") or [])),
@@ -532,13 +554,9 @@ def run_once() -> dict[str, int]:
             continue
 
         try:
-            scan_result = scan_vk_sources(
-                owner_id,
-                per_source=200,
-                max_sources=min(10, len(sources)),
-            )
-            for scan_error in scan_result.get("errors") or []:
-                _log(f"{owner_id}: VK источник: {scan_error}")
+            # Выдача дневной пятёрки не зависит от доступности VK API:
+            # сначала работаем с уже сохранённым пулом, и только при нехватке
+            # обновляем источники. Это убирает 45-секундные таймауты из критического пути.
             prepared, analyzed_total, best_score = _score_until_daily_five(
                 owner_id,
                 member_code,
@@ -546,11 +564,46 @@ def run_once() -> dict[str, int]:
                 daily_limit=daily_limit,
                 min_score=min_score,
                 analysis_limit=analysis_limit,
+                max_rounds=8,
             )
             stats["analyzed"] += analyzed_total
+            scan_result = {"candidates_found": 0, "errors": []}
+
+            if not prepared.get("complete"):
+                try:
+                    scan_result = scan_vk_sources(
+                        owner_id,
+                        per_source=200,
+                        max_sources=min(10, len(sources)),
+                    )
+                    for scan_error in scan_result.get("errors") or []:
+                        _log(f"{owner_id}: VK источник: {scan_error}")
+                except Exception as scan_exc:
+                    _log(
+                        f"{owner_id}: VK API не ответил; продолжаю из сохранённого пула: "
+                        f"{scan_exc}"
+                    )
+                    scan_result = {"candidates_found": 0, "errors": [str(scan_exc)]}
+
+                if int(scan_result.get("candidates_found") or 0) > 0:
+                    prepared2, analyzed2, best2 = _score_until_daily_five(
+                        owner_id,
+                        member_code,
+                        target_profile,
+                        daily_limit=daily_limit,
+                        min_score=min_score,
+                        analysis_limit=analysis_limit,
+                        max_rounds=17,
+                    )
+                    prepared = prepared2
+                    analyzed_total += analyzed2
+                    stats["analyzed"] += analyzed2
+                    if best2 is not None:
+                        best_score = best2 if best_score is None else max(best_score, best2)
+
             _log(
                 f"{owner_id}: Неония проверила VK-пул; "
-                f"найдено={scan_result.get('candidates_found') or 0}, "
+                f"найдено_свежих={scan_result.get('candidates_found') or 0}, "
                 f"оценено={analyzed_total}, "
                 f"лучший_балл={best_score}"
             )
