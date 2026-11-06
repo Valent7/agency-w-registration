@@ -509,7 +509,10 @@ def run_once() -> dict[str, int]:
             scout_access_token = fallback_access_token
             os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
             if service_access_token:
-                _log("VK Scout OAuth недоступен; использую VK_SERVICE_TOKEN приложения")
+                _log(
+                    "VK Scout OAuth недоступен; использую VK_SERVICE_TOKEN приложения; "
+                    f"причина: {exc}"
+                )
             else:
                 _log(
                     "VK Scout OAuth недоступен; использую резервный VK_ACCESS_TOKEN "
