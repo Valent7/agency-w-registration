@@ -2905,6 +2905,215 @@ def fetch_vk_candidate_feed(
     }
 
 
+def _parse_vk_post_reference(value: str) -> tuple[int, int] | None:
+    """Extract owner_id/post_id from a normal VK post link."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    # Accept https://vk.com/wall-123_456, vk.com/wall123_456 and raw -123_456.
+    match = re.search(r"(?:wall)?(-?\d+)_(\d+)", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        owner_id = int(match.group(1))
+        post_id = int(match.group(2))
+    except (TypeError, ValueError):
+        return None
+    if owner_id == 0 or post_id <= 0:
+        return None
+    return owner_id, post_id
+
+
+def prepare_vk_feed_links(
+    owner_id: int,
+    values: Iterable[str],
+    *,
+    ask_openai_fn: Callable[..., Any] | None = None,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Prepare comments for 1-5 post links copied from the owner's visible VK feed.
+
+    This deliberately uses the working service-token path for public post reads
+    and does not touch the blocked legacy VK ID application.
+    """
+    refs: list[tuple[int, int]] = []
+    invalid: list[str] = []
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        parsed = _parse_vk_post_reference(text)
+        if not parsed:
+            invalid.append(text[:160])
+            continue
+        if parsed not in refs:
+            refs.append(parsed)
+        if len(refs) >= max(1, min(5, int(limit))):
+            break
+
+    if not refs:
+        return {
+            "items": [],
+            "recommendations": [],
+            "invalid": invalid,
+            "message": "Вставьте ссылку хотя бы на один пост из Вашей ленты VK.",
+        }
+
+    posts_param = ",".join(f"{owner}_{post}" for owner, post in refs)
+    response = _vk_api(
+        "wall.getById",
+        posts=posts_param,
+        extended=1,
+        fields="first_name,last_name,screen_name,name",
+    )
+    if isinstance(response, dict):
+        raw_items = response.get("items") or response.get("posts") or []
+        profiles_raw = response.get("profiles") or []
+        groups_raw = response.get("groups") or []
+    else:
+        raw_items = response or []
+        profiles_raw = []
+        groups_raw = []
+
+    profiles = {
+        int(row.get("id") or 0): row
+        for row in profiles_raw
+        if isinstance(row, dict) and str(row.get("id") or "").lstrip("-").isdigit()
+    }
+    groups = {
+        int(row.get("id") or 0): row
+        for row in groups_raw
+        if isinstance(row, dict) and str(row.get("id") or "").lstrip("-").isdigit()
+    }
+
+    items: list[dict[str, Any]] = []
+    wanted_keys = set(refs)
+    for post in raw_items:
+        if not isinstance(post, dict):
+            continue
+        try:
+            post_id = int(post.get("id") or 0)
+            post_owner = int(post.get("owner_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if (post_owner, post_id) not in wanted_keys:
+            continue
+
+        material = _vk_post_material(post)
+        if not material:
+            continue
+
+        if post_owner > 0:
+            profile = profiles.get(post_owner) or {}
+            first_name = str(profile.get("first_name") or "").strip()
+            last_name = str(profile.get("last_name") or "").strip()
+            author_name = " ".join(x for x in (first_name, last_name) if x) or f"VK user {post_owner}"
+            screen_name = str(profile.get("screen_name") or "").strip()
+            profile_url = f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/id{post_owner}"
+            source_type = "person"
+        else:
+            gid = abs(post_owner)
+            group = groups.get(gid) or {}
+            author_name = str(group.get("name") or "").strip() or f"VK-сообщество {gid}"
+            screen_name = str(group.get("screen_name") or "").strip()
+            profile_url = f"https://vk.com/{screen_name}" if screen_name else f"https://vk.com/club{gid}"
+            source_type = "community"
+
+        items.append({
+            "post_id": post_id,
+            "owner_id": post_owner,
+            "date": int(post.get("date") or 0),
+            "author_name": author_name,
+            "profile_url": profile_url,
+            "post_url": f"https://vk.com/wall{post_owner}_{post_id}",
+            "source_type": source_type,
+            "material": material,
+        })
+
+    if not items:
+        return {
+            "items": [],
+            "recommendations": [],
+            "invalid": invalid,
+            "message": (
+                "VK не отдал содержимое этих ссылок. Проверьте, что это обычные публичные "
+                "посты из ленты, а не реклама или закрытая запись."
+            ),
+        }
+
+    public_view = [
+        {
+            "post_id": int(item["post_id"]),
+            "owner_id": int(item["owner_id"]),
+            "author_name": item["author_name"],
+            "source_type": item["source_type"],
+            "content": item["material"],
+        }
+        for item in items
+    ]
+
+    parsed: list[dict[str, Any]] = []
+    if ask_openai_fn is not None:
+        system = """
+Ты — Неона. Перед тобой несколько публичных постов, которые владелец Агентства W
+сам выбрал прямо из своей обычной ленты VK.
+
+Для каждого подходящего поста напиши один естественный комментарий от лица владельца.
+Правила:
+- 1–2 коротких предложения;
+- опирайся на конкретную мысль поста;
+- можно добавить тёплое наблюдение, лёгкий юмор или короткий вопрос;
+- не упоминай Агентство W, ИИ, автоматизацию, доход, партнёрство, регистрацию,
+  презентацию, встречу и любые продажи;
+- без ссылок и без шаблонов вроде «Отличный пост»;
+- если по тексту нечего сказать по существу — пропусти пост;
+- не выдумывай содержание фото/видео, если оно не описано в доступном тексте.
+
+Верни ТОЛЬКО JSON-массив:
+[{"post_id":123,"owner_id":456,"reason":"почему уместно","comment":"готовый комментарий"}]
+""".strip()
+        request = "ПОСТЫ ИЗ ЛИЧНОЙ ЛЕНТЫ VK:\n" + json.dumps(
+            public_view,
+            ensure_ascii=False,
+            indent=2,
+        )
+        parsed = _extract_json_array(ask_openai_fn(system, request))
+
+    by_key = {
+        (int(item["owner_id"]), int(item["post_id"])): item
+        for item in items
+    }
+    recommendations: list[dict[str, Any]] = []
+    used: set[tuple[int, int]] = set()
+    for choice in parsed:
+        try:
+            key = (int(choice.get("owner_id") or 0), int(choice.get("post_id") or 0))
+        except (TypeError, ValueError):
+            continue
+        item = by_key.get(key)
+        if not item or key in used:
+            continue
+        comment = re.sub(r"\s+", " ", str(choice.get("comment") or "")).strip()
+        if not comment:
+            continue
+        recommendations.append({
+            **item,
+            "assignment_id": None,
+            "reason": re.sub(r"\s+", " ", str(choice.get("reason") or "")).strip(),
+            "comment": comment,
+        })
+        used.add(key)
+
+    return {
+        "items": items,
+        "recommendations": recommendations,
+        "invalid": invalid,
+        "message": (
+            f"Постов прочитано: {len(items)}; комментариев подготовлено: {len(recommendations)}."
+        ),
+    }
+
+
 def fetch_vk_personal_feed(
     owner_id: int,
     *,
