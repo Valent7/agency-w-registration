@@ -406,7 +406,7 @@ def top_up_vk_owner_now(
         daily_limit=max(1, min(5, int(daily_limit))),
         min_score=max(0, min(100, int(min_score))),
         analysis_limit=max(5, min(100, int(analysis_limit))),
-        max_rounds=5,
+        max_rounds=2,
     )
     scan_result = {"candidates_found": 0}
     if not prepared.get("complete"):
@@ -415,6 +415,7 @@ def top_up_vk_owner_now(
                 owner_id,
                 per_source=200,
                 max_sources=min(10, len(sources)),
+                include_active_context=True,
             )
         except Exception as exc:
             _log(f"{owner_id}: обновление VK отложено; работаю из сохранённого пула: {exc}")
@@ -564,7 +565,7 @@ def run_once() -> dict[str, int]:
                 daily_limit=daily_limit,
                 min_score=min_score,
                 analysis_limit=analysis_limit,
-                max_rounds=8,
+                max_rounds=2,
             )
             stats["analyzed"] += analyzed_total
             scan_result = {"candidates_found": 0, "errors": []}
@@ -575,6 +576,7 @@ def run_once() -> dict[str, int]:
                         owner_id,
                         per_source=200,
                         max_sources=min(10, len(sources)),
+                        include_active_context=True,
                     )
                     for scan_error in scan_result.get("errors") or []:
                         _log(f"{owner_id}: VK источник: {scan_error}")
@@ -622,6 +624,7 @@ def run_once() -> dict[str, int]:
                         owner_id,
                         per_source=200,
                         max_sources=min(10, len(sources)),
+                        include_active_context=True,
                     )
                     prepared, analyzed_total, _ = _score_until_daily_five(
                         owner_id,
