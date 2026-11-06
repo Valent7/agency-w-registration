@@ -885,6 +885,7 @@ def fetch_vk_active_commenters(
 
     user_ids: list[int] = []
     seen: set[int] = set()
+    comment_samples: dict[int, list[str]] = {}
     for post in posts:
         if not isinstance(post, dict):
             continue
@@ -933,7 +934,14 @@ def fetch_vk_active_commenters(
                 uid = int(row.get("from_id") or 0)
             except (TypeError, ValueError):
                 continue
-            if uid <= 0 or uid in seen:
+            if uid <= 0:
+                continue
+            comment_text = " ".join(str(row.get("text") or "").split()).strip()
+            if comment_text:
+                bucket = comment_samples.setdefault(uid, [])
+                if len(bucket) < 3 and comment_text not in bucket:
+                    bucket.append(comment_text[:500])
+            if uid in seen:
                 continue
             seen.add(uid)
             user_ids.append(uid)
@@ -953,6 +961,15 @@ def fetch_vk_active_commenters(
                 continue
             enriched = dict(item)
             enriched["source_community_id"] = cid
+            raw_profile = (
+                dict(enriched.get("raw_profile"))
+                if isinstance(enriched.get("raw_profile"), dict)
+                else {}
+            )
+            samples = comment_samples.get(int(enriched.get("vk_user_id") or 0)) or []
+            if samples:
+                raw_profile["public_comment_samples"] = samples[:3]
+            enriched["raw_profile"] = raw_profile
             members.append(enriched)
 
     return {
@@ -1057,7 +1074,13 @@ def save_vk_candidates(candidates: Iterable[dict[str, Any]]) -> int:
     return saved
 
 
-def scan_vk_sources(owner_id: int, *, per_source: int = 200, max_sources: int = 10) -> dict[str, Any]:
+def scan_vk_sources(
+    owner_id: int,
+    *,
+    per_source: int = 200,
+    max_sources: int = 10,
+    include_active_context: bool = False,
+) -> dict[str, Any]:
     sources = load_vk_sources(owner_id)[:max(1, min(50, int(max_sources)))]
     unique: dict[int, dict[str, Any]] = {}
     errors: list[str] = []
@@ -1066,6 +1089,33 @@ def scan_vk_sources(owner_id: int, *, per_source: int = 200, max_sources: int = 
             page = fetch_vk_members(source, count=per_source)
             for item in page["members"]:
                 unique[int(item["vk_user_id"])] = item
+
+            # Когда обычные карточки слишком пустые, добираем активных авторов
+            # публичных комментариев вместе с небольшими текстовыми фрагментами.
+            # Это даёт Неонии реальные рабочие сигналы вместо имени+города.
+            if include_active_context:
+                try:
+                    active_page = fetch_vk_active_commenters(
+                        source,
+                        post_limit=6,
+                        comment_limit=60,
+                        max_people=min(120, max(40, int(per_source))),
+                    )
+                    for item in active_page.get("members") or []:
+                        uid = int(item.get("vk_user_id") or 0)
+                        if uid <= 0:
+                            continue
+                        previous = unique.get(uid) or {}
+                        merged = {**previous, **item}
+                        old_raw = previous.get("raw_profile") if isinstance(previous.get("raw_profile"), dict) else {}
+                        new_raw = item.get("raw_profile") if isinstance(item.get("raw_profile"), dict) else {}
+                        merged["raw_profile"] = {**old_raw, **new_raw}
+                        unique[uid] = merged
+                except Exception as active_exc:
+                    errors.append(
+                        f"{source.get('community_name') or source.get('community_id')}: "
+                        f"active-context: {active_exc}"
+                    )
         except Exception as exc:
             error_text = str(exc)
             errors.append(
@@ -1100,6 +1150,9 @@ def _deterministic_public_work_signals(candidate: dict[str, Any]) -> dict[str, A
     occupation = raw.get("occupation") if isinstance(raw.get("occupation"), dict) else {}
     career = raw.get("career") if isinstance(raw.get("career"), list) else []
     status = str(candidate.get("status_text") or "").strip()
+    comment_samples = raw.get("public_comment_samples")
+    if not isinstance(comment_samples, list):
+        comment_samples = []
 
     evidence: list[str] = []
     work_text_parts: list[str] = []
@@ -1131,6 +1184,19 @@ def _deterministic_public_work_signals(candidate: dict[str, Any]) -> dict[str, A
     if status and any(marker in status_low for marker in work_markers):
         evidence.append("VK: рабочий статус — " + status[:180])
         work_text_parts.append(status)
+
+    comment_markers = work_markers + (
+        "клиент", "команд", "заказ", "заявк", "встреч", "консультац",
+        "работа", "работаю", "сопровожд", "обучен", "курс", "презентац",
+    )
+    for sample in comment_samples[:3]:
+        sample_text = " ".join(str(sample or "").split()).strip()
+        sample_low = sample_text.casefold()
+        if sample_text and any(marker in sample_low for marker in comment_markers):
+            evidence.append("VK: публичный комментарий — " + sample_text[:180])
+            work_text_parts.append(sample_text)
+            if len(evidence) >= 3:
+                break
 
     combined = " ".join(work_text_parts).casefold()
     ai_provider = bool(
@@ -1168,6 +1234,7 @@ def _candidate_public_view(item: dict[str, Any]) -> dict[str, Any]:
         "last_seen": raw.get("last_seen"),
         "occupation": raw.get("occupation"),
         "career": raw.get("career"),
+        "public_comment_samples": raw.get("public_comment_samples"),
         "can_write_private_message": item.get("can_write_private_message"),
         "source_community_id": item.get("source_community_id"),
     }
