@@ -7294,316 +7294,807 @@ def _render_result(
                             f"{type(exc).__name__}: {exc}"
                         )
 
-            # Telegram-площадки владельца: всегда даём открыть список,
-            # выбрать нужные, убрать старые и найти новые.
-            if telegram_destinations:
-                all_tg_ids = [
+            # Telegram-площадки владельца. Если иллюстрация уже готова,
+            # кнопка будет ниже непосредственно под иллюстрацией.
+            if telegram_destinations and not has_current_image:
+                tg_ids = [
                     int(item.get("chat_id"))
                     for item in telegram_destinations
                     if item.get("chat_id") is not None
                 ]
-                clean_tg_text = str(
-                    result.get("edited_content") or draft
-                ).strip()
-
-                content_image_mode = "photo"
-                if has_current_image:
-                    content_image_mode_label = st.radio(
-                        "Как отправить эту иллюстрацию в Telegram",
-                        options=[
-                            "🖼️ Обычная картинка",
-                            "🏷️ Стикер Telegram",
-                        ],
-                        horizontal=True,
-                        key=(
-                            f"stagirite_content_image_mode_"
-                            f"{task_id}"
-                        ),
-                        help=(
-                            "В режиме стикера текст отправится один раз, "
-                            "а прозрачная иллюстрация — отдельным "
-                            "Telegram-стикером."
-                        ),
-                    )
-                    content_image_mode = (
-                        "sticker"
-                        if content_image_mode_label
-                        == "🏷️ Стикер Telegram"
-                        else "photo"
-                    )
-
-                manager_key = (
-                    f"stagirite_tg_manager_open_{task_id}"
+                tg_hash = _telegram_publication_hash(
+                    str(result.get("edited_content") or draft).strip(),
+                    None,
+                    tg_ids,
                 )
-                if manager_key not in st.session_state:
-                    st.session_state[manager_key] = False
-
-                if st.button(
-                    (
-                        f"📡 Telegram-площадки ({len(all_tg_ids)}) · "
-                        "выбрать / изменить"
-                    ),
-                    key=f"stagirite_tg_manager_toggle_{task_id}",
+                tg_published_count = int(
+                    result.get("telegram_published_count") or 0
+                )
+                tg_already = bool(
+                    tg_ids
+                    and tg_published_count == len(tg_ids)
+                    and str(result.get("telegram_published_hash") or "") == tg_hash
+                )
+                if tg_already:
+                    st.success(
+                        "📡 Telegram принял эту версию материала: "
+                        f"{int(result.get('telegram_published_count') or 0)} "
+                        "площадк(а/и)."
+                    )
+                elif st.button(
+                    f"📡 Опубликовать во всех моих Telegram-площадках ({len(tg_ids)})",
+                    key=f"stagirite_publish_telegram_text_{task_id}",
                     use_container_width=True,
                     type="primary",
+                    disabled=publish_to_publisher_destinations is None,
                 ):
-                    st.session_state[manager_key] = not bool(
-                        st.session_state.get(manager_key)
+                    try:
+                        tg_result = publish_to_publisher_destinations(
+                            owner_id,
+                            str(result.get("edited_content") or draft).strip(),
+                            destination_ids=tg_ids,
+                        )
+                        accepted = int(tg_result.get("accepted") or 0)
+                        requested = int(
+                            tg_result.get("requested") or len(tg_ids)
+                        )
+                        failed = int(tg_result.get("failed") or 0)
+                        publish_results = tg_result.get("results") or []
+                        if (
+                            accepted <= 0
+                            or failed > 0
+                            or accepted < requested
+                        ):
+                            details = []
+                            for item in publish_results:
+                                if (
+                                    not isinstance(item, dict)
+                                    or item.get("ok") is True
+                                ):
+                                    continue
+                                title = str(
+                                    item.get("title")
+                                    or "Telegram-площадка"
+                                ).strip()
+                                error = str(
+                                    item.get("error")
+                                    or "неизвестная ошибка"
+                                ).strip()
+                                details.append(f"{title}: {error}")
+                            detail_text = "; ".join(details[:3])
+                            summary = (
+                                f"Telegram доставил материал в "
+                                f"{accepted} из {requested} площадок."
+                            )
+                            if detail_text:
+                                summary += f" Причина: {detail_text}"
+                            raise RuntimeError(summary)
+
+                        updated = dict(result)
+                        updated["telegram_published_at"] = datetime.now(UTC).isoformat()
+                        updated["telegram_published_hash"] = tg_hash
+                        updated["telegram_published_count"] = accepted
+                        updated["telegram_publish_results"] = publish_results
+                        _update_task(owner_id, task_id, {"result": updated})
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось передать материал в Telegram. "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+
+        understanding = (
+            result.get("stagirite_understanding")
+            if isinstance(result.get("stagirite_understanding"), dict)
+            else {}
+        )
+        if bool(understanding.get("requested_image")):
+            st.success(
+                "🎨 Стагирит понял: к материалу нужна иллюстрация. "
+                "Промт Художнику он подготовит сам."
+            )
+
+        st.markdown("### 📎 Готовые медиа")
+        st.caption(
+            "Можно загрузить свою картинку или готовый MP4-ролик. "
+            "Художник отвечает только за иллюстрации; анонс к ролику пишет "
+            "Мастер контента."
+        )
+
+        # --------------------------------------------------------
+        # Директор может принести готовую картинку или ролик.
+        # --------------------------------------------------------
+        upload_key = f"stagirite_artist_upload_{task_id}"
+        video_upload_key = f"stagirite_video_upload_{task_id}"
+        media_upload_cols = st.columns(2)
+        with media_upload_cols[0]:
+            uploaded_illustration = st.file_uploader(
+                "🖼️ Загрузить картинку",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=False,
+                key=upload_key,
+                help=(
+                    "Если подходящая картинка уже найдена или создана "
+                    "в другом сервисе, загрузите её сюда. "
+                    "Поддерживаются PNG, JPG/JPEG и WEBP до 12 МБ."
+                ),
+            )
+        with media_upload_cols[1]:
+            uploaded_video = st.file_uploader(
+                "🎬 Загрузить ролик",
+                type=["mp4"],
+                accept_multiple_files=False,
+                key=video_upload_key,
+                help=(
+                    "Готовый MP4-ролик для публикации в ваших Telegram-площадках. "
+                    "Текущий лимит — 300 МБ."
+                ),
+            )
+
+        if uploaded_illustration is not None:
+            try:
+                st.image(
+                    uploaded_illustration,
+                    caption="Предпросмотр вашей иллюстрации",
+                    use_container_width=True,
+                )
+            except Exception:
+                pass
+
+            if st.button(
+                "✅ Использовать эту иллюстрацию",
+                key=f"stagirite_artist_use_upload_{task_id}",
+                use_container_width=True,
+                type="primary",
+            ):
+                prepared_upload = _prepare_uploaded_illustration(
+                    uploaded_illustration
+                )
+                if not prepared_upload.get("ok"):
+                    st.error(
+                        str(
+                            prepared_upload.get("error")
+                            or "Не удалось загрузить иллюстрацию."
+                        )
+                    )
+                else:
+                    st.session_state[image_state_key] = (
+                        prepared_upload["image_bytes"]
+                    )
+                    st.session_state[image_meta_key] = {
+                        "source": "uploaded",
+                        "source_text": str(draft).strip(),
+                        "original_name": str(
+                            getattr(
+                                uploaded_illustration,
+                                "name",
+                                "",
+                            )
+                            or ""
+                        ),
+                        "original_format": str(
+                            prepared_upload.get("original_format")
+                            or ""
+                        ),
+                        "original_width": int(
+                            prepared_upload.get("original_width")
+                            or 0
+                        ),
+                        "original_height": int(
+                            prepared_upload.get("original_height")
+                            or 0
+                        ),
+                        "width": int(
+                            prepared_upload.get("width")
+                            or 0
+                        ),
+                        "height": int(
+                            prepared_upload.get("height")
+                            or 0
+                        ),
+                        "resized": bool(
+                            prepared_upload.get("resized")
+                        ),
+                        "created_at": datetime.now(UTC).isoformat(),
+                        "quality_passed": False,
+                        "auto_redrawn": False,
+                    }
+                    st.success(
+                        "Ваша иллюстрация принята. "
+                        "Теперь её можно публиковать вместе с постом."
                     )
                     st.rerun()
 
-                if st.session_state.get(manager_key):
-                    with st.container(border=True):
-                        st.markdown("**Куда разместить пост**")
-                        st.caption(
-                            "Оставьте галочки только у нужных чатов. "
-                            "Здесь же можно убрать старую площадку или "
-                            "найти новую после добавления @AgencyWPublisherBot."
-                        )
+        if uploaded_video is not None:
+            prepared_video = _prepare_uploaded_video(uploaded_video)
+            if prepared_video.get("ok"):
+                st.video(uploaded_video)
+                st.caption(
+                    "🎬 "
+                    + str(prepared_video.get("file_name") or "Ролик")
+                    + " · "
+                    + str(prepared_video.get("size_mb") or 0)
+                    + " МБ"
+                )
+                if st.button(
+                    "✅ Использовать этот ролик",
+                    key=f"stagirite_video_use_upload_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    st.session_state[video_state_key] = prepared_video["video_bytes"]
+                    st.session_state[video_meta_key] = {
+                        "source": "uploaded",
+                        "file_name": str(prepared_video.get("file_name") or "agency_w_video.mp4"),
+                        "mime_type": str(prepared_video.get("mime_type") or "video/mp4"),
+                        "size_bytes": int(prepared_video.get("size_bytes") or 0),
+                        "size_mb": float(prepared_video.get("size_mb") or 0),
+                        "created_at": datetime.now(UTC).isoformat(),
+                    }
+                    updated = dict(result)
+                    for key in (
+                        "video_announcement",
+                        "video_announcement_approved",
+                        "video_announcement_approved_at",
+                        "video_announcement_engine",
+                        "video_structure_published_at",
+                        "video_structure_published_hash",
+                        "video_structure_published_count",
+                        "video_structure_media_id",
+                        "video_telegram_published_at",
+                        "video_telegram_published_hash",
+                        "video_telegram_published_count",
+                        "video_telegram_publish_results",
+                    ):
+                        updated.pop(key, None)
+                    _update_task(owner_id, task_id, {"result": updated})
+                    st.success("Ролик принят. Теперь Мастер контента может написать к нему анонс.")
+                    st.rerun()
+            else:
+                st.error(str(prepared_video.get("error") or "Не удалось подготовить ролик."))
 
-                        selected_tg_ids = []
-                        for item in telegram_destinations:
-                            try:
-                                chat_id = int(item.get("chat_id"))
-                            except (TypeError, ValueError):
-                                continue
+        st.markdown("### 🎨 Художник-иллюстратор")
+        st.caption(
+            "Если нужна новая иллюстрация, вам не надо придумывать промт. "
+            "Стагирит как арт-директор ставит Художнику задачу по смыслу текста."
+        )
 
-                            title = str(
-                                item.get("chat_title")
-                                or "Telegram-площадка"
-                            ).strip()
-                            username = str(
-                                item.get("chat_username") or ""
-                            ).strip()
+        change_key = f"stagirite_artist_change_{task_id}"
 
-                            row = st.columns([5, 2])
-                            with row[0]:
-                                enabled = st.checkbox(
-                                    title + (
-                                        f" · @{username}"
-                                        if username else ""
-                                    ),
-                                    value=True,
-                                    key=(
-                                        f"stagirite_tg_pick_"
-                                        f"{task_id}_{chat_id}"
-                                    ),
-                                )
-                                if enabled:
-                                    selected_tg_ids.append(chat_id)
-                            with row[1]:
-                                if st.button(
-                                    "🗑️ Убрать",
-                                    key=(
-                                        f"stagirite_tg_remove_"
-                                        f"{task_id}_{chat_id}"
-                                    ),
-                                    use_container_width=True,
-                                    disabled=(
-                                        remove_publisher_destination
-                                        is None
-                                    ),
-                                ):
-                                    try:
-                                        remove_publisher_destination(
-                                            owner_id,
-                                            chat_id,
-                                        )
-                                        st.rerun()
-                                    except Exception as exc:
-                                        st.error(
-                                            "Не удалось убрать чат. "
-                                            f"{type(exc).__name__}: {exc}"
-                                        )
+        format_label = st.selectbox(
+            "Формат иллюстрации",
+            options=[
+                "Квадрат — пост",
+                "Вертикальный — сторис / мобильный пост",
+                "Горизонтальный — анонс / обложка",
+            ],
+            key=f"stagirite_artist_format_{task_id}",
+        )
+        size_map = {
+            "Квадрат — пост": "1024x1024",
+            "Вертикальный — сторис / мобильный пост": "1024x1536",
+            "Горизонтальный — анонс / обложка": "1536x1024",
+        }
+        chosen_size = size_map[format_label]
 
-                        if st.button(
-                            "➕ Найти мои новые Telegram-площадки",
-                            key=f"stagirite_tg_sync_{task_id}",
-                            use_container_width=True,
-                            disabled=(
-                                sync_publisher_destinations is None
-                            ),
-                        ):
-                            try:
-                                found = sync_publisher_destinations()
-                                connected = int(
-                                    (found or {}).get("connected") or 0
-                                )
-                                if connected:
-                                    st.success(
-                                        f"Добавлено новых площадок: "
-                                        f"{connected}."
-                                    )
-                                else:
-                                    st.info(
-                                        "Новых площадок пока не найдено. "
-                                        "Сначала добавьте @AgencyWPublisherBot "
-                                        "администратором нужной группы/канала."
-                                    )
-                                st.rerun()
-                            except Exception as exc:
-                                st.error(
-                                    "Не удалось проверить новые чаты. "
-                                    f"{type(exc).__name__}: {exc}"
-                                )
+        current_image = st.session_state.get(image_state_key)
+        current_meta = st.session_state.get(image_meta_key, {})
+        if not isinstance(current_meta, dict):
+            current_meta = {}
 
-                        telegram_hash_text = clean_tg_text
-                        if has_current_image:
-                            telegram_hash_text += (
-                                f"\n[telegram_image_mode="
-                                f"{content_image_mode}]"
+        if current_image:
+            image_source = str(
+                current_meta.get("source") or "artist"
+            ).strip()
+
+            st.image(
+                current_image,
+                caption=(
+                    "Ваша загруженная иллюстрация"
+                    if image_source == "uploaded"
+                    else "Иллюстрация Художника"
+                ),
+                use_container_width=True,
+            )
+
+            if image_source == "uploaded":
+                st.caption(
+                    "📤 Эта картинка загружена Директором. "
+                    "Она используется в публикации так же, "
+                    "как иллюстрация Художника."
+                )
+                if current_meta.get("resized"):
+                    st.caption(
+                        "Изображение было аккуратно уменьшено "
+                        "для удобной публикации."
+                    )
+
+            if current_meta.get("auto_redrawn"):
+                st.caption(
+                    "🧐 Стагирит отклонил первую версию и сам отправил "
+                    "Художнику на одну доработку."
+                )
+            elif current_meta.get("quality_passed"):
+                st.caption(
+                    "✅ Стагирит проверил: иллюстрация соответствует смыслу поста."
+                )
+
+            source_changed = (
+                str(current_meta.get("source_text") or "").strip()
+                != str(draft or "").strip()
+            )
+            if source_changed:
+                st.warning(
+                    "После создания картинки текст был изменён. "
+                    "При необходимости перерисуйте иллюстрацию под новую версию."
+                )
+
+            st.download_button(
+                "⬇️ Сохранить PNG",
+                data=current_image,
+                file_name=(
+                    "agency_w_illustration_"
+                    + datetime.now(BERLIN).strftime("%Y%m%d")
+                    + ".png"
+                ),
+                mime="image/png",
+                key=f"stagirite_artist_download_{task_id}",
+                use_container_width=True,
+            )
+
+            # ----------------------------------------------------
+            # Публикация иллюстрации партнёрам.
+            # Если пост уже размещён — дополняем СУЩЕСТВУЮЩИЕ
+            # сообщения картинкой, не дублируя текст.
+            # Если пост ещё не размещён — отправляем текст + картинку
+            # как одно внутреннее сообщение.
+            # ----------------------------------------------------
+            current_image_hash = _artist_image_hash(
+                current_image
+            )
+            published_image_hash = str(
+                result.get("image_published_hash")
+                or ""
+            ).strip()
+            image_published_count = int(
+                result.get("image_published_count")
+                or 0
+            )
+            image_already_published = bool(
+                current_image_hash
+                and published_image_hash
+                and current_image_hash == published_image_hash
+            )
+
+            image_recipients = structure_member_ids(
+                owner_id
+            )
+            image_recipients_count = len(
+                image_recipients
+            )
+
+            if image_already_published:
+                st.success(
+                    "🖼️ Иллюстрация размещена во внутренних сообщениях: "
+                    f"{image_published_count} получател(я/ей)."
+                )
+            elif published_image_hash and current_image_hash:
+                st.warning(
+                    "Эта версия иллюстрации ещё не размещена: "
+                    "после предыдущей публикации картинка была изменена."
+                )
+
+            can_publish_image = bool(
+                is_approved
+                and not source_changed
+                and image_recipients_count > 0
+                and publish_structure_material is not None
+            )
+
+            if not is_approved:
+                st.caption(
+                    "Сначала утвердите текст материала — затем его "
+                    "можно разместить вместе с иллюстрацией."
+                )
+            elif source_changed:
+                st.caption(
+                    "Сначала перерисуйте иллюстрацию под текущую версию текста."
+                )
+            elif image_recipients_count == 0:
+                st.caption(
+                    "В структуре пока нет зарегистрированных получателей."
+                )
+            elif not image_already_published:
+                already_text_published = bool(
+                    str(result.get("published_at") or "").strip()
+                )
+
+                image_button_label = (
+                    f"📣 Добавить иллюстрацию к посту у всей структуры "
+                    f"({image_recipients_count})"
+                    if already_text_published
+                    else
+                    f"📣 Разместить пост с иллюстрацией всей структуре "
+                    f"({image_recipients_count})"
+                )
+
+                if st.button(
+                    image_button_label,
+                    key=f"stagirite_publish_image_{task_id}",
+                    use_container_width=True,
+                    type="primary",
+                    disabled=not can_publish_image,
+                ):
+                    try:
+                        image_file_name = (
+                            "agency_w_illustration_"
+                            + datetime.now(BERLIN).strftime(
+                                "%Y%m%d_%H%M%S"
                             )
-
-                        tg_hash = _telegram_publication_hash(
-                            telegram_hash_text,
-                            (
-                                current_image_for_publish
-                                if has_current_image
-                                else None
-                            ),
-                            selected_tg_ids,
-                        ) if selected_tg_ids else ""
-
-                        tg_published_count = int(
-                            result.get(
-                                "telegram_published_count"
-                            ) or 0
+                            + ".png"
                         )
-                        tg_already = bool(
-                            selected_tg_ids
-                            and tg_published_count
-                            == len(selected_tg_ids)
-                            and str(
-                                result.get(
-                                    "telegram_published_hash"
-                                ) or ""
-                            ) == tg_hash
-                        )
+                        clean_post_text = str(
+                            result.get("edited_content")
+                            or draft
+                        ).strip()
 
-                        if not selected_tg_ids:
-                            st.warning(
-                                "Выберите хотя бы один Telegram-чат."
-                            )
-                        elif tg_already:
-                            st.success(
-                                "📡 Эта версия уже размещена в "
-                                f"{tg_published_count} выбранных "
-                                "площадк(а/и)."
-                            )
-                        elif st.button(
-                            (
-                                (
-                                    "🚀 Разместить пост и иллюстрацию "
-                                    if has_current_image
-                                    else "🚀 Разместить пост "
-                                )
-                                + f"в выбранных чатах "
-                                f"({len(selected_tg_ids)})"
-                            ),
-                            key=(
-                                f"stagirite_publish_telegram_image_"
-                                f"{task_id}"
-                            ),
-                            use_container_width=True,
-                            type="primary",
-                            disabled=(
-                                publish_to_publisher_destinations
+                        if already_text_published:
+                            if (
+                                attach_structure_image_to_published_message
                                 is None
-                            ),
-                        ):
-                            try:
-                                tg_result = (
-                                    publish_to_publisher_destinations(
-                                        owner_id,
-                                        clean_tg_text,
-                                        image_bytes=(
-                                            current_image_for_publish
-                                            if has_current_image
-                                            else None
-                                        ),
-                                        destination_ids=selected_tg_ids,
-                                        image_mode=content_image_mode,
-                                    )
-                                )
-                                accepted = int(
-                                    tg_result.get("accepted") or 0
-                                )
-                                requested = int(
-                                    tg_result.get("requested")
-                                    or len(selected_tg_ids)
-                                )
-                                failed = int(
-                                    tg_result.get("failed") or 0
-                                )
-                                publish_results = (
-                                    tg_result.get("results") or []
+                            ):
+                                raise RuntimeError(
+                                    "Модуль прикрепления изображения не подключён."
                                 )
 
-                                if (
-                                    accepted <= 0
-                                    or failed > 0
-                                    or accepted < requested
-                                ):
-                                    details = []
-                                    for delivery in publish_results:
-                                        if (
-                                            not isinstance(
-                                                delivery, dict
-                                            )
-                                            or delivery.get("ok") is True
-                                        ):
-                                            continue
-                                        delivery_title = str(
-                                            delivery.get("title")
-                                            or "Telegram-площадка"
-                                        ).strip()
-                                        delivery_error = str(
-                                            delivery.get("error")
-                                            or "неизвестная ошибка"
-                                        ).strip()
-                                        details.append(
-                                            f"{delivery_title}: "
-                                            f"{delivery_error}"
-                                        )
-                                    detail_text = "; ".join(
-                                        details[:3]
-                                    )
-                                    summary = (
-                                        "Telegram доставил пост и "
-                                        f"иллюстрацию в {accepted} "
-                                        f"из {requested} площадок."
-                                    )
-                                    if detail_text:
-                                        summary += (
-                                            f" Причина: {detail_text}"
-                                        )
-                                    raise RuntimeError(summary)
-
-                                updated = dict(result)
-                                updated[
-                                    "telegram_published_at"
-                                ] = datetime.now(UTC).isoformat()
-                                updated[
-                                    "telegram_published_hash"
-                                ] = tg_hash
-                                updated[
-                                    "telegram_published_count"
-                                ] = accepted
-                                updated[
-                                    "telegram_publish_results"
-                                ] = publish_results
-                                _update_task(
+                            publish_result = (
+                                attach_structure_image_to_published_message(
                                     owner_id,
-                                    task_id,
-                                    {"result": updated},
+                                    clean_post_text,
+                                    current_image,
+                                    subject="Сообщение Агентства W",
+                                    published_at=str(
+                                        result.get("published_at")
+                                        or ""
+                                    ),
+                                    file_name=image_file_name,
                                 )
-                                st.rerun()
-                            except Exception as exc:
-                                st.error(
-                                    "Не удалось передать пост в "
-                                    "Telegram-площадки. "
-                                    f"{type(exc).__name__}: {exc}"
+                            )
+                        else:
+                            publish_result = publish_structure_material(
+                                owner_id,
+                                clean_post_text,
+                                image_bytes=current_image,
+                                subject="Сообщение Агентства W",
+                                zoom_url=str(
+                                    result.get("zoom_link")
+                                    or _load_stagirite_settings(
+                                        owner_id
+                                    ).get("zoom_link")
+                                    or ""
+                                ).strip(),
+                                file_name=image_file_name,
+                            )
+
+                        count = int(
+                            publish_result.get("count")
+                            or 0
+                        )
+                        media_id = str(
+                            publish_result.get("media_id")
+                            or ""
+                        ).strip()
+                        publish_mode = str(
+                            publish_result.get("mode")
+                            or ""
+                        ).strip()
+
+                        updated = dict(result)
+                        updated["edited_content"] = clean_post_text
+                        updated["content_approved"] = True
+                        updated["image_published_at"] = (
+                            datetime.now(UTC).isoformat()
+                        )
+                        updated["image_published_count"] = count
+                        updated["image_published_hash"] = (
+                            current_image_hash
+                        )
+                        updated["image_media_id"] = media_id
+                        updated["image_published_mode"] = (
+                            publish_mode
+                        )
+
+                        if not already_text_published:
+                            updated["published_at"] = (
+                                datetime.now(UTC).isoformat()
+                            )
+                            updated["published_count"] = count
+                            updated["published_delivery"] = (
+                                "internal_structure_with_image"
+                            )
+
+                        _update_task(
+                            owner_id,
+                            task_id,
+                            {
+                                "result": updated,
+                                "status": "Выполнено",
+                            },
+                        )
+                        st.rerun()
+
+                    except Exception as exc:
+                        st.error(
+                            "Не удалось разместить иллюстрацию "
+                            "во внутренних сообщениях. "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+            # ----------------------------------------------------
+            # Telegram-площадки: владелец открывает список и выбирает,
+            # куда отправлять. Здесь же можно удалить старую площадку
+            # или найти новую.
+            # ----------------------------------------------------
+            if (
+                is_approved
+                and not source_changed
+                and not telegram_destinations
+            ):
+                if telegram_destinations_error:
+                    st.warning(
+                        "Telegram-площадки временно недоступны: "
+                        "Агентство не смогло прочитать реестр чатов."
+                    )
+                    with st.expander("Техническая причина"):
+                        st.code(telegram_destinations_error)
+                else:
+                    st.info(
+                        "Подключённых Telegram-чатов пока нет. "
+                        "Откройте «Команда → Мои площадки»."
+                    )
+
+            if (
+                is_approved
+                and not source_changed
+                and telegram_destinations
+            ):
+                content_image_mode_label = st.radio(
+                    "Как отправить эту иллюстрацию в Telegram",
+                    options=[
+                        "🖼️ Обычная картинка",
+                        "🏷️ Стикер Telegram",
+                    ],
+                    horizontal=True,
+                    key=f"stagirite_content_image_mode_{task_id}",
+                )
+                content_image_mode = (
+                    "sticker"
+                    if content_image_mode_label == "🏷️ Стикер Telegram"
+                    else "photo"
+                )
+
+                with st.expander(
+                    f"📡 Telegram-площадки ({len(telegram_destinations)}) · "
+                    "выбрать / изменить",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "Оставьте галочки только у нужных чатов. "
+                        "Ненужный чат можно убрать из реестра."
+                    )
+
+                    selected_tg_ids = []
+                    for item in telegram_destinations:
+                        try:
+                            chat_id = int(item.get("chat_id"))
+                        except (TypeError, ValueError):
+                            continue
+
+                        chat_title = str(
+                            item.get("chat_title")
+                            or "Telegram-площадка"
+                        ).strip()
+                        chat_username = str(
+                            item.get("chat_username") or ""
+                        ).strip()
+
+                        row = st.columns([5, 2])
+                        with row[0]:
+                            chosen = st.checkbox(
+                                chat_title + (
+                                    f" · @{chat_username}"
+                                    if chat_username else ""
+                                ),
+                                value=True,
+                                key=(
+                                    f"stagirite_content_tg_pick_"
+                                    f"{task_id}_{chat_id}"
+                                ),
+                            )
+                            if chosen:
+                                selected_tg_ids.append(chat_id)
+
+                        with row[1]:
+                            if st.button(
+                                "🗑️ Убрать",
+                                key=(
+                                    f"stagirite_content_tg_remove_"
+                                    f"{task_id}_{chat_id}"
+                                ),
+                                use_container_width=True,
+                                disabled=(
+                                    remove_publisher_destination is None
+                                ),
+                            ):
+                                try:
+                                    remove_publisher_destination(
+                                        owner_id,
+                                        chat_id,
+                                    )
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(
+                                        "Не удалось убрать чат. "
+                                        f"{type(exc).__name__}: {exc}"
+                                    )
+
+                    if st.button(
+                        "➕ Найти мои новые Telegram-площадки",
+                        key=f"stagirite_content_tg_sync_{task_id}",
+                        use_container_width=True,
+                        disabled=sync_publisher_destinations is None,
+                    ):
+                        try:
+                            sync_result = sync_publisher_destinations()
+                            connected = int(
+                                (sync_result or {}).get("connected") or 0
+                            )
+                            if connected:
+                                st.success(
+                                    f"Добавлено новых площадок: {connected}."
                                 )
+                            else:
+                                st.info(
+                                    "Новых площадок пока не найдено."
+                                )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(
+                                "Не удалось проверить новые площадки. "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+
+                    clean_tg_text = str(
+                        result.get("edited_content") or draft
+                    ).strip()
+                    tg_hash = _telegram_publication_hash(
+                        clean_tg_text
+                        + (
+                            f"\n[telegram_image_mode="
+                            f"{content_image_mode}]"
+                        ),
+                        current_image,
+                        selected_tg_ids,
+                    ) if selected_tg_ids else ""
+
+                    tg_published_count = int(
+                        result.get("telegram_published_count") or 0
+                    )
+                    tg_already = bool(
+                        selected_tg_ids
+                        and tg_published_count == len(selected_tg_ids)
+                        and str(
+                            result.get("telegram_published_hash") or ""
+                        ) == tg_hash
+                    )
+
+                    if not selected_tg_ids:
+                        st.warning(
+                            "Выберите хотя бы один Telegram-чат."
+                        )
+                    elif tg_already:
+                        st.success(
+                            "📡 Эта версия уже размещена в "
+                            f"{tg_published_count} выбранных площадках."
+                        )
+                    elif st.button(
+                        "🚀 Разместить пост и иллюстрацию "
+                        f"в выбранных чатах ({len(selected_tg_ids)})",
+                        key=(
+                            f"stagirite_publish_telegram_image_"
+                            f"{task_id}"
+                        ),
+                        use_container_width=True,
+                        type="primary",
+                        disabled=(
+                            publish_to_publisher_destinations is None
+                        ),
+                    ):
+                        try:
+                            tg_result = (
+                                publish_to_publisher_destinations(
+                                    owner_id,
+                                    clean_tg_text,
+                                    image_bytes=current_image,
+                                    destination_ids=selected_tg_ids,
+                                    image_mode=content_image_mode,
+                                )
+                            )
+                            accepted = int(
+                                tg_result.get("accepted") or 0
+                            )
+                            requested = int(
+                                tg_result.get("requested")
+                                or len(selected_tg_ids)
+                            )
+                            failed = int(
+                                tg_result.get("failed") or 0
+                            )
+                            publish_results = (
+                                tg_result.get("results") or []
+                            )
+
+                            if (
+                                accepted <= 0
+                                or failed > 0
+                                or accepted < requested
+                            ):
+                                details = []
+                                for delivery in publish_results:
+                                    if (
+                                        not isinstance(delivery, dict)
+                                        or delivery.get("ok") is True
+                                    ):
+                                        continue
+                                    title = str(
+                                        delivery.get("title")
+                                        or "Telegram-площадка"
+                                    ).strip()
+                                    error = str(
+                                        delivery.get("error")
+                                        or "неизвестная ошибка"
+                                    ).strip()
+                                    details.append(
+                                        f"{title}: {error}"
+                                    )
+                                detail_text = "; ".join(details[:3])
+                                summary = (
+                                    "Telegram доставил пост и "
+                                    f"иллюстрацию в {accepted} "
+                                    f"из {requested} площадок."
+                                )
+                                if detail_text:
+                                    summary += (
+                                        f" Причина: {detail_text}"
+                                    )
+                                raise RuntimeError(summary)
+
+                            updated = dict(result)
+                            updated[
+                                "telegram_published_at"
+                            ] = datetime.now(UTC).isoformat()
+                            updated[
+                                "telegram_published_hash"
+                            ] = tg_hash
+                            updated[
+                                "telegram_published_count"
+                            ] = accepted
+                            updated[
+                                "telegram_publish_results"
+                            ] = publish_results
+                            _update_task(
+                                owner_id,
+                                task_id,
+                                {"result": updated},
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(
+                                "Не удалось передать пост в "
+                                "Telegram-площадки. "
+                                f"{type(exc).__name__}: {exc}"
+                            )
 
             change_request = st.text_input(
                 "Что изменить в сцене?",
