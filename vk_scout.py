@@ -1144,9 +1144,19 @@ def score_vk_candidates(
     # agency_vk_candidates — общий пул Агентства, поэтому без этого фильтра
     # Неония могла поставить высокий балл человеку из чужого сообщества, а
     # quality gate затем закономерно не выдавал его владельцу: получалось 0/5.
+    owner_sources = load_vk_sources(owner_id)
     owner_source_ids = {
         abs(int(source.get("community_id") or 0))
-        for source in load_vk_sources(owner_id)
+        for source in owner_sources
+        if str(source.get("community_id") or "").lstrip("-").isdigit()
+        and abs(int(source.get("community_id") or 0)) > 0
+    }
+    source_context_by_id = {
+        abs(int(source.get("community_id") or 0)): {
+            "community_name": str(source.get("community_name") or "").strip(),
+            "community_url": str(source.get("community_url") or "").strip(),
+        }
+        for source in owner_sources
         if str(source.get("community_id") or "").lstrip("-").isdigit()
         and abs(int(source.get("community_id") or 0)) > 0
     }
@@ -1320,6 +1330,16 @@ def score_vk_candidates(
 
 {BUSINESS_GATE_RULES}
 
+КОНТЕКСТ VK-ИСТОЧНИКА:
+Название сообщества — допустимый СЛАБЫЙ сигнал контекста, но не доказательство само по себе.
+Если сообщество явно связано с предпринимательством, сетевым бизнесом, продажами,
+профессией или работой с клиентами, а в самом профиле есть хотя бы один
+дополнительный рабочий сигнал (occupation/career/status/описание деятельности),
+можно считать это подтверждённой практической релевантностью.
+Не требуй, чтобы человек уже писал слова «мне нужен ИИ» или «хочу автоматизацию»:
+automation_need_signal=true означает, что из его реальной деятельности видна
+повторяющаяся рутина, которую объективно можно делегировать цифровому сотруднику.
+
 Верни ТОЛЬКО JSON-массив:
 [{{"vk_user_id":123,"score":0,"fit_summary":"...","positive_signals":["..."],
 "weak_fit_signals":["..."],"network_business_signal":false,
@@ -1340,7 +1360,20 @@ def score_vk_candidates(
     scores_this_cycle: list[int] = []
     for start in range(0, len(rows), 10):
         batch = rows[start:start + 10]
-        request = "ПОРТРЕТ ЦА:\n" + profile_text + "\n\nПУБЛИЧНЫЕ VK-ПРОФИЛИ:\n" + json.dumps([_candidate_public_view(x) for x in batch], ensure_ascii=False, indent=2)
+        public_batch = []
+        for candidate in batch:
+            view = _candidate_public_view(candidate)
+            try:
+                source_id = abs(int(candidate.get("source_community_id") or 0))
+            except (TypeError, ValueError):
+                source_id = 0
+            view["source_context"] = source_context_by_id.get(source_id) or {}
+            public_batch.append(view)
+        request = (
+            "ПОРТРЕТ ЦА:\n" + profile_text
+            + "\n\nПУБЛИЧНЫЕ VK-ПРОФИЛИ И КОНТЕКСТ ИХ ИСТОЧНИКА:\n"
+            + json.dumps(public_batch, ensure_ascii=False, indent=2)
+        )
         parsed = _extract_json_array(ask_openai_fn(system_prompt, request))
         by_id = {int(x["vk_user_id"]): x for x in parsed if str(x.get("vk_user_id") or "").isdigit()}
         payload = []
