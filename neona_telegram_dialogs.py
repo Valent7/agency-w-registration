@@ -1462,6 +1462,38 @@ def _is_simple_acknowledgement(text: str) -> bool:
     return normalized in phrases
 
 
+def _sanitize_outbound_reply(value: str) -> str:
+    """Последний барьер перед Telegram: внутренние control-поля наружу не уходят."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    parsed = None
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            candidate = json.loads(text)
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except Exception:
+            parsed = None
+
+    if isinstance(parsed, dict) and any(
+        key in parsed for key in ("reply", "intent", "action", "why")
+    ):
+        # Если по какой-то причине весь JSON дошёл до транспорта, наружу
+        # допускается только человеческая реплика. Пустой reply = молчание.
+        return str(parsed.get("reply") or "").strip()
+
+    # Даже повреждённый/неполный control JSON блокируем fail-closed.
+    lowered = text.casefold()
+    if text.startswith(("{", "[")) and any(
+        token in lowered for token in ('"intent"', '"action"', '"why"', '"reply"')
+    ):
+        return ""
+
+    return text
+
+
 
 def _parse_start(context: dict[str, Any]) -> datetime | None:
     date_value = context.get("requested_date")
@@ -3689,6 +3721,11 @@ async def sync_owner_once(
                         latest.date.astimezone(UTC),
                         state,
                     )
+                    # Последний транспортный барьер: даже если смысловой слой
+                    # ошибочно вернул служебный JSON, в Telegram уйдёт только
+                    # человеческое поле reply либо не уйдёт ничего.
+                    reply = _sanitize_outbound_reply(reply)
+
                     # Закрытый по просьбе человека диалог не должен отвечать
                     # автоматически на последующие сообщения. Мы всё равно
                     # отмечаем входящее обработанным, чтобы worker не возвращался
