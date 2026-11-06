@@ -1089,6 +1089,72 @@ def scan_vk_sources(owner_id: int, *, per_source: int = 200, max_sources: int = 
     }
 
 
+def _deterministic_public_work_signals(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Use only explicit public VK work fields as a fallback quality signal.
+
+    This does not infer income, personality or willingness to buy. It only says:
+    a public work/career role normally contains repeatable work processes that
+    Agency W may be relevant to explore. AI providers remain excluded.
+    """
+    raw = candidate.get("raw_profile") if isinstance(candidate.get("raw_profile"), dict) else {}
+    occupation = raw.get("occupation") if isinstance(raw.get("occupation"), dict) else {}
+    career = raw.get("career") if isinstance(raw.get("career"), list) else []
+    status = str(candidate.get("status_text") or "").strip()
+
+    evidence: list[str] = []
+    work_text_parts: list[str] = []
+
+    occupation_type = str(occupation.get("type") or "").strip().casefold()
+    occupation_name = str(occupation.get("name") or "").strip()
+    if occupation_type == "work" and occupation_name:
+        evidence.append("VK: место работы — " + occupation_name[:180])
+        work_text_parts.append(occupation_name)
+
+    for row in career[:4]:
+        if not isinstance(row, dict):
+            continue
+        company = str(row.get("company") or "").strip()
+        position = str(row.get("position") or "").strip()
+        if position or company:
+            label = " / ".join(x for x in (position, company) if x)
+            evidence.append("VK: карьера — " + label[:180])
+            work_text_parts.extend([position, company])
+
+    work_markers = (
+        "предприним", "самозанят", "риелтор", "риэлтор", "психолог", "юрист",
+        "бухгалтер", "консультант", "менеджер", "директор", "руководител",
+        "продаж", "маркет", "коуч", "тренер", "мастер", "салон", "магазин",
+        "услуг", "недвиж", "турагент", "тур агент", "дизайн", "рекрут",
+        "сетевой", "mlm", "партнер", "партнёр", "дистрибьют",
+    )
+    status_low = status.casefold()
+    if status and any(marker in status_low for marker in work_markers):
+        evidence.append("VK: рабочий статус — " + status[:180])
+        work_text_parts.append(status)
+
+    combined = " ".join(work_text_parts).casefold()
+    ai_provider = bool(
+        re.search(r"\b(?:ai|gpt)\b", combined)
+        or "нейросет" in combined
+        or "искусственн" in combined and "интеллект" in combined
+        or "ai-агент" in combined
+        or "ии-агент" in combined
+        or "промпт" in combined
+        or "prompt engineer" in combined
+    )
+    network_signal = any(
+        marker in combined
+        for marker in ("сетевой", "mlm", "партнерск", "партнёрск", "дистрибьют")
+    )
+
+    return {
+        "has_public_work": bool(evidence),
+        "evidence": evidence[:3],
+        "ai_provider_or_expert": ai_provider,
+        "network_business_signal": network_signal,
+    }
+
+
 def _candidate_public_view(item: dict[str, Any]) -> dict[str, Any]:
     raw = item.get("raw_profile") if isinstance(item.get("raw_profile"), dict) else {}
     return {
@@ -1386,6 +1452,31 @@ automation_need_signal=true означает, что из его реально�
                 score = max(0, min(100, int(item.get("score") or 0)))
             except (TypeError, ValueError):
                 score = 0
+
+            # Deterministic fallback from explicit public VK work fields.
+            # The model may be conservative, but a visible work/career role is
+            # objective evidence of real work processes. It does NOT imply a sale
+            # or income; it only satisfies the broad Agency W routine gate.
+            work_signals = _deterministic_public_work_signals(source)
+            if work_signals["ai_provider_or_expert"]:
+                item["ai_provider_or_expert"] = True
+                item["business_relevant"] = False
+            elif work_signals["has_public_work"]:
+                if item.get("business_relevant") is not True:
+                    item["business_relevant"] = True
+                if item.get("automation_need_signal") is not True:
+                    item["automation_need_signal"] = True
+                if (
+                    work_signals["network_business_signal"]
+                    and item.get("network_business_signal") is not True
+                ):
+                    item["network_business_signal"] = True
+                existing_evidence = item.get("business_evidence")
+                if not isinstance(existing_evidence, list):
+                    existing_evidence = []
+                item["business_evidence"] = (
+                    work_signals["evidence"] + existing_evidence
+                )[:3]
 
             score, _, business_evidence, business_gate_reason = apply_business_gate(
                 item,
