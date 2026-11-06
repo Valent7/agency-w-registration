@@ -36,6 +36,7 @@ from vk_quality_daily import ensure_quality_vk_assignments
 from vk_scout import (
     VKScoutError,
     ensure_daily_vk_assignments,
+    fetch_vk_personal_feed,
     load_today_vk_assignments,
     load_vk_sources,
     release_expired_vk_assignments,
@@ -517,6 +518,31 @@ def run_once() -> dict[str, int]:
         else:
             _log(f"VK Scout OAuth: {exc}")
             scout_access_token = ""
+
+    # Probe the owner's actual VK Home -> Feed on every full worker cycle.
+    # This is read-only and makes feed-access failures visible in Render logs
+    # instead of silently showing "0 posts" in the UI.
+    if scout_access_token:
+        try:
+            feed_probe = fetch_vk_personal_feed(
+                root_owner_id,
+                count=5,
+                max_age_days=3,
+            )
+            access_error = str(feed_probe.get("access_error") or "").strip()
+            if access_error:
+                _log(
+                    f"{root_owner_id}: личная Лента VK недоступна: "
+                    f"{access_error}"
+                )
+            else:
+                _log(
+                    f"{root_owner_id}: личная Лента VK доступна; "
+                    f"прочитано={feed_probe.get('checked') or 0}; "
+                    f"комментируемых={feed_probe.get('commentable') or 0}"
+                )
+        except Exception as feed_exc:
+            _log(f"{root_owner_id}: проверка личной Ленты VK: {feed_exc}")
 
     target_profiles = _load_target_profiles(member_ids)
 
