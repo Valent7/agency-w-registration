@@ -23,6 +23,7 @@ from vk_scout import (
     load_vk_sources,
     mark_vk_invited,
     prepare_vk_feed_links,
+    prepare_vk_feed_manual_text,
     prepare_vk_invitation,
     prepare_vk_warmup_comment,
     register_published_vk_comment,
@@ -773,6 +774,46 @@ def _render_vk_feed_radar(
         )
     if message and not recommendations:
         st.info(message)
+
+        # Some feed items are visible to the logged-in user but hidden from the
+        # server-side VK API. In that case keep the original link for navigation
+        # and let Neona work from text the user can actually see.
+        first_link = ""
+        for line in str(raw or "").splitlines():
+            if line.strip():
+                first_link = line.strip()
+                break
+        if first_link:
+            manual_key = f"vk_feed_manual_text_{int(owner_id)}"
+            manual_text = st.text_area(
+                "Текст или подпись выбранной публикации",
+                key=manual_key,
+                height=150,
+                placeholder=(
+                    "Скопируйте сюда текст поста или подпись к клипу/видео, "
+                    "которые Вы видите в VK."
+                ),
+            )
+            if st.button(
+                "💬 Подготовить комментарий по тексту",
+                key=f"vk_feed_manual_run_{int(owner_id)}",
+                type="primary",
+                use_container_width=True,
+            ):
+                try:
+                    manual_result = prepare_vk_feed_manual_text(
+                        first_link,
+                        manual_text,
+                        ask_openai_fn=ask_openai_fn,
+                    )
+                    st.session_state[state_key] = manual_result
+                    for idx, item in enumerate(manual_result.get("recommendations") or []):
+                        st.session_state[
+                            f"vk_feed_link_comment_{int(owner_id)}_{idx}"
+                        ] = str(item.get("comment") or "")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Не удалось подготовить комментарий по тексту: {exc}")
 
     for idx, item in enumerate(recommendations):
         author = str(item.get("author_name") or "VK").strip()
