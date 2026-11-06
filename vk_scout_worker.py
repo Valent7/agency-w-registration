@@ -36,7 +36,6 @@ from vk_quality_daily import ensure_quality_vk_assignments
 from vk_scout import (
     VKScoutError,
     ensure_daily_vk_assignments,
-    fetch_vk_personal_feed,
     load_today_vk_assignments,
     load_vk_sources,
     release_expired_vk_assignments,
@@ -501,51 +500,35 @@ def run_once() -> dict[str, int]:
     service_access_token = _env("VK_SERVICE_TOKEN")
     legacy_access_token = _env("VK_ACCESS_TOKEN")
     fallback_access_token = service_access_token or legacy_access_token
-    try:
-        scout_access_token = get_valid_vk_scout_access_token(root_owner_id)
-        os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
-    except VKScoutOAuthError as exc:
-        if fallback_access_token:
-            scout_access_token = fallback_access_token
-            os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
-            if service_access_token:
-                _log(
-                    "VK Scout OAuth недоступен; использую VK_SERVICE_TOKEN приложения; "
-                    f"причина: {exc}"
-                )
-            else:
-                _log(
-                    "VK Scout OAuth недоступен; использую резервный VK_ACCESS_TOKEN "
-                    "из прежней Streamlit-схемы"
-                )
-        else:
-            _log(f"VK Scout OAuth: {exc}")
-            scout_access_token = ""
+    service_mode = _env("VK_SCOUT_SERVICE_MODE").casefold() in {"1", "true", "yes", "on"}
 
-    # Probe the owner's actual VK Home -> Feed on every full worker cycle.
-    # This is read-only and makes feed-access failures visible in Render logs
-    # instead of silently showing "0 posts" in the UI.
-    if scout_access_token:
+    if service_mode and service_access_token:
+        # Agency W deliberately abandoned the blocked legacy VK ID application.
+        # In service mode never touch its stored refresh token again.
+        scout_access_token = service_access_token
+        os.environ["VK_SCOUT_ACCESS_TOKEN"] = service_access_token
+        _log("VK Scout работает только через VK_SERVICE_TOKEN; legacy VK ID отключён")
+    else:
         try:
-            feed_probe = fetch_vk_personal_feed(
-                root_owner_id,
-                count=5,
-                max_age_days=3,
-            )
-            access_error = str(feed_probe.get("access_error") or "").strip()
-            if access_error:
-                _log(
-                    f"{root_owner_id}: личная Лента VK недоступна: "
-                    f"{access_error}"
-                )
+            scout_access_token = get_valid_vk_scout_access_token(root_owner_id)
+            os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
+        except VKScoutOAuthError as exc:
+            if fallback_access_token:
+                scout_access_token = fallback_access_token
+                os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
+                if service_access_token:
+                    _log(
+                        "VK Scout OAuth недоступен; использую VK_SERVICE_TOKEN приложения; "
+                        f"причина: {exc}"
+                    )
+                else:
+                    _log(
+                        "VK Scout OAuth недоступен; использую резервный VK_ACCESS_TOKEN "
+                        "из прежней Streamlit-схемы"
+                    )
             else:
-                _log(
-                    f"{root_owner_id}: личная Лента VK доступна; "
-                    f"прочитано={feed_probe.get('checked') or 0}; "
-                    f"комментируемых={feed_probe.get('commentable') or 0}"
-                )
-        except Exception as feed_exc:
-            _log(f"{root_owner_id}: проверка личной Ленты VK: {feed_exc}")
+                _log(f"VK Scout OAuth: {exc}")
+                scout_access_token = ""
 
     target_profiles = _load_target_profiles(member_ids)
 
