@@ -48,13 +48,53 @@ def _db_headers(prefer: str | None = None) -> dict[str, str]:
     return headers
 
 
+def _validate_publisher_token(token: str) -> bool:
+    """Accept a fallback token only when it belongs to AgencyWPublisherBot."""
+    clean = str(token or "").strip()
+    if not clean:
+        return False
+    default_local_base = "https://agency-w-telegram-api.onrender.com"
+    base = (
+        _runtime_secret(
+            "AGENCY_W_TELEGRAM_API_BASE",
+            default_local_base,
+        )
+        or default_local_base
+    ).strip().rstrip("/")
+    try:
+        response = requests.post(
+            f"{base}/bot{clean}/getMe",
+            timeout=20,
+        )
+        if not response.ok:
+            return False
+        data = response.json()
+        result = data.get("result") if isinstance(data, dict) else {}
+        username = str(
+            (result or {}).get("username") or ""
+        ).strip().casefold()
+        return username == "agencywpublisherbot"
+    except Exception:
+        return False
+
+
 def _bot_token() -> str:
     token = _runtime_secret("AGENCY_W_PUBLISHER_BOT_TOKEN")
-    if not token:
-        raise RuntimeError(
-            "Не найден AGENCY_W_PUBLISHER_BOT_TOKEN в Render Environment."
-        )
-    return token
+    if token:
+        return token
+
+    # После переноса на Render старый Publisher-токен мог уже находиться
+    # под общим именем Telegram-бота. Не используем его вслепую:
+    # сначала Telegram должен подтвердить точный username Publisher.
+    fallback = _runtime_secret("TELEGRAM_BOT_TOKEN")
+    if fallback and _validate_publisher_token(fallback):
+        return fallback
+
+    raise RuntimeError(
+        "На Render не найден токен @AgencyWPublisherBot. "
+        "Проверен AGENCY_W_PUBLISHER_BOT_TOKEN и безопасный резерв "
+        "TELEGRAM_BOT_TOKEN, но резерв не принадлежит Publisher-боту."
+    )
 
 
 def _telegram_api_base() -> str:
