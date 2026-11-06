@@ -7303,8 +7303,13 @@ def _render_result(
                     None,
                     tg_ids,
                 )
+                tg_published_count = int(
+                    result.get("telegram_published_count") or 0
+                )
                 tg_already = bool(
-                    str(result.get("telegram_published_hash") or "") == tg_hash
+                    tg_ids
+                    and tg_published_count == len(tg_ids)
+                    and str(result.get("telegram_published_hash") or "") == tg_hash
                 )
                 if tg_already:
                     st.success(
@@ -7325,11 +7330,47 @@ def _render_result(
                             str(result.get("edited_content") or draft).strip(),
                             destination_ids=tg_ids,
                         )
+                        accepted = int(tg_result.get("accepted") or 0)
+                        requested = int(
+                            tg_result.get("requested") or len(tg_ids)
+                        )
+                        failed = int(tg_result.get("failed") or 0)
+                        publish_results = tg_result.get("results") or []
+                        if (
+                            accepted <= 0
+                            or failed > 0
+                            or accepted < requested
+                        ):
+                            details = []
+                            for item in publish_results:
+                                if (
+                                    not isinstance(item, dict)
+                                    or item.get("ok") is True
+                                ):
+                                    continue
+                                title = str(
+                                    item.get("title")
+                                    or "Telegram-площадка"
+                                ).strip()
+                                error = str(
+                                    item.get("error")
+                                    or "неизвестная ошибка"
+                                ).strip()
+                                details.append(f"{title}: {error}")
+                            detail_text = "; ".join(details[:3])
+                            summary = (
+                                f"Telegram доставил материал в "
+                                f"{accepted} из {requested} площадок."
+                            )
+                            if detail_text:
+                                summary += f" Причина: {detail_text}"
+                            raise RuntimeError(summary)
+
                         updated = dict(result)
                         updated["telegram_published_at"] = datetime.now(UTC).isoformat()
                         updated["telegram_published_hash"] = tg_hash
-                        updated["telegram_published_count"] = int(tg_result.get("accepted") or 0)
-                        updated["telegram_publish_results"] = tg_result.get("results") or []
+                        updated["telegram_published_count"] = accepted
+                        updated["telegram_publish_results"] = publish_results
                         _update_task(owner_id, task_id, {"result": updated})
                         st.rerun()
                     except Exception as exc:
@@ -7846,15 +7887,25 @@ def _render_result(
                     current_image,
                     tg_ids,
                 )
+                tg_published_count = int(
+                    result.get("telegram_published_count") or 0
+                )
                 tg_already = bool(
-                    str(result.get("telegram_published_hash") or "") == tg_hash
+                    tg_ids
+                    and tg_published_count == len(tg_ids)
+                    and str(result.get("telegram_published_hash") or "") == tg_hash
                 )
 
-                if tg_already:
+                if not tg_ids:
+                    st.warning(
+                        "Подключённые Telegram-площадки найдены, "
+                        "но у них не прочитались chat_id. "
+                        "Обновите реестр в «Команда → Мои площадки»."
+                    )
+                elif tg_already:
                     st.success(
                         "📡 Telegram принял пост с иллюстрацией: "
-                        f"{int(result.get('telegram_published_count') or 0)} "
-                        "площадк(а/и)."
+                        f"{tg_published_count} площадк(а/и)."
                     )
                 elif st.button(
                     f"📡 Разместить в {len(tg_ids)} чатах пост и иллюстрацию",
@@ -7871,15 +7922,59 @@ def _render_result(
                             destination_ids=tg_ids,
                             image_mode=content_image_mode,
                         )
+                        accepted = int(
+                            tg_result.get("accepted") or 0
+                        )
+                        requested = int(
+                            tg_result.get("requested") or len(tg_ids)
+                        )
+                        failed = int(
+                            tg_result.get("failed") or 0
+                        )
+                        publish_results = (
+                            tg_result.get("results") or []
+                        )
+
+                        # Ноль или частичная доставка не считаются публикацией.
+                        if (
+                            accepted <= 0
+                            or failed > 0
+                            or accepted < requested
+                        ):
+                            details = []
+                            for item in publish_results:
+                                if (
+                                    not isinstance(item, dict)
+                                    or item.get("ok") is True
+                                ):
+                                    continue
+                                title = str(
+                                    item.get("title")
+                                    or "Telegram-площадка"
+                                ).strip()
+                                error = str(
+                                    item.get("error")
+                                    or "неизвестная ошибка"
+                                ).strip()
+                                details.append(
+                                    f"{title}: {error}"
+                                )
+                            detail_text = "; ".join(details[:3])
+                            summary = (
+                                f"Telegram доставил пост и иллюстрацию "
+                                f"в {accepted} из {requested} площадок."
+                            )
+                            if detail_text:
+                                summary += (
+                                    f" Причина: {detail_text}"
+                                )
+                            raise RuntimeError(summary)
+
                         updated = dict(result)
                         updated["telegram_published_at"] = datetime.now(UTC).isoformat()
                         updated["telegram_published_hash"] = tg_hash
-                        updated["telegram_published_count"] = int(
-                            tg_result.get("accepted") or 0
-                        )
-                        updated["telegram_publish_results"] = (
-                            tg_result.get("results") or []
-                        )
+                        updated["telegram_published_count"] = accepted
+                        updated["telegram_publish_results"] = publish_results
                         _update_task(
                             owner_id,
                             task_id,
