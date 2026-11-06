@@ -307,6 +307,7 @@ def _score_until_daily_five(
     min_score: int,
     analysis_limit: int,
     max_rounds: int = 25,
+    priority_ids: list[int] | None = None,
 ) -> tuple[dict[str, Any], int, int | None]:
     """Keep scoring fresh VK profiles until today's 5/5 is complete or pool is exhausted."""
     total_analyzed = 0
@@ -329,6 +330,7 @@ def _score_until_daily_five(
             target_profile,
             ask_openai_fn=_ask_openai,
             limit=analysis_limit,
+            priority_ids=(priority_ids if round_no == 1 else None),
         )
         analyzed_now = int(score_result.get("analyzed") or 0)
         total_analyzed += analyzed_now
@@ -429,6 +431,10 @@ def top_up_vk_owner_now(
                 min_score=max(0, min(100, int(min_score))),
                 analysis_limit=max(5, min(100, int(analysis_limit))),
                 max_rounds=3,
+                priority_ids=[
+                    int(x) for x in (scan_result.get("active_context_ids") or [])
+                    if str(x).isdigit()
+                ],
             )
             prepared = prepared2
             analyzed_total += analyzed2
@@ -596,6 +602,10 @@ def run_once() -> dict[str, int]:
                         min_score=min_score,
                         analysis_limit=analysis_limit,
                         max_rounds=17,
+                        priority_ids=[
+                            int(x) for x in (scan_result.get("active_context_ids") or [])
+                            if str(x).isdigit()
+                        ],
                     )
                     prepared = prepared2
                     analyzed_total += analyzed2
@@ -606,6 +616,7 @@ def run_once() -> dict[str, int]:
             _log(
                 f"{owner_id}: Неония проверила VK-пул; "
                 f"найдено_свежих={scan_result.get('candidates_found') or 0}, "
+                f"активных_с_контекстом={scan_result.get('active_context_count') or 0}, "
                 f"оценено={analyzed_total}, "
                 f"лучший_балл={best_score}"
             )
