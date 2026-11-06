@@ -321,6 +321,151 @@ def install_agency_w_app_metadata():
 
 
 install_agency_w_app_metadata()
+
+
+def _render_public_time_calculator():
+    """Public Free Tool: estimate how much time routine consumes each month."""
+    st.markdown(
+        """
+        <style>
+        .aw-free-tool-wrap { max-width: 760px; margin: 0 auto; }
+        .aw-free-tool-kicker {
+            color: #d9b45b; text-transform: uppercase; letter-spacing: .08em;
+            font-size: .78rem; font-weight: 700; margin-bottom: .35rem;
+        }
+        .aw-free-tool-title {
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1.05;
+            margin: 0 0 .65rem; color: #f8f4ec;
+        }
+        .aw-free-tool-subtitle {
+            color: #d9d2c5; font-size: 1.05rem; line-height: 1.55;
+            margin-bottom: 1.2rem;
+        }
+        .aw-free-tool-result {
+            border: 1px solid rgba(217,180,91,.35);
+            border-radius: 20px;
+            padding: 1.2rem 1.25rem;
+            margin: 1.1rem 0;
+            background: rgba(255,255,255,.045);
+        }
+        .aw-free-tool-big {
+            color: #d9b45b; font-size: clamp(2rem, 6vw, 3.5rem);
+            line-height: 1; font-weight: 800; margin: .35rem 0 .5rem;
+        }
+        .aw-free-tool-note { color:#d9d2c5; line-height:1.55; }
+        .aw-free-tool-brand {
+            margin-top: 1.6rem; padding-top: 1rem;
+            border-top: 1px solid rgba(217,180,91,.18);
+            text-align:center; color:#cfc6b6; font-size:.92rem;
+        }
+        .aw-free-tool-brand strong { color:#d9b45b; }
+        </style>
+        <div class="aw-free-tool-wrap">
+          <div class="aw-free-tool-kicker">Бесплатный инструмент Агентства W</div>
+          <div class="aw-free-tool-title">Куда уходит ваше время?</div>
+          <div class="aw-free-tool-subtitle">
+            За одну минуту посчитайте, сколько часов в месяц у вас забирают повторяющиеся задачи.
+            Не нужна точность до минуты — достаточно честной приблизительной оценки.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("aw_public_time_calculator"):
+        messaging = st.number_input(
+            "Переписка, ответы, сообщения — часов в неделю",
+            min_value=0.0, max_value=100.0, value=3.0, step=0.5,
+        )
+        content = st.number_input(
+            "Посты, тексты, соцсети — часов в неделю",
+            min_value=0.0, max_value=100.0, value=2.0, step=0.5,
+        )
+        search = st.number_input(
+            "Поиск информации и людей — часов в неделю",
+            min_value=0.0, max_value=100.0, value=3.0, step=0.5,
+        )
+        admin = st.number_input(
+            "Организация, записи, напоминания — часов в неделю",
+            min_value=0.0, max_value=100.0, value=2.0, step=0.5,
+        )
+        routine = st.number_input(
+            "Другие повторяющиеся мелкие задачи — часов в неделю",
+            min_value=0.0, max_value=100.0, value=2.0, step=0.5,
+        )
+        submitted = st.form_submit_button(
+            "⏱ Рассчитать моё время",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        weekly = float(messaging + content + search + admin + routine)
+        monthly = weekly * 4.33
+        workdays = monthly / 8.0
+        recoverable = monthly * 0.5
+
+        if monthly < 15:
+            message = (
+                "Рутины пока немного, но даже несколько освобождённых часов можно "
+                "вернуть семье, отдыху или важной работе."
+            )
+        elif monthly < 40:
+            message = (
+                "Это уже заметная часть месяца. Есть смысл посмотреть, какие повторяющиеся "
+                "задачи можно делегировать цифровому помощнику."
+            )
+        else:
+            message = (
+                "Это серьёзный ресурс времени. Возможно, значительную часть месяца вы "
+                "выполняете вручную работу, которую можно передать цифровым сотрудникам."
+            )
+
+        st.markdown(
+            f"""
+            <div class="aw-free-tool-result">
+              <div class="aw-free-tool-note">На повторяющиеся задачи у вас уходит примерно</div>
+              <div class="aw-free-tool-big">{monthly:.1f} часа в месяц</div>
+              <div class="aw-free-tool-note">
+                Это около <strong>{workdays:.1f} полного рабочего дня</strong>.
+              </div>
+              <div style="height:.8rem"></div>
+              <div class="aw-free-tool-note">
+                Если передать цифровым помощникам хотя бы половину этой рутины,
+                можно вернуть себе примерно <strong>{recoverable:.1f} часа в месяц</strong>.
+              </div>
+              <div style="height:.8rem"></div>
+              <div class="aw-free-tool-note">{html.escape(message)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.info(
+            "Следующий вопрос: какие именно задачи из вашего списка можно передать цифровому сотруднику?"
+        )
+        st.link_button(
+            "Узнать об Агентстве W во VK",
+            "https://vk.ru/club241237638",
+            use_container_width=True,
+        )
+
+    st.markdown(
+        """
+        <div class="aw-free-tool-brand">
+          <strong>Агентство W</strong> · Мы возвращаем человеку время
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_public_tool = str(st.query_params.get("tool") or "").strip().casefold()
+if _public_tool in {"time", "vremya", "routine"}:
+    _render_public_time_calculator()
+    st.stop()
+
+
 handle_vk_scout_oauth_callback()
 def _image_data_uri(path):
     """Возвращает PNG как data URI для точного HTML-размещения."""
