@@ -1322,8 +1322,18 @@ def score_vk_candidates(
 
 Верни ТОЛЬКО JSON-массив:
 [{{"vk_user_id":123,"score":0,"fit_summary":"...","positive_signals":["..."],
-"weak_fit_signals":["..."],"business_relevant":false,"business_evidence":[],
+"weak_fit_signals":["..."],"network_business_signal":false,
+"ai_provider_or_expert":false,"automation_need_signal":false,
+"business_relevant":false,"business_evidence":[],
 "business_gate_reason":"..."}}]
+
+КРИТИЧНО ДЛЯ automation_need_signal:
+- true не означает, что человек уже интересуется ИИ;
+- ставь true, если из публичной профессии/деятельности прямо следует регулярная
+  повторяющаяся рабочая рутина: клиенты, переписка, записи, документы, заявки,
+  контент, организация людей/встреч/задач, продажи, сопровождение;
+- обычная профессия с такой рутиной подходит даже без MLM и даже без упоминаний ИИ;
+- не ставь true только по мотивационным цитатам, лайфстайлу или отсутствующим данным.
 """.strip()
 
     analyzed = 0
