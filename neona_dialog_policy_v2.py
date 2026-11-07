@@ -440,7 +440,7 @@ def _create_meeting(config, owner_id, owner_name, contact_id, first_name, userna
         "end_at": finish.isoformat(),
         "meeting_format": fmt,
         "meeting_link": zoom_link or None,
-        "status": "Подтверждена",
+        "status": "Ожидает подтверждения",
         "notes": notes,
         "source": source,
     }
@@ -471,18 +471,9 @@ def _explicit_meeting_slot(text: str, message_dt: datetime):
 
 
 def _slot_within_policy(start_utc: datetime) -> bool:
-    """Never book past, weekend, or outside 10–20 Moscow with a 60m lead."""
+    """Check minimum lead; the owner, not a rigid weekday window, decides."""
     now = datetime.now(core.UTC)
-    local = start_utc.astimezone(core.MSK)
-    minutes = int(getattr(core, "DURATION_MINUTES", 30))
-    end = local + timedelta(minutes=minutes)
-    return (
-        start_utc >= now + timedelta(minutes=60)
-        and local.weekday() < 5
-        and local.hour >= 10
-        and (end.hour < 20 or (end.hour == 20 and end.minute == 0))
-        and local.date() == end.date()
-    )
+    return start_utc >= now + timedelta(minutes=60)
 
 
 def _explicit_confirmation(text: str) -> bool:
@@ -522,8 +513,7 @@ def _schedule_reply_v2(
         if not _slot_within_policy(proposed):
             context.pop("proposed_start_at", None)
             return (
-                prefix + "Это время вне рабочего окна (понедельник–пятница, "
-                "10:00–20:00 МСК) или слишком близко. "
+                prefix + "Это время уже прошло или до встречи осталось менее часа. "
                 "Назовите, пожалуйста, другой день и время.",
                 "collecting_meeting_details", context,
             )
@@ -653,18 +643,16 @@ def _schedule_reply_v2(
         owner_forms = _owner_forms(owner_name)
         if str(context.get("meeting_reason") or "") == "callback":
             answer = (
-                f"Договорились. {owner_forms['nominative']} позвонит вам "
-                f"{_fmt_msk(start)}. Формат — {fmt}."
+                f"Передаю {owner_forms['nominative']} заявку на звонок "
+                f"{_fmt_msk(start)}. Формат — {fmt}. "
+                "Окончательное решение о встрече принимает владелец кабинета."
             )
         else:
             answer = (
-                f"Договорились. Встреча с {owner_forms['instrumental']} "
-                f"записана на {_fmt_msk(start)}. Формат — {fmt}."
+                f"Передаю заявку на встречу с {owner_forms['instrumental']} "
+                f"на {_fmt_msk(start)}. Формат — {fmt}. "
+                "Владелец кабинета подтвердит возможность встречи."
             )
-        if fmt == "Zoom" and zoom_link:
-            answer += f" Ссылка Zoom: {zoom_link}."
-            if zoom_note:
-                answer += f" {zoom_note}"
         farewell = (
             "Хорошего вам дня!" if datetime.now(core.MSK).hour < 18
             else "Хорошего вам вечера!"
@@ -729,7 +717,7 @@ def _schedule_reply_v2(
     context["meeting_confirmation_pending"] = True
     return (
         prefix + f"Проверим ещё раз: {_fmt_msk(start)}, формат — {fmt}. "
-        "Всё верно? Напишите «Подтверждаю», и я внесу встречу в календарь.",
+        "Всё верно? Напишите «Подтверждаю», и я передам заявку владельцу кабинета.",
         "awaiting_confirmation", context,
     )
 
