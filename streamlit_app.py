@@ -562,6 +562,7 @@ def ask_openai(
     uploaded_files=None,
     use_web_search=False,
     model=None,
+    reasoning_effort=None,
 ):
     api_key = _runtime_secret("OPENAI_API_KEY")
 
@@ -627,6 +628,11 @@ def ask_openai(
             "store": False,
         }
 
+        if reasoning_effort:
+            request_body["reasoning"] = {
+                "effort": str(reasoning_effort)
+            }
+
         if use_web_search:
             request_body["tools"] = [
                 {
@@ -679,6 +685,28 @@ def ask_openai(
     except (KeyError, ValueError):
         return "Не удалось обработать ответ OpenAI."
         
+
+
+def ask_stagirite_openai(
+    system_prompt,
+    user_message,
+    uploaded_files=None,
+    use_web_search=False,
+    model=None,
+):
+    """Высокий интеллект только для Стагирита-замдиректора."""
+    stagirite_model = (
+        _runtime_secret("STAGIRITE_OPENAI_MODEL")
+        or "gpt-6.1-sol"
+    )
+    return ask_openai(
+        system_prompt,
+        user_message,
+        uploaded_files=uploaded_files,
+        use_web_search=use_web_search,
+        model=str(model or stagirite_model),
+        reasoning_effort="high",
+    )
 
 
 def ask_claude(
@@ -9216,7 +9244,7 @@ if telegram_login_valid or remembered_data:
                         render_stagirite_center(
                             owner_telegram_id=int(telegram_id),
                             owner_name=first_name,
-                            ask_openai_fn=ask_openai,
+                            ask_openai_fn=ask_stagirite_openai,
                             ask_claude_fn=ask_claude,
                             prepare_candidates_fn=prepare_candidates_for_stagirite,
                             generate_image_fn=generate_openai_illustration,
@@ -9235,7 +9263,7 @@ if telegram_login_valid or remembered_data:
                             render_stagirite_center(
                                 owner_telegram_id=int(telegram_id),
                                 owner_name=first_name,
-                                ask_openai_fn=ask_openai,
+                                ask_openai_fn=ask_stagirite_openai,
                                 ask_claude_fn=ask_claude,
                                 prepare_candidates_fn=prepare_candidates_for_stagirite,
                             )
@@ -9243,7 +9271,7 @@ if telegram_login_valid or remembered_data:
                             render_stagirite_center(
                                 owner_telegram_id=int(telegram_id),
                                 owner_name=first_name,
-                                ask_openai_fn=ask_openai,
+                                ask_openai_fn=ask_stagirite_openai,
                             )
 
                 elif selected_agent == "Неония":
