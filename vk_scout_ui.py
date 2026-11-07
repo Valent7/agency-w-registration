@@ -32,6 +32,9 @@ from vk_scout import (
     send_pending_vk_comment_reply,
     process_manual_vk_comment_reply,
     mark_manual_vk_reply_published,
+    load_manual_vk_private_dialog,
+    process_manual_vk_private_reply,
+    mark_manual_vk_private_reply_sent,
     mark_vk_partner,
     skip_vk_assignment,
     search_vk_communities,
@@ -170,6 +173,122 @@ def _render_vk_material_followup(
         owner_id,
         f"{scope}_{int(assignment_id)}",
         first_name,
+    )
+
+
+def _render_vk_private_dialog_followup(
+    owner_id: int,
+    assignment_id: int,
+    first_name: str,
+    status: str,
+    *,
+    scope: str,
+) -> None:
+    """Personal VK DM handoff: one pasted inbound turn -> the shared Neona brain."""
+    if str(status or "").strip() not in {"invited", "dialogue", "meeting"} or not assignment_id:
+        return
+
+    st.divider()
+    st.markdown("**💬 Личный диалог VK — Неона**")
+    st.caption(
+        "Первое сообщение уже отправлено вручную. Когда человек ответит в личном VK, "
+        "вставьте сюда только его новую реплику. Неона помнит своё первое сообщение и "
+        "дальше ведёт этот же разговор по тем же правилам, что в Telegram."
+    )
+
+    try:
+        dialog = load_manual_vk_private_dialog(int(assignment_id), int(owner_id))
+    except Exception as exc:
+        st.warning(f"Не удалось открыть память VK-диалога: {exc}")
+        return
+
+    stage = str(dialog.get("stage") or "idle")
+    if stage == "scheduled":
+        st.success("📅 Встреча согласована Неоной и зафиксирована в календаре.")
+    elif stage in {
+        "invited_to_meeting",
+        "collecting_meeting_details",
+        "awaiting_confirmation",
+        "awaiting_slot_choice",
+    }:
+        st.info("📅 Неона уже ведёт согласование даты и времени встречи.")
+
+    pending_inbound = str(dialog.get("pending_inbound") or "").strip()
+    pending_reply = str(dialog.get("pending_reply") or "").strip()
+    widget_scope = f"{scope}_{int(owner_id)}_{int(assignment_id)}"
+
+    if pending_reply:
+        if pending_inbound:
+            st.markdown("**Последняя реплика человека:**")
+            st.write(pending_inbound)
+
+        st.markdown("**Ответ Неоны готов:**")
+        edit_key = f"vk_private_neona_reply_{widget_scope}_{dialog.get('last_incoming_message_id') or 'pending'}"
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = pending_reply
+        edited_reply = st.text_area(
+            "Можно отредактировать перед отправкой в VK",
+            key=edit_key,
+            height=120,
+            label_visibility="collapsed",
+        )
+        st.caption(
+            "Скопируйте этот ответ в личный VK. После фактической отправки нажмите кнопку ниже — "
+            "тогда Неона запомнит ход и будет ждать следующую реплику человека."
+        )
+        if st.button(
+            "✅ Ответ Неоны отправлен в VK",
+            key=f"vk_private_reply_sent_{widget_scope}",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                mark_manual_vk_private_reply_sent(
+                    int(assignment_id),
+                    int(owner_id),
+                    str(edited_reply or ""),
+                )
+                st.success("Ответ сохранён в памяти диалога. Неона ждёт следующую реплику.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Не удалось сохранить отправленный ответ: {exc}")
+        return
+
+    inbound_key = f"vk_private_inbound_{widget_scope}"
+    reset_key = f"vk_private_inbound_reset_{widget_scope}"
+    if st.session_state.pop(reset_key, False):
+        st.session_state[inbound_key] = ""
+
+    st.text_area(
+        "Новая реплика человека из личного VK",
+        key=inbound_key,
+        height=100,
+        placeholder="Вставьте только последнее сообщение кандидата",
+    )
+    inbound_text = str(st.session_state.get(inbound_key, "") or "").strip()
+
+    if st.button(
+        "🧠 Передать Неоне",
+        key=f"vk_private_to_neona_{widget_scope}",
+        type="primary",
+        use_container_width=True,
+        disabled=not bool(inbound_text),
+    ):
+        try:
+            process_manual_vk_private_reply(
+                int(assignment_id),
+                int(owner_id),
+                inbound_text,
+            )
+            st.session_state[reset_key] = True
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Неона не смогла обработать ответ: {exc}")
+
+    st.caption(
+        "Важно: обычная личная страница VK сейчас не передаёт Агентству такие входящие "
+        "сообщения автоматически. Поэтому новую реплику нужно вставить сюда; весь контекст, "
+        "аргументацию и согласование встречи Неона ведёт сама."
     )
 
 
@@ -1208,6 +1327,13 @@ def _render_today_vk_candidates(
                     scope="daily",
                 )
 
+            _render_vk_private_dialog_followup(
+                owner_id,
+                assignment_id,
+                first_name,
+                status,
+                scope="daily",
+            )
             _render_vk_material_followup(
                 owner_id,
                 assignment_id,
@@ -1457,6 +1583,13 @@ def _render_known_vk_contacts(
                     scope="known",
                 )
 
+            _render_vk_private_dialog_followup(
+                owner_id,
+                assignment_id,
+                first_name,
+                status,
+                scope="known",
+            )
             _render_vk_material_followup(
                 owner_id,
                 assignment_id,
