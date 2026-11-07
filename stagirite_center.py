@@ -4587,6 +4587,52 @@ def _create_artist_direction(
     )
 
 
+
+def _artist_owner_wishes(
+    scene_request: str = "",
+    avoid: str = "",
+    quick: list[str] | None = None,
+    mood: str = "",
+    age: str = "",
+    place: str = "",
+    brand_style: bool = True,
+) -> str:
+    parts: list[str] = []
+    scene_request = str(scene_request or "").strip()
+    avoid = str(avoid or "").strip()
+    quick = [
+        str(item or "").strip()
+        for item in (quick or [])
+        if str(item or "").strip()
+    ]
+    mood = str(mood or "").strip()
+    age = str(age or "").strip()
+    place = str(place or "").strip()
+
+    if scene_request:
+        parts.append(
+            "ЧТО ДИРЕКТОР ХОЧЕТ ВИДЕТЬ: " + scene_request
+        )
+    if quick:
+        parts.append(
+            "БЫСТРЫЕ УТОЧНЕНИЯ: " + ", ".join(quick)
+        )
+    if mood and mood != "Авто":
+        parts.append("НАСТРОЕНИЕ: " + mood)
+    if age and age != "Авто":
+        parts.append("ВОЗРАСТ ГЕРОЕВ: " + age)
+    if place and place != "Авто":
+        parts.append("МЕСТО / СРЕДА: " + place)
+    if avoid:
+        parts.append("ЧЕГО НЕ ДОЛЖНО БЫТЬ: " + avoid)
+    if brand_style:
+        parts.append(
+            "ФИРМЕННЫЙ СТИЛЬ АГЕНТСТВА W: "
+            "благородный сине-золотой акцент, тепло, живые лица, "
+            "премиально и без дешёвого рекламного глянца."
+        )
+    return "\n".join(parts).strip()
+
 def _make_plan(
     intents: list[str],
     meeting_count: int,
@@ -7574,6 +7620,302 @@ def _render_result(
         )
 
         change_key = f"stagirite_artist_change_{task_id}"
+        artist_request_key = (
+            f"stagirite_artist_request_{task_id}"
+        )
+        artist_avoid_key = (
+            f"stagirite_artist_avoid_{task_id}"
+        )
+        artist_quick_key = (
+            f"stagirite_artist_quick_{task_id}"
+        )
+        artist_mood_key = (
+            f"stagirite_artist_mood_{task_id}"
+        )
+        artist_age_key = (
+            f"stagirite_artist_age_{task_id}"
+        )
+        artist_place_key = (
+            f"stagirite_artist_place_{task_id}"
+        )
+        artist_brand_key = (
+            f"stagirite_artist_brand_{task_id}"
+        )
+
+        artist_settings = _load_stagirite_settings(owner_id)
+        saved_artist_profile = (
+            dict(artist_settings.get("artist_style_profile"))
+            if isinstance(
+                artist_settings.get("artist_style_profile"),
+                dict,
+            )
+            else {}
+        )
+
+        if artist_request_key not in st.session_state:
+            st.session_state[artist_request_key] = ""
+        if artist_avoid_key not in st.session_state:
+            st.session_state[artist_avoid_key] = str(
+                saved_artist_profile.get("avoid") or ""
+            )
+        if artist_quick_key not in st.session_state:
+            saved_quick = saved_artist_profile.get("quick")
+            st.session_state[artist_quick_key] = (
+                list(saved_quick)
+                if isinstance(saved_quick, list)
+                else []
+            )
+        if artist_mood_key not in st.session_state:
+            st.session_state[artist_mood_key] = str(
+                saved_artist_profile.get("mood") or "Авто"
+            )
+        if artist_age_key not in st.session_state:
+            st.session_state[artist_age_key] = str(
+                saved_artist_profile.get("age") or "Авто"
+            )
+        if artist_place_key not in st.session_state:
+            st.session_state[artist_place_key] = str(
+                saved_artist_profile.get("place") or "Авто"
+            )
+        if artist_brand_key not in st.session_state:
+            st.session_state[artist_brand_key] = bool(
+                saved_artist_profile.get("brand_style", True)
+            )
+
+        artist_mode = st.radio(
+            "Как создать иллюстрацию?",
+            options=[
+                "⚡ Быстро — Стагирит сам",
+                "🎯 Точно — я уточню",
+            ],
+            horizontal=True,
+            key=f"stagirite_artist_mode_{task_id}",
+            help=(
+                "В точном режиме Вы просто описываете картинку "
+                "обычными словами или голосом. Стагирит сам "
+                "превращает пожелание в профессиональный промт."
+            ),
+        )
+
+        if artist_mode == "🎯 Точно — я уточню":
+            with st.container(border=True):
+                st.markdown(
+                    "**Что Вы хотите видеть в иллюстрации?**"
+                )
+                st.caption(
+                    "Не нужен технический промт. Скажите как человеку: "
+                    "кто в кадре, где он находится и какое настроение."
+                )
+
+                artist_voice = None
+                if hasattr(st, "audio_input"):
+                    artist_voice = st.audio_input(
+                        "🎙️ Наговорить пожелание",
+                        key=f"stagirite_artist_voice_{task_id}",
+                    )
+
+                if (
+                    artist_voice is not None
+                    and st.button(
+                        "📝 Расшифровать голос",
+                        key=(
+                            f"stagirite_artist_voice_to_text_"
+                            f"{task_id}"
+                        ),
+                        use_container_width=True,
+                        disabled=_transcribe_artist_audio is None,
+                    )
+                ):
+                    if _transcribe_artist_audio is None:
+                        st.warning(
+                            "Распознавание голоса пока не подключено."
+                        )
+                    else:
+                        try:
+                            audio_bytes = artist_voice.getvalue()
+                            audio_name = str(
+                                getattr(
+                                    artist_voice,
+                                    "name",
+                                    "artist-wish.wav",
+                                )
+                                or "artist-wish.wav"
+                            )
+                            audio_type = str(
+                                getattr(
+                                    artist_voice,
+                                    "type",
+                                    "audio/wav",
+                                )
+                                or "audio/wav"
+                            )
+                            transcript = _transcribe_artist_audio(
+                                audio_bytes,
+                                filename=audio_name,
+                                mime_type=audio_type,
+                            )
+                            st.session_state[
+                                artist_request_key
+                            ] = transcript
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(
+                                "Не удалось распознать голос. "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+
+                artist_scene_request = st.text_area(
+                    "Опишите желаемую сцену",
+                    placeholder=(
+                        "Например: женщина 55–65 лет дома у окна, "
+                        "тёплый вечерний свет, ощущение свободы и "
+                        "спокойствия; без офиса в центре кадра."
+                    ),
+                    height=120,
+                    key=artist_request_key,
+                )
+
+                artist_avoid = st.text_input(
+                    "Чего точно не должно быть?",
+                    placeholder=(
+                        "Например: без молодых моделей, без холодного "
+                        "офиса, без шаблонных лиц."
+                    ),
+                    key=artist_avoid_key,
+                )
+
+                quick_options = [
+                    "Героиня старше",
+                    "Меньше офиса",
+                    "Больше уюта",
+                    "Больше семьи",
+                    "Больше природы",
+                    "Тёплая атмосфера",
+                    "Премиально",
+                    "Для аудитории 50+",
+                    "Живые лица",
+                    "Без шаблонного глянца",
+                    "Больше доверия",
+                    "Спокойнее и мягче",
+                ]
+                artist_quick = st.multiselect(
+                    "Быстрые уточнения",
+                    options=quick_options,
+                    key=artist_quick_key,
+                )
+
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    artist_mood = st.selectbox(
+                        "Настроение",
+                        [
+                            "Авто",
+                            "Тёплое",
+                            "Уютное",
+                            "Вдохновляющее",
+                            "Спокойное",
+                            "Премиальное",
+                            "Деловое",
+                        ],
+                        key=artist_mood_key,
+                    )
+                with m2:
+                    artist_age = st.selectbox(
+                        "Возраст героев",
+                        [
+                            "Авто",
+                            "35+",
+                            "45+",
+                            "50+",
+                            "60+",
+                        ],
+                        key=artist_age_key,
+                    )
+                with m3:
+                    artist_place = st.selectbox(
+                        "Где сцена",
+                        [
+                            "Авто",
+                            "Дома",
+                            "В уютном кафе",
+                            "На природе",
+                            "В городе",
+                            "В рабочем кабинете",
+                            "Светлый нейтральный фон",
+                        ],
+                        key=artist_place_key,
+                    )
+
+                artist_brand_style = st.checkbox(
+                    "Использовать фирменный стиль Агентства W",
+                    key=artist_brand_key,
+                )
+
+                if st.button(
+                    "💾 Запомнить мой стиль",
+                    key=f"stagirite_artist_save_style_{task_id}",
+                    use_container_width=True,
+                ):
+                    updated_settings = dict(artist_settings)
+                    updated_settings["artist_style_profile"] = {
+                        "avoid": str(artist_avoid or "").strip(),
+                        "quick": list(artist_quick or []),
+                        "mood": str(artist_mood or "Авто"),
+                        "age": str(artist_age or "Авто"),
+                        "place": str(artist_place or "Авто"),
+                        "brand_style": bool(artist_brand_style),
+                    }
+                    _save_stagirite_settings(
+                        owner_id,
+                        updated_settings,
+                    )
+                    st.success(
+                        "✅ Стиль сохранён для следующих иллюстраций."
+                    )
+
+                artist_user_direction = _artist_owner_wishes(
+                    scene_request=artist_scene_request,
+                    avoid=artist_avoid,
+                    quick=artist_quick,
+                    mood=artist_mood,
+                    age=artist_age,
+                    place=artist_place,
+                    brand_style=artist_brand_style,
+                )
+        else:
+            artist_user_direction = _artist_owner_wishes(
+                avoid=str(
+                    saved_artist_profile.get("avoid") or ""
+                ),
+                quick=(
+                    saved_artist_profile.get("quick")
+                    if isinstance(
+                        saved_artist_profile.get("quick"),
+                        list,
+                    )
+                    else []
+                ),
+                mood=str(
+                    saved_artist_profile.get("mood") or "Авто"
+                ),
+                age=str(
+                    saved_artist_profile.get("age") or "Авто"
+                ),
+                place=str(
+                    saved_artist_profile.get("place") or "Авто"
+                ),
+                brand_style=bool(
+                    saved_artist_profile.get(
+                        "brand_style",
+                        True,
+                    )
+                ),
+            )
+            if saved_artist_profile:
+                st.caption(
+                    "Будет применён Ваш сохранённый стиль. "
+                    "Для конкретной сцены выберите «Точно — я уточню»."
+                )
 
         format_label = st.selectbox(
             "Формат иллюстрации",
