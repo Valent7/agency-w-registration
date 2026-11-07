@@ -268,7 +268,7 @@ def _guard_scheduling_reply(config, reply: str, text: str, context):
 
 
 def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
-    """Свободный слот с окном 10:00–20:00 МСК, буфером и постоянной занятостью."""
+    """Проверка календарных встреч, занятости и буфера без жёсткого рабочего окна."""
 
     start_utc = start_utc.astimezone(core.UTC)
     end_utc = end_utc.astimezone(core.UTC)
@@ -277,14 +277,8 @@ def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
     if start_utc < datetime.now(core.UTC) + timedelta(minutes=MIN_LEAD_MINUTES):
         return False
 
-    # Рабочее окно владельца: 10:00–20:00 МСК.
+    # Proposed times are constrained by actual calendar availability.
     start_msk = start_utc.astimezone(core.MSK)
-    end_msk = end_utc.astimezone(core.MSK)
-    day_start = datetime.combine(start_msk.date(), dt_time(10, 0), core.MSK)
-    day_end = datetime.combine(start_msk.date(), dt_time(20, 0), core.MSK)
-
-    if start_msk < day_start or end_msk > day_end:
-        return False
 
     # Между встречами / постоянной занятостью оставляем минимум 1 час.
     expanded_start = start_utc - timedelta(minutes=BUFFER_MINUTES)
