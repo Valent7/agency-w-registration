@@ -8473,6 +8473,20 @@ def _render_result(
                     with st.spinner(
                         "Стагирит уточняет бриф, Художник создаёт новую версию..."
                     ):
+                        redraw_request_parts = [
+                            str(artist_user_direction or "").strip(),
+                            (
+                                "ДОПОЛНИТЕЛЬНО ИЗМЕНИТЬ В ЭТОЙ ВЕРСИИ: "
+                                + str(change_request or "").strip()
+                                if str(change_request or "").strip()
+                                else ""
+                            ),
+                        ]
+                        redraw_request = "\n".join(
+                            part
+                            for part in redraw_request_parts
+                            if part
+                        ).strip()
                         artist_direction = _create_artist_direction(
                             ask_openai_fn,
                             str(task.get("assignment") or ""),
@@ -8480,9 +8494,7 @@ def _render_result(
                             result.get("content_master")
                             if isinstance(result.get("content_master"), dict)
                             else {},
-                            user_change_request=str(
-                                change_request or ""
-                            ).strip(),
+                            user_change_request=redraw_request,
                         )
                         generated = generate_image_fn(
                             str(draft).strip(),
@@ -8544,6 +8556,9 @@ def _render_result(
                             result.get("content_master")
                             if isinstance(result.get("content_master"), dict)
                             else {},
+                            user_change_request=str(
+                                artist_user_direction or ""
+                            ).strip(),
                         )
                         generated = generate_image_fn(
                             str(draft).strip(),
