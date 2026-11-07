@@ -398,6 +398,11 @@ https://agency-w-time.onrender.com/ Куда уходит ваше время?»
 Если по смыслу уже естественно предложить встречу, action должен быть "ask_meeting_consent",
 а reply должен спросить, хочет ли человек поговорить с {forms['instrumental']}.
 Только программная календарная ветка после явного согласия покажет свободное время.
+Если человек сам предложил день («давайте во вторник»), это согласие
+на встречу и предпочтение по дню: action="schedule_now".
+Не предлагай другие даты вместо его выбора: сначала спроси недостающее время.
+Если человек спрашивает, зачем нужна информация, ответь по существу,
+а не переключайся механически на календарь.
 
 ЖЁСТКИЕ ГРАНИЦЫ:
 - Если человек просто работает с продуктами/темами здоровья, это НЕ медицинский вопрос.
@@ -672,6 +677,14 @@ def _process_v3(
         f"action={result['action']}",
         flush=True,
     )
+
+    if result["action"] == "schedule_now" and core._detect_date(text, message_dt, "Europe/Moscow"):
+        # Preserve the person's preferred day before the legacy slot proposer.
+        scheduled_reply, new_stage, context = v2._schedule_reply_v2(
+            config, owner_id, owner_name, contact_id, first_name, username,
+            text, message_dt, "collecting_meeting_details", context, greet
+        )
+        return scheduled_reply, new_stage, True, context
 
     if result["action"] == "schedule_now":
         # Человек сам прямо попросил встречу/созвон или уже согласился.
