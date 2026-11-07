@@ -4155,6 +4155,341 @@ def mark_vk_invited(assignment_id: int) -> None:
     _sb_patch("agency_vk_assignments", {"id": f"eq.{int(assignment_id)}"}, {"status": "invited", "invited_at": now, "updated_at": now})
 
 
+def _vk_dialog_contact_id(vk_user_id: int) -> int:
+    """Stable negative id for VK dialogs inside Neona's shared dialog-state table."""
+    raw = f"vk-user:{int(vk_user_id)}".encode("utf-8")
+    digest = hashlib.sha256(raw).digest()
+    value = int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+    return -abs(value)
+
+
+def _vk_assignment_dialog_context(
+    assignment_id: int,
+    *,
+    owner_id: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    filters: dict[str, Any] = {
+        "id": f"eq.{int(assignment_id)}",
+        "select": "*",
+        "limit": 1,
+    }
+    if owner_id is not None:
+        filters["owner_telegram_id"] = f"eq.{int(owner_id)}"
+    rows = _sb_get("agency_vk_assignments", filters)
+    if not rows:
+        raise VKScoutError("VK-кандидат для этого диалога не найден.")
+    assignment = rows[0]
+
+    vk_user_id = int(assignment.get("vk_user_id") or 0)
+    if vk_user_id <= 0:
+        raise VKScoutError("У VK-кандидата не найден ID профиля.")
+
+    candidates = _sb_get(
+        "agency_vk_candidates",
+        {
+            "vk_user_id": f"eq.{vk_user_id}",
+            "select": "*",
+            "limit": 1,
+        },
+    )
+    candidate = candidates[0] if candidates else {}
+    return assignment, candidate
+
+
+def load_manual_vk_private_dialog(
+    assignment_id: int,
+    owner_id: int,
+) -> dict[str, Any]:
+    """Read Neona state for a manually relayed personal-VK conversation."""
+    assignment, candidate = _vk_assignment_dialog_context(
+        int(assignment_id),
+        owner_id=int(owner_id),
+    )
+    vk_user_id = int(assignment.get("vk_user_id") or 0)
+    contact_id = _vk_dialog_contact_id(vk_user_id)
+    rows = _sb_get(
+        "agency_dialog_states",
+        {
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "contact_telegram_id": f"eq.{contact_id}",
+            "select": "*",
+            "limit": 1,
+        },
+    )
+    state = rows[0] if rows else {}
+    context = state.get("context") if isinstance(state.get("context"), dict) else {}
+    return {
+        "assignment_id": int(assignment_id),
+        "vk_user_id": vk_user_id,
+        "contact_id": contact_id,
+        "first_name": str(candidate.get("first_name") or "").strip(),
+        "stage": str(state.get("stage") or "idle"),
+        "last_incoming_message_id": int(state.get("last_incoming_message_id") or 0),
+        "pending_inbound": str(context.get("vk_manual_pending_inbound") or "").strip(),
+        "pending_reply": str(context.get("vk_manual_pending_reply") or "").strip(),
+        "last_outbound": str(context.get("vk_manual_last_outbound_text") or "").strip(),
+        "last_processed_at": str(context.get("vk_manual_last_processed_at") or "").strip(),
+        "context": context,
+    }
+
+
+def process_manual_vk_private_reply(
+    assignment_id: int,
+    owner_id: int,
+    inbound_text: str,
+) -> dict[str, Any]:
+    """Run a pasted personal-VK reply through the same Neona policy as Telegram."""
+    text = re.sub(r"\s+", " ", str(inbound_text or "")).strip()
+    if not text:
+        raise VKScoutError("Вставьте ответ человека из VK.")
+
+    assignment, candidate = _vk_assignment_dialog_context(
+        int(assignment_id),
+        owner_id=int(owner_id),
+    )
+    status = str(assignment.get("status") or "").strip()
+    if status not in {"invited", "dialogue", "meeting"}:
+        raise VKScoutError(
+            "Сначала отправьте человеку первое сообщение и нажмите «✅ Отправлено»."
+        )
+
+    vk_user_id = int(assignment.get("vk_user_id") or 0)
+    first_name = str(candidate.get("first_name") or "").strip()
+    contact_id = _vk_dialog_contact_id(vk_user_id)
+
+    import neona_dialog_policy as policy
+
+    policy.apply_policy()
+    core = policy.core
+    config = core.load_config()
+
+    members = _sb_get(
+        "agency_members",
+        {
+            "telegram_id": f"eq.{int(owner_id)}",
+            "select": "first_name",
+            "limit": 1,
+        },
+    )
+    owner_name = (
+        str(members[0].get("first_name") or "").strip()
+        if members
+        else "Владелец"
+    ) or "Владелец"
+
+    state = core._dialog_state(config, int(owner_id), contact_id)
+    if not isinstance(state, dict):
+        invited_at = str(assignment.get("invited_at") or datetime.now(UTC).isoformat())
+        first_message = str(assignment.get("invitation_text") or "").strip()
+        initial_turns = []
+        if first_message:
+            initial_turns.append(
+                {
+                    "at": invited_at,
+                    "kind": "outbound",
+                    "category": "first_touch",
+                    "summary": "Первое сообщение Неоны в VK.",
+                    "incoming": "",
+                    "neona_reply": first_message[:500],
+                    "stage_before": "idle",
+                    "stage_after": "idle",
+                }
+            )
+        context: dict[str, Any] = {
+            "channel": "vk",
+            "vk_user_id": vk_user_id,
+            "vk_assignment_id": int(assignment_id),
+            "first_message_sent_at": invited_at,
+            "activated_by": "vk_personal_manual_handoff",
+            "pre_activation_history_forbidden": True,
+            "last_reply_text": first_message,
+        }
+        if initial_turns:
+            context["relationship_memory"] = {
+                "version": 1,
+                "last_turn_at": invited_at,
+                "last_kind": "outbound",
+                "last_category": "first_touch",
+                "last_summary": "Первое сообщение Неоны в VK.",
+                "last_incoming": "",
+                "last_reply": first_message[:700],
+                "confirmed_facts": [],
+                "goals_or_needs": [],
+                "questions": [],
+                "preferences": [],
+                "objections": [],
+                "turns": initial_turns,
+                "next_step": "Ждать следующего входящего сообщения.",
+            }
+        state = {
+            "last_incoming_message_id": 0,
+            "stage": "idle",
+            # Первое сообщение уже отправлено вручную, поэтому Неона не здоровается повторно.
+            "greeted": True,
+            "context": context,
+        }
+    else:
+        state = dict(state)
+        context = (
+            dict(state.get("context"))
+            if isinstance(state.get("context"), dict)
+            else {}
+        )
+        context.update(
+            {
+                "channel": "vk",
+                "vk_user_id": vk_user_id,
+                "vk_assignment_id": int(assignment_id),
+                "activated_by": context.get("activated_by") or "vk_personal_manual_handoff",
+            }
+        )
+        state["context"] = context
+
+    context = dict(state.get("context") or {})
+    previous_outbound = str(
+        context.get("vk_manual_last_outbound_text")
+        or context.get("last_reply_text")
+        or assignment.get("invitation_text")
+        or ""
+    ).strip()
+    fingerprint = hashlib.sha256(
+        f"{int(assignment_id)}|{previous_outbound}|{text}".encode("utf-8")
+    ).hexdigest()
+
+    # Streamlit can resend a form action after rerun. Reuse the already prepared
+    # reply instead of paying for and generating a duplicate Neona response.
+    if (
+        str(context.get("vk_manual_pending_fingerprint") or "") == fingerprint
+        and str(context.get("vk_manual_pending_reply") or "").strip()
+    ):
+        return {
+            "reply": str(context.get("vk_manual_pending_reply") or "").strip(),
+            "stage": str(state.get("stage") or "idle"),
+            "deduplicated": True,
+        }
+
+    message_dt = datetime.now(UTC)
+    reply, new_stage, greeted, new_context = core._process_message(
+        config,
+        int(owner_id),
+        owner_name,
+        contact_id,
+        first_name,
+        "",
+        text,
+        message_dt,
+        state,
+    )
+    reply_text = re.sub(r"\s+", " ", str(reply or "")).strip()
+    if not reply_text:
+        raise VKScoutError(
+            "Неона не подготовила ответ. Диалог мог быть закрыт по просьбе человека."
+        )
+
+    new_context = dict(new_context or {})
+    new_context.update(
+        {
+            "channel": "vk",
+            "vk_user_id": vk_user_id,
+            "vk_assignment_id": int(assignment_id),
+            "vk_manual_pending_inbound": text,
+            "vk_manual_pending_reply": reply_text,
+            "vk_manual_pending_fingerprint": fingerprint,
+            "vk_manual_last_processed_at": message_dt.isoformat(),
+        }
+    )
+    incoming_id = int.from_bytes(
+        hashlib.sha256(
+            f"vk-manual:{int(owner_id)}:{int(assignment_id)}:{fingerprint}".encode("utf-8")
+        ).digest()[:8],
+        "big",
+    ) & ((1 << 63) - 1)
+
+    core._save_dialog_state(
+        config,
+        int(owner_id),
+        contact_id,
+        last_incoming_id=incoming_id,
+        stage=str(new_stage or "idle"),
+        greeted=bool(greeted),
+        context=new_context,
+    )
+    return {
+        "reply": reply_text,
+        "stage": str(new_stage or "idle"),
+        "deduplicated": False,
+    }
+
+
+def mark_manual_vk_private_reply_sent(
+    assignment_id: int,
+    owner_id: int,
+    outbound_text: str,
+) -> dict[str, Any]:
+    """Confirm that the owner copied Neona's prepared reply back into personal VK."""
+    sent_text = re.sub(r"\s+", " ", str(outbound_text or "")).strip()
+    if not sent_text:
+        raise VKScoutError("Ответ Неоны пуст.")
+
+    assignment, _candidate = _vk_assignment_dialog_context(
+        int(assignment_id),
+        owner_id=int(owner_id),
+    )
+    vk_user_id = int(assignment.get("vk_user_id") or 0)
+    contact_id = _vk_dialog_contact_id(vk_user_id)
+
+    import neona_dialog_policy as policy
+
+    policy.apply_policy()
+    core = policy.core
+    config = core.load_config()
+    state = core._dialog_state(config, int(owner_id), contact_id)
+    if not isinstance(state, dict):
+        raise VKScoutError("Память этого VK-диалога Неоны не найдена.")
+
+    context = (
+        dict(state.get("context"))
+        if isinstance(state.get("context"), dict)
+        else {}
+    )
+    pending = str(context.get("vk_manual_pending_reply") or "").strip()
+    if not pending:
+        raise VKScoutError("У Неоны сейчас нет подготовленного VK-ответа.")
+
+    now = datetime.now(UTC).isoformat()
+    context.update(
+        {
+            "channel": "vk",
+            "vk_user_id": vk_user_id,
+            "vk_assignment_id": int(assignment_id),
+            "vk_manual_last_outbound_text": sent_text,
+            "vk_manual_last_outbound_at": now,
+            "last_reply_text": sent_text,
+        }
+    )
+    for key in (
+        "vk_manual_pending_inbound",
+        "vk_manual_pending_reply",
+        "vk_manual_pending_fingerprint",
+    ):
+        context.pop(key, None)
+
+    core._save_dialog_state(
+        config,
+        int(owner_id),
+        contact_id,
+        last_incoming_id=int(state.get("last_incoming_message_id") or 0),
+        stage=str(state.get("stage") or "idle"),
+        greeted=bool(state.get("greeted", True)),
+        context=context,
+    )
+    return {
+        "sent": True,
+        "stage": str(state.get("stage") or "idle"),
+        "sent_at": now,
+    }
+
+
 def skip_vk_assignment(assignment_id: int) -> None:
     now = datetime.now(UTC).isoformat()
     _sb_patch("agency_vk_assignments", {"id": f"eq.{int(assignment_id)}"}, {"status": "skipped", "released_at": now, "updated_at": now})
