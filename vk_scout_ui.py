@@ -1134,7 +1134,7 @@ def _render_today_vk_candidates(
         profile_url = str(item.get("profile_url") or "").strip()
         status = str(item.get("status") or "reserved").strip()
         invitation_text = str(item.get("invitation_text") or "").strip()
-        legacy_link_message = bool(
+        auto_neona_link = bool(
             invitation_text
             and (
                 "vk.me/club" in invitation_text
@@ -1230,34 +1230,36 @@ def _render_today_vk_candidates(
 
                 st.code(invitation_text, language=None)
 
-                if legacy_link_message:
-                    if status == "invited":
-                        st.caption(
-                            "ℹ️ Это старое сообщение, уже отмеченное как отправленное. "
-                            "Оно сохранено в истории как было отправлено. Все новые первые "
-                            "сообщения Неоны создаются без обязательной ссылки на сообщество."
-                        )
-                    elif assignment_id:
-                        st.warning(
-                            "Это сообщение было подготовлено до нового правила и всё ещё содержит "
-                            "старую ссылку. Обновите его одним нажатием."
-                        )
-                        if st.button(
-                            "🔄 Обновить без ссылки",
-                            key=f"vk_refresh_legacy_{owner_id}_{assignment_id}",
-                            type="primary",
-                            use_container_width=False,
-                        ):
-                            try:
-                                prepare_vk_invitation(
-                                    assignment_id,
-                                    member_code,
-                                    ask_openai_fn=ask_openai_fn,
-                                )
-                                st.success("Сообщение обновлено по новым правилам.")
-                                st.rerun()
-                            except Exception as exc:
-                                st.error(f"Не удалось обновить сообщение: {exc}")
+                if auto_neona_link:
+                    st.caption(
+                        "🔗 Персональная ссылка в конце сообщения — это автоматический вход к Неоне. "
+                        "После первого сообщения человека в открывшемся диалоге Неона продолжит сама."
+                    )
+                elif assignment_id and status != "invited":
+                    st.warning(
+                        "У этого ранее подготовленного сообщения ещё нет автоматического перехода к Неоне."
+                    )
+                    if st.button(
+                        "🔄 Добавить автоматический переход к Неоне",
+                        key=f"vk_restore_neona_bridge_{owner_id}_{assignment_id}",
+                        type="primary",
+                        use_container_width=False,
+                    ):
+                        try:
+                            prepare_vk_invitation(
+                                assignment_id,
+                                member_code,
+                                ask_openai_fn=ask_openai_fn,
+                            )
+                            st.success("Автоматический переход к Неоне добавлен.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Не удалось обновить сообщение: {exc}")
+                elif status == "invited":
+                    st.caption(
+                        "ℹ️ Это сообщение уже было отправлено без автоматического перехода. "
+                        "Для него ниже остаётся резервный ручной режим."
+                    )
                 if status != "invited" and assignment_id:
                     if st.button(
                         "✏️ Редактировать",
@@ -1327,13 +1329,14 @@ def _render_today_vk_candidates(
                     scope="daily",
                 )
 
-            _render_vk_private_dialog_followup(
-                owner_id,
-                assignment_id,
-                first_name,
-                status,
-                scope="daily",
-            )
+            if status == "invited" and not auto_neona_link:
+                _render_vk_private_dialog_followup(
+                    owner_id,
+                    assignment_id,
+                    first_name,
+                    status,
+                    scope="daily",
+                )
             _render_vk_material_followup(
                 owner_id,
                 assignment_id,
@@ -1343,9 +1346,9 @@ def _render_today_vk_candidates(
             )
 
     st.caption(
-        "Первое сообщение пока отправляется из личного VK вручную: откройте профиль, "
-        "скопируйте утверждённый текст Неоны и после отправки нажмите «Отправлено». "
-        "Обязательной ссылки на сообщество в первом сообщении больше нет."
+        "Первое сообщение отправляется из личного VK вручную. В конце текста есть персональная "
+        "ссылка: человек открывает её и пишет ответ — после этого Неона автоматически подхватывает "
+        "диалог и ведёт его дальше до встречи."
     )
 
 
@@ -1417,7 +1420,7 @@ def _render_known_vk_contacts(
         profile_url = str(item.get("profile_url") or "").strip()
         status = str(item.get("status") or "reserved").strip()
         invitation_text = str(item.get("invitation_text") or "").strip()
-        legacy_link_message = bool(
+        auto_neona_link = bool(
             invitation_text
             and (
                 "vk.me/club" in invitation_text
@@ -1491,34 +1494,36 @@ def _render_known_vk_contacts(
 
                 st.code(invitation_text, language=None)
 
-                if legacy_link_message:
-                    if status == "invited":
-                        st.caption(
-                            "ℹ️ Это старое сообщение, уже отмеченное как отправленное. "
-                            "Оно сохранено в истории как было отправлено. Все новые первые "
-                            "сообщения Неоны создаются без обязательной ссылки на сообщество."
-                        )
-                    elif assignment_id:
-                        st.warning(
-                            "Это сообщение было подготовлено до нового правила и всё ещё содержит "
-                            "старую ссылку. Обновите его одним нажатием."
-                        )
-                        if st.button(
-                            "🔄 Обновить без ссылки",
-                            key=f"vk_refresh_legacy_{owner_id}_{assignment_id}",
-                            type="primary",
-                            use_container_width=False,
-                        ):
-                            try:
-                                prepare_vk_invitation(
-                                    assignment_id,
-                                    member_code,
-                                    ask_openai_fn=ask_openai_fn,
-                                )
-                                st.success("Сообщение обновлено по новым правилам.")
-                                st.rerun()
-                            except Exception as exc:
-                                st.error(f"Не удалось обновить сообщение: {exc}")
+                if auto_neona_link:
+                    st.caption(
+                        "🔗 Персональная ссылка в конце сообщения — автоматический вход к Неоне. "
+                        "После первого сообщения человека в открывшемся диалоге Неона продолжит сама."
+                    )
+                elif assignment_id and status != "invited":
+                    st.warning(
+                        "У этого ранее подготовленного сообщения ещё нет автоматического перехода к Неоне."
+                    )
+                    if st.button(
+                        "🔄 Добавить автоматический переход к Неоне",
+                        key=f"vk_known_restore_neona_bridge_{owner_id}_{assignment_id}",
+                        type="primary",
+                        use_container_width=False,
+                    ):
+                        try:
+                            prepare_vk_invitation(
+                                assignment_id,
+                                member_code,
+                                ask_openai_fn=ask_openai_fn,
+                            )
+                            st.success("Автоматический переход к Неоне добавлен.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Не удалось обновить сообщение: {exc}")
+                elif status == "invited":
+                    st.caption(
+                        "ℹ️ Это сообщение уже было отправлено без автоматического перехода. "
+                        "Для него ниже остаётся резервный ручной режим."
+                    )
                 if status != "invited" and assignment_id:
                     if st.button(
                         "✏️ Редактировать",
@@ -1583,13 +1588,14 @@ def _render_known_vk_contacts(
                     scope="known",
                 )
 
-            _render_vk_private_dialog_followup(
-                owner_id,
-                assignment_id,
-                first_name,
-                status,
-                scope="known",
-            )
+            if status == "invited" and not auto_neona_link:
+                _render_vk_private_dialog_followup(
+                    owner_id,
+                    assignment_id,
+                    first_name,
+                    status,
+                    scope="known",
+                )
             _render_vk_material_followup(
                 owner_id,
                 assignment_id,
