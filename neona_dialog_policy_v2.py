@@ -332,8 +332,6 @@ def _find_slots(config, owner_id, after_utc=None, limit=3):
     found = []
     for day_offset in range(31):
         day = start_day + timedelta(days=day_offset)
-        if day.weekday() >= 5:
-            continue
         cursor = datetime.combine(day, datetime.min.time(), core.MSK).replace(hour=10)
         end = datetime.combine(day, datetime.min.time(), core.MSK).replace(hour=20)
         while cursor + timedelta(minutes=duration) <= end:
@@ -361,7 +359,7 @@ def _offer_slots(config, owner_id, owner_name, context, reason="", after_utc=Non
     if not slots:
         return (
             prefix + (_prelude(reason, owner_name) + " " if reason else "")
-            + "В ближайшем рабочем окне свободного времени не нашлось. "
+            + "В ближайшие дни свободного времени не нашлось. "
               "Встречу можно будет согласовать позже.",
             "idle", context,
         )
@@ -440,7 +438,7 @@ def _create_meeting(config, owner_id, owner_name, contact_id, first_name, userna
         "end_at": finish.isoformat(),
         "meeting_format": fmt,
         "meeting_link": zoom_link or None,
-        "status": "Ожидает подтверждения",
+        "status": "Подтверждена",
         "notes": notes,
         "source": source,
     }
@@ -643,16 +641,18 @@ def _schedule_reply_v2(
         owner_forms = _owner_forms(owner_name)
         if str(context.get("meeting_reason") or "") == "callback":
             answer = (
-                f"Передаю {owner_forms['nominative']} заявку на звонок "
-                f"{_fmt_msk(start)}. Формат — {fmt}. "
-                "Окончательное решение о встрече принимает владелец кабинета."
+                f"Договорились. {owner_forms['nominative']} позвонит вам "
+                f"{_fmt_msk(start)}. Формат — {fmt}."
             )
         else:
             answer = (
-                f"Передаю заявку на встречу с {owner_forms['instrumental']} "
-                f"на {_fmt_msk(start)}. Формат — {fmt}. "
-                "Владелец кабинета подтвердит возможность встречи."
+                f"Договорились. Встреча с {owner_forms['instrumental']} "
+                f"записана на {_fmt_msk(start)}. Формат — {fmt}."
             )
+        if fmt == "Zoom" and zoom_link:
+            answer += f" Ссылка Zoom: {zoom_link}."
+            if zoom_note:
+                answer += f" {zoom_note}"
         farewell = (
             "Хорошего вам дня!" if datetime.now(core.MSK).hour < 18
             else "Хорошего вам вечера!"
@@ -717,7 +717,7 @@ def _schedule_reply_v2(
     context["meeting_confirmation_pending"] = True
     return (
         prefix + f"Проверим ещё раз: {_fmt_msk(start)}, формат — {fmt}. "
-        "Всё верно? Напишите «Подтверждаю», и я передам заявку владельцу кабинета.",
+        "Всё верно? Напишите «Подтверждаю», и я внесу встречу в календарь.",
         "awaiting_confirmation", context,
     )
 
