@@ -15,13 +15,7 @@
 .cosmic-door.right{right:0;transform-origin:right center;animation-name:door-right}
 .cosmic-door.right::after{left:7%}
 .cosmic-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;opacity:0;transform:scale(.76);animation:clock-reveal 8.8s ease forwards;pointer-events:none}
-.cosmic-clock{position:relative;width:min(48vw,290px);height:min(48vw,290px);border-radius:50%;border:8px double #eac16c;background:radial-gradient(circle,#162f40 0 33%,#0b1a2d 65%,#081224 100%);box-shadow:0 0 23px #eab84d,0 0 90px #dba44d55,inset 0 0 34px #dba44d55}
-.cosmic-clock::before{content:"";position:absolute;inset:12px;border-radius:50%;border:2px dotted #eac46f;box-shadow:inset 0 0 22px #d7a34755}
-.cosmic-clock::after{content:"";position:absolute;inset:48%;border-radius:50%;background:#fff1ae;box-shadow:0 0 12px #ffd88e}
-.cosmic-hand{position:absolute;left:calc(50% - 2px);bottom:50%;width:4px;background:linear-gradient(#fff0b1,#c88f2b);border-radius:8px;transform-origin:50% 100%}
-.cosmic-hand.hour{height:28%;transform:rotate(305deg)}
-.cosmic-hand.minute{height:37%;transform:rotate(45deg)}
-.cosmic-hand.second{height:40%;width:2px;left:calc(50% - 1px);animation:tick-hand 1s steps(1,end) infinite;transform:rotate(15deg)}
+.cosmic-video{display:block;width:auto;max-width:min(82vw,400px);height:auto;max-height:68vh;object-fit:contain;border-radius:12px;filter:drop-shadow(0 0 30px #d3a95590)}
 .cosmic-intro-caption{text-align:center;font-family:Georgia,serif;font-style:italic;font-size:clamp(23px,3.2vw,43px);padding:0 18px;text-shadow:0 0 24px #c7a05d}
 .cosmic-intro-actions{position:absolute;bottom:28px;left:0;right:0;display:flex;justify-content:center;gap:14px;z-index:5}
 .cosmic-intro-actions button{background:#0c1e32d9;border:1px solid #d5ae62;color:#f8deb0;border-radius:8px;padding:10px 18px;cursor:pointer;font-size:15px}
@@ -36,7 +30,7 @@
 </style></head><body>
 <div id="cosmic-intro" role="dialog" aria-label="Космическая заставка журнала Время жить" aria-modal="true">
 <div class="cosmic-stars" aria-hidden="true"></div><div class="cosmic-glow" aria-hidden="true"></div>
-<div class="cosmic-center" aria-hidden="true"><div class="cosmic-clock"><i class="cosmic-hand hour"></i><i class="cosmic-hand minute"></i><i class="cosmic-hand second"></i></div><div class="cosmic-intro-caption">Мы возвращаем человеку время.</div></div>
+<div class="cosmic-center" aria-hidden="true"><video id="w-original-clock" class="cosmic-video" src="assets/clock-original.mp4" playsinline preload="auto" aria-label="Оригинальные золотые часы Агентства W с тиканьем"></video><div class="cosmic-intro-caption">Мы возвращаем человеку время.</div></div>
 <div class="cosmic-door left" aria-hidden="true"></div><div class="cosmic-door right" aria-hidden="true"></div>
 
 </div>
@@ -70,62 +64,37 @@ practice:['Пять вопросов, которые возвращают час
 team:['Как работают цифровые коллеги?',['Один инструмент может писать, другой — анализировать данные, третий — вести подготовку встреч. Однако реальная польза начинается не с их количества, а с согласованности.','В Агентстве W идея состоит в распределении ролей. Неония помогает искать людей, Неона поддерживает содержательные диалоги, Стагирит координирует задачи, Неола помогает осваивать инструкции.','Это не обещание идеальной автоматизации. Это способ по-новому организовать работу — с человеком в центре.']]
 };document.querySelectorAll('[data-article]').forEach(b=>b.addEventListener('click',()=>{const [title,paragraphs]=articles[b.dataset.article];document.getElementById('story').innerHTML='<h2>'+title+'</h2>'+paragraphs.map(p=>'<p>'+p+'</p>').join('');document.getElementById('reader').showModal()}));document.getElementById('close').onclick=()=>document.getElementById('reader').close();document.getElementById('reader').onclick=e=>{if(e.target.id==='reader')e.target.close()};
 
-// Cinematic entrance: try audible autoplay and unlock sound on a tap/click
-// anywhere on the intro. Browsers may reject sound until that interaction.
+// Preserve the original Agency W clock video's ticking audio when allowed.
 (function(){
  const intro=document.getElementById('cosmic-intro');
- if(!intro)return;
- let audio=null,interval=null,finished=false;
- let unlocked=false;
- const duration=9000;
- function stop(){
-   if(interval){clearInterval(interval);interval=null;}
-   if(audio&&audio.state!=='closed')audio.close().catch(()=>{});
-   audio=null;
+ const video=document.getElementById('w-original-clock');
+ if(!intro||!video)return;
+ let finished=false, started=false;
+ function finish(){
+   if(finished)return;finished=true;video.pause();
+   intro.classList.add('intro-exit');setTimeout(()=>intro.remove(),950);
  }
- function end(){
+ function play(){
    if(finished)return;
-   finished=true;stop();intro.classList.add('intro-exit');
-   setTimeout(()=>intro.remove(),950);
+   started=true;
+   video.muted=true;
+   video.play().then(()=>{
+     // Browsers may block audible autoplay: allow unmuting on a user gesture.
+     video.muted=false;
+   }).catch(()=>{ video.muted=true; video.play().catch(()=>{}); });
  }
- try{
-   if(matchMedia('(prefers-reduced-motion: reduce)').matches){intro.remove();return;}
- }catch(e){}
- function tick(){
-   if(!audio||audio.state!=='running')return;
-   const t=audio.currentTime;
-   // A short, low clock-like paired tick, not an alert beep.
-   [0,.095].forEach((delay,i)=>{
-     const o=audio.createOscillator(),gain=audio.createGain();
-     o.type='triangle';o.frequency.setValueAtTime(i?510:660,t+delay);
-     o.frequency.exponentialRampToValueAtTime(i?310:420,t+delay+.04);
-     gain.gain.setValueAtTime(.0001,t+delay);
-     gain.gain.exponentialRampToValueAtTime(.10,t+delay+.004);
-     gain.gain.exponentialRampToValueAtTime(.0001,t+delay+.075);
-     o.connect(gain);gain.connect(audio.destination);
-     o.start(t+delay);o.stop(t+delay+.08);
-   });
- }
- async function startSound(){
+ video.addEventListener('error',finish);
+ function enableSound(){
    if(finished)return;
-   try{
-     const Audio=window.AudioContext||window.webkitAudioContext;
-     if(!Audio)return;
-     if(!audio)audio=new Audio();
-     await audio.resume();
-     if(audio.state==='running'&&!interval){
-       unlocked=true;tick();interval=setInterval(tick,1000);
-     }
-   }catch(e){}
+   if(video.ended){video.currentTime=0;}
+   video.muted=false;video.volume=1;
+   const p=video.play();
+   if(p&&p.catch)p.catch(()=>{video.muted=true;video.play().catch(()=>{});});
  }
- // Attempt autoplay when allowed; never claim this can override browser policy.
- startSound();
- intro.addEventListener('pointerdown',startSound,{passive:true});
- intro.addEventListener('touchstart',startSound,{passive:true});
- document.addEventListener('keydown',function onKey(){
-   if(!finished)startSound();
-   else document.removeEventListener('keydown',onKey);
- });
- setTimeout(end,duration);
+ intro.addEventListener('pointerdown',enableSound,{passive:true});
+ intro.addEventListener('touchstart',enableSound,{passive:true});
+ document.addEventListener('keydown',enableSound,{once:true});
+ setTimeout(play,3000);
+ setTimeout(finish,9000);
 })();
 </script></body></html>
