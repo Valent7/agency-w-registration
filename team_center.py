@@ -1101,7 +1101,7 @@ def _mark_read(message_id: int) -> None:
 
 
 
-VK_COMMUNITY_ID = "241237638"
+VK_COMMUNITY_ID = (_runtime_secret("VK_GROUP_ID", "241237638").lstrip("-") or "241237638")
 VK_REF_SOURCE = "agency_w"
 VK_COMMUNITY_URL = f"https://vk.ru/club{VK_COMMUNITY_ID}"
 
