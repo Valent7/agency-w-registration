@@ -3309,6 +3309,73 @@ async def billing_stripe_webhook(request: Request):
     return JSONResponse({"received": True, "applied": bool(applied)})
 
 
+def _audit_vk_partner_links_on_startup() -> None:
+    """Aggregate-only audit: every partner must have one distinct VK referral code."""
+    try:
+        rows = _sb_get(
+            "agency_members",
+            {
+                "select": "telegram_id,member_code",
+                "limit": 10000,
+            },
+        )
+    except Exception as exc:
+        print(
+            "VK_PARTNER_LINK_AUDIT_ERROR:",
+            type(exc).__name__,
+            flush=True,
+        )
+        return
+
+    codes = [
+        str(row.get("member_code") or "").strip()
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    nonempty = [code for code in codes if code]
+    counts = {}
+    for code in nonempty:
+        counts[code] = counts.get(code, 0) + 1
+    duplicate_codes = sum(1 for count in counts.values() if count > 1)
+
+    telegram_ids = [
+        str(row.get("telegram_id") or "").strip()
+        for row in rows
+        if isinstance(row, dict) and str(row.get("telegram_id") or "").strip()
+    ]
+    telegram_counts = {}
+    for telegram_id in telegram_ids:
+        telegram_counts[telegram_id] = telegram_counts.get(telegram_id, 0) + 1
+    duplicate_telegram_ids = sum(
+        1 for count in telegram_counts.values() if count > 1
+    )
+
+    noncanonical = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        telegram_id = str(row.get("telegram_id") or "").strip()
+        member_code = str(row.get("member_code") or "").strip()
+        if telegram_id and member_code and member_code != f"W{telegram_id}":
+            noncanonical += 1
+
+    expected_group_id = "241237638"
+    print(
+        "VK_PARTNER_LINK_AUDIT:",
+        {
+            "members": len(rows),
+            "codes": len(nonempty),
+            "missing_codes": len(rows) - len(nonempty),
+            "duplicate_codes": duplicate_codes,
+            "duplicate_telegram_ids": duplicate_telegram_ids,
+            "noncanonical_codes": noncanonical,
+            "vk_group_id": str(VK_GROUP_ID or ""),
+            "community_matches_agency_w": str(VK_GROUP_ID or "") == expected_group_id,
+        },
+        flush=True,
+    )
+
+
 routes = [
     Route("/", health, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
@@ -3344,6 +3411,7 @@ routes = [
 
 @asynccontextmanager
 async def _app_lifespan(app):
+    _audit_vk_partner_links_on_startup()
     _restore_instagram_subscriptions_on_startup()
     _catch_up_recent_instagram_comment_replies()
     yield
