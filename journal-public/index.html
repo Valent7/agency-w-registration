@@ -32,6 +32,15 @@ h3{font-size:clamp(22px,2.4vw,28px)}
 dialog h2{font-size:35px}
 @media(max-width:850px){nav{justify-content:center}.wrap{padding:48px 20px}.hero{padding-top:43px;padding-bottom:55px}.hero h1{font-size:clamp(38px,9vw,55px)}.hero .lead{margin-bottom:28px}.agency-intro-video{max-height:560px;width:min(100%,330px)}}
 @media(max-width:450px){.brand b{font-size:15px}nav .links{font-size:13px;gap:12px}.hero{padding-top:30px}.hero h1{font-size:40px}.video-title{font-size:25px}.agency-intro-video{max-height:520px;width:min(100%,300px)}}
+
+/* Compact gold video invitation aligned with all future team portraits */
+.team-video-btn{display:block;margin-top:19px;width:100%;padding:12px 10px;border:1px solid var(--gold);border-radius:7px;color:var(--gold);background:#091a2d;cursor:pointer;font-size:14px;font-weight:600;line-height:1.4;transition:background .2s,color .2s}
+.team-video-btn:hover,.team-video-btn:focus-visible{background:var(--gold);color:#061325}
+.team-video-btn[hidden]{display:none}
+.team-film-dialog{width:min(430px,calc(100% - 24px));max-width:430px;padding:20px;border-radius:12px;text-align:center}
+.team-film-dialog h2{font-size:28px;margin:6px 0 15px}
+.team-film-dialog video{display:block;width:100%;max-height:70vh;aspect-ratio:9/16;object-fit:contain;background:#000;border-radius:8px}
+.team-film-dialog .close{margin-bottom:10px}
 </style><style>
 /* Opening is an overlay; the actual journal remains unchanged underneath. */
 #cosmic-intro{position:fixed;inset:0;z-index:10000;overflow:hidden;background:radial-gradient(ellipse at center,#163351 0%,#051326 67%,#020814 100%);color:#f7deb0;isolation:isolate}
@@ -98,12 +107,13 @@ dialog h2{font-size:35px}
 <button class="article" data-article="team"><small>ЦИФРОВАЯ КОМАНДА · 4 МИН</small><h3>Как работают цифровые коллеги?</h3><p>От поиска людей до контента: почему согласованность важнее количества сервисов.</p>Читать статью ↗</button>
 </div></div></section>
 <section class="divider" id="team"><div class="wrap"><span class="eyebrow">04 / ИИ-команда</span><h2>Знакомьтесь —<br><em>цифровые коллеги.</em></h2><p class="lead">Это виртуальные специалисты Агентства W. Каждый отвечает за свою область работы.</p><div class="teams">
-<div class="person"><div class="portrait"><img src="assets/neonia.webp" alt="Портрет ИИ-специалиста" loading="lazy"></div><div><span class="eyebrow">ПОИСК</span><h3>Неония</h3><p>Изучает аудиторию и помогает находить подходящих людей.</p></div></div>
+<div class="person"><div class="portrait"><img src="assets/neonia.webp" alt="Портрет Неонии" loading="lazy"></div><div><span class="eyebrow">ПОИСК</span><h3>Неония</h3><p>Изучает аудиторию и помогает находить подходящих людей.</p><button type="button" class="team-video-btn" data-team-video="neonia" hidden>▶ Знакомство с Неонией</button></div></div>
 <div class="person"><div class="portrait"><img src="assets/neona.webp" alt="Портрет ИИ-специалиста" loading="lazy"></div><div><span class="eyebrow">ДИАЛОГИ</span><h3>Неона</h3><p>Поддерживает диалог и согласовывает встречи.</p></div></div>
 <div class="person"><div class="portrait"><img src="assets/stagirite.webp" alt="Портрет ИИ-специалиста" loading="lazy"></div><div><span class="eyebrow">КООРДИНАЦИЯ</span><h3>Стагирит</h3><p>Помогает организовать работу цифровой команды.</p></div></div>
 <div class="person"><div class="portrait"><img src="assets/neola.webp" alt="Портрет ИИ-специалиста" loading="lazy"></div><div><span class="eyebrow">НАСТАВНИЧЕСТВО</span><h3>Неола</h3><p>Объясняет инструкции простыми словами и помогает освоиться.</p></div></div>
 </div></div></section></main>
 <footer class="footer">Агентство W · «Мы возвращаем человеку время» · 2026<br>Информационный сайт. Не является рабочим кабинетом Агентства.</footer>
+<dialog class="team-film-dialog" id="team-film" aria-label="Видеознакомство с цифровым сотрудником"><button class="close" id="team-film-close" type="button" aria-label="Закрыть видео">Закрыть ✕</button><h2 id="team-film-title">Знакомство с Неонией</h2><video id="team-film-video" controls playsinline preload="none"></video></dialog>
 <dialog id="reader"><button class="close" id="close">Закрыть ✕</button><div id="story"></div></dialog>
 <script>
 const articles={
@@ -113,6 +123,30 @@ ai:['ИИ не заменяет человека.',['Искусственный 
 practice:['Пять вопросов, которые возвращают часы.',['Запишите обычные дела за неделю. Даже маленькие действия складываются в большие часы.','Первый вопрос: что я делаю чаще трёх раз в неделю? Второй: что можно описать простой инструкцией? Третий: какие задачи не требуют моего личного решения?','Четвёртый: сколько времени занимают эти действия в месяц? Пятый: на что я хотел бы потратить освободившееся время?','Не каждую задачу можно автоматизировать — и не каждую стоит. Но даже один разумно изменённый процесс даёт возможность дышать свободнее.']],
 team:['Как работают цифровые коллеги?',['Один инструмент может писать, другой — анализировать данные, третий — вести подготовку встреч. Однако реальная польза начинается не с их количества, а с согласованности.','В Агентстве W идея состоит в распределении ролей. Неония помогает искать людей, Неона поддерживает содержательные диалоги, Стагирит координирует задачи, Неола помогает осваивать инструкции.','Это не обещание идеальной автоматизации. Это способ по-новому организовать работу — с человеком в центре.']]
 };document.querySelectorAll('[data-article]').forEach(b=>b.addEventListener('click',()=>{const [title,paragraphs]=articles[b.dataset.article];document.getElementById('story').innerHTML='<h2>'+title+'</h2>'+paragraphs.map(p=>'<p>'+p+'</p>').join('');document.getElementById('reader').showModal()}));document.getElementById('close').onclick=()=>document.getElementById('reader').close();document.getElementById('reader').onclick=e=>{if(e.target.id==='reader')e.target.close()};
+
+// Video cards are activated only after their media has been uploaded and verified.
+(function(){
+ const videos={neonia:{url:'assets/neonia-intro.mp4',title:'Неония — аналитик Агентства W'}};
+ const modal=document.getElementById('team-film');
+ const player=document.getElementById('team-film-video');
+ const title=document.getElementById('team-film-title');
+ document.querySelectorAll('[data-team-video]').forEach(button=>{
+   const item=videos[button.dataset.teamVideo];if(!item)return;
+   // Do not expose a nonworking player before the actual uploaded video exists.
+   fetch(item.url,{method:'HEAD'}).then(r=>{
+     if(!r.ok||!String(r.headers.get('content-type')||'').includes('video'))return;
+     button.hidden=false;
+   }).catch(()=>{});
+   button.addEventListener('click',()=>{
+     title.textContent=item.title;player.src=item.url;modal.showModal();
+     player.play().catch(()=>{});
+   });
+ });
+ function close(){player.pause();player.removeAttribute('src');player.load();modal.close();}
+ document.getElementById('team-film-close').addEventListener('click',close);
+ modal.addEventListener('click',event=>{if(event.target===modal)close()});
+ modal.addEventListener('close',()=>{player.pause();player.removeAttribute('src');player.load()});
+})();
 
 // Play supplied clock video and unlock its own audio through a tap.
 (function(){
