@@ -2285,7 +2285,15 @@ async def process_reaction_once(
         else {}
     )
     reaction_key = f"{int(reacted_message_id)}:{str(reaction or '').strip()}"
-    if reaction_key == str(context.get("last_reaction_key") or ""):
+    processed_reaction_keys = [
+        str(item)
+        for item in (context.get("processed_reaction_keys") or [])
+        if str(item).strip()
+    ]
+    if (
+        reaction_key == str(context.get("last_reaction_key") or "")
+        or reaction_key in set(processed_reaction_keys)
+    ):
         return False
 
     try:
@@ -2346,6 +2354,33 @@ async def process_reaction_once(
     new_context["last_reaction_value"] = reaction_value
     new_context["last_reaction_message_id"] = int(reacted_message_id)
     new_context["last_reaction_at"] = datetime.now(UTC).isoformat()
+    new_context["processed_reaction_keys"] = (
+        processed_reaction_keys + [reaction_key]
+    )[-50:]
+
+    # A reaction must never cause the exact same outbound message to be sent
+    # twice in a row. This is a final transport guard, independent of model logic.
+    previous_outbound = _normalize_intent_text(
+        str(context.get("last_reply_text") or "")
+    )
+    current_outbound = _normalize_intent_text(str(reply or ""))
+    if (
+        current_outbound
+        and previous_outbound
+        and current_outbound == previous_outbound
+    ):
+        _save_dialog_state(
+            config,
+            int(owner_id),
+            int(contact_id),
+            last_incoming_id=int(
+                state.get("last_incoming_message_id") or 0
+            ),
+            stage=new_stage,
+            greeted=greeted,
+            context=new_context,
+        )
+        return False
 
     if not reply:
         _save_dialog_state(
