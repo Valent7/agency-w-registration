@@ -4112,6 +4112,15 @@ def prepare_vk_invitation(
     else:
         message = _vk_safe_first_touch(first_name)
 
+    # Возвращаем автоматический мост в Неону. Первое касание остаётся ручным
+    # из личного VK партнёра, но ответ человек пишет через персональную ссылку
+    # сообщества. ref закрепляет его за конкретным владельцем, а Callback API
+    # передаёт первое и последующие сообщения Неоне автоматически.
+    invitation_link = personal_vk_invitation_link(member_code)
+    bridge_line = f"💬 Чтобы я сразу увидела ваш ответ: {invitation_link}"
+    if invitation_link not in message:
+        message = message.rstrip() + "\n\n" + bridge_line
+
     now = datetime.now(UTC).isoformat()
     _sb_patch(
         "agency_vk_assignments",
@@ -4119,8 +4128,7 @@ def prepare_vk_invitation(
         {
             "status": "prepared",
             "invitation_text": message,
-            # Первое сообщение больше не заставляет человека идти в сообщество.
-            "invitation_link": None,
+            "invitation_link": invitation_link,
             "prepared_at": now,
             "updated_at": now,
         },
@@ -4138,7 +4146,7 @@ def prepare_vk_invitation(
         ),
         "profile_url": vk_profile_url(candidate),
         "invitation_text": message,
-        "invitation_link": None,
+        "invitation_link": invitation_link,
         "known_contact": known_contact,
         # Для диагностики в коде/тестах; в пользовательский интерфейс это поле
         # выводить не нужно.
