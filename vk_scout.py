@@ -74,7 +74,7 @@ def _config() -> dict[str, str]:
         "supabase_url": _secret("SUPABASE_URL").rstrip("/"),
         "supabase_key": _secret("SUPABASE_SECRET_KEY") or _secret("SUPABASE_SERVICE_ROLE_KEY"),
         "vk_token": (_secret("VK_SCOUT_ACCESS_TOKEN") or _secret("VK_SERVICE_TOKEN") or _secret("VK_ACCESS_TOKEN")),
-        "vk_group_id": _secret("VK_GROUP_ID").lstrip("-"),
+        "vk_group_id": (_secret("VK_GROUP_ID", "241237638").lstrip("-") or "241237638"),
         "vk_api_version": _secret("VK_API_VERSION", "5.199") or "5.199",
     }
     missing = [
