@@ -499,6 +499,26 @@ def _schedule_reply_v2(
     detected_time = core._detect_time(text)
     fmt_in_message = core._detect_format(text)
 
+    # A direct question about purpose is not a request for a different slot.
+    normalized = _norm(text)
+    if (
+        ("для чего" in normalized or "зачем" in normalized)
+        and any(word in normalized for word in ("информац", "это", "вам", "спрашива"))
+    ):
+        explanation = (
+            "Чтобы лучше понять вашу деятельность и подготовить "
+            "содержательный разговор с владельцем Агентства W, "
+            "а не задавать вам случайные вопросы."
+        )
+        preferred = str(context.get("requested_meeting_date") or "")
+        if preferred:
+            return (
+                prefix + explanation + " Во сколько в выбранный вами день вам удобно созвониться?",
+                "collecting_meeting_details", context,
+            )
+        return prefix + explanation, stage, context
+
+
     # A person who names a day has priority over suggested slots.
     # Preserve the day and ask ONLY for the missing clock time.
     pending_day = str(context.get("requested_meeting_date") or "")
