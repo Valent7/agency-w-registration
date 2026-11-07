@@ -499,6 +499,29 @@ def _schedule_reply_v2(
     detected_time = core._detect_time(text)
     fmt_in_message = core._detect_format(text)
 
+    # A person who names a day has priority over suggested slots.
+    # Preserve the day and ask ONLY for the missing clock time.
+    pending_day = str(context.get("requested_meeting_date") or "")
+    if detected_date and not detected_time:
+        context["requested_meeting_date"] = detected_date
+        context.pop("offered_slots", None)
+        context.pop("proposed_start_at", None)
+        context.pop("meeting_confirmation_pending", None)
+        return (
+            prefix + f"Во сколько во вторник вам удобно?" if "вторник" in _norm(text)
+            else prefix + f"Какое время вам удобно {datetime.fromisoformat(detected_date).strftime('%d.%m.%Y')} (МСК)?",
+            "collecting_meeting_details", context,
+        )
+    if detected_time and not detected_date and pending_day:
+        try:
+            proposed = datetime.fromisoformat(
+                f"{pending_day}T{detected_time}:00"
+            ).replace(tzinfo=core.MSK).astimezone(core.UTC)
+        except (TypeError, ValueError):
+            proposed = None
+    if proposed is not None:
+        context.pop("requested_meeting_date", None)
+
     # The person's latest full request always overrides an older offered slot.
     # Nothing is written to the calendar until they explicitly confirm.
     if proposed is not None:
