@@ -66,6 +66,13 @@ except ImportError:
     remove_publisher_destination = None
     sync_publisher_destinations = None
 
+try:
+    from content_studio_intent import (
+        transcribe_audio as _transcribe_artist_audio,
+    )
+except ImportError:
+    _transcribe_artist_audio = None
+
 from workspace_persistence import persist_workspace_if_changed
 
 
@@ -161,9 +168,15 @@ def _load_stagirite_settings(owner_id: int) -> dict[str, Any]:
 
 def _save_stagirite_settings(owner_id: int, settings: dict[str, Any]) -> None:
     owner_id = int(owner_id)
+    artist_style_profile = (
+        dict(settings.get("artist_style_profile"))
+        if isinstance(settings.get("artist_style_profile"), dict)
+        else {}
+    )
     clean = {
         "zoom_link": str(settings.get("zoom_link") or "").strip(),
         "zoom_note": str(settings.get("zoom_note") or "").strip(),
+        "artist_style_profile": artist_style_profile,
     }
     st.session_state[_settings_key(owner_id)] = clean
 
