@@ -70,27 +70,62 @@ practice:['Пять вопросов, которые возвращают час
 team:['Как работают цифровые коллеги?',['Один инструмент может писать, другой — анализировать данные, третий — вести подготовку встреч. Однако реальная польза начинается не с их количества, а с согласованности.','В Агентстве W идея состоит в распределении ролей. Неония помогает искать людей, Неона поддерживает содержательные диалоги, Стагирит координирует задачи, Неола помогает осваивать инструкции.','Это не обещание идеальной автоматизации. Это способ по-новому организовать работу — с человеком в центре.']]
 };document.querySelectorAll('[data-article]').forEach(b=>b.addEventListener('click',()=>{const [title,paragraphs]=articles[b.dataset.article];document.getElementById('story').innerHTML='<h2>'+title+'</h2>'+paragraphs.map(p=>'<p>'+p+'</p>').join('');document.getElementById('reader').showModal()}));document.getElementById('close').onclick=()=>document.getElementById('reader').close();document.getElementById('reader').onclick=e=>{if(e.target.id==='reader')e.target.close()};
 
-// Uninterrupted cinematic entrance. Audio playback is attempted automatically,
- // but browsers may prevent audible playback without a user's prior interaction.
- (function(){
-  const intro=document.getElementById('cosmic-intro');
-  if(!intro)return;
-  let audio=null, interval=null, finished=false;
-  function stop(){if(interval)clearInterval(interval);if(audio&&audio.state!=='closed')audio.close().catch(()=>{});}
-  function end(){if(finished)return;finished=true;stop();intro.classList.add('intro-exit');setTimeout(()=>intro.remove(),950);}
-  try{if(matchMedia('(prefers-reduced-motion: reduce)').matches){intro.remove();return;}}catch(e){}
-  function tick(){
+// Cinematic entrance: try audible autoplay and unlock sound on a tap/click
+// anywhere on the intro. Browsers may reject sound until that interaction.
+(function(){
+ const intro=document.getElementById('cosmic-intro');
+ if(!intro)return;
+ let audio=null,interval=null,finished=false;
+ let unlocked=false;
+ const duration=9000;
+ function stop(){
+   if(interval){clearInterval(interval);interval=null;}
+   if(audio&&audio.state!=='closed')audio.close().catch(()=>{});
+   audio=null;
+ }
+ function end(){
+   if(finished)return;
+   finished=true;stop();intro.classList.add('intro-exit');
+   setTimeout(()=>intro.remove(),950);
+ }
+ try{
+   if(matchMedia('(prefers-reduced-motion: reduce)').matches){intro.remove();return;}
+ }catch(e){}
+ function tick(){
    if(!audio||audio.state!=='running')return;
-   const o=audio.createOscillator(),g=audio.createGain(),t=audio.currentTime;
-   o.type='triangle';o.frequency.value=850;
-   g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.045,t+.005);
-   g.gain.exponentialRampToValueAtTime(.0001,t+.055);
-   o.connect(g);g.connect(audio.destination);o.start(t);o.stop(t+.06);
-  }
-  try{
-   const Audio=window.AudioContext||window.webkitAudioContext;
-   if(Audio){audio=new Audio();audio.resume().then(()=>{tick();interval=setInterval(tick,1000);}).catch(()=>{});}
-  }catch(e){}
-  setTimeout(end,9000);
- })();
+   const t=audio.currentTime;
+   // A short, low clock-like paired tick, not an alert beep.
+   [0,.095].forEach((delay,i)=>{
+     const o=audio.createOscillator(),gain=audio.createGain();
+     o.type='triangle';o.frequency.setValueAtTime(i?510:660,t+delay);
+     o.frequency.exponentialRampToValueAtTime(i?310:420,t+delay+.04);
+     gain.gain.setValueAtTime(.0001,t+delay);
+     gain.gain.exponentialRampToValueAtTime(.10,t+delay+.004);
+     gain.gain.exponentialRampToValueAtTime(.0001,t+delay+.075);
+     o.connect(gain);gain.connect(audio.destination);
+     o.start(t+delay);o.stop(t+delay+.08);
+   });
+ }
+ async function startSound(){
+   if(finished)return;
+   try{
+     const Audio=window.AudioContext||window.webkitAudioContext;
+     if(!Audio)return;
+     if(!audio)audio=new Audio();
+     await audio.resume();
+     if(audio.state==='running'&&!interval){
+       unlocked=true;tick();interval=setInterval(tick,1000);
+     }
+   }catch(e){}
+ }
+ // Attempt autoplay when allowed; never claim this can override browser policy.
+ startSound();
+ intro.addEventListener('pointerdown',startSound,{passive:true});
+ intro.addEventListener('touchstart',startSound,{passive:true});
+ document.addEventListener('keydown',function onKey(){
+   if(!finished)startSound();
+   else document.removeEventListener('keydown',onKey);
+ });
+ setTimeout(end,duration);
+})();
 </script></body></html>
