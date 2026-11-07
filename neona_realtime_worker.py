@@ -234,12 +234,43 @@ class RealtimePilots:
                     }
                     targets_by_id.update(pending)
                     targets = list(targets_by_id.values())
+
+                    # Reactions can arrive again during this same debounce window.
+                    # Merge them NOW instead of leaving the same batch queued for
+                    # the next loop iteration.
+                    reaction_by_message = {
+                        (int(contact_id), int(msg_id)): (
+                            int(contact_id),
+                            int(msg_id),
+                            str(reaction_value),
+                        )
+                        for contact_id, msg_id, reaction_value in reaction_events
+                    }
+                    reaction_by_message.update(pending_reactions)
+                    reaction_events = list(reaction_by_message.values())
+
+                    # One burst from one person must never produce several
+                    # automatic replies. Keep only the newest reacted message
+                    # for each contact; Telegram message ids are monotonic.
+                    latest_reaction_by_contact = {}
+                    for reaction_event in reaction_events:
+                        contact_id, msg_id, reaction_value = reaction_event
+                        previous = latest_reaction_by_contact.get(int(contact_id))
+                        if previous is None or int(msg_id) >= int(previous[1]):
+                            latest_reaction_by_contact[int(contact_id)] = (
+                                int(contact_id),
+                                int(msg_id),
+                                str(reaction_value),
+                            )
+                    reaction_events = list(latest_reaction_by_contact.values())
+
                     if pending_since:
                         first_event_at = min(
                             first_event_at or time.monotonic(), min(pending_since.values())
                         )
                     pending.clear()
                     pending_since.clear()
+                    pending_reactions.clear()
                     changed.clear()
 
                 try:
