@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 
 
@@ -6,15 +7,26 @@ def render_neonia_contacts():
 
     st.markdown("### 👥 Контакты")
 
+    # Render supplies credentials via environment variables.  Streamlit secrets
+    # are optional; accessing st.secrets without secrets.toml raises at runtime.
+    def setting_present(name: str) -> bool:
+        if os.environ.get(name, "").strip():
+            return True
+        try:
+            return bool(st.secrets.get(name, ""))
+        except (FileNotFoundError, OSError):
+            return False
+
     telegram_ready = (
-        "TELEGRAM_API_ID" in st.secrets
-        and "TELEGRAM_API_HASH" in st.secrets
+        setting_present("TELEGRAM_API_ID")
+        and setting_present("TELEGRAM_API_HASH")
     )
 
     if not telegram_ready:
         st.error(
             "Не найдены TELEGRAM_API_ID и TELEGRAM_API_HASH "
-            "в настройках приложения."
+            "в переменных окружения Render. Проверьте настройки Telegram; " 
+            "страница контактов продолжит работать без аварийного сбоя."
         )
         return {
             "telegram_connected": False,
