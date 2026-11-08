@@ -1,5 +1,6 @@
 """Маркетинг Агентства W: собственная этичная воронка без стороннего бренда."""
 import streamlit as st
+from agency_w_partner_plan import render_w_partner_plan
 
 
 STAGES = (
@@ -42,15 +43,18 @@ def _draft(audience, problem, channel, purpose):
 
 def render_marketing_w(owner_name: str):
     st.markdown("## 📣 Маркетинг Агентства W")
-    st.caption("От знакомства до сопровождения. Не отдельная компания, не франшизный план и не обещание заработка.")
+    st.caption("Продвижение продуктов, развитие партнёрской сети, мотивация и обучение команды W.")
     st.info(
         "Наш принцип: человек понимает пользу → добровольно проявляет интерес → "
         "принимает решение. ИИ сокращает рутину, решения остаются за людьми."
     )
 
-    route, outreach, measurement = st.tabs(
-        ["🧭 Маршрут", "✉️ Личное приглашение", "📈 Результаты"]
+    partner_plan, route, outreach, measurement = st.tabs(
+        ["🌳 Партнёрский план", "🧭 Маршрут", "✉️ Личное приглашение", "📈 Результаты"]
     )
+
+    with partner_plan:
+        render_w_partner_plan()
 
     with route:
         st.markdown("### Единый путь от интереса до результата")
