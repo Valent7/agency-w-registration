@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 import zipfile
 from datetime import datetime
@@ -43,18 +44,35 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
+def _runtime_secret(name: str) -> str:
+    """Prefer Render environment; Streamlit secrets are optional."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, "") or "").strip()
+    except (FileNotFoundError, OSError):
+        return ""
+
+
 def _supabase_base() -> str:
-    return str(st.secrets["SUPABASE_URL"]).rstrip("/")
+    value = _runtime_secret("SUPABASE_URL")
+    if not value:
+        raise RuntimeError("Не настроен SUPABASE_URL в Render Environment.")
+    return value.rstrip("/")
 
 
 def _service_key() -> str:
-    return str(st.secrets["SUPABASE_SECRET_KEY"])
+    value = _runtime_secret("SUPABASE_SECRET_KEY")
+    if not value:
+        raise RuntimeError("Не настроен SUPABASE_SECRET_KEY в Render Environment.")
+    return value
 
 
 def _openai_key() -> str:
-    value = str(st.secrets.get("OPENAI_API_KEY") or "").strip()
+    value = _runtime_secret("OPENAI_API_KEY")
     if not value:
-        raise RuntimeError("OPENAI_API_KEY не найден в Streamlit Secrets.")
+        raise RuntimeError("Не настроен OPENAI_API_KEY в Render Environment.")
     return value
 
 
