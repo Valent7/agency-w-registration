@@ -872,6 +872,16 @@ def _heygen_config():
 
 def _heygen_error_message(response):
     """Короткая безопасная ошибка без вывода API-ключа."""
+    if response.status_code in (401, 403):
+        return (
+            "HeyGen отклонил авторизацию (HTTP "
+            + str(response.status_code)
+            + "). Ключ HEYGEN_API_KEY доступен приложению, но HeyGen "
+            "его не принимает или у ключа нет необходимых прав. "
+            "Проверьте действительность API-ключа в HeyGen и замените значение "
+            "HEYGEN_API_KEY в Render → agency-w-web → Environment. "
+            "Ключ не отправляйте в чат. Генерация видео не запущена."
+        )
     try:
         payload = response.json()
         if isinstance(payload, dict):
@@ -914,7 +924,7 @@ def create_neona_heygen_video(text):
         return {
             "ok": False,
             "error": (
-                "В Streamlit Secrets не найдено: "
+                "В настройках Render (Environment) не найдено: "
                 + ", ".join(missing)
                 + "."
             ),
@@ -1010,7 +1020,7 @@ def get_neona_heygen_video(video_id):
     if not api_key:
         return {
             "ok": False,
-            "error": "HEYGEN_API_KEY не найден в Streamlit Secrets.",
+            "error": "HEYGEN_API_KEY отсутствует в настройках Render (Environment).",
         }
 
     try:
