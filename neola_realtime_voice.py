@@ -282,6 +282,7 @@ def create_realtime_client_secret(
     onboarding_step=0,
     daily_greeting_done=False,
     has_target_profile=False,
+    knowledge_search_available=True,
 ):
     api_key = _runtime_secret("OPENAI_API_KEY")
     if not api_key:
@@ -295,6 +296,15 @@ def create_realtime_client_secret(
         has_target_profile=has_target_profile,
     )
 
+    if not knowledge_search_available:
+        instructions += (
+            "\n\nСЕЙЧАС ВНЕШНИЙ ПОИСК ПО ДОКУМЕНТАМ НЕДОСТУПЕН. "
+            "Не утверждай, что проверяла книги, базу знаний или документы. "
+            "Отвечай только на основании встроенной карты Агентства и известного контекста. "
+            "Для вопросов, требующих точной проверки источника, прямо скажи, "
+            "что поиск временно недоступен и не придумывай ответ."
+        )
+
     body = {
         "expires_after": {
             "anchor": "created_at",
@@ -305,7 +315,7 @@ def create_realtime_client_secret(
             "model": REALTIME_MODEL,
             "output_modalities": ["audio"],
             "instructions": instructions,
-            "tools": [KNOWLEDGE_SEARCH_TOOL],
+            "tools": [KNOWLEDGE_SEARCH_TOOL] if knowledge_search_available else [],
             "tool_choice": "auto",
             "reasoning": {
                 "effort": "low",
@@ -547,14 +557,14 @@ def _render_realtime_html(
       assistantTranscript: "",
       instructions: INSTRUCTIONS,
       context: CONTEXT,
-       tools: [KNOWLEDGE_TOOL],
+       tools: KNOWLEDGE_URL && KNOWLEDGE_TOKEN ? [KNOWLEDGE_TOOL] : [],
     }};
   }}
 
   const live = window.__agencyWNeolaLive;
   live.instructions = INSTRUCTIONS;
   live.context = CONTEXT;
-  live.tools = [KNOWLEDGE_TOOL];
+  live.tools = KNOWLEDGE_URL && KNOWLEDGE_TOKEN ? [KNOWLEDGE_TOOL] : [];
 
   function sendContextUpdate() {{
     if (!live.dc || live.dc.readyState !== "open") return;
@@ -853,6 +863,17 @@ def render_neola_realtime_voice(
     - в браузер передаётся короткоживущий ephemeral client secret;
     - разговор идёт напрямую браузер <-> OpenAI Realtime через WebRTC.
     """
+    knowledge_url = ""
+    knowledge_token = ""
+    try:
+        knowledge_url, knowledge_token = _knowledge_search_config(telegram_id)
+    except (RuntimeError, ValueError):
+        st.warning(
+            "Поиск по внешней базе знаний временно недоступен. "
+            "Голосовая Неола работает с инструкциями Агентства, "
+            "но не подтверждает сведения из внешних документов."
+        )
+
     try:
         token, instructions, expires_at = create_realtime_client_secret(
             telegram_id=telegram_id,
@@ -861,15 +882,10 @@ def render_neola_realtime_voice(
             onboarding_step=onboarding_step,
             daily_greeting_done=daily_greeting_done,
             has_target_profile=has_target_profile,
+            knowledge_search_available=bool(knowledge_url and knowledge_token),
         )
     except Exception as exc:
         # Партнёру показываем только понятный русский текст без API-деталей.
-        st.error(str(exc))
-        return False
-
-    try:
-        knowledge_url, knowledge_token = _knowledge_search_config(telegram_id)
-    except Exception as exc:
         st.error(str(exc))
         return False
 
