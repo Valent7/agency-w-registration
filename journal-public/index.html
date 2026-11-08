@@ -64,6 +64,21 @@ dialog h2{font-size:35px}
 .news-card a:hover{text-decoration:underline}
 @media(max-width:850px){.news-grid{grid-template-columns:1fr 1fr}.news-card{min-height:0}}
 @media(max-width:600px){.news-grid{grid-template-columns:1fr}.news-card{padding:22px}.news-section{scroll-margin-top:120px}}
+
+.ora-editorial{margin-top:38px;padding:34px;border:1px solid #5d6570;background:linear-gradient(120deg,#102b42 0%,#08192b 70%);scroll-margin-top:108px}
+.ora-editorial-top h3{font-size:clamp(27px,3vw,41px);max-width:850px;margin:12px 0 15px}
+.ora-deck{font-size:18px;line-height:1.6;color:#d8e3eb;max-width:850px}
+.ora-editorial-grid{display:grid;grid-template-columns:minmax(200px,300px) 1fr;gap:34px;margin-top:22px}
+.ora-video-preview{border:1px solid #bf954c;background:radial-gradient(circle at 50% 28%,#26465d,#061324 72%);aspect-ratio:9/13;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px;color:#f0d5a2;gap:12px}
+.ora-video-icon{display:grid;place-items:center;font-size:36px;width:80px;height:80px;border-radius:50%;border:1px solid var(--gold);background:#081829}
+.ora-video-preview span{font:25px/1.2 Georgia,serif}.ora-video-preview small{font-size:13px;color:#b7cbd7}
+.ora-video-link{display:block;text-align:center;border:1px solid var(--gold);color:var(--gold);padding:12px;margin-top:16px;font-weight:600;font-size:15px}
+.ora-video-link:hover{background:var(--gold);color:#061325}.ora-video-note{display:block;color:#a9bbca;font-size:12px;line-height:1.5;margin-top:12px}
+.ora-editorial-copy h4{font:25px/1.25 Georgia,serif;color:#e8c17f;margin:12px 0 10px}
+.ora-editorial-copy p,.ora-editorial-copy li{font-size:16px;color:#d8e0e7;line-height:1.65}
+.ora-editorial-copy ul{padding-left:22px}.ora-editorial-copy li{margin-bottom:6px}
+.ora-editorial-copy .ora-closer{color:var(--gold);font-weight:650}
+@media(max-width:720px){.ora-editorial{padding:22px}.ora-editorial-grid{grid-template-columns:1fr;gap:23px}.ora-video-side{max-width:310px;margin:auto}}
 </style><style>
 /* Opening is an overlay; the actual journal remains unchanged underneath. */
 #cosmic-intro{position:fixed;inset:0;z-index:10000;overflow:hidden;background:radial-gradient(ellipse at center,#163351 0%,#051326 67%,#020814 100%);color:#f7deb0;isolation:isolate}
@@ -145,10 +160,30 @@ dialog h2{font-size:35px}
 <h2 id="news-heading">Что нового<br><em>в Агентстве W.</em></h2>
 <p class="lead">Только события и новые публикации Агентства W — с датами и ссылками на подтверждённые материалы.</p>
 <div class="news-grid">
+<article class="news-card"><time datetime="2026-11-08">8 ноября 2026</time><span class="news-topic">НОВЫЙ ЦИФРОВОЙ СОТРУДНИК</span><h3>Представляем Ору — помощника для вашего чата</h3><p>Ора знакомится с читателями и рассказывает, как её знания и задачи можно настроить под разные сообщества.</p><a href="#ora-article">Читать статью и смотреть видео ↗</a></article>
 <article class="news-card"><time datetime="2026-11-08">8 ноября 2026</time><span class="news-topic">ВИДЕОИСТОРИЯ</span><h3>Неона: собеседник захотел собственного ИИ-секретаря</h3><p>В журнал добавлена видеоистория по реальной переписке в Telegram. Личные данные собеседника скрыты.</p><a href="#neona-story-feature">Посмотреть историю ↗</a></article>
 <article class="news-card"><time datetime="2026-11-08">8 ноября 2026</time><span class="news-topic">ЦИФРОВАЯ КОМАНДА</span><h3>Четыре цифровых сотрудника — четыре видеознакомства</h3><p>Представлены Неония, Неона, Стагирит и Неола. В разделе команды можно посмотреть их видеопредставления.</p><a href="#team">Познакомиться с командой ↗</a></article>
 
-</div></div></section>
+</div>
+<article id="ora-article" class="ora-editorial">
+<div class="ora-editorial-top"><span class="eyebrow">ПРЕМЬЕРА · 8 НОЯБРЯ 2026</span><h3>Знакомьтесь, Ора! Цифровой сотрудник, которого можно настроить под ваше сообщество</h3><p class="ora-deck">Ора работает не по одному шаблону. Владелец сообщества определяет темы, знания и задачи — цифровой помощник помогает поддерживать выбранное направление.</p></div>
+<div class="ora-editorial-grid">
+<div class="ora-video-side"><div class="ora-video-preview"><div class="ora-video-icon">▶</div><span>Видеознакомство с Орой</span><small>Вертикальный ролик · Ора говорит своим голосом</small></div><a class="ora-video-link" href="https://app.heygen.com/videos/dbb7df62631036fc77a0bfdd7ef46178" target="_blank" rel="noopener noreferrer">Посмотреть видео Оры ↗</a><small class="ora-video-note">Видео открывается в HeyGen. После загрузки готового MP4 в журнал его можно будет смотреть прямо здесь.</small></div>
+<div class="ora-editorial-copy">
+<h4>Не один сценарий для всех, а именно ваш</h4>
+<p>Первое пространство, где Ора помогает участникам общаться, — сообщество «ВРЕМЯ / WREMYA». Но её назначение шире: Ору можно настроить для разных тематических чатов и сообществ.</p>
+<p>В основу знаний можно заложить необходимые владельцу материалы: обучающие программы, инструкции, описание продуктов, правила сообщества, часто задаваемые вопросы и другие документы. А затем определить, как Ора должна использовать эти знания в общении.</p>
+<h4>Чем она может помочь владельцу</h4>
+<ul><li>Приветствовать новичков и объяснять правила чата.</li><li>Отвечать на вопросы по загруженным материалам.</li><li>Поддерживать обсуждения и готовить тематические рубрики.</li><li>Напоминать о встречах, занятиях и событиях.</li><li>Помогать участникам ориентироваться в материалах сообщества.</li></ul>
+<p>В образовательной группе Ора может помогать наставнику. В предпринимательском сообществе — знакомить с программами и продуктами. В тематическом клубе — поддерживать разговор и объяснять сложное простыми словами.</p>
+<h4>Первый пример — «ВРЕМЯ»</h4>
+<p>Для чата «ВРЕМЯ / WREMYA» подготовлены рубрики «Мысли вслух», «Непричёсанные мысли», материалы о природе времени по Стивену Хокингу и напоминания о встречах. Это пример конкретной настройки, а не ограничение возможностей Оры.</p>
+<h4>Направление выбираете вы</h4>
+<p><strong>Вы</strong> задаёте темы, правила общения, знания и приоритеты. Ора помогает владельцу вести сообщество в выбранном направлении, а важные решения остаются за человеком.</p>
+<p>Набор функций зависит от настроек и подключений. Автоматические публикации и ответы требуют проверки в конкретном чате — мы не обещаем безошибочную работу без настройки и контроля.</p>
+<p class="ora-closer">Агентство W · Мы возвращаем человеку время.</p>
+</div></div></article>
+</div></section>
 <section class="divider" id="team"><div class="wrap"><span class="eyebrow">05 / ИИ-команда</span><h2>Знакомьтесь —<br><em>цифровые коллеги.</em></h2><p class="lead">Это виртуальные специалисты Агентства W. Каждый отвечает за свою область работы.</p><div class="teams">
 <div class="person"><div class="portrait"><img src="assets/neonia.webp" alt="Портрет Неонии" loading="lazy"></div><div><span class="eyebrow">ПОИСК</span><h3>Неония</h3><p>Изучает аудиторию и помогает находить подходящих людей.</p><button type="button" class="team-video-btn" data-team-video="neonia" hidden>▶ Знакомство с Неонией</button></div></div>
 <div class="person"><div class="portrait"><img src="assets/neona.webp" alt="Портрет Неоны" loading="lazy"></div><div><span class="eyebrow">ДИАЛОГИ</span><h3>Неона</h3><p>Поддерживает диалог и согласовывает встречи.</p><button type="button" class="team-video-btn" data-team-video="neona" hidden>▶ Знакомство с Неоной</button></div></div>
