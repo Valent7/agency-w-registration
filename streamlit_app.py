@@ -160,7 +160,6 @@ from vk_scout_oauth import handle_vk_scout_oauth_callback
 from telegram_stories_ui import render_telegram_stories_radar
 from instagram_radar_ui import render_instagram_radar
 from content_factory_ui import render_content_factory
-from agency_marketing_w import render_marketing_w
 import asyncio
 import json
 import re
@@ -8664,7 +8663,6 @@ if telegram_login_valid or remembered_data:
             "📖 Дневник",
             "🤖 Агенты",
             "🏭 Контент",
-            "📣 Маркетинг",
             "👥 Команда",
             "🗺️ Развитие",
             "👤 Профиль",
@@ -8679,7 +8677,6 @@ if telegram_login_valid or remembered_data:
                 "📖 Дневник": "Дневник",
                 "🤖 Агенты": "Агенты",
                 "🏭 Контент": "Контент-завод",
-                "📣 Маркетинг": "Маркетинг W",
                 "👥 Команда": "Команда",
                 "🗺️ Развитие": "Развитие",
                 "👤 Профиль": "Профиль",
@@ -14530,9 +14527,6 @@ if telegram_login_valid or remembered_data:
                 get_neona_heygen_video,
                 target_profile=content_target_profile,
             )
-
-        elif main_section == "📣 Маркетинг":
-            render_marketing_w(str(first_name or "Партнёр"))
 
         elif main_section == "👥 Команда":
             partner_center_tab, team_tools_tab = st.tabs(
