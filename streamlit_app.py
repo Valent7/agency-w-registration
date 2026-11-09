@@ -8304,7 +8304,15 @@ def set_remember_cookie(token):
             .forEach((key) => url.searchParams.delete(key));
           const clean = url.pathname
             + (url.searchParams.toString() ? '?' + url.searchParams.toString() : '');
-          window.history.replaceState({{}}, document.title, clean);
+          // A fresh top-level request is essential here: Streamlit's server
+          // may have read cookies before the browser received this one.
+          // Reload only after the signed cookie was written, and remove the
+          // short-lived Telegram token from the URL to prevent replay.
+          if (document.cookie.split('; ').some((part) => part.startsWith('{REMEMBER_COOKIE_NAME}='))) {{
+            window.location.replace(clean || '/');
+          }} else {{
+            console.error('Agency W: login cookie was not saved');
+          }}
         }})();
         </script>
         """,
