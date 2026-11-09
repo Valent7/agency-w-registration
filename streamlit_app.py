@@ -306,6 +306,12 @@ def install_agency_w_app_metadata():
             ensureLink('apple-touch-icon', iconUri, '512x512');
             ensureLink('icon', iconUri, '512x512');
           }}
+          // Agency W renders its interface in Russian. Automatic Chrome/Google
+          // translation can replace React-managed text nodes and cause
+          // NotFoundError: removeChild during Streamlit rerenders.
+          document.documentElement.lang = 'ru';
+          document.documentElement.classList.add('notranslate');
+          ensureMeta('google', 'notranslate');
           ensureMeta('theme-color', '#050505');
           ensureMeta('apple-mobile-web-app-capable', 'yes');
           ensureMeta('apple-mobile-web-app-status-bar-style', 'black-translucent');
