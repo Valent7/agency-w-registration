@@ -79,7 +79,7 @@ dialog h2{font-size:35px}
 .ora-editorial-copy ul{padding-left:22px}.ora-editorial-copy li{margin-bottom:6px}
 .ora-editorial-copy .ora-closer{color:var(--gold);font-weight:650}
 @media(max-width:720px){.ora-editorial{padding:22px}.ora-editorial-grid{grid-template-columns:1fr;gap:23px}.ora-video-side{max-width:310px;margin:auto}}
-.ora-feature-video{display:block;width:100%;height:auto;aspect-ratio:9/16;object-fit:contain;background:#020914;border:1px solid #b99355;border-radius:10px}.ora-video-side{align-self:start}</style><style>
+.ora-feature-video{display:block;width:100%;height:auto;aspect-ratio:9/16;object-fit:contain;background:#020914;border:1px solid #b99355;border-radius:10px}.ora-video-side{align-self:start}\n.editorial-link{display:block}.editorial-link span{color:var(--gold);font-size:15px;font-weight:600}\n#fresh-articles[hidden]{display:none!important}\n</style><style>
 /* Opening is an overlay; the actual journal remains unchanged underneath. */
 #cosmic-intro{position:fixed;inset:0;z-index:10000;overflow:hidden;background:radial-gradient(ellipse at center,#163351 0%,#051326 67%,#020814 100%);color:#f7deb0;isolation:isolate}
 #cosmic-intro.intro-exit{opacity:0;pointer-events:none;transition:opacity .9s ease}
@@ -154,6 +154,13 @@ dialog h2{font-size:35px}
     <p>Посмотрите, как Неона поддерживает диалог и вызывает интерес к цифровым сотрудникам Агентства W.</p>
   </div>
 </div></div></section>
+<section class="divider" id="fresh-articles" hidden aria-labelledby="fresh-articles-heading">
+<div class="wrap">
+<span class="eyebrow">НОВЫЕ МАТЕРИАЛЫ</span>
+<h2 id="fresh-articles-heading">Свежие мысли.<br><em>Практическая польза.</em></h2>
+<p class="lead">Статьи о времени, жизни и разумном применении ИИ.</p>
+<div id="fresh-articles-grid" class="articles"></div>
+</div></section>
 <section id="news" class="news-section" aria-labelledby="news-heading">
 <div class="wrap">
 <span class="eyebrow">04 / Новости</span>
@@ -274,6 +281,41 @@ team:['Как работают цифровые коллеги?',['Один ин
   film.addEventListener('loadedmetadata',()=>{block.hidden=false;});
   film.addEventListener('error',()=>{block.hidden=true;});
   // Hide the feature until its actual MP4 has been uploaded; no broken player.
+})();
+</script>
+<script>
+(function(){
+  const section=document.getElementById('fresh-articles');
+  const container=document.getElementById('fresh-articles-grid');
+  if(!section||!container)return;
+  fetch('editorial/feed.json',{cache:'no-store'})
+    .then(response=>{if(!response.ok)throw Error('Feed unavailable');return response.json()})
+    .then(feed=>{
+      if(!feed||!Array.isArray(feed.articles))return;
+      const items=feed.articles.slice(0,8).filter(item=>
+        item && typeof item.title==='string' &&
+        typeof item.summary==='string' &&
+        typeof item.category==='string' &&
+        typeof item.url==='string' &&
+        /^editorial\\/[a-z0-9-]+\\.html$/.test(item.url));
+      items.forEach(item=>{
+        const link=document.createElement('a');
+        link.className='article editorial-link';
+        link.href=item.url;
+        const cat=document.createElement('small');
+        cat.textContent=item.category.toUpperCase()+' · '+(item.date||'');
+        const title=document.createElement('h3');
+        title.textContent=item.title;
+        const desc=document.createElement('p');
+        desc.textContent=item.summary;
+        const more=document.createElement('span');
+        more.textContent='Читать статью ↗';
+        link.append(cat,title,desc,more);
+        container.append(link);
+      });
+      if(items.length)section.hidden=false;
+    })
+    .catch(()=>{/* Earlier articles remain visible when the feed is unavailable. */});
 })();
 </script>
 </body></html>
