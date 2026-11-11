@@ -179,9 +179,29 @@ h1{{font:normal clamp(35px,5vw,55px)/1.18 Georgia,serif;margin:16px 0 26px}}
 <div class="cta"><strong>А куда уходит ваше время?</strong><p>Выпишите три повторяющиеся задачи, которые вы хотели бы делегировать.</p>
 <a href="{TIME_URL}">Посчитать время, которое забирает рутина →</a></div>
 </main><footer>Агентство W · Мы возвращаем человеку время · <a href="/privacy.html">Статистика и конфиденциальность</a> · <button type="button" data-analytics-settings>Настройки аналитики</button></footer>
+<script src="../assets/reader-contact.js" defer></script>
 <script src="../assets/metrika-consent.js" defer></script>
 </body></html>
 """
+
+
+def write_sitemap(feed: dict) -> None:
+    """List only published, canonical journal pages; exclude referral URLs."""
+    pages = [(SITE_URL + "/", None)]
+    for entry in feed.get("articles", []):
+        url = str(entry.get("url", ""))
+        stamp = str(entry.get("date", ""))
+        if re.fullmatch(r"editorial/[a-z0-9-]+\.html", url):
+            pages.append((SITE_URL + "/" + url,
+                          stamp if re.fullmatch(r"\d{4}-\d{2}-\d{2}", stamp) else None))
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for url, lastmod in pages:
+        lines.append("  <url><loc>" + html.escape(url) + "</loc>"
+                     + ("<lastmod>" + lastmod + "</lastmod>" if lastmod else "")
+                     + "</url>")
+    lines.append("</urlset>")
+    (SITE / "sitemap.xml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def publish(article: dict, topic: dict, *, automatic: bool = True) -> Path:
@@ -204,6 +224,7 @@ def publish(article: dict, topic: dict, *, automatic: bool = True) -> Path:
             "url": f"editorial/{slug}.html", "origin": "editorial_plan"}
     feed["articles"].insert(0, item)
     FEED.write_text(json.dumps(feed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_sitemap(feed)
     return path
 
 
