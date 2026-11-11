@@ -1,0 +1,33 @@
+name: Journal editorial pilot checks
+
+on:
+  pull_request:
+    branches:
+      - agency-w-journal-public
+    paths:
+      - 'journal_editor/**'
+      - 'journal-public/editorial/**'
+      - 'journal-public/index.html'
+      - '.github/workflows/journal-editorial-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  editorial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Check out proposed changes
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Syntax
+        run: python -m compileall -q journal_editor
+      - name: Offline safety tests
+        run: python -m unittest discover -s journal_editor/tests -v
+      - name: Editorial plan smoke test
+        run: python journal_editor/editor.py --check
