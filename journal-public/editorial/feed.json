@@ -1,4 +1,14 @@
 {
   "version": 1,
-  "articles": []
+  "articles": [
+    {
+      "slug": "kak-ponyat-kuda-uhodit-vremya",
+      "title": "Куда исчезает наш день — и как вернуть время для жизни",
+      "summary": "Иногда мы устаём сильнее, чем успеваем сделать важного. Попробуем без упрёков к себе разобраться, какие привычные дела съедают внимание и что можно изменить уже на этой неделе.",
+      "category": "Время и жизнь",
+      "date": "2026-11-11",
+      "url": "editorial/kak-ponyat-kuda-uhodit-vremya.html",
+      "origin": "director_approved_draft"
+    }
+  ]
 }
