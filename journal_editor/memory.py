@@ -88,6 +88,9 @@ def make_state(feed: list[dict], events: list[dict]) -> list[dict]:
             item["status"] = "опубликовано (по feed.json)"
             item["next"] = ("Проверить страницу, иллюстрацию и внутренние ссылки в браузере."
                             if "site_verified" not in stages else "Сохранить результаты наблюдения.")
+        elif "published" in stages:
+            item["status"] = "публикация заявлена, но отсутствует в feed.json — не подтверждено"
+            item["next"] = "Проверить GitHub и Render, восстановить запись feed.json после проверки."
         elif "blocked" in stages:
             item["status"] = "есть препятствие"
             item["next"] = "Устранить указанное препятствие и перепроверить."
