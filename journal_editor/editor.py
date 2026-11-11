@@ -183,9 +183,9 @@ h1{{font:normal clamp(35px,5vw,55px)/1.18 Georgia,serif;margin:16px 0 26px}}
 """
 
 
-def publish(article: dict, topic: dict) -> Path:
+def publish(article: dict, topic: dict, *, automatic: bool = True) -> Path:
     # The operating policy requires deliberate activation only after a reviewed pilot.
-    if os.getenv("JOURNAL_AUTOPUBLISH") != "1":
+    if automatic and os.getenv("JOURNAL_AUTOPUBLISH") != "1":
         raise EditorialError("Публикация отключена: JOURNAL_AUTOPUBLISH должен быть 1.")
     feed = load_json(FEED)
     slug = topic["slug"]
@@ -211,9 +211,24 @@ def main() -> int:
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="Проверить план без затрат")
     mode.add_argument("--draft", action="store_true", help="Сохранить материал на проверку")
-    mode.add_argument("--publish", action="store_true", help="Опубликовать при явном разрешении")
+    mode.add_argument("--publish", action="store_true", help="Автопубликация при включённом флаге")
+    mode.add_argument("--approve", metavar="SLUG", help="Утвердить существующий черновик")
     args = p.parse_args()
     try:
+        if args.approve:
+            slug = args.approve
+            if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+                raise EditorialError("Некорректное имя черновика.")
+            draft_path = DRAFTS / (slug + ".json")
+            draft = load_json(draft_path)
+            topic, article = draft["topic"], draft["article"]
+            if topic.get("slug") != slug:
+                raise EditorialError("Имя черновика не совпадает с темой.")
+            validate(article)
+            path = publish(article, topic, automatic=False)
+            draft_path.unlink()
+            print("Утверждённый материал опубликован:", path.relative_to(ROOT))
+            return 0
         topic = choose_topic()
         if args.check:
             print("Проверка успешна. Следующая тема:", topic["question"])
