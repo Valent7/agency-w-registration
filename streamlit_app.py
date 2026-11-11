@@ -14584,6 +14584,22 @@ if telegram_login_valid or remembered_data:
             st.markdown("**Персональная партнёрская ссылка:**")
             st.code(partner_link, language=None)
 
+            # Share the public journal without granting anyone access to this
+            # authenticated Agency W workspace. Each member gets their own
+            # journal referral URL from their existing verified member_code.
+            st.markdown("**📖 Моя ссылка на журнал «Время жить»:**")
+            journal_invite_url = (
+                "https://agency-w-journal.onrender.com/?ref="
+                + str(member_code)
+            )
+            st.code(journal_invite_url, language=None)
+            st.caption(
+                "Этой ссылкой можно делиться с читателями. Журнал бесплатный, "
+                "а кнопка связи в нём направляет сообщения через VK к вашему "
+                "цифровому помощнику Неоне. Прямую доставку на email и "
+                "ежемесячную оплату ещё не подключали."
+            )
+
             st.divider()
             st.markdown("#### ♿ Доступность")
             st.caption(
