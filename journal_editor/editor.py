@@ -178,7 +178,8 @@ h1{{font:normal clamp(35px,5vw,55px)/1.18 Georgia,serif;margin:16px 0 26px}}
 <div class="article-body">{body}</div>
 <div class="cta"><strong>А куда уходит ваше время?</strong><p>Выпишите три повторяющиеся задачи, которые вы хотели бы делегировать.</p>
 <a href="{TIME_URL}">Посчитать время, которое забирает рутина →</a></div>
-</main><footer>Агентство W · Мы возвращаем человеку время</footer>
+</main><footer>Агентство W · Мы возвращаем человеку время · <a href="/privacy.html">Статистика и конфиденциальность</a> · <button type="button" data-analytics-settings>Настройки аналитики</button></footer>
+<script src="../assets/metrika-consent.js" defer></script>
 </body></html>
 """
 
