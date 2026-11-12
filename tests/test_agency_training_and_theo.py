@@ -64,7 +64,7 @@ class VKMeetingRepliesTests(unittest.TestCase):
         )
 
     def test_new_1800_beats_old_numbered_options(self):
-        with patch.object(theo, "_slot_free_with_buffer", return_value=True):
+        with patch.object(theo, "_slot_availability", return_value="free"):
             reply, state, context, booking = self.answer(
                 "Ни один мне не подходит, но могу перенести на 18:00 МСК")
         self.assertEqual(state, "awaiting_confirmation")
@@ -76,13 +76,73 @@ class VKMeetingRepliesTests(unittest.TestCase):
     def test_time_change_in_confirmation_stage(self):
         context = self.context()
         context["proposed_start_at"] = datetime(2026, 12, 15, 19, 0, tzinfo=MSK).astimezone(UTC).isoformat()
-        with patch.object(theo, "_slot_free_with_buffer", return_value=True):
+        with patch.object(theo, "_slot_availability", return_value="free"):
             reply, state, ctx, booking = self.answer(
                 "Лучше в 18:00 МСК, WhatsApp", "awaiting_confirmation", context)
         self.assertIn("18:00", reply)
         self.assertEqual(state, "awaiting_confirmation")
         self.assertIsNone(booking)
         self.assertEqual(datetime.fromisoformat(ctx["proposed_start_at"]).astimezone(MSK).hour, 18)
+
+
+    def test_busy_requested_evening_does_not_jump_to_next_morning(self):
+        near = [datetime(2026, 12, 15, hour, 30, tzinfo=MSK).astimezone(UTC)
+                for hour in (17, 18)]
+        with patch.object(theo, "_slot_availability", return_value="busy_meeting"), \
+             patch.object(theo, "_near_requested_slots", return_value=near) as find:
+            reply, stage, context, booking = self.answer(
+                "Нет, хочу 15.12.2026 в 18:00 МСК, WhatsApp")
+        self.assertEqual(stage, "awaiting_slot_choice")
+        self.assertIn("18:00", reply)
+        self.assertIn("15.12.2026", reply)
+        self.assertNotIn("16.12.2026", reply)
+        self.assertNotIn("10:00", reply)
+        self.assertIsNone(booking)
+        self.assertTrue(find.call_args.kwargs.get("same_day_only"))
+
+    def test_busy_requested_evening_with_no_nearby_options_asks_before_changing_date(self):
+        with patch.object(theo, "_slot_availability", return_value="busy_block"), \
+             patch.object(theo, "_near_requested_slots", return_value=[]):
+            reply, stage, context, booking = self.answer(
+                "Нет, мне подходит только 15.12.2026 в 18:00 МСК, WhatsApp")
+        self.assertIn("18:00", reply)
+        self.assertIn("другую дату", reply)
+        self.assertNotIn("10:00", reply)
+        self.assertNotIn("16.12.2026", reply)
+        self.assertEqual(stage, "collecting_meeting_details")
+        self.assertIsNone(booking)
+
+    def test_calendar_error_never_claims_time_busy_or_offers_morning(self):
+        with patch.object(theo, "_slot_availability", return_value="unavailable"), \
+             patch.object(theo, "_near_requested_slots") as find:
+            reply, stage, context, booking = self.answer(
+                "Мне удобно 15.12.2026 в 18:00 МСК, WhatsApp")
+        self.assertIn("не удалось проверить календарь", reply)
+        self.assertNotIn("время занято", reply)
+        self.assertNotIn("10:00", reply)
+        self.assertEqual(stage, "collecting_meeting_details")
+        self.assertIsNone(booking)
+        find.assert_not_called()
+
+    def test_meeting_buffer_is_reported_as_actual_block(self):
+        start = datetime(2026, 12, 15, 18, 0, tzinfo=MSK).astimezone(UTC)
+        with patch.object(theo, "_list_meetings", return_value=[]), \
+             patch.object(theo, "_recurring_blocks", return_value=[{
+                "weekday": 1, "active": True, "title": "Личная встреча",
+                "start_time": "19:00:00", "end_time": "19:30:00",
+             }]):
+            self.assertEqual(
+                theo._slot_availability(1, start, start + timedelta(minutes=30)),
+                "busy_block"
+            )
+
+    def test_calendar_network_error_is_not_booking(self):
+        start = datetime(2026, 12, 15, 18, 0, tzinfo=MSK).astimezone(UTC)
+        with patch.object(theo, "_list_meetings", side_effect=TimeoutError("timeout")):
+            self.assertEqual(
+                theo._slot_availability(1, start, start + timedelta(minutes=30)),
+                "unavailable"
+            )
 
     def test_missing_day_asks_once_for_day(self):
         context = {"contact_timezone": "Europe/Moscow",

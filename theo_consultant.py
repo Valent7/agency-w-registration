@@ -256,32 +256,38 @@ def _recurring_blocks(owner_id: int, weekday: int) -> list[dict]:
         return [{"_calendar_error": True}]
 
 
-def _slot_free_with_buffer(owner_id: int, start_utc: datetime, end_utc: datetime) -> bool:
+def _slot_availability(owner_id: int, start_utc: datetime, end_utc: datetime) -> str:
+    """Return a truthful status: free, busy_meeting, busy_block, unavailable.
+
+    A database/permission/network error is NOT evidence that someone booked
+    the time. Never offer alternatives as if the time were confirmed busy.
+    """
     start_utc = start_utc.astimezone(UTC)
     end_utc = end_utc.astimezone(UTC)
-
     if start_utc < datetime.now(UTC) + timedelta(minutes=MIN_LEAD_MINUTES):
-        return False
+        return "too_soon"
 
     start_msk = start_utc.astimezone(MSK)
     end_msk = end_utc.astimezone(MSK)
     day_start = datetime.combine(start_msk.date(), dt_time(10, 0), MSK)
     day_end = datetime.combine(start_msk.date(), dt_time(20, 0), MSK)
-
     if start_msk < day_start or end_msk > day_end:
-        return False
+        return "outside_hours"
 
     expanded_start = start_utc - timedelta(minutes=BUFFER_MINUTES)
     expanded_end = end_utc + timedelta(minutes=BUFFER_MINUTES)
-
-    if _list_meetings(owner_id, expanded_start, expanded_end):
-        return False
+    try:
+        meetings = _list_meetings(owner_id, expanded_start, expanded_end)
+    except Exception as exc:
+        print("THEO_CALENDAR_CHECK_ERROR:", type(exc).__name__, flush=True)
+        return "unavailable"
+    if meetings:
+        return "busy_meeting"
 
     blocks = _recurring_blocks(owner_id, start_msk.weekday())
     if blocks and blocks[0].get("_calendar_error"):
-        return False
+        return "unavailable"
     blocks = agency_team_schedule.effective_blocks(blocks, start_msk.date())
-
     for block in blocks:
         if not bool(block.get("active", True)):
             continue
@@ -294,17 +300,17 @@ def _slot_free_with_buffer(owner_id: int, start_utc: datetime, end_utc: datetime
             block_end_clock = dt_time(int(raw_end[0]), int(raw_end[1]))
         except (TypeError, ValueError):
             continue
-
         block_start_msk = datetime.combine(start_msk.date(), block_start_clock, MSK)
         block_end_msk = datetime.combine(start_msk.date(), block_end_clock, MSK)
+        if (expanded_start < block_end_msk.astimezone(UTC)
+                and expanded_end > block_start_msk.astimezone(UTC)):
+            return "busy_block"
+    return "free"
 
-        if (
-            expanded_start < block_end_msk.astimezone(UTC)
-            and expanded_end > block_start_msk.astimezone(UTC)
-        ):
-            return False
 
-    return True
+def _slot_free_with_buffer(owner_id: int, start_utc: datetime, end_utc: datetime) -> bool:
+    """Compatibility API used by Theo's existing appointment safeguards."""
+    return _slot_availability(owner_id, start_utc, end_utc) == "free"
 
 
 def _load_zoom_link(owner_id: int) -> tuple[str, str]:
@@ -629,40 +635,67 @@ def _format_slot(start_utc: datetime, tz_name: str) -> str:
     )
 
 
-def _find_three_slots(owner_id: int, around_utc: datetime, contact_timezone: str) -> list[datetime]:
-    result: list[datetime] = []
-    start_day_msk = around_utc.astimezone(MSK).date()
+def _near_requested_slots(
+    owner_id: int, requested_utc: datetime, contact_timezone: str,
+    *, same_day_only: bool = True,
+) -> list[datetime]:
+    """Find truly free alternatives near a person's preferred clock time.
 
-    for day_offset in range(0, 8):
-        day = start_day_msk + timedelta(days=day_offset)
-        if day.weekday() >= 5:
+    Never jump from an explicitly requested evening to tomorrow at 10 AM.
+    For "today", consider only today, preserving the person's chosen day.
+    """
+    original = requested_utc.astimezone(MSK)
+    days = 1 if same_day_only else 6
+    result = []
+    # Prefer small changes to the requested time, not the opening hour.
+    offsets = (30, -30, 60, -60, 90, -90, 120, -120)
+    for day_offset in range(days):
+        target_day = original.date() + timedelta(days=day_offset)
+        if target_day.weekday() >= 5:
             continue
-
-        cursor = datetime.combine(day, dt_time(10, 0), MSK)
-        end = datetime.combine(day, dt_time(20, 0), MSK)
-        earliest = around_utc.astimezone(MSK)
-        if day == earliest.date() and earliest > cursor:
-            cursor = earliest.replace(
-                minute=30 if earliest.minute > 0 and earliest.minute <= 30 else 0,
-                second=0, microsecond=0,
-            )
-            if earliest.minute > 30 or (earliest.minute == 0 and earliest.second):
-                cursor += timedelta(minutes=30)
-            if cursor < earliest:
-                cursor += timedelta(minutes=30)
-
-        while cursor + timedelta(minutes=DURATION_MINUTES) <= end:
-            start_utc = cursor.astimezone(UTC)
-            end_utc = start_utc + timedelta(minutes=DURATION_MINUTES)
+        for minutes in offsets:
+            candidate = datetime.combine(
+                target_day, dt_time(original.hour, original.minute), MSK
+            ) + timedelta(minutes=minutes)
+            if candidate.date() != target_day:
+                continue
+            start_utc = candidate.astimezone(UTC)
             local = start_utc.astimezone(ZoneInfo(contact_timezone))
-
-            if 8 <= local.hour < 22 and _slot_free_with_buffer(owner_id, start_utc, end_utc):
+            if (8 <= local.hour < 22 and
+                    _slot_free_with_buffer(
+                        owner_id, start_utc,
+                        start_utc + timedelta(minutes=DURATION_MINUTES),
+                    )):
                 result.append(start_utc)
                 if len(result) == 3:
                     return result
+    return result
 
+
+def _find_three_slots(owner_id: int, around_utc: datetime, contact_timezone: str) -> list[datetime]:
+    """Generic availability listing when no exact preferred hour is in play."""
+    result: list[datetime] = []
+    around_msk = around_utc.astimezone(MSK)
+    for day_offset in range(8):
+        day = around_msk.date() + timedelta(days=day_offset)
+        if day.weekday() >= 5:
+            continue
+        cursor = datetime.combine(day, dt_time(10, 0), MSK)
+        end = datetime.combine(day, dt_time(20, 0), MSK)
+        if day_offset == 0:
+            while cursor < around_msk:
+                cursor += timedelta(minutes=30)
+        while cursor + timedelta(minutes=DURATION_MINUTES) <= end:
+            start_utc = cursor.astimezone(UTC)
+            local = start_utc.astimezone(ZoneInfo(contact_timezone))
+            if 8 <= local.hour < 22 and _slot_free_with_buffer(
+                owner_id, start_utc,
+                start_utc + timedelta(minutes=DURATION_MINUTES),
+            ):
+                result.append(start_utc)
+                if len(result) == 3:
+                    return result
             cursor += timedelta(minutes=30)
-
     return result
 
 
@@ -705,7 +738,7 @@ def _schedule_reply(
         "THEO_CALENDAR_PARSE:",
         {
             "state": state,
-            "incoming": incoming_text,
+            "incoming_chars": len(str(incoming_text or "")),
             "requested_date": context.get("requested_date"),
             "requested_time": context.get("requested_time"),
             "contact_timezone": context.get("contact_timezone"),
@@ -928,11 +961,18 @@ def _schedule_reply(
             None,
         )
 
-    if _slot_free_with_buffer(owner_id, start_utc, end_utc):
+    availability = _slot_availability(owner_id, start_utc, end_utc)
+    print("THEO_REQUESTED_SLOT_CHECK:", {
+        "date_msk": start_msk.date().isoformat(),
+        "hour_msk": start_msk.strftime("%H:%M"),
+        "result": availability,
+    }, flush=True)
+
+    if availability == "free":
         context["proposed_start_at"] = start_utc.isoformat()
 
-        # "Записывай / внеси / бронируй" уже является явным подтверждением.
-        # Не заставляем человека подтверждать одно и то же второй раз.
+        # Explicit "book / confirm" can make the record immediately,
+        # after the same calendar recheck. Do not require another YES.
         if _is_meeting_acceptance(incoming_text):
             return _schedule_reply(
                 owner_id=owner_id,
@@ -954,29 +994,48 @@ def _schedule_reply(
             None,
         )
 
-    slots = _find_three_slots(owner_id, start_utc, tz_name)
-    if not slots:
+    context.pop("proposed_start_at", None)
+    context.pop("offered_slots", None)
+    if availability == "unavailable":
+        # Fail closed, but don't claim a conflict without evidence.
         return (
-            "Это время недоступно, а в ближайшем рабочем окне свободных вариантов "
-            "пока не нашлось. Напишите другой удобный день — я проверю.",
-            "collecting_meeting_details",
-            context,
-            None,
+            f"Вы предложили {_format_slot(start_utc, tz_name)}, формат — "
+            f"{meeting_format}. Сейчас не удалось проверить календарь, "
+            "поэтому не буду утверждать, что это время занято, и не стану "
+            "записывать наугад. Нужно уточнить доступность.",
+            "collecting_meeting_details", context, None,
         )
 
+    # The requested date takes precedence over generic working-day searches.
+    # No invented 10:00 next-day options for a person who asked for 18:00 today.
+    if availability == "busy_meeting":
+        reason_text = "Рядом с этим временем уже есть запись в календаре."
+    elif availability == "busy_block":
+        reason_text = "С этим временем пересекается постоянная занятость."
+    else:
+        reason_text = "Это время пока нельзя подтвердить."
+
+    slots = _near_requested_slots(
+        owner_id, start_utc, tz_name, same_day_only=True
+    )
+    if not slots:
+        return (
+            f"Я проверил {_format_slot(start_utc, tz_name)}. {reason_text} "
+            "Близких свободных вариантов на тот же день сейчас не вижу. "
+            "Хотите предложить другую дату? Проверю удобные именно вам часы.",
+            "collecting_meeting_details", context, None,
+        )
     context["offered_slots"] = [slot.isoformat() for slot in slots]
     options = "\n".join(
-        f"{index}. {_format_slot(slot, tz_name)}"
-        for index, slot in enumerate(slots, 1)
+        f"{i}. {_format_slot(slot, tz_name)}"
+        for i, slot in enumerate(slots, 1)
     )
-
     return (
-        "Это время недоступно. Нашёл ближайшие свободные варианты:\n"
+        f"Вы предложили {_format_slot(start_utc, tz_name)}. {reason_text} "
+        "Проверил ближайшие варианты в тот же день:\n"
         + options
-        + "\nНапишите номер подходящего варианта.",
-        "awaiting_slot_choice",
-        context,
-        None,
+        + "\nВы можете выбрать вариант или предложить другой час.",
+        "awaiting_slot_choice", context, None,
     )
 
 def _read_text(path: Path) -> str:
