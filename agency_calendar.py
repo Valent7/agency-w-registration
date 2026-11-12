@@ -246,7 +246,46 @@ def list_recurring_blocks(owner_telegram_id: int) -> list[dict[str, Any]]:
     rows = response.json()
     rows = rows if isinstance(rows, list) else []
 
-    # Reading must not silently rewrite the old calendar to 20:00.
+    # Owner approved replacing only the obsolete, standard team schedule.
+    # On the owner's next calendar load, persist the new timetable, then
+    # INACTIVATE (do not delete) the exact old team blocks for reversibility.
+    # Personal events and differently named blocks remain untouched.
+    retired = [
+        row for row in rows
+        if agency_team_schedule.retired_team_block(row)
+        and str(row.get("id") or "").strip()
+    ]
+    if retired:
+        try:
+            save_recurring_blocks(
+                owner_telegram_id,
+                weekdays=[0, 2, 4],
+                title=agency_team_schedule.TITLE,
+                start_time=dt_time(19, 0),
+                end_time=dt_time(19, 30),
+                meeting_format="",
+                notes="Обучение действующей команды: пн, ср, пт, 19:00 МСК, 30 минут.",
+            )
+            for old_block in retired:
+                patch = requests.patch(
+                    f"{_supabase_url()}/rest/v1/agency_calendar_blocks",
+                    headers={**_supabase_headers(), "Prefer": "return=minimal"},
+                    params={
+                        "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+                        "id": f"eq.{old_block['id']}",
+                    },
+                    json={"active": False,
+                          "updated_at": datetime.now(UTC).isoformat()},
+                    timeout=30,
+                )
+                if patch.status_code >= 400:
+                    raise CalendarStorageError(
+                        "Не удалось выключить устаревшее групповое расписание."
+                    )
+            # Effective schedule is already in use; next load fetches persisted rows.
+        except Exception as exc:
+            # Do not make calendars unusable during transient storage failures.
+            print("CALENDAR_TRAINING_SYNC_PENDING:", type(exc).__name__, flush=True)
     return rows
 
 
