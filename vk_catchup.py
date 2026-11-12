@@ -52,3 +52,42 @@ def recent_user_messages(api_response: dict, *, now_ts: int | None = None, max_a
         })
     result.sort(key=lambda entry: (entry["date"], entry["id"]))
     return result
+
+
+def latest_unanswered_history(history: dict, peer_id: int, *,
+                              now_ts: int | None = None,
+                              max_age: int = 900) -> dict | None:
+    """Only last inbound text, and only if no subsequent outbound reply.
+
+    This avoids replaying past messages, including ones already answered before
+    the webhook recovered. The caller independently verifies this is an
+    existing Agency W contact.
+    """
+    now = int(time.time() if now_ts is None else now_ts)
+    source = history.get("response") if isinstance(history, dict) else None
+    items = source.get("items") if isinstance(source, dict) else None
+    if not isinstance(items, list) or not items:
+        return None
+    try:
+        peer_id = int(peer_id)
+    except (TypeError, ValueError):
+        return None
+    # VK getHistory returns most recent messages first.
+    newest = items[0]
+    if not isinstance(newest, dict):
+        return None
+    try:
+        outgoing = int(newest.get("out") or 0)
+        from_id = int(newest.get("from_id") or 0)
+        timestamp = int(newest.get("date") or 0)
+        message_id = int(newest.get("id") or 0)
+    except (TypeError, ValueError):
+        return None
+    content = str(newest.get("text") or "").strip()
+    if outgoing or from_id != peer_id or not content or message_id <= 0:
+        return None
+    if not 0 <= now - timestamp <= max_age:
+        return None
+    return {"id": message_id, "peer_id": peer_id,
+            "from_id": from_id, "out": 0,
+            "date": timestamp, "text": content}

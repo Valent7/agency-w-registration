@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 import hashlib
 import json
 import os
@@ -2295,7 +2296,7 @@ def _vk_contact_id(user_id: int) -> int:
     return -abs(_stable_message_id(f"vk-user:{int(user_id)}"))
 
 
-def _vk_api(method: str, **params) -> dict:
+def _vk_api(method: str, *, _request_timeout: float = 30, **params) -> dict:
     if not VK_ACCESS_TOKEN:
         raise RuntimeError("Missing VK_ACCESS_TOKEN")
     response = requests.post(
@@ -2305,7 +2306,7 @@ def _vk_api(method: str, **params) -> dict:
             "access_token": VK_ACCESS_TOKEN,
             "v": VK_API_VERSION,
         },
-        timeout=30,
+        timeout=_request_timeout,
     )
     if not response.ok:
         raise RuntimeError(
@@ -2976,44 +2977,70 @@ _VK_CATCHUP_CHECKS = 0
 
 
 def _vk_catchup_recent_inbound() -> None:
-    """Recover recent *existing* conversation replies without any new hosting.
+    """Independently retrieve the latest unanswered text for existing leads.
 
-    Do not enumerate strangers into an outreach campaign: only people already
-    attached to an Agency W owner in agency_vk_leads may be recovered.
+    VK->Render callbacks sometimes time out. The existing Render service can
+    ask VK for message history directly, without another hosting provider.
+    No outreach to strangers, no replay of answered messages, no broad archive.
     """
     if not VK_ACCESS_TOKEN or not VK_GROUP_ID:
         return
-    response = _vk_api("messages.getConversations", count=100, filter="all")
-    candidates = vk_catchup.recent_user_messages(response, max_age=3600)
-    # Startup diagnostics contain counts only: no contact IDs or message text.
+
+    # Existing leads only; last_seen_at is an activity order, not permission
+    # to initiate a new conversation. If a lead is absent, do not contact them.
+    leads = _sb_get(
+        "agency_vk_leads",
+        {"select": "vk_user_id,vk_peer_id,last_seen_at",
+         "order": "last_seen_at.desc", "limit": 25},
+    )
+    checked = 0
+    candidates = 0
+    errors = 0
+    for lead in leads:
+        if not isinstance(lead, dict):
+            continue
+        try:
+            peer_id = int(lead.get("vk_peer_id") or lead.get("vk_user_id") or 0)
+            user_id = int(lead.get("vk_user_id") or 0)
+            if peer_id <= 0 or peer_id != user_id:
+                continue
+            # A single slow VK call must not stall the entire recovery service.
+            response = _vk_api(
+                "messages.getHistory", peer_id=peer_id,
+                count=3, _request_timeout=7,
+            )
+            checked += 1
+            newest = vk_catchup.latest_unanswered_history(
+                response, peer_id, max_age=900
+            )
+            if newest is not None:
+                candidates += 1
+                payload = {
+                    "type": "message_new",
+                    "group_id": int(VK_GROUP_ID),
+                    "object": {"message": newest},
+                }
+                # Uses the same per-peer lock and persistent message-id
+                # deduplication as callbacks.
+                _process_vk_message(payload)
+        except Exception as exc:
+            errors += 1
+            if errors <= 2:
+                # Types only; never include tokens, user IDs or message text.
+                print("VK_HISTORY_RECOVERY_ERROR:", type(exc).__name__, flush=True)
+        finally:
+            time.sleep(0.35)
+
     global _VK_CATCHUP_CHECKS
     _VK_CATCHUP_CHECKS += 1
-    if _VK_CATCHUP_CHECKS <= 2 or (_VK_CATCHUP_CHECKS % 60 == 0):
-        page = response.get("response") if isinstance(response, dict) else {}
-        page = page if isinstance(page, dict) else {}
-        items = page.get("items")
-        print("VK_CATCHUP_HEALTH:", {
-            "scan": _VK_CATCHUP_CHECKS,
-            "conversations": len(items) if isinstance(items, list) else -1,
-            "recent_inbound": len(candidates),
+    if candidates or errors or _VK_CATCHUP_CHECKS <= 3 or _VK_CATCHUP_CHECKS % 30 == 0:
+        print("VK_HISTORY_RECOVERY:", {
+            "run": _VK_CATCHUP_CHECKS,
+            "known_leads": len(leads),
+            "checked": checked,
+            "candidate_messages": candidates,
+            "errors": errors,
         }, flush=True)
-    if not candidates:
-        return
-    print("VK_CATCHUP_SCAN:", {"recent_inbound": len(candidates)}, flush=True)
-    for message in candidates:
-        try:
-            vk_user_id = message["from_id"]
-            if not _vk_lead(vk_user_id):
-                continue
-            payload = {
-                "type": "message_new",
-                "group_id": int(VK_GROUP_ID),
-                "object": {"message": message},
-            }
-            _process_vk_message(payload)
-        except Exception as exc:
-            # Do not log message texts, user information or access tokens.
-            print("VK_CATCHUP_MESSAGE_ERROR:", type(exc).__name__, flush=True)
 
 
 async def _vk_catchup_loop() -> None:
