@@ -2972,6 +2972,9 @@ def _process_vk_message_unlocked(payload: dict) -> None:
         print("VK_NEONA_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
 
 
+_VK_CATCHUP_CHECKS = 0
+
+
 def _vk_catchup_recent_inbound() -> None:
     """Recover recent *existing* conversation replies without any new hosting.
 
@@ -2982,6 +2985,18 @@ def _vk_catchup_recent_inbound() -> None:
         return
     response = _vk_api("messages.getConversations", count=100, filter="all")
     candidates = vk_catchup.recent_user_messages(response, max_age=3600)
+    # Startup diagnostics contain counts only: no contact IDs or message text.
+    global _VK_CATCHUP_CHECKS
+    _VK_CATCHUP_CHECKS += 1
+    if _VK_CATCHUP_CHECKS <= 2 or (_VK_CATCHUP_CHECKS % 60 == 0):
+        page = response.get("response") if isinstance(response, dict) else {}
+        page = page if isinstance(page, dict) else {}
+        items = page.get("items")
+        print("VK_CATCHUP_HEALTH:", {
+            "scan": _VK_CATCHUP_CHECKS,
+            "conversations": len(items) if isinstance(items, list) else -1,
+            "recent_inbound": len(candidates),
+        }, flush=True)
     if not candidates:
         return
     print("VK_CATCHUP_SCAN:", {"recent_inbound": len(candidates)}, flush=True)

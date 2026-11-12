@@ -13,7 +13,7 @@ class NeonaVKRoutingTests(unittest.TestCase):
     def test_referral_vk_uses_v3_not_old_policy(self):
         tree = ast.parse((ROOT / "instagram_webhook.py").read_text(encoding="utf-8"))
         fn = next(n for n in tree.body
-                  if isinstance(n, ast.FunctionDef) and n.name == "_process_vk_message")
+                  if isinstance(n, ast.FunctionDef) and n.name == "_process_vk_message_unlocked")
         imports = [n for n in ast.walk(fn) if isinstance(n, ast.Import)]
         self.assertTrue(any(alias.name == "neona_dialog_policy_v3"
                             for item in imports for alias in item.names))
