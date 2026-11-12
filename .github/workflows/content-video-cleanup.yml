@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - "content_video_cleanup.py"
+      - "content_tiktok_detection.py"
+      - "tests/test_content_tiktok_detection.py"
       - "content_video_cleanup_ui.py"
       - "content_factory_ui.py"
       - "tests/test_content_video_cleanup.py"
@@ -25,9 +27,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg >/dev/null
-          python -m pip install requests pillow
+          python -m pip install requests pillow numpy
       - name: Compile modules without running Streamlit
         run: |
-          python -m py_compile content_video_cleanup.py content_video_cleanup_ui.py content_factory_ui.py tests/test_content_video_cleanup.py
+          python -m py_compile content_tiktok_detection.py tests/test_content_tiktok_detection.py content_video_cleanup.py content_video_cleanup_ui.py content_factory_ui.py tests/test_content_video_cleanup.py
       - name: Verify MP4 cleanup, original audio and isolation
         run: python -m unittest discover -s tests -p "test_content_video_cleanup.py" -v
+
+      - name: Verify time-scoped TikTok overlay scan
+        run: python -m unittest discover -s tests -p "test_content_tiktok_detection.py" -v
