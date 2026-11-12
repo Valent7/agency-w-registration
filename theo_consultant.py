@@ -24,7 +24,7 @@ UTC = timezone.utc
 MSK = ZoneInfo("Europe/Moscow")
 
 DURATION_MINUTES = 30
-BUFFER_MINUTES = 60
+BUFFER_MINUTES = agency_team_schedule.MEETING_BUFFER_MINUTES
 MIN_LEAD_MINUTES = 60
 
 MEETING_FORMATS = ("Zoom", "Telegram", "WhatsApp")

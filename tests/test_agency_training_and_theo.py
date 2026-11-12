@@ -125,17 +125,68 @@ class VKMeetingRepliesTests(unittest.TestCase):
         self.assertIsNone(booking)
         find.assert_not_called()
 
-    def test_meeting_buffer_is_reported_as_actual_block(self):
-        start = datetime(2026, 12, 15, 18, 0, tzinfo=MSK).astimezone(UTC)
+    def test_half_hour_gap_before_1900_block_is_respected(self):
+        # At 18:00–18:30 the person has a full 30 min before the 19:00 meeting.
+        at_18 = datetime(2026, 12, 15, 18, 0, tzinfo=MSK).astimezone(UTC)
+        at_1830 = at_18 + timedelta(minutes=30)
+        at_19 = at_18 + timedelta(minutes=60)
+        blocks = [{
+            "weekday": 1, "active": True, "title": "Личная встреча",
+            "start_time": "19:00:00", "end_time": "20:00:00",
+        }]
         with patch.object(theo, "_list_meetings", return_value=[]), \
-             patch.object(theo, "_recurring_blocks", return_value=[{
-                "weekday": 1, "active": True, "title": "Личная встреча",
-                "start_time": "19:00:00", "end_time": "19:30:00",
-             }]):
-            self.assertEqual(
-                theo._slot_availability(1, start, start + timedelta(minutes=30)),
-                "busy_block"
-            )
+             patch.object(theo, "_recurring_blocks", return_value=blocks):
+            self.assertEqual(theo._slot_availability(
+                1, at_18, at_1830), "free")
+            self.assertEqual(theo._slot_availability(
+                1, at_1830, at_19), "busy_block")
+
+    def test_half_hour_gap_before_1900_meeting_is_respected(self):
+        # The confirmed 19:00–20:00 meeting must remain booked, without
+        # unnecessarily blocking a 30-min meeting ending at 18:30.
+        at_18 = datetime(2026, 12, 15, 18, 0, tzinfo=MSK).astimezone(UTC)
+        at_1830 = at_18 + timedelta(minutes=30)
+        at_19 = at_18 + timedelta(minutes=60)
+        confirmed = {"start_at": at_19, "end_at": at_19 + timedelta(hours=1)}
+        def matches(owner_id, expanded_start, expanded_end):
+            return [confirmed] if (
+                expanded_start < confirmed["end_at"]
+                and expanded_end > confirmed["start_at"]
+            ) else []
+        with patch.object(theo, "_list_meetings", side_effect=matches), \
+             patch.object(theo, "_recurring_blocks", return_value=[]):
+            self.assertEqual(theo._slot_availability(
+                1, at_18, at_1830), "free")
+            self.assertEqual(theo._slot_availability(
+                1, at_1830, at_19), "busy_meeting")
+
+    def test_theo_and_neona_share_same_gap_rule(self):
+        import neona_dialog_policy as neona
+        self.assertEqual(agency_team_schedule.MEETING_BUFFER_MINUTES, 30)
+        self.assertEqual(theo.BUFFER_MINUTES, 30)
+        self.assertEqual(neona.BUFFER_MINUTES, 30)
+        at_18 = datetime(2026, 12, 15, 18, 0, tzinfo=MSK).astimezone(UTC)
+        at_1830 = at_18 + timedelta(minutes=30)
+        at_19 = at_18 + timedelta(minutes=60)
+        confirmed = {"start_at": at_19, "end_at": at_19 + timedelta(hours=1)}
+        def matching(config, owner_id, expanded_start, expanded_end):
+            return [confirmed] if (
+                expanded_start < confirmed["end_at"]
+                and expanded_end > confirmed["start_at"]
+            ) else []
+        from types import SimpleNamespace
+        fake_json = type("Response", (), {
+            "raise_for_status": lambda self: None,
+            "json": lambda self: [],
+        })()
+        cfg = SimpleNamespace(supabase_url="https://example.invalid")
+        with patch.object(neona.core, "_list_meetings", side_effect=matching), \
+             patch.object(neona.core, "_headers", return_value={}), \
+             patch.object(neona.requests, "get", return_value=fake_json):
+            self.assertTrue(neona._slot_free_with_buffer(
+                cfg, 1, at_18, at_1830))
+            self.assertFalse(neona._slot_free_with_buffer(
+                cfg, 1, at_1830, at_19))
 
     def test_calendar_network_error_is_not_booking(self):
         start = datetime(2026, 12, 15, 18, 0, tzinfo=MSK).astimezone(UTC)

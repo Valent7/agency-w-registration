@@ -15,7 +15,7 @@ import neona_objections as objections
 import neona_memory as memory
 
 
-BUFFER_MINUTES = 60
+BUFFER_MINUTES = agency_team_schedule.MEETING_BUFFER_MINUTES
 MIN_LEAD_MINUTES = 60
 
 
@@ -281,7 +281,7 @@ def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
     # Proposed times are constrained by actual calendar availability.
     start_msk = start_utc.astimezone(core.MSK)
 
-    # Между встречами / постоянной занятостью оставляем минимум 1 час.
+    # Между встречами / постоянной занятостью оставляем 30 минут.
     expanded_start = start_utc - timedelta(minutes=BUFFER_MINUTES)
     expanded_end = end_utc + timedelta(minutes=BUFFER_MINUTES)
 

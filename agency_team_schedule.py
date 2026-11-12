@@ -13,6 +13,10 @@ START = "19:00"
 END = "19:30"
 TITLE = "Практическое занятие Агентства W"
 
+# A half-hour appointment ending at 18:30 is compatible with a 19:00 meeting.
+# Keep this shared for VK Theo and Neona (Telegram / Instagram / VK).
+MEETING_BUFFER_MINUTES = 30
+
 
 def retired_team_block(block):
     """Match only the old standard team calendar blocks, never arbitrary events."""
