@@ -118,7 +118,8 @@ class VKMeetingRepliesTests(unittest.TestCase):
             reply, stage, context, booking = self.answer(
                 "Мне удобно 15.12.2026 в 18:00 МСК, WhatsApp")
         self.assertIn("не удалось проверить календарь", reply)
-        self.assertNotIn("время занято", reply)
+        self.assertNotIn("Это время занято.", reply)
+        self.assertIn("не буду утверждать", reply)
         self.assertNotIn("10:00", reply)
         self.assertEqual(stage, "collecting_meeting_details")
         self.assertIsNone(booking)
