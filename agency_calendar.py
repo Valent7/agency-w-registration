@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 import calendar as month_calendar
+import agency_team_schedule
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -245,38 +246,7 @@ def list_recurring_blocks(owner_telegram_id: int) -> list[dict[str, Any]]:
     rows = response.json()
     rows = rows if isinstance(rows, list) else []
 
-    # Исправляем только старые системные блоки, созданные прежним
-    # ошибочным значением по умолчанию 17:00–18:00 МСК.
-    repaired = False
-    for block in rows:
-        title = str(block.get("title") or "").strip()
-        start_label = str(block.get("start_time") or "")[:5]
-        end_label = str(block.get("end_time") or "")[:5]
-        block_id = str(block.get("id") or "").strip()
-        if (
-            title == "Командная встреча"
-            and start_label == "17:00"
-            and end_label == "18:00"
-            and block_id
-        ):
-            patch = requests.patch(
-                f"{_supabase_url()}/rest/v1/agency_calendar_blocks",
-                headers={
-                    **_supabase_headers(),
-                    "Prefer": "return=minimal",
-                },
-                params={"id": f"eq.{block_id}"},
-                json={
-                    "start_time": "20:00:00",
-                    "end_time": "21:00:00",
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-                timeout=30,
-            )
-            if patch.status_code < 400:
-                block["start_time"] = "20:00:00"
-                block["end_time"] = "21:00:00"
-                repaired = True
+    # Reading must not silently rewrite the old calendar to 20:00.
     return rows
 
 
@@ -360,7 +330,7 @@ def _has_recurring_conflict(
         # считаем слот занятым консервативно.
         return True
 
-    for block in blocks:
+    for block in agency_team_schedule.effective_blocks(blocks, start_msk.date()):
         if not bool(block.get("active", True)):
             continue
         try:
@@ -446,7 +416,7 @@ def _conflict_description(
 
     candidate_start = start_msk.timetz().replace(tzinfo=None)
     candidate_end = end_msk.timetz().replace(tzinfo=None)
-    for block in blocks:
+    for block in agency_team_schedule.effective_blocks(blocks, start_msk.date()):
         if not bool(block.get("active", True)):
             continue
         try:
@@ -860,7 +830,9 @@ def _render_day_meetings(
     range_start, range_end = _period_for_msk_day(day)
     meetings = list_meetings(owner_telegram_id, range_start, range_end)
     blocks = [
-        block for block in list_recurring_blocks(owner_telegram_id)
+        block for block in agency_team_schedule.effective_blocks(
+            list_recurring_blocks(owner_telegram_id), day
+        )
         if int(block.get("weekday", -1)) == day.weekday()
     ]
 
@@ -1012,33 +984,69 @@ def _render_calendar_view(owner_telegram_id: int) -> None:
 def _render_recurring_blocks(owner_telegram_id: int) -> None:
     st.markdown("### 🔒 Постоянная занятость")
     st.caption(
-        "Эти интервалы повторяются каждую неделю и считаются занятыми "
-        "и для календаря, и для Неоны. Время задаётся по МСК."
+        "Время по МСК. Командные занятия: понедельник, среда и пятница "
+        "19:00–19:30. Старые стандартные блоки 20:00–21:00 "
+        "больше не ограничивают подбор времени."
     )
+    st.info(
+        "Актуальные 30-минутные занятия уже учитываются календарём, "
+        "Тео и Неоной. Остальные личные встречи и занятость сохраняются."
+    )
+    if st.button(
+        "♻️ Сохранить новое расписание вместо старого",
+        key="calendar_sync_agency_lessons",
+    ):
+        try:
+            existing = list_recurring_blocks(owner_telegram_id)
+            # First install the replacement, then remove ONLY matched old blocks.
+            save_recurring_blocks(
+                owner_telegram_id,
+                weekdays=[0, 2, 4],
+                title=agency_team_schedule.TITLE,
+                start_time=dt_time(19, 0),
+                end_time=dt_time(19, 30),
+                meeting_format="",
+                notes="Практика работы с Агентством W; 30 минут.",
+            )
+            removed = 0
+            for record in existing:
+                if not agency_team_schedule.retired_team_block(record):
+                    continue
+                old_id = str(record.get("id") or "").strip()
+                if not old_id:
+                    continue
+                delete_recurring_block(old_id)
+                removed += 1
+            st.success(
+                f"Новое расписание сохранено. Устаревших командных блоков удалено: {removed}."
+            )
+            st.rerun()
+        except CalendarStorageError as exc:
+            st.error("Не удалось завершить обновление: " + str(exc))
 
     weekday_options = list(range(7))
     selected_weekdays = st.multiselect(
         "Дни недели",
         options=weekday_options,
-        default=[0, 1, 2, 3, 4],
+        default=[0, 2, 4],
         format_func=lambda item: WEEKDAY_NAMES[item],
         key="calendar_block_weekdays",
     )
     title = st.text_input(
         "Название",
-        value="Командная встреча",
+        value="Личная занятость",
         key="calendar_block_title",
     )
     time_columns = st.columns(2)
     block_start = time_columns[0].time_input(
         "Начало по МСК",
-        value=dt_time(20, 0),
+        value=dt_time(19, 0),
         step=1800,
         key="calendar_block_start",
     )
     block_end = time_columns[1].time_input(
         "Окончание по МСК",
-        value=dt_time(21, 0),
+        value=dt_time(19, 30),
         step=1800,
         key="calendar_block_end",
     )
@@ -1088,10 +1096,10 @@ def _render_recurring_blocks(owner_telegram_id: int) -> None:
         return
 
     if not blocks:
-        st.caption("Постоянной занятости пока нет.")
+        st.caption("Другой постоянной занятости пока нет.")
         return
 
-    st.markdown("#### Уже сохранено")
+    st.markdown("#### Сохранённые блоки")
     for block in blocks:
         block_id = str(block.get("id") or "")
         weekday = int(block.get("weekday", 0))
@@ -1099,6 +1107,9 @@ def _render_recurring_blocks(owner_telegram_id: int) -> None:
         start_label = str(block.get("start_time") or "")[:5]
         end_label = str(block.get("end_time") or "")[:5]
         with st.container(border=True):
+            retired = agency_team_schedule.retired_team_block(block)
+            if retired:
+                st.warning("Устаревший командный блок — не учитывается в новом расписании.")
             st.write(
                 f"**{WEEKDAY_NAMES[weekday]} · {start_label}–{end_label} МСК** — "
                 f"{title_label} · {block.get('meeting_format') or 'без формата'}"
@@ -1575,7 +1586,9 @@ def render_today_meetings_compact(owner_telegram_id: int) -> None:
     try:
         meetings = list_meetings(owner_telegram_id, range_start, range_end)
         blocks = [
-            block for block in list_recurring_blocks(owner_telegram_id)
+            block for block in agency_team_schedule.effective_blocks(
+                list_recurring_blocks(owner_telegram_id), today_msk
+            )
             if int(block.get("weekday", -1)) == today_msk.weekday()
         ]
     except CalendarStorageError:

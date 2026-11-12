@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import requests
 from openai import OpenAI
 
+import agency_team_schedule
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -278,6 +280,7 @@ def _slot_free_with_buffer(owner_id: int, start_utc: datetime, end_utc: datetime
     blocks = _recurring_blocks(owner_id, start_msk.weekday())
     if blocks and blocks[0].get("_calendar_error"):
         return False
+    blocks = agency_team_schedule.effective_blocks(blocks, start_msk.date())
 
     for block in blocks:
         if not bool(block.get("active", True)):
@@ -637,6 +640,16 @@ def _find_three_slots(owner_id: int, around_utc: datetime, contact_timezone: str
 
         cursor = datetime.combine(day, dt_time(10, 0), MSK)
         end = datetime.combine(day, dt_time(20, 0), MSK)
+        earliest = around_utc.astimezone(MSK)
+        if day == earliest.date() and earliest > cursor:
+            cursor = earliest.replace(
+                minute=30 if earliest.minute > 0 and earliest.minute <= 30 else 0,
+                second=0, microsecond=0,
+            )
+            if earliest.minute > 30 or (earliest.minute == 0 and earliest.second):
+                cursor += timedelta(minutes=30)
+            if cursor < earliest:
+                cursor += timedelta(minutes=30)
 
         while cursor + timedelta(minutes=DURATION_MINUTES) <= end:
             start_utc = cursor.astimezone(UTC)
@@ -671,6 +684,22 @@ def _schedule_reply(
         datetime.now(UTC),
     )
     state = str(meeting_state or "collecting_meeting_details").strip()
+
+    # A person's newest day/time ALWAYS supersedes an older numbered list.
+    # Keep the last confirmed date when the person changes only the clock time.
+    latest_time = _detect_time(incoming_text)
+    latest_date = _detect_date(
+        incoming_text, datetime.now(UTC), context.get("contact_timezone")
+    )
+    if state in {"awaiting_slot_choice", "awaiting_confirmation"} and (
+        latest_date or latest_time
+    ):
+        context.pop("offered_slots", None)
+        context.pop("proposed_start_at", None)
+        if latest_date and not latest_time:
+            # A new day cannot silently inherit a clock from the old proposal.
+            context.pop("requested_time", None)
+        state = "collecting_meeting_details"
 
     print(
         "THEO_CALENDAR_PARSE:",
@@ -790,8 +819,40 @@ def _schedule_reply(
                 None,
             )
 
+        if _is_no(incoming_text) or any(
+            phrase in _normalize_calendar_text(incoming_text)
+            for phrase in ("ни один", "не подходят", "другие варианты")
+        ):
+            after = datetime.now(UTC)
+            if slots:
+                try:
+                    after = datetime.fromisoformat(
+                        str(slots[-1]).replace("Z", "+00:00")
+                    ).astimezone(UTC) + timedelta(minutes=30)
+                except (TypeError, ValueError):
+                    pass
+            alternatives = _find_three_slots(
+                owner_id, after, str(context.get("contact_timezone") or "Europe/Moscow")
+            )
+            if alternatives:
+                context["offered_slots"] = [x.isoformat() for x in alternatives]
+                options = "\n".join(
+                    f"{index}. {_format_slot(slot, str(context.get('contact_timezone') or 'Europe/Moscow'))}"
+                    for index, slot in enumerate(alternatives, 1)
+                )
+                return (
+                    "Понимаю, эти часы вам не подходят. Вот другие варианты:\n"
+                    + options + "\nИли предложите свой день и время — я проверю.",
+                    "awaiting_slot_choice",
+                    context,
+                    None,
+                )
+            return (
+                "Понимаю. Назовите удобные вам день и время — я проверю календарь.",
+                "collecting_meeting_details", context, None,
+            )
         return (
-            "Напишите, пожалуйста, номер подходящего варианта: 1, 2 или 3.",
+            "Назовите удобный день и время или выберите один из предложенных вариантов.",
             "awaiting_slot_choice",
             context,
             None,

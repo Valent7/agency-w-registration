@@ -1,0 +1,32 @@
+name: Agency W calendar and VK meeting regressions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "theo_consultant.py"
+      - "neona_dialog_policy.py"
+      - "agency_calendar.py"
+      - "agency_team_schedule.py"
+      - "tests/test_agency_training_and_theo.py"
+      - ".github/workflows/agency-calendar-vk-regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install isolated unit-test dependencies
+        run: python -m pip install requests openai
+      - name: Compile changed Python modules
+        run: python -m py_compile agency_team_schedule.py theo_consultant.py agency_calendar.py neona_dialog_policy.py
+      - name: Test exact time overrides, schedule, and duplicate blocks
+        run: python -m unittest discover -s tests -p test_agency_training_and_theo.py -v

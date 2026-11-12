@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 
 import requests
+import agency_team_schedule
 import neona_telegram_dialogs as core
 import neona_objections as objections
 import neona_memory as memory
@@ -321,6 +322,7 @@ def _slot_free_with_buffer(config, owner_id, start_utc, end_utc):
 
     if not isinstance(blocks, list):
         return False
+    blocks = agency_team_schedule.effective_blocks(blocks, start_msk.date())
 
     for block in blocks:
         if not bool(block.get("active", True)):
