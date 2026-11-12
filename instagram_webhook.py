@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import hashlib
 import json
 import os
@@ -12,6 +14,7 @@ from urllib.request import Request as UrlRequest, urlopen
 from urllib.parse import quote, urlencode
 
 import requests
+import vk_catchup
 from functools import lru_cache
 from html import escape as html_escape
 from instagram_auth_tools import (
@@ -2715,7 +2718,33 @@ def _seed_vk_neona_state_from_first_touch(
     }
 
 
+# Callback API can occasionally skip a delivery. Polling also processes
+# conversations, so both entry points must serialize per person.
+_VK_LOCKS: dict[int, threading.Lock] = {}
+_VK_LOCKS_GUARD = threading.Lock()
+
+
+def _vk_lock_for(peer_id: int) -> threading.Lock:
+    with _VK_LOCKS_GUARD:
+        return _VK_LOCKS.setdefault(int(peer_id), threading.Lock())
+
+
 def _process_vk_message(payload: dict) -> None:
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    msg = obj.get("message") if isinstance(obj, dict) else None
+    if not isinstance(msg, dict):
+        return
+    try:
+        peer_id = int(msg.get("peer_id") or 0)
+    except (TypeError, ValueError):
+        return
+    if peer_id <= 0:
+        return
+    with _vk_lock_for(peer_id):
+        _process_vk_message_unlocked(payload)
+
+
+def _process_vk_message_unlocked(payload: dict) -> None:
     """Route partner-attributed VK community replies to Neona; keep generic visitors with Theo."""
     try:
         obj = payload.get("object")
@@ -2943,6 +2972,48 @@ def _process_vk_message(payload: dict) -> None:
         print("VK_NEONA_ERROR:", f"{type(exc).__name__}: {exc}", flush=True)
 
 
+def _vk_catchup_recent_inbound() -> None:
+    """Recover recent *existing* conversation replies without any new hosting.
+
+    Do not enumerate strangers into an outreach campaign: only people already
+    attached to an Agency W owner in agency_vk_leads may be recovered.
+    """
+    if not VK_ACCESS_TOKEN or not VK_GROUP_ID:
+        return
+    response = _vk_api("messages.getConversations", count=100, filter="all")
+    candidates = vk_catchup.recent_user_messages(response, max_age=3600)
+    if not candidates:
+        return
+    print("VK_CATCHUP_SCAN:", {"recent_inbound": len(candidates)}, flush=True)
+    for message in candidates:
+        try:
+            vk_user_id = message["from_id"]
+            if not _vk_lead(vk_user_id):
+                continue
+            payload = {
+                "type": "message_new",
+                "group_id": int(VK_GROUP_ID),
+                "object": {"message": message},
+            }
+            _process_vk_message(payload)
+        except Exception as exc:
+            # Do not log message texts, user information or access tokens.
+            print("VK_CATCHUP_MESSAGE_ERROR:", type(exc).__name__, flush=True)
+
+
+async def _vk_catchup_loop() -> None:
+    """Fallback every 30 seconds; background thread cannot block webhooks."""
+    await asyncio.sleep(3)
+    while True:
+        try:
+            await asyncio.to_thread(_vk_catchup_recent_inbound)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print("VK_CATCHUP_POLL_ERROR:", type(exc).__name__, str(exc)[:160], flush=True)
+        await asyncio.sleep(30)
+
+
 async def vk_webhook_receive(request: Request):
     try:
         payload = await request.json()
@@ -2974,7 +3045,16 @@ async def vk_webhook_receive(request: Request):
         return PlainTextResponse("Forbidden", status_code=403)
 
     if event_type == "message_new":
-        print("VK_WEBHOOK_EVENT:", payload, flush=True)
+        obj = payload.get("object")
+        item = obj.get("message") if isinstance(obj, dict) else {}
+        item = item if isinstance(item, dict) else {}
+        # Never log the full callback payload; it includes the VK secret.
+        print("VK_WEBHOOK_EVENT:", {
+            "group_id": incoming_group_id,
+            "message_id": item.get("id"),
+            "peer_id": item.get("peer_id"),
+            "event_type": event_type,
+        }, flush=True)
         return PlainTextResponse(
             "ok",
             status_code=200,
@@ -3420,7 +3500,15 @@ async def _app_lifespan(app):
     _audit_vk_partner_links_on_startup()
     _restore_instagram_subscriptions_on_startup()
     _catch_up_recent_instagram_comment_replies()
-    yield
+    fallback = asyncio.create_task(_vk_catchup_loop(), name="vk-catchup")
+    try:
+        yield
+    finally:
+        fallback.cancel()
+        try:
+            await fallback
+        except asyncio.CancelledError:
+            pass
 
 
 app = Starlette(

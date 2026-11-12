@@ -11,6 +11,8 @@ on:
       - "tests/test_agency_training_and_theo.py"
       - "tests/test_vk_neona_v3_route.py"
       - "instagram_webhook.py"
+      - "vk_catchup.py"
+      - "tests/test_vk_catchup.py"
       - "neona_dialog_policy_v2.py"
       - "neona_dialog_policy_v3.py"
       - ".github/workflows/agency-calendar-vk-regression.yml"
@@ -36,3 +38,5 @@ jobs:
         run: python -m unittest discover -s tests -p test_agency_training_and_theo.py -v
       - name: Verify actual VK Neona route and exact-time acceptance
         run: python -m unittest discover -s tests -p test_vk_neona_v3_route.py -v
+      - name: Verify missed-callback recovery without duplicate messages
+        run: python -m unittest discover -s tests -p test_vk_catchup.py -v
