@@ -2808,10 +2808,16 @@ def _process_vk_message(payload: dict) -> None:
             )
             return
 
-        import neona_dialog_policy as policy
+        # Personal-ref VK conversations must use Neona V3, including V2's
+        # exact-time calendar engine. Importing the legacy policy here used
+        # core._schedule_reply and caused the repeating 'choose 1/2/3' loop.
+        import neona_dialog_policy_v3 as policy
 
         policy.apply_policy()
         core = policy.core
+        if (core._schedule_reply is not policy.v2._schedule_reply_v2
+                or policy.legacy._process_message_without_memory is not policy._process_v3):
+            raise RuntimeError("VK Neona V3 scheduling policy failed to activate")
         config, owner_id, owner_name = _vk_neona_config(core, owner)
         contact_id = _vk_contact_id(from_id)
         message_dt = _message_datetime(message.get("date"))

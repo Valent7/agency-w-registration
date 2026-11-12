@@ -9,6 +9,10 @@ on:
       - "agency_calendar.py"
       - "agency_team_schedule.py"
       - "tests/test_agency_training_and_theo.py"
+      - "tests/test_vk_neona_v3_route.py"
+      - "instagram_webhook.py"
+      - "neona_dialog_policy_v2.py"
+      - "neona_dialog_policy_v3.py"
       - ".github/workflows/agency-calendar-vk-regression.yml"
   workflow_dispatch:
 
@@ -25,8 +29,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install isolated unit-test dependencies
-        run: python -m pip install requests openai
+        run: python -m pip install requests openai telethon cryptography
       - name: Compile changed Python modules
-        run: python -m py_compile agency_team_schedule.py theo_consultant.py agency_calendar.py neona_dialog_policy.py
+        run: python -m py_compile agency_team_schedule.py theo_consultant.py agency_calendar.py neona_dialog_policy.py neona_dialog_policy_v2.py neona_dialog_policy_v3.py instagram_webhook.py
       - name: Test exact time overrides, schedule, and duplicate blocks
         run: python -m unittest discover -s tests -p test_agency_training_and_theo.py -v
+      - name: Verify actual VK Neona route and exact-time acceptance
+        run: python -m unittest discover -s tests -p test_vk_neona_v3_route.py -v
