@@ -416,7 +416,7 @@ def top_up_vk_owner_now(
             scan_result = scan_vk_sources(
                 owner_id,
                 per_source=200,
-                max_sources=1,
+                max_sources=min(5, len(sources)),
                 include_active_context=True,
             )
         except Exception as exc:
@@ -593,7 +593,7 @@ def run_once() -> dict[str, int]:
                     scan_result = scan_vk_sources(
                         owner_id,
                         per_source=200,
-                        max_sources=1,
+                        max_sources=min(5, len(sources)),
                         include_active_context=True,
                     )
                     for scan_error in scan_result.get("errors") or []:
@@ -646,7 +646,7 @@ def run_once() -> dict[str, int]:
                     scan_result = scan_vk_sources(
                         owner_id,
                         per_source=200,
-                        max_sources=1,
+                        max_sources=min(5, len(sources)),
                         include_active_context=True,
                     )
                     prepared, analyzed_total, _ = _score_until_daily_five(
@@ -666,7 +666,8 @@ def run_once() -> dict[str, int]:
                             scan_result = scan_vk_sources(
                                 owner_id,
                                 per_source=200,
-                                max_sources=min(10, len(sources)),
+                                max_sources=min(5, len(sources)),
+                                include_active_context=True,
                             )
                             prepared, analyzed_total, _ = _score_until_daily_five(
                                 owner_id,
