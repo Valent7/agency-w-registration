@@ -923,9 +923,6 @@ def fetch_vk_active_commenters(
             user_ids.append(uid)
             if len(user_ids) >= max_people:
                 break
-        if len(user_ids) >= max_people:
-            break
-
         # Some VK responses omit profiles. Recover IDs from visible comments.
         for row in comments.get("items") or []:
             if not isinstance(row, dict):
@@ -941,12 +938,10 @@ def fetch_vk_active_commenters(
                 bucket = comment_samples.setdefault(uid, [])
                 if len(bucket) < 3 and comment_text not in bucket:
                     bucket.append(comment_text[:500])
-            if uid in seen:
+            if uid in seen or len(user_ids) >= max_people:
                 continue
             seen.add(uid)
             user_ids.append(uid)
-            if len(user_ids) >= max_people:
-                break
         if len(user_ids) >= max_people:
             break
 
