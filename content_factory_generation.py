@@ -15,6 +15,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import wave
+from array import array
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +83,7 @@ def can_resume_video(production):
     if not isinstance(review, dict) or review.get("approved") is not True:
         return False
     try:
-        checked_content = validate_content(production["content"], "reel", "vk")
+        checked_content = validate_content(production["content"], "reel", "vk", music_only=production["content"].get("music_only") is True)
     except GenerationError:
         return False
     long_video = checked_content.get("target_seconds") == 120
@@ -138,7 +140,40 @@ def _text(value: Any, field: str, maximum: int, *, required: bool = True) -> str
     return value
 
 
-def validate_content(data: Any, content_format: str, platform: str) -> dict:
+def _music_only(job):
+    return (job.get("studio_master") is True and job.get("video_style") == "cartoon"
+            and str(job.get("topic") or "").startswith("[Кадриан: только музыка]\n"))
+
+
+def _short_music(duration):
+    """An original soft instrumental bed for the short cartoon."""
+    rate = 24000
+    track = [0.0] * round(rate * duration)
+    notes = (62, 69, 74, 77, 74, 69, 58, 65, 70, 74, 70, 65,
+             53, 60, 65, 69, 65, 60, 55, 62, 67, 70, 67, 62, 62)
+    for index, note in enumerate(notes):
+        start = round(index * 0.55 * rate)
+        frequency = 440 * 2 ** ((note - 69) / 12)
+        for offset in range(min(rate * 2, len(track) - start)):
+            t = offset / rate
+            phase = 2 * math.pi * frequency * t
+            envelope = (1 - math.exp(-70 * t)) * math.exp(-2.5 * t)
+            track[start + offset] += 0.135 * envelope * (math.sin(phase) + 0.20 * math.sin(2 * phase))
+    samples = array("h", (
+        round(32767 * value * min(1, (len(track) - index) / rate))
+        for index, value in enumerate(track)
+    ))
+    import sys
+    if sys.byteorder != "little":
+        samples.byteswap()
+    out = io.BytesIO()
+    with wave.open(out, "wb") as audio:
+        audio.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+        audio.writeframes(samples.tobytes())
+    return out.getvalue()
+
+
+def validate_content(data: Any, content_format: str, platform: str, *, music_only=False) -> dict:
     """Validate the whole copy before any paid image or speech request."""
     if not isinstance(data, dict):
         raise GenerationError("ИИ вернул материал в неверном формате.")
@@ -156,6 +191,9 @@ def validate_content(data: Any, content_format: str, platform: str) -> dict:
         result["slides"] = [_text(slide, "текст слайда", 400) for slide in slides]
         if len(set(result["slides"])) != len(result["slides"]):
             raise GenerationError("ИИ повторил одинаковые слайды карусели.")
+    if content_format == "reel" and music_only:
+        result.update(narration="", music_only=True)
+        return result
     if content_format == "reel":
         long_video = data.get("target_seconds") == 120 and type(data.get("target_seconds")) is int
         if "target_seconds" in data and not long_video:
@@ -473,12 +511,16 @@ class Generator:
     def _copy(self, project, job, *, previous=None, review=None):
         from content_factory_editorial import build_copy_prompt
         instructions, input_data = build_copy_prompt(project, job, previous=previous, review=review)
+        if _music_only(job):
+            instructions += "\nРежим короткого мультфильма: narration должен быть пустой строкой. Звук — только музыка."
         result = _bind_reel_target(self._structured(instructions, input_data), job, previous)
-        return validate_content(result, job["format"], job["platform"])
+        return validate_content(result, job["format"], job["platform"], music_only=_music_only(job))
 
     def _review_copy(self, project, job, content):
         from content_factory_editorial import build_review_prompt, validate_review
         instructions, input_data = build_review_prompt(project, job, content)
+        if _music_only(job):
+            instructions += "\nОтсутствие закадрового текста здесь задумано пользователем."
         return validate_review(self._structured(instructions, input_data, model=self.review_model, max_tokens=4000))
 
     def _proofread(self, project, job, content):
@@ -489,7 +531,7 @@ class Generator:
         if isinstance(result, dict) and result.get("format", job["format"]) != job["format"]:
             raise GenerationError("Корректор изменил формат материала; производство остановлено.")
         result = _bind_reel_target(result, job, content)
-        corrected = validate_content(result, job["format"], job["platform"])
+        corrected = validate_content(result, job["format"], job["platform"], music_only=_music_only(job))
         if job["format"] == "carousel":
             original_slides = content.get("slides") or []
             if len(corrected["slides"]) != len(original_slides):
@@ -626,6 +668,7 @@ class Generator:
             clips, speech, content["narration"], content["title"],
             project["name"], project["brand_color"], **duration_options, **finishing,
             apply_finishing=bool(state.get("apply_finishing")),
+            music_only=content.get("music_only") is True,
         )
         content["video_kind"] = "live"
         content.pop("video_branding", None)
@@ -796,7 +839,12 @@ class Generator:
                         )
 
             speech, duration = None, None
-            if live_client is not None:
+            if live_client is not None and _music_only(job):
+                report("video", "Готовим музыку для 15-секундной анимации.")
+                duration = 14.65
+                duration_options = {}
+                speech = _short_music(duration)
+            elif live_client is not None:
                 report("video", "Записываем голос, чтобы точно рассчитать длительность живых сцен.")
                 speech = self._request("audio/speech", self._speech_payload(clean_project, content["narration"])).content
                 duration_options = {"target_seconds": 120} if content.get("target_seconds") == 120 else {}
@@ -919,7 +967,8 @@ class Generator:
                         if extension is None:
                             raise GenerationError("Не удалось сохранить исходник живой сцены.")
                         raw_sources.append(save_source(f"live_input_{index + 1:02d}.{extension}", image, mime))
-                    speech_source = save_source("live_narration.mp3", speech, "audio/mpeg")
+                    speech_source = (save_source("live_music.wav", speech, "audio/wav") if _music_only(job)
+                                     else save_source("live_narration.mp3", speech, "audio/mpeg"))
                     content["video_kind"] = "live"
                     personalization = (job.get("checkpoint") or {}).get("video_personalization") or {}
                     _video_finishing(personalization)
