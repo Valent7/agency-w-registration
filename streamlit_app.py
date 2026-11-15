@@ -14523,24 +14523,8 @@ if telegram_login_valid or remembered_data:
                         )
 
         elif main_section == "🏭 Контент":
-            content_passport = st.session_state.get(
-                f"neonia_target_audience_passport_{telegram_id}",
-                {},
-            )
-            content_target_profile = (
-                content_passport.get("profile")
-                if isinstance(content_passport, dict)
-                else None
-            )
-            render_content_factory(
-                int(telegram_id),
-                str(first_name or "Партнёр"),
-                ask_openai,
-                generate_openai_illustration,
-                create_neona_heygen_video,
-                get_neona_heygen_video,
-                target_profile=content_target_profile,
-            )
+            st.subheader("🔒 Контент-завод W")
+            st.info("Раздел закрыт. Для работы над видео готовится отдельный чат Кадриана.")
 
         elif main_section == "👥 Команда":
             partner_center_tab, team_tools_tab = st.tabs(
