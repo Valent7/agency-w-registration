@@ -1432,8 +1432,15 @@ def _normalise_package(data, owner_id, settings):
 
 
 def _supabase_config():
-    url = _clean_text(st.secrets.get("SUPABASE_URL"), 1000).rstrip("/")
-    key = _clean_text(st.secrets.get("SUPABASE_SECRET_KEY"), 5000)
+    def setting(name, limit):
+        try:
+            secret = _clean_text(st.secrets.get(name), limit)
+        except FileNotFoundError:
+            secret = ""
+        return secret or _clean_text(os.getenv(name), limit)
+
+    url = setting("SUPABASE_URL", 1000).rstrip("/")
+    key = setting("SUPABASE_SECRET_KEY", 5000)
     return url, key
 
 
