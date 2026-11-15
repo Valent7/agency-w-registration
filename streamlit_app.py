@@ -8682,6 +8682,7 @@ if telegram_login_valid or remembered_data:
             "📖 Дневник",
             "🤖 Агенты",
             locked_content,
+            "🎬 Студия контента",
             "👥 Команда",
             "🗺️ Развитие",
             "👤 Профиль",
@@ -8696,6 +8697,7 @@ if telegram_login_valid or remembered_data:
                 "📖 Дневник": "Дневник",
                 "🤖 Агенты": "Агенты",
                 locked_content: locked_content,
+                "🎬 Студия контента": "Студия контента",
                 "👥 Команда": "Команда",
                 "🗺️ Развитие": "Развитие",
                 "👤 Профиль": "Профиль",
@@ -14567,6 +14569,16 @@ if telegram_login_valid or remembered_data:
                             neola_ui_context,
                             ask_openai,
                         )
+
+        elif main_section == "🎬 Студия контента":
+            from kadrian_studio_ui import render_kadrian
+
+            st.header("Студия контента")
+            kadrian_key = f"agency_kadrian_open_{telegram_id}"
+            if st.button("Кадриан", key=f"{kadrian_key}_button", type="primary"):
+                st.session_state[kadrian_key] = True
+            if st.session_state.get(kadrian_key):
+                render_kadrian(int(telegram_id), ask_openai)
 
         elif main_section == "👥 Команда":
             partner_center_tab, team_tools_tab = st.tabs(
