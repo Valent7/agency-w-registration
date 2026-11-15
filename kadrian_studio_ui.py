@@ -27,6 +27,7 @@ def render_kadrian(owner_id, ask_ai):
     chat = st.session_state.setdefault(key, {"messages": [], "brief": "", "request": None})
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
+    music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
     for role, message in chat["messages"]:
         with st.chat_message(role):
             st.markdown(message)
@@ -40,8 +41,11 @@ def render_kadrian(owner_id, ask_ai):
                 "Иначе предложи короткий сценарий: кадры, озвучка, ритм и финал. "
                 "Сохраняй утверждённые реплики дословно. Не обещай, что видео уже создано. "
                 "Отвечай только по текущему видео или мультфильму.",
-                f"Формат: {style}\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
+                f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
             )
+        if not answer or answer.startswith(("Ошибка OpenAI", "Ключ OpenAI", "Не удалось")):
+            st.error("Кадриан не получил сценарий. Попробуйте отправить пожелание ещё раз.")
+            return
         chat["messages"].extend([("user", prompt), ("assistant", answer)])
         chat["brief"] = f"Пожелание партнёра: {prompt}\nПлан Кадриана: {answer}"[:6000]
         chat["request"] = uuid4().hex
@@ -50,14 +54,14 @@ def render_kadrian(owner_id, ask_ai):
     if chat["brief"] and st.button("Собрать по этому замыслу", type="primary", key=key + "_submit"):
         request = chat["request"]
         dedupe = sha256(f"kadrian|{owner_id}|{project_id}|{request}".encode()).hexdigest()
-        fingerprint = sha256(f"{style}|{chat['brief']}".encode()).hexdigest()
+        fingerprint = sha256(f"{style}|{music_only}|{chat['brief']}".encode()).hexdigest()
         now = iso(datetime.now(timezone.utc))
         try:
             job = store.enqueue_job(owner_id, project_id, {
                 "platform": "instagram", "format": "reel", "scheduled_at": now,
                 "available_at": now, "state": "queued", "dedupe_key": dedupe,
                 "request_id": request, "request_fingerprint": fingerprint,
-                "topic": chat["brief"], "requested_by_owner": True,
+                "topic": ("[Кадриан: только музыка]\n" + chat["brief"])[:6000] if music_only else chat["brief"], "requested_by_owner": True,
                 "video_mode": "live", "video_style": style,
                 "review_required": True, "studio_master": True,
                 "content": {}, "assets": [], "checkpoint": {}, "error": "", "attempts": 0,
