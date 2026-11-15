@@ -155,7 +155,7 @@ def _scene_captions(path, events, start, end, title, brand_name, brand_color):
 def render_live_reel(
     scene_clips, speech_bytes, narration, title, brand_name, brand_color, *,
     target_seconds=45, intro_image_bytes=None, outro_image_bytes=None, music_bytes=None,
-    voice_volume=1.0, music_volume=0.12, apply_finishing=False,
+    voice_volume=1.0, music_volume=0.12, apply_finishing=False, music_only=False,
 ):
     """Make a live reel and finish Agency W films with selected branding/audio."""
     _, maximum = _limits(target_seconds)
@@ -167,7 +167,8 @@ def render_live_reel(
     if sum(map(len, scene_clips)) > MAX_TOTAL_CLIP_BYTES:
         raise LiveMediaError("Общий размер видеосцен превышает 100 МБ.")
     _speech(speech_bytes)
-    narration, title, brand_name = _text(narration, 4000 if target_seconds == 120 else 3000), _text(title, 150), _text(brand_name, 120)
+    narration = "" if music_only else _text(narration, 4000 if target_seconds == 120 else 3000)
+    title, brand_name = _text(title, 150), _text(brand_name, 120)
     if not isinstance(brand_color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", brand_color):
         raise LiveMediaError("Цвет оформления должен иметь формат #RRGGBB.")
     ffmpeg, ffprobe = _tools()
@@ -179,7 +180,7 @@ def render_live_reel(
         total_frames = math.ceil((duration + END_PADDING) * FPS)
         base, extra = divmod(total_frames, len(scene_clips))
         counts = [base + (index < extra) for index in range(len(scene_clips))]
-        events = _caption_events(narration, duration)
+        events = [] if music_only else _caption_events(narration, duration)
         try:
             logo = prepare_video_logo(root, (1080, 1920), brand_name)
         except VideoBrandingError as error:
