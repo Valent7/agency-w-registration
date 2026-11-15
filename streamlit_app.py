@@ -8719,8 +8719,9 @@ if telegram_login_valid or remembered_data:
             )
 
         st.html(
-            """
+            r"""
             <style>
+            .st-key-main_section button[aria-disabled="true"],
             .st-key-main_section label:has(input[aria-disabled="true"]) {
                 opacity: .55;
                 cursor: not-allowed;
@@ -8731,6 +8732,11 @@ if telegram_login_valid or remembered_data:
                 const lock = () => {
                     const menu = document.querySelector(".st-key-main_section");
                     if (!menu) return;
+                    for (const button of menu.querySelectorAll('button[role="radio"]')) {
+                        if (button.textContent.replace(/\s/g, "") !== "🔒Контент") continue;
+                        button.disabled = true;
+                        button.setAttribute("aria-disabled", "true");
+                    }
                     for (const label of menu.querySelectorAll("label")) {
                         if (label.textContent.trim() !== "🔒 Контент") continue;
                         const radio = label.querySelector("input");
