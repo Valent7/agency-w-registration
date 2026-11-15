@@ -8668,6 +8668,11 @@ if telegram_login_valid or remembered_data:
             )
 
         pending_main_section = st.session_state.pop("agency_open_main_section", None)
+        locked_content = "🔒 Контент"
+        if pending_main_section in ("🏭 Контент", locked_content):
+            pending_main_section = "☀️ День"
+        if st.session_state.get("main_section") in ("🏭 Контент", locked_content):
+            st.session_state["main_section"] = "☀️ День"
         if pending_main_section:
             st.session_state["main_section"] = pending_main_section
 
@@ -8676,7 +8681,7 @@ if telegram_login_valid or remembered_data:
             "📅 Календарь",
             "📖 Дневник",
             "🤖 Агенты",
-            "🏭 Контент",
+            locked_content,
             "👥 Команда",
             "🗺️ Развитие",
             "👤 Профиль",
@@ -8690,7 +8695,7 @@ if telegram_login_valid or remembered_data:
                 "📅 Календарь": "Календарь",
                 "📖 Дневник": "Дневник",
                 "🤖 Агенты": "Агенты",
-                "🏭 Контент": "Контент-завод",
+                locked_content: locked_content,
                 "👥 Команда": "Команда",
                 "🗺️ Развитие": "Развитие",
                 "👤 Профиль": "Профиль",
@@ -8712,6 +8717,41 @@ if telegram_login_valid or remembered_data:
                 width="stretch",
                 key="main_section",
             )
+
+        st.html(
+            """
+            <style>
+            .st-key-main_section label:has(input[aria-disabled="true"]) {
+                opacity: .55;
+                cursor: not-allowed;
+            }
+            </style>
+            <script>
+            (() => {
+                const lock = () => {
+                    const menu = document.querySelector(".st-key-main_section");
+                    if (!menu) return;
+                    for (const label of menu.querySelectorAll("label")) {
+                        if (label.textContent.trim() !== "🔒 Контент") continue;
+                        const radio = label.querySelector("input");
+                        if (!radio) continue;
+                        radio.disabled = true;
+                        radio.setAttribute("aria-disabled", "true");
+                    }
+                };
+                window.agencyContentLockObserver?.disconnect();
+                window.agencyContentLockObserver = new MutationObserver(lock);
+                window.agencyContentLockObserver.observe(document.body, {
+                    childList: true, subtree: true
+                });
+                lock();
+            })();
+            </script>
+            """,
+            unsafe_allow_javascript=True,
+        )
+        if main_section == locked_content:
+            main_section = "☀️ День"
 
         # Постоянный быстрый вызов Неолы. Она получает контекст текущего экрана
         # и учитывает вложенную навигацию («матрёшки») Агентства W.
@@ -14521,10 +14561,6 @@ if telegram_login_valid or remembered_data:
                             neola_ui_context,
                             ask_openai,
                         )
-
-        elif main_section == "🏭 Контент":
-            st.subheader("🔒 Контент-завод W")
-            st.info("Раздел закрыт. Для работы над видео готовится отдельный чат Кадриана.")
 
         elif main_section == "👥 Команда":
             partner_center_tab, team_tools_tab = st.tabs(
