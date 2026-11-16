@@ -9,6 +9,33 @@ from content_factory_autopilot_ui import _runtime
 from content_factory_core import iso
 
 
+def _render_library(store, owner_id, project_id, style):
+    try:
+        jobs = store.list_jobs(owner_id, project_id, limit=100)
+    except Exception:
+        st.warning("Не удалось загрузить готовые работы.")
+        return
+    found = False
+    for job in jobs:
+        if not job.get("studio_master") or job.get("video_style") != style or not job.get("assets"):
+            continue
+        if job.get("state") not in {"ready", "published", "scheduled", "paused"} or job.get("error"):
+            continue
+        try:
+            assets = store.resolve_assets(owner_id, job["assets"])
+        except Exception:
+            st.caption("Один из файлов временно недоступен.")
+            continue
+        for asset in assets:
+            url = asset.get("url")
+            if url and str(asset.get("mime_type") or "").startswith("video/"):
+                found = True
+                st.video(url)
+                st.link_button("Открыть MP4", url)
+    if not found:
+        st.info("Готовые файлы появятся здесь после сборки.")
+
+
 def render_kadrian(owner_id, ask_ai):
     st.header("Кадриан")
     st.caption("Расскажите, какой ролик или мультфильм хотите. Сценарий можно поправить здесь же.")
@@ -25,31 +52,80 @@ def render_kadrian(owner_id, ask_ai):
     project_id = project["id"]
     key = f"kadrian_{owner_id}_{project_id}"
     chat = st.session_state.setdefault(key, {"messages": [], "brief": "", "request": None})
+    gallery_key = key + "_gallery"
+    first, second = st.columns(2)
+    if first.button("Готовые видеоролики", key=key + "_live_library"):
+        st.session_state[gallery_key] = "live"
+    if second.button("Готовые мультфильмы", key=key + "_cartoon_library"):
+        st.session_state[gallery_key] = "cartoon"
+    library = st.session_state.get(gallery_key)
+    if library:
+        if st.button("Вернуться в чат", key=key + "_return"):
+            st.session_state.pop(gallery_key, None)
+            st.rerun()
+        _render_library(store, owner_id, project_id, library)
+        return
+    if chat.get("files"):
+        with st.expander("Вложения в этом чате"):
+            for name, mime, data in chat["files"]:
+                st.caption(name)
+                if mime.startswith("image/"):
+                    st.image(data, width=180)
+                elif mime.startswith("audio/"):
+                    st.audio(data, format=mime)
+                elif mime.startswith("video/"):
+                    st.video(data, format=mime)
+            if st.button("Убрать вложения", key=key + "_clear_files"):
+                chat.pop("files", None)
+                st.rerun()
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
     music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
-    for role, message in chat["messages"]:
-        with st.chat_message(role):
-            st.markdown(message)
+    previous = chat["messages"][:-2] if len(chat["messages"]) > 2 else []
+    latest = chat["messages"][len(previous):]
+    if previous:
+        with st.expander("Предыдущие сообщения"):
+            for role, entry in previous:
+                with st.chat_message(role):
+                    st.markdown(entry)
+    turn = st.container()
 
-    message = st.chat_input("Напишите или наговорите, какой ролик хотите",
-                            max_chars=5000, accept_audio=True, max_upload_size=15)
+    with st.container():
+        message = st.chat_input("Напишите или наговорите, какой ролик хотите",
+                            max_chars=5000, accept_audio=True, accept_file="multiple",
+                            file_type=["png", "jpg", "jpeg", "webp", "mp3", "wav", "m4a", "ogg", "mp4", "mov", "webm"],
+                            max_upload_size=15)
+    if not message:
+        with turn:
+            for role, entry in latest:
+                with st.chat_message(role):
+                    st.markdown(entry)
     if message:
+        if message.files:
+            files = [(item.name, item.type or "", item.getvalue()) for item in message.files]
+            if len(files) > 8 or sum(len(data) for _, _, data in files) > 40 * 1024 * 1024:
+                st.error("Прикрепите до 8 файлов общим размером до 40 МБ.")
+                return
+            chat["files"] = files
         prompt = message.text.strip()
         if message.audio:
             from content_factory_ui import _transcribe_content_audio
             try:
-                with st.spinner("Распознаю запись…"):
+                with turn, st.spinner("Распознаю запись…"):
                     spoken = _transcribe_content_audio(message.audio.getvalue())
             except Exception:
                 st.error("Не удалось распознать запись. Попробуйте ещё раз или напишите пожелание.")
                 return
             prompt = "\n".join(value for value in (prompt, spoken) if value)[:5000]
+        if not prompt and message.files:
+            st.rerun()
         if not prompt:
             st.warning("Запишите пожелание ещё раз или напишите его.")
             return
         history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-10:])
-        with st.spinner("Кадриан готовит ответ…"):
+        with turn, st.chat_message("user"):
+            st.markdown(prompt)
+        with turn, st.chat_message("assistant"), st.spinner("Кадриан готовит ответ…"):
             answer = ask_ai(
                 "Ты Кадриан, кинопроизводитель Агентства W. Пиши по-русски простыми словами. "
                 "Если без уточнения нельзя сделать качественно, задай ровно один вопрос. "
@@ -66,7 +142,9 @@ def render_kadrian(owner_id, ask_ai):
         chat["request"] = uuid4().hex
         st.rerun()
 
-    if chat["brief"] and st.button("Собрать по этому замыслу", type="primary", key=key + "_submit"):
+    if chat.get("files"):
+        st.caption("Вложения доступны для просмотра в этой переписке. Подключение к сборке пока недоступно.")
+    if chat["brief"] and not chat.get("files") and st.button("Собрать по этому замыслу", type="primary", key=key + "_submit"):
         request = chat["request"]
         dedupe = sha256(f"kadrian|{owner_id}|{project_id}|{request}".encode()).hexdigest()
         fingerprint = sha256(f"{style}|{music_only}|{chat['brief']}".encode()).hexdigest()
@@ -83,38 +161,10 @@ def render_kadrian(owner_id, ask_ai):
             })
             if job.get("request_fingerprint") != fingerprint:
                 st.warning("Этот замысел уже отправлен с другим форматом. Опишите новую версию в чате.")
+            else:
+                chat["queued"] = True
         except Exception:
             st.error("Не удалось подтвердить постановку в очередь. Обновите список работ перед повтором.")
 
-    try:
-        jobs = store.list_jobs(owner_id, project_id, limit=100)
-        jobs = [job for job in jobs if job.get("studio_master") and
-                job.get("video_style") in {"live", "cartoon"}]
-    except Exception:
-        st.warning("Не удалось обновить список работ.")
-        return
-    errors = [job for job in jobs if job.get("error")]
-    if errors:
-        with st.expander("История ошибок"):
-            for job in errors:
-                st.caption(job["error"])
-    jobs = [job for job in jobs if not job.get("error") or job.get("state") == "queued"]
-    if jobs:
-        st.subheader("Мои ролики")
-        st.button("Обновить статус", key=key + "_refresh")
-    for job in jobs:
-        st.markdown(("**Мультфильм**" if job["video_style"] == "cartoon" else "**Живое видео**"))
-        if job.get("error"):
-            st.caption(job["error"])
-        elif job.get("assets"):
-            try:
-                assets = store.resolve_assets(owner_id, job["assets"])
-            except Exception:
-                st.caption("Не удалось получить ссылку на файл. Обновите статус.")
-                continue
-            for asset in assets:
-                if str(asset.get("mime_type") or "").startswith("video/") and asset.get("url"):
-                    st.video(asset["url"])
-                    st.link_button("Открыть MP4", asset["url"])
-        else:
-            st.caption("В очереди или в работе" if job["state"] == "queued" else job["state"])
+    if chat.get("queued"):
+        st.caption("Ролик отправлен на сборку. Готовый файл появится в соответствующем разделе.")
