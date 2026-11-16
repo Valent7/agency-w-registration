@@ -81,14 +81,25 @@ def render_kadrian(owner_id, ask_ai):
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
     music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
-    for role, message in chat["messages"]:
-        with st.chat_message(role):
-            st.markdown(message)
+    previous = chat["messages"][:-2] if len(chat["messages"]) > 2 else []
+    latest = chat["messages"][len(previous):]
+    if previous:
+        with st.expander("Предыдущие сообщения"):
+            for role, entry in previous:
+                with st.chat_message(role):
+                    st.markdown(entry)
+    turn = st.container()
 
-    message = st.chat_input("Напишите или наговорите, какой ролик хотите",
+    with st.container():
+        message = st.chat_input("Напишите или наговорите, какой ролик хотите",
                             max_chars=5000, accept_audio=True, accept_file="multiple",
                             file_type=["png", "jpg", "jpeg", "webp", "mp3", "wav", "m4a", "ogg", "mp4", "mov", "webm"],
                             max_upload_size=15)
+    if not message:
+        with turn:
+            for role, entry in latest:
+                with st.chat_message(role):
+                    st.markdown(entry)
     if message:
         if message.files:
             files = [(item.name, item.type or "", item.getvalue()) for item in message.files]
@@ -100,7 +111,7 @@ def render_kadrian(owner_id, ask_ai):
         if message.audio:
             from content_factory_ui import _transcribe_content_audio
             try:
-                with st.spinner("Распознаю запись…"):
+                with turn, st.spinner("Распознаю запись…"):
                     spoken = _transcribe_content_audio(message.audio.getvalue())
             except Exception:
                 st.error("Не удалось распознать запись. Попробуйте ещё раз или напишите пожелание.")
@@ -112,7 +123,9 @@ def render_kadrian(owner_id, ask_ai):
             st.warning("Запишите пожелание ещё раз или напишите его.")
             return
         history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-10:])
-        with st.spinner("Кадриан готовит ответ…"):
+        with turn, st.chat_message("user"):
+            st.markdown(prompt)
+        with turn, st.chat_message("assistant"), st.spinner("Кадриан готовит ответ…"):
             answer = ask_ai(
                 "Ты Кадриан, кинопроизводитель Агентства W. Пиши по-русски простыми словами. "
                 "Если без уточнения нельзя сделать качественно, задай ровно один вопрос. "
