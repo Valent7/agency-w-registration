@@ -1636,7 +1636,12 @@ FORMAT_LABELS = {
 
 def _transcribe_content_audio(audio_bytes, filename="content-request.wav"):
     """Распознаёт простое голосовое задание и не отправляет его повторно."""
-    api_key = _clean_text(st.secrets.get("OPENAI_API_KEY"), 5000)
+    api_key = _clean_text(os.getenv("OPENAI_API_KEY"), 5000)
+    if not api_key:
+        try:
+            api_key = _clean_text(st.secrets.get("OPENAI_API_KEY"), 5000)
+        except FileNotFoundError:
+            api_key = ""
     if not api_key:
         raise RuntimeError("Ключ OpenAI не найден в настройках приложения.")
 

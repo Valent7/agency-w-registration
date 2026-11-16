@@ -32,7 +32,22 @@ def render_kadrian(owner_id, ask_ai):
         with st.chat_message(role):
             st.markdown(message)
 
-    if prompt := st.chat_input("Расскажите Кадриану, что хотите увидеть", max_chars=5000):
+    message = st.chat_input("Напишите или наговорите, какой ролик хотите",
+                            max_chars=5000, accept_audio=True, max_upload_size=15)
+    if message:
+        prompt = message.text.strip()
+        if message.audio:
+            from content_factory_ui import _transcribe_content_audio
+            try:
+                with st.spinner("Распознаю запись…"):
+                    spoken = _transcribe_content_audio(message.audio.getvalue())
+            except Exception:
+                st.error("Не удалось распознать запись. Попробуйте ещё раз или напишите пожелание.")
+                return
+            prompt = "\n".join(value for value in (prompt, spoken) if value)[:5000]
+        if not prompt:
+            st.warning("Запишите пожелание ещё раз или напишите его.")
+            return
         history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-10:])
         with st.spinner("Кадриан готовит ответ…"):
             answer = ask_ai(
@@ -78,6 +93,12 @@ def render_kadrian(owner_id, ask_ai):
     except Exception:
         st.warning("Не удалось обновить список работ.")
         return
+    errors = [job for job in jobs if job.get("error")]
+    if errors:
+        with st.expander("История ошибок"):
+            for job in errors:
+                st.caption(job["error"])
+    jobs = [job for job in jobs if not job.get("error") or job.get("state") == "queued"]
     if jobs:
         st.subheader("Мои ролики")
         st.button("Обновить статус", key=key + "_refresh")
