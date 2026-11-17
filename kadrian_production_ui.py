@@ -37,7 +37,7 @@ def connection_status(owner_id=None, project_id=None):
         except Exception:
             runway = False
     return {
-        'HeyGen': bool(cfg.get('HEYGEN_API_KEY') or cfg.get('HEYGEN_KEY')),
+        'HeyGen': bool(cfg.get('KADRIAN_HEYGEN_API_KEY')),
         'Runway': runway,
         'Shotstack': bool(cfg.get('SHOTSTACK_API_KEY')),
         'ElevenLabs': bool(cfg.get('ELEVENLABS_API_KEY')),
@@ -179,10 +179,10 @@ def render_production(owner_id, project, store, ask_ai, chat, route, style, key)
     if route == 'assembly':
         _assembly(owner_id, project, store, cfg, style, key)
         return
-    if not cfg.get('HEYGEN_API_KEY') and not cfg.get('HEYGEN_KEY'):
-        st.info('Для этого формата нужен HEYGEN_API_KEY в настройках сервера студии.')
+    if not cfg.get('KADRIAN_HEYGEN_API_KEY'):
+        st.info('Для этого формата нужен KADRIAN_HEYGEN_API_KEY в настройках сервера студии.')
         return
-    client = HeyGenClient(cfg.get('HEYGEN_API_KEY') or cfg.get('HEYGEN_KEY'))
+    client = HeyGenClient(cfg.get('KADRIAN_HEYGEN_API_KEY'))
     aspect = st.selectbox('Кадр', ['9:16', '16:9'], key=key + '_aspect')
     speakers = None
     seconds = 30

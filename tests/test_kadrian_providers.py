@@ -10,7 +10,7 @@ import requests
 
 from content_factory_live_video import LiveVideoPending, LiveVideoUncertain
 from content_factory_store import SQLiteStore
-from kadrian_providers import HeyGenClient, ShotstackClient, heygen_payload, shotstack_payload
+from kadrian_providers import HeyGenClient, ShotstackClient, heygen_payload, shotstack_payload, provider_client
 from kadrian_production import process_provider_job, resolve_spec
 from kadrian_production_ui import enqueue_provider, _quote
 
@@ -29,6 +29,12 @@ def response(data, status=200):
 
 
 class ProviderContractTests(unittest.TestCase):
+    def test_kadrian_uses_only_dedicated_key(self):
+        client = provider_client('heygen', {'KADRIAN_HEYGEN_API_KEY': 'kadrian-token', 'HEYGEN_API_KEY': 'ora-token'})
+        self.assertEqual(client.headers['X-Api-Key'], 'kadrian-token')
+        with self.assertRaises(ValueError):
+            provider_client('heygen', {'HEYGEN_API_KEY': 'ora-token', 'HEYGEN_KEY': 'legacy-token'})
+
     def test_interview_preserves_speaker_order_and_exact_words(self):
         payload = heygen_payload(interview())
         self.assertEqual(payload['type'], 'studio')

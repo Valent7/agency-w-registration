@@ -23,7 +23,7 @@ def _text(value, limit):
 class HeyGenClient:
     def __init__(self, key, session=None):
         if not isinstance(key, str) or not key.strip():
-            raise ValueError('Добавьте HEYGEN_API_KEY в настройки сервера студии.')
+            raise ValueError('Добавьте KADRIAN_HEYGEN_API_KEY в настройки сервера студии.')
         self.session = session or requests.Session()
         self.headers = {'X-Api-Key': key.strip()}
 
@@ -214,7 +214,7 @@ class ShotstackClient:
 
 def provider_client(provider, config):
     if provider == 'heygen':
-        return HeyGenClient(config.get('HEYGEN_API_KEY') or config.get('HEYGEN_KEY'))
+        return HeyGenClient(config.get('KADRIAN_HEYGEN_API_KEY'))
     if provider == 'shotstack':
         return ShotstackClient(config.get('SHOTSTACK_API_KEY'))
     raise ValueError('Неизвестный производственный сервис Кадриана.')
