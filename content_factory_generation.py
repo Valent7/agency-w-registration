@@ -911,6 +911,10 @@ class Generator:
                     planned_seconds = [5 if value <= 5 else 10 for value in planned_seconds]
                 estimate = getattr(live_client, "estimate_credits", None)
                 credits = estimate(planned_seconds) if callable(estimate) else None
+                if job.get("approved_video_credit_limit") is not None and (
+                    isinstance(credits, bool) or not isinstance(credits, (int, float)) or not math.isfinite(credits)
+                ):
+                    raise GenerationError("Не удалось проверить оценку выбранной видеомодели. Сначала согласуйте новую смету.", draft=content)
                 if (isinstance(credits, (int, float)) and not isinstance(credits, bool)
                         and math.isfinite(credits) and credits >= 0):
                     if job.get("approved_video_credit_limit") is not None and credits > job["approved_video_credit_limit"]:
