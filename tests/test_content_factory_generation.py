@@ -204,10 +204,11 @@ class GenerationTests(unittest.TestCase):
         generator, session = self.generator([
             copy_response(POST), copy_response(POST), review_response(False),
             copy_response(revised), copy_response(revised), review_response(False),
+            copy_response(revised), copy_response(revised), review_response(False),
         ])
         with self.assertRaises(GenerationError) as caught:
             generator.generate(PROJECT, {"platform": "vk", "format": "post"})
-        self.assertEqual(requested_paths(session), ["responses"] * 6)
+        self.assertEqual(requested_paths(session), ["responses"] * 9)
         self.assertEqual(caught.exception.draft["text"], revised["text"])
         self.assertFalse(caught.exception.draft["quality_review"]["approved"])
 
@@ -471,10 +472,11 @@ class GenerationTests(unittest.TestCase):
         generator, session = self.generator([
             copy_response(reel), copy_response(reel), review_response(False, issue=issue),
             copy_response(reel), copy_response(reel), review_response(False, issue=issue),
+            copy_response(reel), copy_response(reel), review_response(False, issue=issue),
         ])
         with self.assertRaisesRegex(GenerationError, "Стагирит остановил производство") as caught:
             generator.generate(PROJECT, {"platform": "vk", "format": "reel"})
-        self.assertEqual(requested_paths(session), ["responses"] * 6)
+        self.assertEqual(requested_paths(session), ["responses"] * 9)
         self.assertEqual(caught.exception.draft["quality_review"]["issues"], [issue])
         self.assertFalse(caught.exception.draft["quality_review"]["approved"])
         rewrite = json.loads(session.post.call_args_list[3].kwargs["json"]["input"])

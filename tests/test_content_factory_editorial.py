@@ -101,7 +101,7 @@ class CopyPromptTests(unittest.TestCase):
         payload = json.loads(user)
         self.assertEqual(payload["previous"], CONTENT)
         self.assertEqual(payload["review"], review)
-        self.assertIn("единственная редакторская переработка", system)
+        self.assertIn("редакторская переработка", system)
         self.assertNotIn(review["brief_feedback"], system)
         with self.assertRaises(EditorialError):
             build_copy_prompt(PROJECT, JOB, review=review)

@@ -1,8 +1,7 @@
 """Offline tests for Neonia's Telegram-group daily source.
 
-The selected group is primary. If it cannot complete the daily five, other
-accessible Telegram groups may top up the same day. Personal contacts do not
-silently replace group candidates in chat mode.
+The selected group supplies active candidates under the current targeting
+policy. Personal contacts do not silently replace group candidates in chat mode.
 """
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -21,7 +20,7 @@ class DailySourcePolicy(unittest.TestCase):
         self.assertFalse(policy.matches_daily_batch(contact_batch,"chats",group))
         correct={"candidate_ids":[6,7,8,9,10],
                  "source":"neonia_sequential_queue",
-                 "source_signature":"chats:9211"}
+                 "source_signature":"chats:9211:network-non-ai-v2"}
         self.assertTrue(policy.matches_daily_batch(correct,"chats",group))
         self.assertFalse(policy.matches_daily_batch(correct,"chats",9212))
 
@@ -33,7 +32,7 @@ class DailySourcePolicy(unittest.TestCase):
         self.assertEqual(policy.selected_chat_details(s)["title"],"Preferred")
         s["selected_source_chat"]=0
         self.assertIsNone(policy.selected_chat_details(s))
-        self.assertEqual(policy.source_signature(*policy.owner_source(s)),"chats:unset")
+        self.assertEqual(policy.source_signature(*policy.owner_source(s)),"chats:unset:network-non-ai-v2")
 
     def test_no_contacts_fallback_when_group_missing(self):
         s={"daily_source_mode":"chats","selected_source_chat":9211,
@@ -131,6 +130,8 @@ class PersonalContactRoutingTests(unittest.TestCase):
             "business_evidence":["Visible repeated admin work"],
             "work_state":"available","selection_blocked":False,
             "_stagirite_activity_tier":0,
+            "analysis_policy_version":policy.CANDIDATE_POLICY_VERSION,
+            "network_business_signal":True,"ai_provider_or_expert":False,
         }
         check = scout_storage._qualified_personal_candidate
         self.assertTrue(check(qualified))
@@ -205,6 +206,17 @@ class CandidateExclusionTests(unittest.TestCase):
 
 class DailyWorkerTests(unittest.TestCase):
     def setUp(self):
+        real_datetime = datetime
+        class Daytime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime.now(tz).replace(hour=12)
+        clock = patch.object(worker, 'datetime', Daytime)
+        clock.start()
+        self.addCleanup(clock.stop)
+        fixture_clock = patch(__name__ + '.datetime', Daytime)
+        fixture_clock.start()
+        self.addCleanup(fixture_clock.stop)
         self.storage=DummyStorage()
         self.storage.state={
             "schema_version":9, "daily_source_mode":"chats",
@@ -230,7 +242,9 @@ class DailyWorkerTests(unittest.TestCase):
                 "activity_eligible":True,"telegram_activity_label":"писал сегодня",
                 "last_seen_at":datetime.now(timezone.utc).isoformat(),
                 "activity_precision":"group_message_exact",
-                "_stagirite_activity_tier":0,"has_message_history":False,"recent_messages":[],
+                "_stagirite_activity_tier":0,
+            "analysis_policy_version":policy.CANDIDATE_POLICY_VERSION,
+            "network_business_signal":True,"ai_provider_or_expert":False,"has_message_history":False,"recent_messages":[],
             } for i in range(201,207)],120)
         async def should_not_need_members(*args,**kwargs):
             raise AssertionError("participant list must not be required when active authors provide five")
@@ -241,7 +255,7 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertEqual(result["count"],5)
         stored_batch=self.storage.tasks["row"]["result"]["daily_candidate_feed"]["daily_batches"][
             worker.datetime.now(worker.BERLIN).date().isoformat()]
-        self.assertEqual(stored_batch["source_signature"],"chats:9211")
+        self.assertEqual(stored_batch["source_signature"],"chats:9211:network-non-ai-v2")
         self.assertEqual(stored_batch["source"],"neonia_group_activity_targeting")
         self.assertEqual(len(stored_batch["candidate_ids"]),5)
         self.assertNotIn(111,stored_batch["candidate_ids"])
@@ -251,7 +265,7 @@ class DailyWorkerTests(unittest.TestCase):
 
     def test_local_fallback_requires_practical_agency_signal(self):
         for text in (
-            "Обсуждение бизнеса и автоматизации команды",
+            "Обсуждение сетевого бизнеса и работы команды",
             "Не успеваю отвечать на сообщения клиентов, слишком много рутины",
             "Каждый день веду соцсети, публикации и заявки вручную",
         ):
@@ -327,7 +341,7 @@ class DailyWorkerTests(unittest.TestCase):
         with patch.object(worker,"_read_active_group_authors",new=only_two), \
              patch.object(worker,"_read_selected_members",new=members):
             result=worker.process(77,"fake",self.storage.state,self.storage)
-        self.assertEqual(result["status"],"incomplete")
+        self.assertEqual(result["status"],"searching")
         self.assertEqual(result["count"],2)
         self.assertEqual(result["missing"],3)
         batch=self.storage.tasks["row"]["result"]["daily_candidate_feed"]["daily_batches"][
@@ -355,7 +369,7 @@ class DailyWorkerTests(unittest.TestCase):
             "result":{"daily_candidate_feed":{"daily_batches":{day:{
                 "candidate_ids":[201,202,203,204,205],
                 "source":"neonia_sequential_queue",
-                "source_signature":"chats:9211"}}}}}
+                "source_signature":"chats:9211:network-non-ai-v2"}}}}}
         result=worker.process(77,"fake",self.storage.state,self.storage)
         self.assertEqual(result["status"],"ready")
 

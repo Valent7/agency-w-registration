@@ -53,6 +53,8 @@ def _safe_website(value):
     value = str(value or "").strip()
     if not value:
         raise LaunchVideoError("Вставьте ссылку на сайт или страницу проекта.")
+    if re.match(r"^[a-z][a-z0-9+.-]*://", value, flags=re.IGNORECASE) and not re.match(r"^https?://", value, flags=re.IGNORECASE):
+        raise LaunchVideoError("Укажите ссылку http или https на публичный сайт.")
     if not re.match(r"^https?://", value, flags=re.IGNORECASE):
         value = "https://" + value
     # Agency W moved from Streamlit Cloud to Render. Never send the obsolete

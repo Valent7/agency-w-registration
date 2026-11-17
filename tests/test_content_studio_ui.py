@@ -1,7 +1,8 @@
 """The Content entry keeps tools, archives and publishing directly reachable."""
 import unittest
 from streamlit.testing.v1 import AppTest
-from test_content_factory_autopilot_ui import APP
+from tests.test_content_factory_autopilot_ui import APP
+from tests.studio_intent_fixture import approve_intent
 
 
 SCRIPT = APP.replace(
@@ -30,7 +31,7 @@ class StudioNavigationTests(unittest.TestCase):
         self.assertEqual(app.radio(key='content_studio_77_tool').value, 'today')
         self.assertNotIn('cf2_start_77', [item.key for item in app.button])
         self.assertFalse(app.tabs)
-        self.assertTrue(any(item.label == '✨ Создать пакет дня' for item in app.button))
+        self.assertTrue(any(item.label == '1. Понять мой замысел' for item in app.button))
         self.assertFalse(any(item.label == 'Сохранить проект' for item in app.button))
         self.assertIn('Сегодняшний контент', app.radio(key='content_studio_77_tool').options)
         self.assertIn('Мои генерации', app.radio(key='content_studio_77_tool').options)
@@ -43,14 +44,13 @@ class StudioNavigationTests(unittest.TestCase):
                 self.choose(app, section)
         self.assertFalse(app.session_state['_fake_store'].actions)
 
-    def test_music_section_is_true_three_step_flow_without_external_editor(self):
+    def test_music_section_requires_intent_approval_without_external_editor(self):
         app = self.app()
         self.choose(app, 'music')
         values = [item.value for item in app.markdown]
-        self.assertTrue(any('Музыка — 3 шага' in value for value in values))
-        self.assertTrue(any('1. Опишите музыку' in value for value in values))
-        self.assertTrue(any('2. Создайте' in value for value in values))
-        self.assertTrue(any('3. Прослушайте и выберите' in value for value in values))
+        self.assertTrue(any('Музыка — 4 шага' in value for value in values))
+        self.assertTrue(any('1. Расскажите, какую музыку' in value for value in values))
+        self.assertTrue(any('Прослушайте и выберите' in value for value in values))
         self.assertTrue(any(item.key == 'studio_music_77_project-1_prompt' for item in app.text_area))
         self.assertFalse(app.get('link_button'))
         self.assertNotIn('studio_music_77_project-1_mode', [item.key for item in app.radio])
@@ -60,9 +60,11 @@ class StudioNavigationTests(unittest.TestCase):
         app = self.app()
         self.choose(app, 'music')
         key = 'studio_music_77_project-1_prompt'
-        create = app.button(key='studio_music_77_project-1_create')
-        self.assertTrue(create.disabled)
-        app.text_area(key=key).input('Лёгкая спокойная музыка для ролика о времени').run()
+        self.assertNotIn('studio_music_77_project-1_create', [b.key for b in app.button])
+        app.text_area(key=key).input('Лёгкая спокойная музыка для ролика о времени')
+        next(b for b in app.button if b.label == '1. Понять мой замысел').click().run()
+        self.assertNotIn('studio_music_77_project-1_create', [b.key for b in app.button])
+        approve_intent(app)
         self.assertFalse(app.button(key='studio_music_77_project-1_create').disabled)
         self.assertFalse(app.session_state['_fake_store'].actions)
 
@@ -139,7 +141,7 @@ class StudioNavigationTests(unittest.TestCase):
         app.selectbox(key='content_studio_77_mobile_tool').select('texts').run()
         self.assertFalse(app.exception)
         self.assertEqual(app.radio(key='content_studio_77_tool').value, 'texts')
-        self.assertTrue(any(item.label == 'Подготовить текст' for item in app.button))
+        self.assertTrue(any(item.label == '1. Понять мой замысел' for item in app.button))
 
     def test_archive_opens_previous_manual_result_without_recreating(self):
         package = {'package_id': 'manual-1', 'owner_telegram_id': 77,

@@ -146,8 +146,8 @@ class CalendarRegressionTests(unittest.TestCase):
         self.assertFalse(self.db_calls)
         self.assertNotEqual(ctx["proposed_start_at"], new["proposed_start_at"])
 
-    def test_no_booking_on_sunday_or_premature_confirmation(self):
-        self.assertFalse(self.ns["_slot_within_policy"](STALE_SUNDAY_AT_SEVEN))
+    def test_owner_can_choose_sunday_but_format_alone_cannot_confirm(self):
+        self.assertTrue(self.ns["_slot_within_policy"](STALE_SUNDAY_AT_SEVEN))
         msg, stage, ctx = self.reply(
             "Zoom", "awaiting_confirmation",
             {"proposed_start_at": STALE_SUNDAY_AT_SEVEN.isoformat(),

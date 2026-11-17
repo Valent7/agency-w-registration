@@ -769,7 +769,7 @@ class Generator:
             # Two bounded revisions are enough to correct unsupported claims without
             # creating an unbounded model loop or changing the owner's approved idea.
             semantic_revisions_left = 2
-            while not review["approved"] and semantic_revisions_left > 0 and not job.get("approved_video_credit_limit"):
+            while not review["approved"] and semantic_revisions_left > 0 and reference is None and not job.get("approved_video_credit_limit"):
                 semantic_revisions_left -= 1
                 report(
                     "copy",
@@ -887,17 +887,10 @@ class Generator:
                 if required_count == accepted_count:
                     visual_plan = validate_visual_plan(accepted_plan, frame_count=accepted_count)
                 else:
-                    report(
-                        "visual",
-                        f"Озвучка длиннее исходного плана. Добавляем {required_count - accepted_count} "
-                        "промежуточные сцены без изменения утверждённой истории.",
-                    )
-                    instructions, input_data = build_visual_prompt(
-                        clean_project, job, content, frame_count=required_count
-                    )
-                    visual_plan = validate_visual_plan(
-                        self._structured(instructions, input_data),
-                        frame_count=required_count,
+                    raise GenerationError(
+                        "Озвучка требует больше живых сцен, чем утверждено в сценарии. "
+                        "Сократите озвучку или утвердите новый план перед запуском изображений.",
+                        draft=content,
                     )
             else:
                 instructions, input_data = build_visual_prompt(clean_project, job, content, frame_count=frame_count)

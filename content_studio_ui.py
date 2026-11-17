@@ -381,8 +381,6 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
                      key=mobile_key, on_change=_mobile_navigation, args=(owner_id, mobile_key))
 
     store, service, project = _context(owner_id)
-    if not store or not project:
-        return
 
     navigation, workspace = st.columns([1.15, 5.85], gap="large")
     with navigation, st.container(key=f"studio_nav_{owner_id}"):
@@ -394,6 +392,8 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
         tool = st.radio("Раздел завода", list(TOOLS), format_func=TOOLS.get, key=key, label_visibility="collapsed")
     with workspace:
         st.markdown("## " + TOOLS[tool])
+        if (not store or not project) and tool not in {"library", "project"}:
+            return
         try:
             from content_factory_billing_ui import render_wallet_panel
             render_wallet_panel(owner_id, project, store)
