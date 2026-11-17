@@ -1,4 +1,5 @@
 """Partner-facing video chat on the Agency's existing production worker."""
+from base64 import b64decode
 from datetime import datetime, timezone
 from hashlib import sha256
 from uuid import uuid4
@@ -34,6 +35,47 @@ def _render_library(store, owner_id, project_id, style):
                 st.link_button("Открыть MP4", url)
     if not found:
         st.info("Готовые файлы появятся здесь после сборки.")
+
+
+def _render_visual_previews(chat, key):
+    import os
+    from openai import OpenAI
+
+    images = chat.setdefault("visual_previews", {})
+    st.subheader("Эскизы мультфильма")
+    st.caption("Создавайте по одному изображению, чтобы можно было поправить отдельный эскиз. Каждый запуск использует генерацию изображений.")
+    label = st.selectbox("Что нарисовать", ("Персонаж 1", "Персонаж 2", "Персонаж 3", "Локация", "Реквизит"), key=key + "_visual_slot")
+    description = st.text_area("Как должен выглядеть эскиз", max_chars=1500, key=key + "_visual_" + label)
+    if st.button("Нарисовать эскиз", disabled=not description.strip(), key=key + "_draw"):
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            st.error("Генератор изображений не настроен.")
+        else:
+            try:
+                with st.spinner("Рисую эскиз…"):
+                    result = OpenAI(api_key=api_key, timeout=100, max_retries=0).images.generate(
+                        model="gpt-image-1",
+                        prompt=(
+                            "Создай один эскиз для мультфильма, без надписей. "
+                            "Выразительные силуэты и чистый контур, если пользователь не указал другой стиль. "
+                            f"Тип эскиза: {label}. Описание пользователя: {description.strip()}"
+                        ),
+                        size="1024x1024",
+                        quality="low",
+                    )
+                    image = b64decode(result.data[0].b64_json, validate=True)
+                images[label] = image
+                chat.pop("approved_visuals", None)
+            except Exception:
+                st.error("Генератор не вернул эскиз. Предыдущие изображения сохранены.")
+    for name, image in images.items():
+        st.image(image, caption=name, width=280)
+        st.download_button("Скачать " + name.lower(), image, file_name=name + ".png", mime="image/png", key=key + "_download_" + name)
+    if images and st.button("Утвердить показанные эскизы", key=key + "_approve_visuals"):
+        chat["approved_visuals"] = True
+    if chat.get("approved_visuals"):
+        st.success("Эскизы утверждены для этой сессии.")
+        st.caption("Передача утверждённых эскизов в раскадровку пока не подключена.")
 
 
 def render_kadrian(owner_id, ask_ai):
@@ -81,6 +123,9 @@ def render_kadrian(owner_id, ask_ai):
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
     music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
+    if style == "cartoon":
+        with st.expander("Создать и утвердить эскизы", expanded=True):
+            _render_visual_previews(chat, key)
     previous = chat["messages"][:-2] if len(chat["messages"]) > 2 else []
     latest = chat["messages"][len(previous):]
     if previous:
@@ -130,7 +175,7 @@ def render_kadrian(owner_id, ask_ai):
                 "Ты Кадриан, кинопроизводитель Агентства W. Пиши по-русски простыми словами. "
                 "Если без уточнения нельзя сделать качественно, задай ровно один вопрос. "
                 "Иначе предложи короткий сценарий: кадры, озвучка, ритм и финал. "
-                "Сохраняй утверждённые реплики дословно. Не обещай, что видео уже создано. "
+                "Сохраняй утверждённые реплики дословно. Генерация эскизов запускается только кнопкой «Нарисовать эскиз». Не обещай запуск, файлы, сроки или фоновую работу от имени чата. "
                 "Отвечай только по текущему видео или мультфильму.",
                 f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
             )
