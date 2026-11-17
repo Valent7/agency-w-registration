@@ -569,6 +569,7 @@ def ask_openai(
     use_web_search=False,
     model=None,
     reasoning_effort=None,
+    input_images=None,
 ):
     api_key = _runtime_secret("OPENAI_API_KEY")
 
@@ -588,6 +589,9 @@ def ask_openai(
                 "text": user_message,
             }
         ]
+
+        for image in input_images or []:
+            input_content.append({"type": "input_image", "image_url": image})
 
         for uploaded_file in uploaded_files:
             upload_response = requests.post(
@@ -8667,6 +8671,10 @@ if telegram_login_valid or remembered_data:
                 )
             )
 
+        if st.query_params.get("studio") == "kadrian" and not st.session_state.get("kadrian_link_opened"):
+            st.session_state["agency_open_main_section"] = "🎬 Студия контента"
+            st.session_state[f"agency_kadrian_open_{telegram_id}"] = True
+            st.session_state["kadrian_link_opened"] = True
         pending_main_section = st.session_state.pop("agency_open_main_section", None)
         locked_content = "🔒 Контент"
         if pending_main_section in ("🏭 Контент", locked_content):

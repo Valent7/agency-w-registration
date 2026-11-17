@@ -282,10 +282,15 @@ class _StoreBase:
 
     def _asset(self, owner_id: int, project_id: str, job_id: str, filename: str, data: bytes, mime_type: str) -> dict:
         owner_id = _owner(owner_id)
-        project_id, job_id = _id(project_id), _id(job_id)
-        job = self.get_job(owner_id, job_id)
-        if not job or job["project_id"] != project_id:
-            raise StoreError("Задание для сохранения медиа не найдено.")
+        project_id = _id(project_id)
+        if job_id is None:
+            self._require_project(owner_id, project_id)
+            job_id = project_id
+        else:
+            job_id = _id(job_id)
+            job = self.get_job(owner_id, job_id)
+            if not job or job["project_id"] != project_id:
+                raise StoreError("Задание для сохранения медиа не найдено.")
         if not isinstance(data, bytes) or not data or len(data) > 100 * 1024 * 1024:
             raise StoreError("Нужен непустой медиафайл размером до 100 МБ.")
         if mime_type not in {"image/jpeg", "image/png", "image/webp", "video/mp4", "audio/mpeg", "audio/mp4", "audio/wav"}:

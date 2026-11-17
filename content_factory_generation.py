@@ -761,13 +761,15 @@ class Generator:
                        if reference is not None else self._copy(clean_project, job))
             report("proofread", "Корректор проверяет грамматику и точность формулировок.")
             content = self._proofread(clean_project, job, content)
+            if reference is not None and job.get("approved_video_credit_limit") is not None:
+                content["narration"] = reference["plan"]["narration"]
             report("review", "Стагирит проверяет смысл, факты и пользу текста.")
             review = self._review_copy(clean_project, job, content)
             # Resolve semantic defects automatically before any paid image/video request.
             # Two bounded revisions are enough to correct unsupported claims without
             # creating an unbounded model loop or changing the owner's approved idea.
             semantic_revisions_left = 2
-            while not review["approved"] and semantic_revisions_left > 0:
+            while not review["approved"] and semantic_revisions_left > 0 and not job.get("approved_video_credit_limit"):
                 semantic_revisions_left -= 1
                 report(
                     "copy",
@@ -911,6 +913,8 @@ class Generator:
                 credits = estimate(planned_seconds) if callable(estimate) else None
                 if (isinstance(credits, (int, float)) and not isinstance(credits, bool)
                         and math.isfinite(credits) and credits >= 0):
+                    if job.get("approved_video_credit_limit") is not None and credits > job["approved_video_credit_limit"]:
+                        raise GenerationError("План превысил согласованную оценку видеокредитов. Согласуйте новую версию.", draft=content)
                     content["video_credit_estimate"] = {
                         "credits": credits, "scene_seconds": planned_seconds,
                         "model": str(getattr(live_client, "model", ""))[:80], "is_estimate": True,

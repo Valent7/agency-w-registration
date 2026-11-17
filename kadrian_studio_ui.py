@@ -1,6 +1,9 @@
 """Partner-facing video chat on the Agency's existing production worker."""
-from base64 import b64decode
+from base64 import b64decode, b64encode
 import re
+import os
+
+from kadrian_memory import director_instructions, project_context, restore_chat, save_turn, production_plan
 from datetime import datetime, timezone
 from hashlib import sha256
 from uuid import uuid4
@@ -53,7 +56,7 @@ def _draw_chat_image(prompt, context, style, files):
         raise RuntimeError("В студии не настроен ключ OpenAI для изображений.")
     client = OpenAI(api_key=api_key, timeout=100, max_retries=0)
     options = {
-        "model": "gpt-image-1",
+        "model": os.getenv("CONTENT_FACTORY_IMAGE_MODEL", "gpt-image-2.5-sunburst"),
         "prompt": (
             "Создай одно изображение по последней просьбе пользователя. "
             "Возьми описание героя и обстановки из переписки. "
@@ -62,7 +65,7 @@ def _draw_chat_image(prompt, context, style, files):
             f"Режим студии по умолчанию: {style}.\nПереписка и сценарий:\n{context[-12000:]}\nПросьба: {prompt}"
         ),
         "size": "1024x1024",
-        "quality": "low",
+        "quality": "medium",
     }
     references = [(name, data, mime) for name, mime, data in files
                   if mime in {"image/png", "image/jpeg", "image/webp"}]
@@ -73,9 +76,14 @@ def _draw_chat_image(prompt, context, style, files):
     return b64decode(result.data[0].b64_json, validate=True)
 
 
-def _render_chat_entry(role, entry):
+def _render_chat_entry(role, entry, store=None, owner_id=None):
     with st.chat_message(role):
-        if isinstance(entry, bytes):
+        if isinstance(entry, dict) and entry.get("storage_path"):
+            try:
+                st.image(store.read_asset(owner_id, entry))
+            except Exception:
+                st.warning("Сохранённый эскиз временно недоступен.")
+        elif isinstance(entry, bytes):
             st.image(entry)
         else:
             st.markdown(entry)
@@ -96,7 +104,39 @@ def render_kadrian(owner_id, ask_ai):
     project = st.selectbox("Проект", projects, format_func=lambda item: item["name"])
     project_id = project["id"]
     key = f"kadrian_{owner_id}_{project_id}"
-    chat = st.session_state.setdefault(key, {"messages": [], "brief": "", "request": None})
+    chat = st.session_state.setdefault(key, restore_chat(project))
+    if chat.get("pending_save"):
+        try:
+            save_turn(store, owner_id, project_id, **chat["pending_save"])
+            chat.pop("pending_save")
+        except Exception:
+            st.warning("Ответ сохранён в открытом окне. Сохранение истории на сервер временно недоступно.")
+            if st.button("Повторить сохранение", key=key + "_retry_save"):
+                st.rerun()
+            return
+    with st.expander("Память проекта"):
+        st.caption("Согласованные факты, стиль, решения и замечания для будущих разговоров.")
+        notes = st.text_area("Что Кадриану нужно помнить", value=project.get("kadrian_notes", ""),
+                             max_chars=20000, key=key + "_notes")
+        if st.button("Сохранить память", key=key + "_save_notes"):
+            try:
+                store.update_project_if_current(owner_id, project_id, {"kadrian_notes": notes}, project["updated_at"])
+            except Exception:
+                st.error("Память не сохранена. Возможно, проект изменён в другом окне. Обновите страницу.")
+            else:
+                st.success("Память сохранена.")
+                st.rerun()
+    with st.expander("Подключения студии"):
+        st.caption("Изображения и речь — OpenAI. Движение живых сцен и мультфильмов — Runway Gen-4.5. Монтаж — FFmpeg на сервере.")
+        if st.button("Проверить доступ к видеосервису", key=key + "_check_video"):
+            try:
+                from content_factory_runtime import resolve_live_video_client
+                client = resolve_live_video_client(project)
+                balance = client.preflight().get("credit_balance")
+                st.success(f"Runway доступен. Модель {client.model}. Кредиты: {balance}.")
+            except Exception:
+                st.error("Доступ к Runway не подтверждён. Проверьте ключ и баланс видеосервиса в настройках студии.")
+    st.link_button("Прямая ссылка на Кадриана", "https://agency-w-web.onrender.com/?studio=kadrian")
     gallery_key = key + "_gallery"
     first, second = st.columns(2)
     if first.button("Готовые видеоролики", key=key + "_live_library"):
@@ -131,7 +171,7 @@ def render_kadrian(owner_id, ask_ai):
     if previous:
         with st.expander("Предыдущие сообщения"):
             for role, entry in previous:
-                _render_chat_entry(role, entry)
+                _render_chat_entry(role, entry, store, owner_id)
     turn = st.container()
 
     with st.container():
@@ -142,7 +182,7 @@ def render_kadrian(owner_id, ask_ai):
     if not message:
         with turn:
             for role, entry in latest:
-                _render_chat_entry(role, entry)
+                _render_chat_entry(role, entry, store, owner_id)
     if message:
         if message.files:
             files = [(item.name, item.type or "", item.getvalue()) for item in message.files]
@@ -165,7 +205,7 @@ def render_kadrian(owner_id, ask_ai):
         if not prompt:
             st.warning("Запишите пожелание ещё раз или напишите его.")
             return
-        history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-10:] if isinstance(message, str))
+        history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-60:] if isinstance(message, str))
         with turn, st.chat_message("user"):
             st.markdown(prompt)
         draw = re.match(
@@ -195,16 +235,28 @@ def render_kadrian(owner_id, ask_ai):
                         error = "Генератор изображений не вернул результат."
                     chat["messages"].extend([("user", prompt), ("assistant", error)])
                     st.rerun()
-            chat["messages"].extend([("user", prompt), ("assistant", image)])
+            try:
+                asset = store.put_asset(owner_id, project_id, None, "kadrian-frame.png", image, "image/png")
+            except Exception:
+                st.error("Эскиз создан, но не сохранён на сервере. Скачайте изображение из предпросмотра перед закрытием окна.")
+                chat["messages"].extend([("user", prompt), ("assistant", image)])
+                return
+            chat["messages"].extend([("user", prompt), ("assistant", asset)])
+            chat["pending_save"] = {"turn_id": uuid4().hex, "prompt": prompt, "answer": "Эскиз",
+                                    "brief": chat["brief"], "request": chat["request"], "image_asset": asset}
             st.rerun()
         with turn, st.chat_message("assistant"), st.spinner("Кадриан готовит ответ…"):
             answer = ask_ai(
-                "Ты Кадриан, кинопроизводитель Агентства W. Пиши по-русски простыми словами. "
-                "Если без уточнения нельзя сделать качественно, задай ровно один вопрос. "
-                "Иначе предложи короткий сценарий: кадры, озвучка, ритм и финал. "
-                "Сохраняй утверждённые реплики дословно. Для запуска рисунка пользователь может написать «Нарисуй портрет» или «Нарисуй эскиз». Не обещай запуск, файлы, сроки или фоновую работу от имени чата. "
-                "Отвечай только по текущему видео или мультфильму.",
-                f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
+                director_instructions(),
+                f"Данные выбранного проекта (исходные материалы):\n{project_context(project)}\n"
+                f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\n"
+                f"Вложения: {[name for name, _, _ in chat.get('files', [])]}. Изображения переданы для просмотра. Аудио и видео доступны только в интерфейсе.\n"
+                f"Предыдущий замысел:\n{chat['brief']}\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
+                model=os.getenv("KADRIAN_CHAT_MODEL", "gpt-5"),
+                reasoning_effort="medium",
+                input_images=["data:" + mime + ";base64," + b64encode(data).decode("ascii")
+                              for _, mime, data in chat.get("files", [])
+                              if mime in {"image/png", "image/jpeg", "image/webp"}],
             )
         if not answer or answer.startswith(("Ошибка OpenAI", "Ключ OpenAI", "Не удалось")):
             st.error("Кадриан не получил сценарий. Попробуйте отправить пожелание ещё раз.")
@@ -212,14 +264,40 @@ def render_kadrian(owner_id, ask_ai):
         chat["messages"].extend([("user", prompt), ("assistant", answer)])
         chat["brief"] = f"Пожелание партнёра: {prompt}\nПлан Кадриана: {answer}"[:6000]
         chat["request"] = uuid4().hex
+        chat["pending_save"] = {"turn_id": chat["request"], "prompt": prompt, "answer": answer,
+                                "brief": chat["brief"], "request": chat["request"]}
         st.rerun()
 
     if chat.get("files"):
         st.caption("Вложения доступны для просмотра в этой переписке. Подключение к сборке пока недоступно.")
-    if chat["brief"] and not chat.get("files") and st.button("Собрать по этому замыслу", type="primary", key=key + "_submit"):
+    plan_key = sha256(f"{style}|{music_only}|{chat['brief']}".encode()).hexdigest()
+    if chat.get("production_key") != plan_key:
+        chat.pop("production_plan", None)
+    if chat["brief"] and not chat.get("files"):
+        if st.button("Подготовить сценарий к сборке", key=key + "_prepare"):
+            try:
+                with st.spinner("Собираю сцены для вашего согласования…"):
+                    plan = production_plan(ask_ai, project, chat["brief"])
+                chat["request"] = uuid4().hex
+                chat["production_plan"] = plan
+                chat["production_key"] = plan_key
+            except Exception:
+                st.error("Не удалось подготовить проверенный план. Продолжите обсуждение или повторите подготовку.")
+    plan = chat.get("production_plan")
+    if plan:
+        st.subheader("Сценарий перед запуском")
+        st.markdown(plan["narration"])
+        for number, frame in enumerate(plan["visual_plan"]["frames"], 1):
+            st.markdown(f"**Сцена {number}** — {frame['subject']}\n\n{frame['composition']}")
+        st.caption("Чтобы изменить сценарий, напишите правку в чат и подготовьте новую версию.")
+        st.info("Оценка движения сцен Runway Gen-4.5 — до 720 кредитов (7,20 $ по ставке 0,01 $ за кредит). "
+                "Изображения, речь и ответы ИИ оплачиваются дополнительно по тарифам OpenAI. "
+                "Сумма за эти услуги в эту оценку не входит.")
+    if plan and st.button("Согласовать сценарий и запустить сборку", type="primary", key=key + "_submit"):
+        from content_factory_editorial import build_reference_seed
         request = chat["request"]
         dedupe = sha256(f"kadrian|{owner_id}|{project_id}|{request}".encode()).hexdigest()
-        fingerprint = sha256(f"{style}|{music_only}|{chat['brief']}".encode()).hexdigest()
+        fingerprint = sha256(f"{style}|{music_only}|{plan}".encode()).hexdigest()
         now = iso(datetime.now(timezone.utc))
         try:
             job = store.enqueue_job(owner_id, project_id, {
@@ -229,6 +307,8 @@ def render_kadrian(owner_id, ask_ai):
                 "topic": ("[Кадриан: только музыка]\n" + chat["brief"])[:6000] if music_only else chat["brief"], "requested_by_owner": True,
                 "video_mode": "live", "video_style": style,
                 "review_required": True, "studio_master": True,
+                "approved_reference": build_reference_seed(owner_id, project_id, str(uuid4()), style, plan, project),
+                "approved_video_credit_limit": 720,
                 "content": {}, "assets": [], "checkpoint": {}, "error": "", "attempts": 0,
             })
             if job.get("request_fingerprint") != fingerprint:
