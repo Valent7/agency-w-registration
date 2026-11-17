@@ -27,11 +27,18 @@ def _config():
     return _configuration()
 
 
-def connection_status():
+def connection_status(owner_id=None, project_id=None):
     cfg = _config()
+    runway = bool(cfg.get('RUNWAYML_API_SECRET'))
+    if not runway and owner_id is not None and project_id:
+        try:
+            from content_factory_runtime import get_live_video_capabilities
+            runway = get_live_video_capabilities(owner_id, project_id)['live_video_configured']
+        except Exception:
+            runway = False
     return {
         'HeyGen': bool(cfg.get('HEYGEN_API_KEY') or cfg.get('HEYGEN_KEY')),
-        'Runway': bool(cfg.get('RUNWAYML_API_SECRET')),
+        'Runway': runway,
         'Shotstack': bool(cfg.get('SHOTSTACK_API_KEY')),
         'ElevenLabs': bool(cfg.get('ELEVENLABS_API_KEY')),
     }
@@ -102,9 +109,11 @@ def _speakers(client, count, key):
     speakers = []
     for index in range(count):
         avatar = st.selectbox(f'Участник {index + 1}', avatars,
-                              format_func=lambda item: item.get('name') or item.get('id', ''), key=f'{key}_avatar_{index}')
+                              format_func=lambda item: item.get('name') or item.get('id', ''),
+                              index=min(index, len(avatars) - 1), key=f'{key}_avatar_{index}')
         voice = st.selectbox(f'Голос участника {index + 1}', voices,
-                             format_func=lambda item: item.get('name') or item.get('id', ''), key=f'{key}_voice_{index}')
+                             format_func=lambda item: item.get('name') or item.get('id', ''),
+                             index=min(index, len(voices) - 1), key=f'{key}_voice_{index}')
         supported = avatar.get('supported_api_engines') or []
         if not supported:
             detail_key = key + '_detail_' + str(avatar.get('id'))
@@ -311,8 +320,15 @@ def render_provider_progress(store, owner_id, project_id):
         st.info((job.get('progress') or {}).get('message') or 'Заказ ожидает фонового сборщика.')
     elif job.get('error'):
         st.warning(str(job['error']))
-    elif state == 'ready' and job.get('assets'):
+    elif state == 'ready':
         try:
+            if job.get('external_delivery'):
+                from kadrian_production import provider_preview_url
+                url = provider_preview_url(job)
+                st.video(url)
+                st.link_button('Скачать готовое видео', url)
+                st.caption('Большой файл хранится у видеосервиса. Скачайте его для своего архива.')
+                return
             assets = store.resolve_assets(owner_id, job['assets'])
             for asset in assets:
                 if asset.get('mime_type') == 'video/mp4':

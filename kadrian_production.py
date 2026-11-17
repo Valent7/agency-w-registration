@@ -75,19 +75,37 @@ def process_provider_job(worker, job, project):
     url = result.get('video_url') or result.get('url')
     if not url:
         raise LiveVideoError('Сервис завершил работу, но файл ещё недоступен.', retryable=True)
-    data = download_result(url)
-    asset = worker.store.put_asset(job['owner_id'], job['project_id'], job['id'], 'kadrian.mp4', data, 'video/mp4')
+    assets = []
+    external_delivery = False
+    try:
+        data = download_result(url)
+        assets.append(worker.store.put_asset(job['owner_id'], job['project_id'], job['id'], 'kadrian.mp4', data, 'video/mp4'))
+    except LiveVideoError as error:
+        if error.code != 'video_too_large':
+            raise
+        external_delivery = True
     from content_factory_billing import billing_enforced, settle_usage
     from content_factory_core import iso
     checkpoint = {'generation_complete': True}
-    worker._update(job, assets=[asset], checkpoint=checkpoint)
+    worker._update(job, assets=assets, checkpoint=checkpoint, external_delivery=external_delivery)
     if billing_enforced():
         settle_usage(worker.store, job['owner_id'], job['project_id'],
                      reference='video:' + job['id'], now=iso(worker.clock()))
         checkpoint['billing_settled'] = True
-    worker._finish(job, state='ready', assets=[asset], production=production,
+    worker._finish(job, state='ready', assets=assets, production=production, external_delivery=external_delivery,
                    content={'title': str(job.get('topic') or 'Кадриан')[:150],
                             'text': str(job.get('topic') or 'Готовое видео'), 'video_style': job.get('video_style', 'live')},
                    checkpoint=checkpoint, error='',
                    progress={'stage': 'ready', 'message': 'Видео готово к просмотру.'})
     return 'generated'
+
+
+def provider_preview_url(job):
+    from content_factory_runtime import _configuration
+    client = provider_client(job['kadrian_provider'], _configuration())
+    result = client.status(job['production']['task_id'], job.get('provider_spec') or {})
+    url = result.get('video_url') or result.get('url')
+    if result.get('status') not in {'done', 'completed'} or not isinstance(url, str) or not url.startswith('https://'):
+        raise ValueError('Готовое видео временно недоступно.')
+    from content_factory_live_video import _public_url
+    return _public_url(url)

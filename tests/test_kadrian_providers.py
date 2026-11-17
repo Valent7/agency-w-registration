@@ -166,3 +166,37 @@ class DurableProviderTests(unittest.TestCase):
             self.assertEqual(second['generated'], 1)
         self.client.create.assert_called_once()
         publisher.assert_not_called()
+
+    def test_large_completed_result_keeps_provider_delivery_without_reordering(self):
+        from content_factory_live_video import LiveVideoError
+        self.client.status.return_value = {'status': 'completed', 'video_url': 'https://media.example/result.mp4'}
+        with patch.dict(sys.modules, {'content_factory_runtime': self.runtime}), \
+                patch('kadrian_production.provider_client', return_value=self.client), \
+                patch('kadrian_production.download_result', side_effect=LiveVideoError('Большой файл', code='video_too_large')):
+            self.assertEqual(process_provider_job(self.worker, self.job, self.project), 'generated')
+        saved = self.store.get_job(11, self.job['id'])
+        self.assertEqual(saved['state'], 'ready')
+        self.assertTrue(saved['external_delivery'])
+        self.assertEqual(saved['production']['task_id'], 'provider-task')
+        self.client.create.assert_called_once()
+
+    def test_saved_sketch_becomes_first_frame(self):
+        import io
+        from PIL import Image
+        output = io.BytesIO()
+        Image.new('RGB', (64, 64), 'blue').save(output, format='PNG')
+        asset = self.store.put_asset(11, self.project['id'], None, 'frame.png', output.getvalue(), 'image/png')
+        spec = {'kind': 'scene', 'prompt': 'Персонаж улыбается', 'duration': 10, 'reference_asset': asset}
+        job = {**self.job, 'provider_spec': spec}
+        resolved = resolve_spec(self.store, job)
+        self.assertEqual(resolved['image']['type'], 'base64')
+        self.assertEqual(heygen_payload(resolved)['mode'], 'image_to_video')
+
+    def test_missing_wallet_quote_stops_before_paid_call(self):
+        from content_factory_billing import BillingError
+        with patch.dict(sys.modules, {'content_factory_runtime': self.runtime}), \
+                patch('kadrian_production.provider_client', return_value=self.client), \
+                patch('content_factory_billing.billing_enforced', return_value=True):
+            with self.assertRaises(ValueError):
+                process_provider_job(self.worker, self.job, self.project)
+        self.client.create.assert_not_called()

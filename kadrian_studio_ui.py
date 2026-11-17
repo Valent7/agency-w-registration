@@ -23,12 +23,20 @@ def _render_library(store, owner_id, project_id, style):
         return
     found = False
     for job in jobs:
-        if not job.get("studio_master") or job.get("video_style") != style or not job.get("assets"):
+        if not job.get("studio_master") or job.get("video_style") != style :
             continue
         if job.get("state") not in {"ready", "published", "scheduled", "paused"} or job.get("error"):
             continue
         try:
-            assets = store.resolve_assets(owner_id, job["assets"])
+            if job.get("external_delivery"):
+                from kadrian_production import provider_preview_url
+                url = provider_preview_url(job)
+                st.video(url)
+                st.link_button("Скачать готовое видео", url)
+                st.caption("Большой файл хранится у видеосервиса. Скачайте его для своего архива.")
+                found = True
+                continue
+            assets = store.resolve_assets(owner_id, job.get("assets") or [])
         except Exception:
             st.caption("Один из файлов временно недоступен.")
             continue
@@ -129,8 +137,8 @@ def render_kadrian(owner_id, ask_ai):
                 st.rerun()
     with st.expander("Подключения студии"):
         st.caption("Изображения и речь — OpenAI. Сцены — Runway и HeyGen Video. Ведущие — HeyGen. Музыка — ElevenLabs. Сборка — FFmpeg и Shotstack.")
-        for service, configured in connection_status().items():
-            st.caption(service + (" — ключ записан на сервере" if configured else " — API-ключ ещё не записан"))
+        for service, configured in connection_status(owner_id, project_id).items():
+            st.caption(service + (" — настройки найдены" if configured else " — настройки подключения не найдены"))
         if st.button("Проверить доступ к видеосервису", key=key + "_check_video"):
             try:
                 from content_factory_runtime import resolve_live_video_client
