@@ -258,7 +258,9 @@ class RunwayVideoClient:
         finally:
             response.close()
 
-    def download(self, url):
+    def download(self, url, *, max_bytes=MAX_CLIP_BYTES):
+        if type(max_bytes) is not int or not 1 <= max_bytes <= 100 * 1024 * 1024:
+            raise LiveVideoError("Неверный предел размера видео.")
         current = _public_url(url)
         for redirect in range(4):
             try:
@@ -278,14 +280,14 @@ class RunwayVideoClient:
                     raise LiveVideoError("Файл живой сцены пока недоступен. Повторный заказ не выполнялся.",
                                          retryable=True, code="video_download_unavailable")
                 length = response.headers.get("Content-Length")
-                if isinstance(length, str) and length.isdecimal() and int(length) > MAX_CLIP_BYTES:
+                if isinstance(length, str) and length.isdecimal() and int(length) > max_bytes:
                     raise LiveVideoError("Готовая сцена превышает допустимый размер.", code="video_too_large")
                 data, total = [], 0
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if not chunk:
                         continue
                     total += len(chunk)
-                    if total > MAX_CLIP_BYTES:
+                    if total > max_bytes:
                         raise LiveVideoError("Готовая сцена превышает допустимый размер.", code="video_too_large")
                     data.append(chunk)
                 if not total:

@@ -1,4 +1,5 @@
 """Project-scoped director context and durable text turns using the existing store."""
+import os
 from pathlib import Path
 import json
 
@@ -11,7 +12,7 @@ PROJECT_FIELDS = ('name', 'product', 'audience', 'goal', 'tone', 'facts', 'examp
 
 def director_instructions():
     return '\n\n'.join((CONTEXT / name).read_text(encoding='utf-8')
-                        for name in ('Agent.md', 'DIRECTOR.md'))
+                        for name in ('Agent.md', 'DIRECTOR.md', 'SERVICES.md'))
 
 
 def project_context(project):
@@ -69,5 +70,6 @@ def production_plan(ask_ai, project, brief):
         'Эта версия будет показана владельцу для согласования до запуска.',
         project_context(project) + '\nЗамысел и обсуждение:\n' + brief
         + '\nСхема:\n' + json.dumps(schema, ensure_ascii=False),
+        model=os.getenv('KADRIAN_CHAT_MODEL', 'gpt-6.1-terra'), reasoning_effort='medium',
     )
     return validate_reference_plan(json.loads(result), platform='instagram')

@@ -12,6 +12,7 @@ import streamlit as st
 
 from content_factory_autopilot_ui import _runtime
 from content_factory_core import iso
+from kadrian_production_ui import ROUTES, connection_status, render_production, render_provider_progress
 
 
 def _render_library(store, owner_id, project_id, style):
@@ -127,7 +128,9 @@ def render_kadrian(owner_id, ask_ai):
                 st.success("Память сохранена.")
                 st.rerun()
     with st.expander("Подключения студии"):
-        st.caption("Изображения и речь — OpenAI. Движение живых сцен и мультфильмов — Runway Gen-4.5. Монтаж — FFmpeg на сервере.")
+        st.caption("Изображения и речь — OpenAI. Сцены — Runway и HeyGen Video. Ведущие — HeyGen. Музыка — ElevenLabs. Сборка — FFmpeg и Shotstack.")
+        for service, configured in connection_status().items():
+            st.caption(service + (" — ключ записан на сервере" if configured else " — API-ключ ещё не записан"))
         if st.button("Проверить доступ к видеосервису", key=key + "_check_video"):
             try:
                 from content_factory_runtime import resolve_live_video_client
@@ -166,6 +169,7 @@ def render_kadrian(owner_id, ask_ai):
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
     music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
+    route = st.selectbox("Производство", list(ROUTES), format_func=ROUTES.get, key=key + "_route")
     previous = chat["messages"][:-2] if len(chat["messages"]) > 2 else []
     latest = chat["messages"][len(previous):]
     if previous:
@@ -249,10 +253,11 @@ def render_kadrian(owner_id, ask_ai):
             answer = ask_ai(
                 director_instructions(),
                 f"Данные выбранного проекта (исходные материалы):\n{project_context(project)}\n"
+                f"Производство: {ROUTES[route]}. В интервью HeyGen два участника показаны сменой отдельных планов.\n"
                 f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\n"
                 f"Вложения: {[name for name, _, _ in chat.get('files', [])]}. Изображения переданы для просмотра. Аудио и видео доступны только в интерфейсе.\n"
                 f"Предыдущий замысел:\n{chat['brief']}\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
-                model=os.getenv("KADRIAN_CHAT_MODEL", "gpt-5"),
+                model=os.getenv("KADRIAN_CHAT_MODEL", "gpt-6.1-terra"),
                 reasoning_effort="medium",
                 input_images=["data:" + mime + ";base64," + b64encode(data).decode("ascii")
                               for _, mime, data in chat.get("files", [])
@@ -268,8 +273,12 @@ def render_kadrian(owner_id, ask_ai):
                                 "brief": chat["brief"], "request": chat["request"]}
         st.rerun()
 
+    render_provider_progress(store, owner_id, project_id)
     if chat.get("files"):
         st.caption("Вложения доступны для просмотра в этой переписке. Подключение к сборке пока недоступно.")
+    if route != "runway":
+        render_production(owner_id, project, store, ask_ai, chat, route, style, key + "_" + route)
+        return
     plan_key = sha256(f"{style}|{music_only}|{chat['brief']}".encode()).hexdigest()
     if chat.get("production_key") != plan_key:
         chat.pop("production_plan", None)
