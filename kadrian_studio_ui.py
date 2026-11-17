@@ -42,14 +42,24 @@ def _draw_chat_image(prompt, context, style, files):
     import os
     from openai import OpenAI
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=100, max_retries=0)
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        from streamlit.errors import StreamlitSecretNotFoundError
+        try:
+            api_key = str(st.secrets.get("OPENAI_API_KEY") or "").strip()
+        except StreamlitSecretNotFoundError:
+            pass
+    if not api_key:
+        raise RuntimeError("В студии не настроен ключ OpenAI для изображений.")
+    client = OpenAI(api_key=api_key, timeout=100, max_retries=0)
     options = {
         "model": "gpt-image-1",
         "prompt": (
             "Создай одно изображение по последней просьбе пользователя. "
             "Возьми описание героя и обстановки из переписки. "
             "Сохрани согласованные детали и используй приложенные изображения как образцы. "
-            f"Формат: {style}.\nПереписка и сценарий:\n{context[-12000:]}\nПросьба: {prompt}"
+            "Явно указанный стиль в последней просьбе важнее режима студии и прежних формулировок. "
+            f"Режим студии по умолчанию: {style}.\nПереписка и сценарий:\n{context[-12000:]}\nПросьба: {prompt}"
         ),
         "size": "1024x1024",
         "quality": "low",
@@ -166,9 +176,25 @@ def render_kadrian(owner_id, ask_ai):
                 try:
                     with st.spinner("Кадриан рисует…"):
                         image = _draw_chat_image(prompt, chat["brief"] + "\n" + history, style, chat.get("files", []))
-                except Exception:
-                    st.error("Не удалось создать изображение. Попробуйте ещё раз.")
-                    return
+                except Exception as exc:
+                    import logging
+                    status = getattr(exc, "status_code", None)
+                    code = getattr(exc, "code", None)
+                    logging.getLogger(__name__).warning("Kadrian image failed: %s status=%s code=%s", type(exc).__name__, status, code)
+                    if status in (401, 403):
+                        error = "OpenAI отклонил доступ студии к генерации изображений."
+                    elif code in ("billing_hard_limit_reached", "insufficient_quota"):
+                        error = "OpenAI сообщил, что исчерпан лимит оплаты или квота изображений."
+                    elif status == 429:
+                        error = "OpenAI ограничил частоту запросов к генератору изображений."
+                    elif status == 400:
+                        error = "OpenAI отклонил параметры изображения или приложенный образец."
+                    elif isinstance(exc, RuntimeError):
+                        error = "В студии не настроен ключ OpenAI для изображений."
+                    else:
+                        error = "Генератор изображений не вернул результат."
+                    chat["messages"].extend([("user", prompt), ("assistant", error)])
+                    st.rerun()
             chat["messages"].extend([("user", prompt), ("assistant", image)])
             st.rerun()
         with turn, st.chat_message("assistant"), st.spinner("Кадриан готовит ответ…"):
