@@ -1,5 +1,6 @@
 """Partner-facing video chat on the Agency's existing production worker."""
 from base64 import b64decode
+import re
 from datetime import datetime, timezone
 from hashlib import sha256
 from uuid import uuid4
@@ -37,49 +38,37 @@ def _render_library(store, owner_id, project_id, style):
         st.info("Готовые файлы появятся здесь после сборки.")
 
 
-def _render_visual_previews(chat, key, style):
+def _draw_chat_image(prompt, context, style, files):
     import os
     from openai import OpenAI
 
-    cartoon = style == "cartoon"
-    visual_style = (
-        "Мультяшный стиль, выразительные силуэты и чистый контур."
-        if cartoon else "Фотореалистичный кадр живого видео, естественный свет и фактуры."
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=100, max_retries=0)
+    options = {
+        "model": "gpt-image-1",
+        "prompt": (
+            "Создай одно изображение по последней просьбе пользователя. "
+            "Возьми описание героя и обстановки из переписки. "
+            "Сохрани согласованные детали и используй приложенные изображения как образцы. "
+            f"Формат: {style}.\nПереписка и сценарий:\n{context[-12000:]}\nПросьба: {prompt}"
+        ),
+        "size": "1024x1024",
+        "quality": "low",
+    }
+    references = [(name, data, mime) for name, mime, data in files
+                  if mime in {"image/png", "image/jpeg", "image/webp"}]
+    result = (
+        client.images.edit(image=references, **options)
+        if references else client.images.generate(**options)
     )
-    images = chat.setdefault("visual_previews", {})
-    st.subheader("Эскизы мультфильма" if cartoon else "Эскизы живого видео")
-    st.caption("Создавайте по одному изображению, чтобы можно было поправить отдельный эскиз. Каждый запуск использует генерацию изображений.")
-    label = st.selectbox("Что нарисовать", ("Персонаж 1", "Персонаж 2", "Персонаж 3", "Локация", "Реквизит"), key=key + "_visual_slot")
-    description = st.text_area("Как должен выглядеть эскиз", max_chars=1500, key=key + "_visual_" + label)
-    if st.button("Нарисовать эскиз", disabled=not description.strip(), key=key + "_draw"):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            st.error("Генератор изображений не настроен.")
+    return b64decode(result.data[0].b64_json, validate=True)
+
+
+def _render_chat_entry(role, entry):
+    with st.chat_message(role):
+        if isinstance(entry, bytes):
+            st.image(entry)
         else:
-            try:
-                with st.spinner("Рисую эскиз…"):
-                    result = OpenAI(api_key=api_key, timeout=100, max_retries=0).images.generate(
-                        model="gpt-image-1",
-                        prompt=(
-                            f"Создай один эскиз без надписей. {visual_style} "
-                            f"Тип эскиза: {label}. Описание пользователя: {description.strip()}"
-                        ),
-                        size="1024x1024",
-                        quality="low",
-                    )
-                    image = b64decode(result.data[0].b64_json, validate=True)
-                images[label] = image
-                chat.pop("approved_visuals", None)
-            except Exception:
-                st.error("Генератор не вернул эскиз. Предыдущие изображения сохранены.")
-    for name, image in images.items():
-        st.image(image, caption=name, width=280)
-        st.download_button("Скачать " + name.lower(), image, file_name=name + ".png", mime="image/png", key=key + "_download_" + name)
-    if images and st.button("Утвердить показанные эскизы", key=key + "_approve_visuals"):
-        chat["approved_visuals"] = True
-    if chat.get("approved_visuals"):
-        st.success("Эскизы утверждены для этой сессии.")
-        st.caption("Передача утверждённых эскизов в раскадровку пока не подключена.")
+            st.markdown(entry)
 
 
 def render_kadrian(owner_id, ask_ai):
@@ -127,17 +116,12 @@ def render_kadrian(owner_id, ask_ai):
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
     music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
-    preview_key = key if style == "cartoon" else key + "_live"
-    preview_state = chat if style == "cartoon" else chat.setdefault("live_preview_state", {})
-    with st.expander("Создать и утвердить эскизы", expanded=True):
-        _render_visual_previews(preview_state, preview_key, style)
     previous = chat["messages"][:-2] if len(chat["messages"]) > 2 else []
     latest = chat["messages"][len(previous):]
     if previous:
         with st.expander("Предыдущие сообщения"):
             for role, entry in previous:
-                with st.chat_message(role):
-                    st.markdown(entry)
+                _render_chat_entry(role, entry)
     turn = st.container()
 
     with st.container():
@@ -148,8 +132,7 @@ def render_kadrian(owner_id, ask_ai):
     if not message:
         with turn:
             for role, entry in latest:
-                with st.chat_message(role):
-                    st.markdown(entry)
+                _render_chat_entry(role, entry)
     if message:
         if message.files:
             files = [(item.name, item.type or "", item.getvalue()) for item in message.files]
@@ -172,15 +155,28 @@ def render_kadrian(owner_id, ask_ai):
         if not prompt:
             st.warning("Запишите пожелание ещё раз или напишите его.")
             return
-        history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-10:])
+        history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-10:] if isinstance(message, str))
         with turn, st.chat_message("user"):
             st.markdown(prompt)
+        draw = re.match(
+            r"^(?:пожалуйста[,]?\s+)?(?:нарисуй|перерисуй|покажи|создай|сделай|пришли)\b", prompt.strip(), re.I
+        ) and re.search(r"\b(?:портрет\w*|картинк\w*|эскиз\w*|иллюстраци\w*)", prompt, re.I)
+        if draw:
+            with turn, st.chat_message("assistant"):
+                try:
+                    with st.spinner("Кадриан рисует…"):
+                        image = _draw_chat_image(prompt, chat["brief"] + "\n" + history, style, chat.get("files", []))
+                except Exception:
+                    st.error("Не удалось создать изображение. Попробуйте ещё раз.")
+                    return
+            chat["messages"].extend([("user", prompt), ("assistant", image)])
+            st.rerun()
         with turn, st.chat_message("assistant"), st.spinner("Кадриан готовит ответ…"):
             answer = ask_ai(
                 "Ты Кадриан, кинопроизводитель Агентства W. Пиши по-русски простыми словами. "
                 "Если без уточнения нельзя сделать качественно, задай ровно один вопрос. "
                 "Иначе предложи короткий сценарий: кадры, озвучка, ритм и финал. "
-                "Сохраняй утверждённые реплики дословно. Генерация эскизов запускается только кнопкой «Нарисовать эскиз». Не обещай запуск, файлы, сроки или фоновую работу от имени чата. "
+                "Сохраняй утверждённые реплики дословно. Для запуска рисунка пользователь может написать «Нарисуй портрет» или «Нарисуй эскиз». Не обещай запуск, файлы, сроки или фоновую работу от имени чата. "
                 "Отвечай только по текущему видео или мультфильму.",
                 f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
             )
