@@ -160,8 +160,13 @@ def shotstack_payload(spec):
     if spec.get('music_url'):
         if not isinstance(spec['music_url'], str) or not spec['music_url'].startswith('https://'):
             raise ValueError('Музыка должна иметь HTTPS-ссылку хранилища.')
-        tracks.append({'clips': [{'asset': {'type': 'audio', 'src': spec['music_url'], 'volume': 0.12},
-                                   'start': 0, 'length': start}]})
+        volume = spec.get('music_volume', 0.12)
+        duration = spec.get('music_duration', start)
+        if (isinstance(volume, bool) or not isinstance(volume, (int, float)) or not 0 <= volume <= 1
+                or isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 0 < duration <= 1800):
+            raise ValueError('Проверьте громкость и длительность музыки.')
+        tracks.append({'clips': [{'asset': {'type': 'audio', 'src': spec['music_url'], 'volume': volume},
+                                   'start': 0, 'length': min(start, duration)}]})
     aspect = spec.get('aspect_ratio', '9:16')
     if aspect not in {'9:16', '16:9'}:
         raise ValueError('Выберите вертикальный или горизонтальный формат.')
