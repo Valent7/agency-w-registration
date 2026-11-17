@@ -272,15 +272,28 @@ def _assembly(owner_id, project, store, cfg, style, key):
     if not cfg.get('SHOTSTACK_API_KEY'):
         st.info('Для облачной сборки нужен SHOTSTACK_API_KEY в настройках сервера студии. Обычная сборка Runway продолжает использовать FFmpeg.')
         return
+    st.markdown('### Своя музыка')
+    uploaded = st.file_uploader('Загрузить музыкальный трек', type=['mp3', 'wav', 'm4a'], key=key + '_music_upload')
+    st.caption('До 30 МБ и 30 минут. Загрузка не запускает платную генерацию музыки.')
+    if uploaded is not None and st.button('Сохранить музыку в проект', key=key + '_save_music'):
+        from kadrian_music import save_uploaded_music
+        try:
+            saved = save_uploaded_music(store, owner_id, project['id'], uploaded.getvalue(), uploaded.name)
+            if saved.get('studio_complete'):
+                st.success('Музыка сохранена. Выберите её в списке музыкальных дорожек ниже.')
+            else:
+                st.warning('Файл ещё не сохранён полностью. Повторите сохранение.')
+        except Exception:
+            st.error('Не удалось сохранить музыку. Выберите MP3, WAV или M4A до 30 МБ и 30 минут и повторите.')
     jobs = store.list_jobs(owner_id, project['id'], limit=100)
     videos, music = [], []
     for job in jobs:
         for asset in job.get('assets') or []:
             item = {'label': str((job.get('content') or {}).get('title') or job.get('topic') or asset.get('filename')),
-                    'asset': asset}
+                    'asset': asset, 'duration': (job.get('content') or {}).get('audio_duration')}
             if asset.get('mime_type') == 'video/mp4':
                 videos.append(item)
-            elif asset.get('mime_type') == 'audio/mpeg':
+            elif job.get('studio_complete', True) and asset.get('mime_type') in {'audio/mpeg', 'audio/wav', 'audio/mp4'}:
                 music.append(item)
     if not videos:
         st.info('Готовые видео выбранного проекта появятся здесь для сборки.')
@@ -299,6 +312,14 @@ def _assembly(owner_id, project, store, cfg, style, key):
             'aspect_ratio': st.selectbox('Формат сборки', ['9:16', '16:9'], key=key + '_assembly_aspect')}
     if track is not None:
         spec['music_asset'] = music[track]['asset']
+        spec['music_volume'] = st.slider('Громкость музыки, %', 0, 100, 12, key=key + '_music_volume') / 100
+        if music[track].get('duration'):
+            spec['music_duration'] = music[track]['duration']
+        try:
+            resolved = store.resolve_assets(owner_id, [music[track]['asset']])[0]
+            st.audio(resolved.get('url') or resolved.get('path'))
+        except Exception:
+            st.caption('Предпрослушивание временно недоступно.')
     if clips:
         seconds = sum(clip['duration'] for clip in clips)
         _confirm(store, owner_id, project['id'], 'shotstack', spec, style,
