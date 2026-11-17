@@ -37,12 +37,17 @@ def _render_library(store, owner_id, project_id, style):
         st.info("Готовые файлы появятся здесь после сборки.")
 
 
-def _render_visual_previews(chat, key):
+def _render_visual_previews(chat, key, style):
     import os
     from openai import OpenAI
 
+    cartoon = style == "cartoon"
+    visual_style = (
+        "Мультяшный стиль, выразительные силуэты и чистый контур."
+        if cartoon else "Фотореалистичный кадр живого видео, естественный свет и фактуры."
+    )
     images = chat.setdefault("visual_previews", {})
-    st.subheader("Эскизы мультфильма")
+    st.subheader("Эскизы мультфильма" if cartoon else "Эскизы живого видео")
     st.caption("Создавайте по одному изображению, чтобы можно было поправить отдельный эскиз. Каждый запуск использует генерацию изображений.")
     label = st.selectbox("Что нарисовать", ("Персонаж 1", "Персонаж 2", "Персонаж 3", "Локация", "Реквизит"), key=key + "_visual_slot")
     description = st.text_area("Как должен выглядеть эскиз", max_chars=1500, key=key + "_visual_" + label)
@@ -56,8 +61,7 @@ def _render_visual_previews(chat, key):
                     result = OpenAI(api_key=api_key, timeout=100, max_retries=0).images.generate(
                         model="gpt-image-1",
                         prompt=(
-                            "Создай один эскиз для мультфильма, без надписей. "
-                            "Выразительные силуэты и чистый контур, если пользователь не указал другой стиль. "
+                            f"Создай один эскиз без надписей. {visual_style} "
                             f"Тип эскиза: {label}. Описание пользователя: {description.strip()}"
                         ),
                         size="1024x1024",
@@ -123,9 +127,10 @@ def render_kadrian(owner_id, ask_ai):
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
     music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
-    if style == "cartoon":
-        with st.expander("Создать и утвердить эскизы", expanded=True):
-            _render_visual_previews(chat, key)
+    preview_key = key if style == "cartoon" else key + "_live"
+    preview_state = chat if style == "cartoon" else chat.setdefault("live_preview_state", {})
+    with st.expander("Создать и утвердить эскизы", expanded=True):
+        _render_visual_previews(preview_state, preview_key, style)
     previous = chat["messages"][:-2] if len(chat["messages"]) > 2 else []
     latest = chat["messages"][len(previous):]
     if previous:
