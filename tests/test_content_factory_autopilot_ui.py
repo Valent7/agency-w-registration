@@ -79,7 +79,7 @@ class FakeService:
             if job['id'] == job_id: job['state'] = 'cancelled'
     def retry(self, owner_id, job_id):
         self.store.actions.append(('retry', owner_id, job_id))
-    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id):
+    def create_material(self, owner_id, project_id, topic, content_format, platforms, *, request_id, **kwargs):
         self.store.actions.append(('create', owner_id, project_id, topic, content_format, platforms, request_id))
         return [{'id':'new-request','state':'queued'} for platform in platforms]
     def revise_material(self, owner_id, job_id, feedback, *, request_id):
@@ -95,6 +95,10 @@ def process(store, owner_id, project_id):
 with patch.object(ui, '_runtime', return_value=(store,FakeService(store),{'storage':'local','ai_configured':True,'encryption_configured':True})), patch.object(ui, '_process_queue', side_effect=process):
     ui.render_content_autopilot(77, 'Партнёр')
 '''
+
+
+from tests.studio_intent_fixture import instrument, approve_intent
+APP = instrument(APP)
 
 
 class AutopilotUiTests(unittest.TestCase):
@@ -146,7 +150,7 @@ class AutopilotUiTests(unittest.TestCase):
         self.assertFalse(app.exception)
         app.radio(key="cf_auto_77_project-1_brief_format").set_value("reel").run()
         self.assertFalse(app.exception)
-        self.assertTrue(next(item for item in app.button if item.label == "Создать материал").disabled)
+        self.assertTrue(next(item for item in app.button if item.label == "1. Понять мой замысел").disabled)
         self.assertTrue(any("Подключение живого видео" in item.value for item in app.info))
         self.assertFalse(any(action[0] == 'create' for action in app.session_state['_fake_store'].actions))
         # Old rendered examples stay accurately labelled even in a live project.
@@ -184,7 +188,9 @@ def remember_save(owner, project, key):
         self.assertEqual(platforms.value, ["vk"])
         self.assertEqual(platforms.options, ["ВКонтакте"])
         app.text_area(key="cf_auto_77_project-1_brief_topic").input("Как освободить вечер от повторяющихся задач")
-        next(item for item in app.button if item.label == "Создать материал").click().run()
+        next(item for item in app.button if item.label == "1. Понять мой замысел").click().run()
+        approve_intent(app)
+        next(item for item in app.button if item.label == "✨ Создать по утверждённому замыслу").click().run()
         self.assertFalse(app.exception)
         first = app.session_state['_fake_store'].actions[-1]
         self.assertEqual(first[:3], ('create',77,'project-1'))
@@ -192,14 +198,16 @@ def remember_save(owner, project, key):
         self.assertFalse(app.session_state['_fake_store'].project['automation_enabled'])
         app.run()
         self.assertEqual(len([action for action in app.session_state['_fake_store'].actions if action[0]=='create']), 1)
-        next(item for item in app.button if item.label == "Создать материал").click().run()
+        next(item for item in app.button if item.label == "1. Понять мой замысел").click().run()
+        approve_intent(app)
+        next(item for item in app.button if item.label == "✨ Создать по утверждённому замыслу").click().run()
         self.assertFalse(app.exception)
         self.assertEqual(app.session_state['_fake_store'].actions[-1][-1], first[-1])
         self.assertTrue(any("Задача сохранена" in item.value for item in app.success))
 
     def test_brief_disabled_without_connected_platform_and_memory_saved_explicitly(self):
         app = self.app()
-        self.assertTrue(next(item for item in app.button if item.label == "Создать материал").disabled)
+        self.assertTrue(next(item for item in app.button if item.label == "1. Понять мой замысел").disabled)
         app.text_area(key="cf_auto_77_project-1_facts").input("Подтверждённая возможность")
         app.text_area(key="cf_auto_77_project-1_examples").input("Живой пример текста")
         app.text_area(key="cf_auto_77_project-1_visual_style").input("Тёплый свет")
@@ -591,7 +599,9 @@ with patch.object(runtime, 'get_owner_instagram_connect_url', return_value='http
         app.run()
         app.text_area(key="cf_auto_77_project-1_brief_topic").input("Объясни, как предпринимателю освободить вечер от рутины")
         app.multiselect(key="cf_auto_77_project-1_brief_platforms").set_value(["vk"])
-        next(item for item in app.button if item.label == "Создать материал").click().run()
+        next(item for item in app.button if item.label == "1. Понять мой замысел").click().run()
+        approve_intent(app)
+        next(item for item in app.button if item.label == "✨ Создать по утверждённому замыслу").click().run()
         self.assertFalse(app.exception)
         self.assertTrue(any("Результат появится в разделе «Мои генерации»" in item.value for item in app.success))
         self.assertFalse(any("во вкладке" in item.value for kind in (app.caption, app.info, app.success) for item in kind))
@@ -608,14 +618,14 @@ with patch.object(runtime, 'get_owner_instagram_connect_url', return_value='http
         visible = " ".join(item.value for kind in (app.info, app.caption) for item in kind)
         self.assertIn("в разделе «Площадки»", visible)
         self.assertIn("Настройки проекта → Подключение живого видео", visible)
-        self.assertIn("в разделе «Мои генерации»", visible)
+        self.assertIn("сохранит его здесь", visible)
         self.assertNotIn("во вкладке", visible)
         app.session_state["_section"] = "calendar"
         app.run()
         self.assertTrue(any("в разделе «Настройки проекта»" in item.value for item in app.info))
         legacy = self.app()
         visible = " ".join(item.value for kind in (legacy.info, legacy.caption) for item in kind)
-        self.assertIn("во вкладке «Материалы»", visible)
+        self.assertIn("сохранит его здесь", visible)
         self.assertIn("во вкладке «Проект»", visible)
 
 

@@ -21,7 +21,7 @@ def load_editor_functions():
                 if isinstance(node, ast.FunctionDef) and node.name in names]
     assert {node.name for node in selected} == names
     module = ast.Module(body=selected, type_ignores=[])
-    namespace = {"re": re, "json": json}
+    namespace = {"re": re, "json": json, "_runtime_secret": lambda name: None}
     exec(compile(ast.fix_missing_locations(module), str(source), "exec"), namespace)
     return namespace
 

@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: Compile changed application modules
         run: python -m py_compile neola_daily_brief.py neola_partner_center.py streamlit_app.py tests/test_neola_daily_brief.py
       - name: Test daily spoken brief, calendar filtering and browser voice

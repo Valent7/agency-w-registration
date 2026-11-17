@@ -761,13 +761,15 @@ class Generator:
                        if reference is not None else self._copy(clean_project, job))
             report("proofread", "Корректор проверяет грамматику и точность формулировок.")
             content = self._proofread(clean_project, job, content)
+            if reference is not None and job.get("approved_video_credit_limit") is not None:
+                content["narration"] = reference["plan"]["narration"]
             report("review", "Стагирит проверяет смысл, факты и пользу текста.")
             review = self._review_copy(clean_project, job, content)
             # Resolve semantic defects automatically before any paid image/video request.
             # Two bounded revisions are enough to correct unsupported claims without
             # creating an unbounded model loop or changing the owner's approved idea.
             semantic_revisions_left = 2
-            while not review["approved"] and semantic_revisions_left > 0:
+            while not review["approved"] and semantic_revisions_left > 0 and reference is None and not job.get("approved_video_credit_limit"):
                 semantic_revisions_left -= 1
                 report(
                     "copy",
@@ -885,17 +887,10 @@ class Generator:
                 if required_count == accepted_count:
                     visual_plan = validate_visual_plan(accepted_plan, frame_count=accepted_count)
                 else:
-                    report(
-                        "visual",
-                        f"Озвучка длиннее исходного плана. Добавляем {required_count - accepted_count} "
-                        "промежуточные сцены без изменения утверждённой истории.",
-                    )
-                    instructions, input_data = build_visual_prompt(
-                        clean_project, job, content, frame_count=required_count
-                    )
-                    visual_plan = validate_visual_plan(
-                        self._structured(instructions, input_data),
-                        frame_count=required_count,
+                    raise GenerationError(
+                        "Озвучка требует больше живых сцен, чем утверждено в сценарии. "
+                        "Сократите озвучку или утвердите новый план перед запуском изображений.",
+                        draft=content,
                     )
             else:
                 instructions, input_data = build_visual_prompt(clean_project, job, content, frame_count=frame_count)
@@ -909,8 +904,14 @@ class Generator:
                     planned_seconds = [5 if value <= 5 else 10 for value in planned_seconds]
                 estimate = getattr(live_client, "estimate_credits", None)
                 credits = estimate(planned_seconds) if callable(estimate) else None
+                if job.get("approved_video_credit_limit") is not None and (
+                    isinstance(credits, bool) or not isinstance(credits, (int, float)) or not math.isfinite(credits)
+                ):
+                    raise GenerationError("Не удалось проверить оценку выбранной видеомодели. Сначала согласуйте новую смету.", draft=content)
                 if (isinstance(credits, (int, float)) and not isinstance(credits, bool)
                         and math.isfinite(credits) and credits >= 0):
+                    if job.get("approved_video_credit_limit") is not None and credits > job["approved_video_credit_limit"]:
+                        raise GenerationError("План превысил согласованную оценку видеокредитов. Согласуйте новую версию.", draft=content)
                     content["video_credit_estimate"] = {
                         "credits": credits, "scene_seconds": planned_seconds,
                         "model": str(getattr(live_client, "model", ""))[:80], "is_estimate": True,

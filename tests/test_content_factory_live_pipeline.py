@@ -170,7 +170,7 @@ class LiveVideoPipelineTests(unittest.TestCase):
         self.assertEqual(saved["content"], COPY)
         self.assertEqual(len(saved["production"]["tasks"]), 4)
         self.assertTrue(all(saved["production"]["tasks"]))
-        self.assertEqual(saved["progress"]["stage"], "video")
+        self.assertEqual(saved["progress"]["stage"], "video_wait")
         self.assertIsNone(saved["lease_owner"])
         self.assertIsNone(saved["lease_until"])
         self.assertGreater(saved["available_at"], iso(self.now))

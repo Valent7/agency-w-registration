@@ -68,6 +68,10 @@ with patch('content_studio_catalog.save_studio_result',side_effect=save), patch(
 '''
 
 
+from tests.studio_intent_fixture import instrument, approve_intent
+APP = instrument(APP)
+
+
 class StudioToolsTests(unittest.TestCase):
     def app(self, kind='text'):
         app = AppTest.from_string(APP.replace('KIND', repr(kind)), default_timeout=15).run()
@@ -76,8 +80,14 @@ class StudioToolsTests(unittest.TestCase):
 
     def submit(self, app, kind='text', prompt='Напиши ясный текст с конкретным примером'):
         app.text_area(key=f'studio_tool_77_project-1_{kind}_prompt').input(prompt)
-        label = {'text':'Подготовить текст','image':'Создать изображение','audio':'Озвучить'}[kind]
+        before = len(app.session_state['_calls'])
+        label = '1. Понять подачу' if kind == 'audio' else '1. Понять мой замысел'
         next(button for button in app.button if button.label == label).click().run()
+        self.assertEqual(len(app.session_state['_calls']), before)
+        if prompt.strip() and app.session_state.filtered_state.get('_project_changes', {}).get('owner_id', 77) == 77 and any(b.label == '✅ Да, именно это' for b in app.button):
+            approve_intent(app)
+            label = {'text':'✨ Создать текст','image':'✨ Создать изображение','audio':'🎙️ Озвучить'}[kind]
+            next(button for button in app.button if button.label == label).click().run()
         self.assertFalse(app.exception, [item.message for item in app.exception])
         return app
 
@@ -128,7 +138,7 @@ class StudioToolsTests(unittest.TestCase):
         script = APP.replace("return {'id':'saved-1','studio_complete':True}", "return {'id':'saved-1','studio_complete':False}")
         app = AppTest.from_string(script.replace('KIND', repr('text')), default_timeout=15).run()
         self.submit(app)
-        self.assertFalse(app.success)
+        self.assertFalse(any('Сохранено' in x.value for x in app.success))
         self.assertTrue(app.warning)
         self.assertEqual(len(app.session_state['_calls']), 1)
 
@@ -158,7 +168,7 @@ class StudioToolsTests(unittest.TestCase):
         self.assertEqual(call[:2], ('audio','audio/speech'))
         self.assertEqual(call[2]['voice'], 'nova')
         self.assertEqual(call[2]['input'], 'Это точные слова владельца.')
-        self.assertEqual(call[2]['instructions'], 'Энергично и с короткими паузами')
+        self.assertIn('Энергично и с короткими паузами', call[2]['instructions'])
         self.assertTrue(app.session_state['_response_closed'])
         self.assertEqual(app.session_state['_saves'][0][2], 'audio')
         self.assertEqual(len(app.get('audio')), 1)
@@ -168,12 +178,12 @@ class StudioToolsTests(unittest.TestCase):
         app = self.app()
         app.session_state['_project_changes'] = {'owner_id':88}
         app.run()
-        self.assertTrue(next(button for button in app.button if button.label == 'Подготовить текст').disabled)
+        self.assertTrue(next(button for button in app.button if button.label == '1. Понять мой замысел').disabled)
         self.assertEqual(app.session_state['_calls'], [])
         script = APP.replace('77', '291173537')
         app = AppTest.from_string(script.replace('KIND', repr('text')), default_timeout=15).run()
         self.assertFalse(app.exception)
-        self.assertTrue(next(button for button in app.button if button.label == 'Подготовить текст').disabled)
+        self.assertTrue(next(button for button in app.button if button.label == '1. Понять мой замысел').disabled)
         self.assertEqual(app.session_state['_calls'], [])
 
     def test_blank_prompt_and_provider_error_do_not_save_fake_text(self):

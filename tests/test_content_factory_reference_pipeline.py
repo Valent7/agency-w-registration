@@ -269,6 +269,15 @@ class ReferenceGenerationTests(unittest.TestCase):
             generator._illustration.assert_not_called()
             client.preflight.assert_not_called()
 
+    def test_rejected_approved_reference_requires_owner_review_before_rewrite(self):
+        generator, client = self.generator()
+        generator._review_copy.return_value = {'approved': False, 'issues': ['Нужно уточнение владельца'], 'brief_feedback': 'Проверить'}
+        with self.assertRaises(GenerationError):
+            self.generate(generator, self.job())
+        generator._copy.assert_not_called()
+        generator._illustration.assert_not_called()
+        client.create_scene.assert_not_called()
+
     def test_voice_too_long_for_accepted_story_stops_before_paid_images(self):
         generator, _ = self.generator()
         with self.assertRaisesRegex(GenerationError, "больше живых сцен"):

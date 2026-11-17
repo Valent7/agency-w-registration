@@ -60,7 +60,7 @@ class PartnerOnboardingTests(unittest.TestCase):
         # The existing connected account and Director diagnostics remain usable.
         self.assertIn("if connection:", source)
         self.assertIn("if is_agency_owner(int(owner_telegram_id)):", source)
-        self.assertIn("🔄 Обновить разрешения Instagram", source)
+        self.assertIn("Подключить Instagram", source)
 
     def test_no_dead_instagram_prompt_or_radar_for_unconnected_partners(self):
         self.assertIn('if is_agency_owner(int(telegram_id)):', UI)

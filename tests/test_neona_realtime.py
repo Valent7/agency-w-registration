@@ -67,7 +67,8 @@ class NeonaRealtimeTests(unittest.TestCase):
 
             def on(self, _):
                 def decorator(callback):
-                    self.handler = callback
+                    if self.handler is None:
+                        self.handler = callback
                     return callback
                 return decorator
 

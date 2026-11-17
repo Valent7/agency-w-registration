@@ -113,7 +113,7 @@ def analyze(generator, current_project, video_bytes, **kwargs):
         raise RuntimeError('private-model-url?token=secret')
     return report(kwargs['style'])
 
-def save(store, owner_id, project_id, data, *, request_id):
+def save(store, owner_id, project_id, data, *, request_id, **kwargs):
     st.session_state['_saves'].append(
         (owner_id,project_id,copy.deepcopy(data),request_id)
     )
@@ -136,6 +136,10 @@ with patch('content_studio_reference_ui.st.file_uploader',side_effect=upload), \
 '''
 
 
+from tests.studio_intent_fixture import instrument, approve_intent
+APP = instrument(APP)
+
+
 class ReferenceUiTests(unittest.TestCase):
     key = 'studio_reference_77_project-1'
 
@@ -150,8 +154,11 @@ class ReferenceUiTests(unittest.TestCase):
         app.radio(key=self.key + '_style').set_value(style)
         next(
             item for item in app.button
-            if item.label == '✨ Подготовить сценарий'
+            if item.label == '1. Понять мой замысел'
         ).click().run()
+        if any(b.label == '✅ Да, именно это' for b in app.button):
+            approve_intent(app)
+            next(b for b in app.button if b.label == '✨ Разобрать образец и подготовить сценарий').click().run()
         self.assertFalse(app.exception, [item.message for item in app.exception])
         return app
 
@@ -171,15 +178,15 @@ class ReferenceUiTests(unittest.TestCase):
         self.assertFalse(app.exception, [item.message for item in app.exception])
         return app
 
-    def test_initial_page_is_exactly_three_step_flow_without_side_effects(self):
+    def test_initial_page_starts_with_intent_without_side_effects(self):
         app = self.app()
         visible = ' '.join(
             str(item.value)
             for group in (app.subheader, app.markdown, app.caption, app.info)
             for item in group
         )
-        self.assertIn('Видео по образцу — 3 шага', visible)
-        self.assertIn('1. Загрузите видео-образец', visible)
+        self.assertIn('Видео по образцу', visible)
+        self.assertIn('1. Загрузите образец', visible)
         self.assertEqual(app.session_state['_analyses'], [])
         self.assertEqual(app.session_state['_saves'], [])
         self.assertEqual(app.session_state['_creates'], [])

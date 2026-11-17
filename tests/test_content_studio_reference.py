@@ -138,7 +138,7 @@ class ReferenceModelTests(unittest.TestCase):
                 self.assertEqual(generator._structured.call_count, 1 if mode == "vision" else 0)
 
     def test_invalid_inputs_fail_before_inspection_or_provider(self):
-        cases = [(PROJECT, "invalid-style", ""), ({}, "live", ""), (PROJECT, "live", "x" * 3001),
+        cases = [(PROJECT, "invalid-style", ""), ({}, "live", ""), (PROJECT, "live", "x" * 12001),
                  ({**PROJECT, "facts": {"not": "text"}}, "live", "")]
         for project, style, goal in cases:
             with self.subTest(style=style), patch("content_studio_reference.inspect_reference_video") as inspect:

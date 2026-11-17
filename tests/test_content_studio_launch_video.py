@@ -100,7 +100,7 @@ class LaunchVideoTests(unittest.TestCase):
         self.assertTrue(job["studio_master"])
         self.assertTrue(job["requested_by_owner"])
         self.assertTrue(job["review_required"])
-        self.assertEqual(job["video_mode"], "live")
+        self.assertEqual(job["video_mode"], "brag")
         self.assertGreaterEqual(len(job["production_plan"]), 4)
         self.assertEqual(job["approved_intent"]["main_idea"], BRIEF["hook"])
 

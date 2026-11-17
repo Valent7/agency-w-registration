@@ -256,7 +256,7 @@ class InstagramDirectIdentityTests(unittest.TestCase):
     def test_ui_distinguishes_record_from_direct_delivery(self):
         self.assertIn("Зелёный статус означает, что аккаунт записан", UI)
         self.assertIn('instagram/diagnose', UI)
-        self.assertIn('Сверить аккаунт с Instagram', UI)
+        self.assertIn('Проверить аккаунт и разрешения', UI)
         self.assertIn('"status": "eq.connected"', SOURCE)
         self.assertIn("INSTAGRAM_OAUTH_CALLBACK_ERROR", SOURCE)
 

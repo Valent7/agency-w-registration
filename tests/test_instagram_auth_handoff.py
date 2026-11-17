@@ -114,7 +114,7 @@ class InstagramServerIssuedStateTests(unittest.TestCase):
 
     def test_streamlit_uses_signed_handoff_and_render_connect_url(self):
         self.assertIn("from instagram_auth_handoff import create_signed_handoff", UI_SOURCE)
-        self.assertIn("st.secrets.get(\"SUPABASE_SECRET_KEY\")", UI_SOURCE)
+        self.assertIn('_runtime_secret("SUPABASE_SECRET_KEY")', UI_SOURCE)
         self.assertIn('return f"{base_url}/instagram/connect?"', UI_SOURCE)
         start = UI_SOURCE.index("def _instagram_connect_state(")
         end = UI_SOURCE.index("def _render_connected_channel_card(", start)

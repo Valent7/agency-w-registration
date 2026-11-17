@@ -5,6 +5,9 @@ on:
   pull_request:
     paths:
       - "content_factory_*.py"
+      - "kadrian_*.py"
+      - "kadrian_context/**"
+      - "tests/test_kadrian*.py"
       - "content_studio_*.py"
       - "agency_outro.py"
       - "content_factory_setup.sql"
@@ -38,5 +41,7 @@ jobs:
           python -m pip check
       - name: Compile application and worker
         run: python -m compileall -q .
+      - name: Check Kadrian memory and provider workflows
+        run: python -m unittest discover -s tests -p 'test_kadrian*.py' -v
       - name: Run offline regression and real media tests
         run: python -m unittest discover -s tests -v
