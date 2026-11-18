@@ -321,3 +321,68 @@ class FilmTests(TestCase):
         self.assertEqual(ready['state'], 'ready')
         self.assertEqual(ready['film_id'], original.film_id)
         self.assertEqual(original.read_asset(77, ready['assets'][0]), b'video')
+
+    def test_ui_blocks_new_film_until_paid_image_result_is_saved_without_regeneration(self):
+        from streamlit.testing.v1 import AppTest
+        script = 'import streamlit as st\nfrom kadrian_studio_ui import render_kadrian\nrender_kadrian(77, st.session_state["ask"])'
+        # A valid tiny image makes Streamlit display verification meaningful.
+        import io
+        from PIL import Image
+        output = io.BytesIO()
+        Image.new('RGB', (2, 2), 'red').save(output, format='PNG')
+        data = output.getvalue()
+        key = f'kadrian_77_{self.pid}_film_{self.legacy}'
+        app = AppTest.from_string(script)
+        app.session_state['ask'] = Mock()
+        app.session_state[key] = {'film_id': self.legacy, 'unsaved_image': {
+            'data': data, 'turn_id': 'paid-image', 'prompt': 'Эскиз', 'answer': 'Эскиз',
+            'brief': 'Сценарий', 'request': 'image-request'}}
+        with patch('kadrian_studio_ui._runtime', return_value=(self.raw, None, None)), \
+             patch('kadrian_studio_ui.connection_status', return_value={}), \
+             patch('kadrian_studio_ui._draw_chat_image') as draw:
+            with patch.object(self.raw, 'put_asset', side_effect=StoreError('offline')):
+                app.run()
+                self.assertFalse(app.exception)
+                self.assertFalse(any(x.label == '🎬 Новый фильм / мультфильм' for x in app.button))
+                self.assertTrue(any('не сохранён' in x.value for x in app.warning))
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any(x.label == '🎬 Новый фильм / мультфильм' for x in app.button))
+            draw.assert_not_called()
+        turns = self.one.get_project(77, self.pid)['kadrian_chat']['turns']
+        self.assertEqual(turns[-1]['id'], 'paid-image')
+        self.assertEqual(self.one.read_asset(77, turns[-1]['image_asset']), data)
+
+    def test_editable_scene_draft_survives_switch_and_fresh_browser(self):
+        from streamlit.testing.v1 import AppTest
+        script = 'import streamlit as st\nfrom kadrian_studio_ui import render_kadrian\nrender_kadrian(77, st.session_state["ask"])'
+        def field(app, group, label):
+            return next(x for x in getattr(app, group) if x.label == label)
+        with patch('kadrian_studio_ui._runtime', return_value=(self.raw, None, None)), \
+             patch('kadrian_studio_ui.connection_status', return_value={}), \
+             patch('kadrian_production_ui._config', return_value={'KADRIAN_HEYGEN_API_KEY': 'test'}):
+            app = AppTest.from_string(script)
+            app.session_state['ask'] = Mock()
+            app.run()
+            field(app, 'selectbox', 'Производство').set_value('scene').run()
+            field(app, 'text_area', 'Задание для сцены').set_value('Кот пьёт из блюдца, держа его в лапах').run()
+            field(app, 'button', '🎬 Новый фильм / мультфильм').click().run()
+            field(app, 'selectbox', 'Производство').set_value('scene').run()
+            self.assertEqual(field(app, 'text_area', 'Задание для сцены').value, '')
+            field(app, 'selectbox', 'Сохранённые фильмы').set_value(self.legacy).run()
+            self.assertEqual(field(app, 'text_area', 'Задание для сцены').value, 'Кот пьёт из блюдца, держа его в лапах')
+            restarted = AppTest.from_string(script)
+            restarted.session_state['ask'] = Mock()
+            restarted.run()
+            self.assertEqual(field(restarted, 'text_area', 'Задание для сцены').value, 'Кот пьёт из блюдца, держа его в лапах')
+            self.assertFalse(restarted.exception)
+
+    def test_draft_capture_excludes_button_events_and_shared_rule_editor(self):
+        from kadrian_films import save_drafts
+        second = self.new()
+        save_drafts(self.raw, 77, self.pid, second.film_id, 'film', {
+            'film_scene_scene_prompt': 'Draft', 'film_scene_provider_submit': True,
+            'film_notes': 'Not an approved rule', 'film': {'messages': []},
+            'another_film_scene_prompt': 'Foreign'})
+        drafts = films(self.raw.get_project(77, self.pid))['items'][second.film_id]['drafts']
+        self.assertEqual(drafts, {'_scene_scene_prompt': 'Draft'})

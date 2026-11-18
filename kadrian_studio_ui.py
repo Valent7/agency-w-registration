@@ -3,7 +3,7 @@ from base64 import b64decode, b64encode
 import re
 import os
 
-from kadrian_films import FilmStore, films, create_film, change_film
+from kadrian_films import FilmStore, films, create_film, change_film, save_drafts
 from kadrian_memory import director_instructions, project_context, restore_chat, save_turn, production_plan
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -124,6 +124,28 @@ def render_kadrian(owner_id, ask_ai):
     for state_key in list(st.session_state):
         if state_key.startswith(base_key + "_film_") and isinstance(st.session_state[state_key], dict):
             previous_chat = st.session_state[state_key]
+            if previous_chat.get('film_id'):
+                try:
+                    save_drafts(raw_store, owner_id, project_id, previous_chat['film_id'], state_key, st.session_state)
+                except Exception:
+                    st.error('Изменения сценария ещё не сохранены. Переключение фильмов остановлено.')
+                    return
+            if previous_chat.get('unsaved_image'):
+                unsaved = previous_chat['unsaved_image']
+                try:
+                    previous_store = FilmStore(raw_store, owner_id, project_id, previous_chat['film_id'])
+                    asset = previous_store.put_asset(owner_id, project_id, None, 'kadrian-frame.png', unsaved['data'], 'image/png')
+                    previous_chat['pending_save'] = {k: v for k, v in unsaved.items() if k != 'data'}
+                    previous_chat['pending_save']['image_asset'] = asset
+                    previous_chat.pop('unsaved_image')
+                except Exception:
+                    st.warning('Эскиз создан, но ещё не сохранён. Переключение фильмов остановлено до сохранения.')
+                    st.image(unsaved['data'])
+                    st.download_button('Скачать несохранённый эскиз', unsaved['data'], 'kadrian-frame.png', 'image/png',
+                                       key=state_key + '_download_unsaved')
+                    if st.button('Повторить сохранение эскиза', key=state_key + '_retry_image'):
+                        st.rerun()
+                    return
             if previous_chat.get("pending_save"):
                 try:
                     previous_store = FilmStore(raw_store, owner_id, project_id, previous_chat['film_id'])
@@ -170,6 +192,9 @@ def render_kadrian(owner_id, ask_ai):
         return
     key = base_key + '_film_' + film_id
     item = films(project)['items'][film_id]
+    for suffix, value in item.get('drafts', {}).items():
+        if key + suffix not in st.session_state:
+            st.session_state[key + suffix] = value
     chat = restore_chat(project)
     chat['film_id'] = film_id
     try:
@@ -339,9 +364,9 @@ def render_kadrian(owner_id, ask_ai):
             try:
                 asset = store.put_asset(owner_id, project_id, None, "kadrian-frame.png", image, "image/png")
             except Exception:
-                st.error("Эскиз создан, но не сохранён на сервере. Скачайте изображение из предпросмотра перед закрытием окна.")
-                chat["messages"].extend([("user", prompt), ("assistant", image)])
-                return
+                chat['unsaved_image'] = {'data': image, 'turn_id': uuid4().hex, 'prompt': prompt,
+                                         'answer': 'Эскиз', 'brief': chat['brief'], 'request': chat['request']}
+                st.rerun()
             chat["messages"].extend([("user", prompt), ("assistant", asset)])
             chat["pending_save"] = {"turn_id": uuid4().hex, "prompt": prompt, "answer": "Эскиз",
                                     "brief": chat["brief"], "request": chat["request"], "image_asset": asset}
@@ -409,4 +434,7 @@ def render_kadrian(owner_id, ask_ai):
         st.caption("Изображения можно использовать как опорный кадр сцены.")
     if route != "runway":
         render_production(owner_id, project, store, ask_ai, chat, route, style, key + "_" + route)
-        return
+    try:
+        save_drafts(raw_store, owner_id, project_id, film_id, key, st.session_state)
+    except Exception:
+        st.warning('Изменения полей сценария пока не сохранены. Повторите сохранение перед закрытием окна.')

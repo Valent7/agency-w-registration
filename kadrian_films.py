@@ -1,5 +1,7 @@
 """Durable film workspaces; no provider calls, schema changes or job resets."""
 from copy import deepcopy
+import json
+import re
 from uuid import UUID, uuid4, uuid5, NAMESPACE_URL
 
 from content_factory_store import StoreError
@@ -58,6 +60,26 @@ def create_film(store, owner, project_id, film_id=None):
         except StoreError:
             if attempt == 4:
                 raise
+
+
+def save_drafts(store, owner, project_id, film_id, prefix, state):
+    """Persist editable production fields and idempotency tokens, never button events."""
+    pattern = r'(?:^|_)(?:style|music|route|title|scene_prompt|aspect|seconds|reference_image|clips|music_track|music_volume|assembly_aspect|dialogue|dialogue_brief|dialogue_revision|line_speaker_\d+|line_text_\d+|duration_\d+|avatar_\d+|voice_\d+|submission_[a-f0-9]+)$'
+    values = {}
+    for key in state:
+        if key.startswith(prefix + '_') and re.search(pattern, key[len(prefix):]):
+            value = state[key]
+            try:
+                encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            except (ValueError, TypeError):
+                continue
+            if len(encoded.encode()) <= 128000:
+                values[key[len(prefix):]] = value
+    project = _project(store, owner, project_id)
+    previous = films(project)['items'][film_id].get('drafts', {})
+    merged = {**previous, **values}
+    if merged != previous:
+        change_film(store, owner, project_id, film_id, lambda item: item.update(drafts={**item.get('drafts', {}), **values}))
 
 
 def production_status(job):
