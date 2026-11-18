@@ -124,7 +124,7 @@ def render_kadrian(owner_id, ask_ai):
                 st.rerun()
             return
     from agent_memory_runtime import enabled, prepare_project
-    if enabled(owner_id):
+    if enabled(owner_id, project_id):
         from agent_memory_runtime import reconcile_project
         try:
             reconcile_project(store, owner_id, project)
@@ -227,7 +227,7 @@ def render_kadrian(owner_id, ask_ai):
         if not prompt:
             st.warning("Запишите пожелание ещё раз или напишите его.")
             return
-        if enabled(owner_id):
+        if enabled(owner_id, project_id):
             try:
                 project = prepare_project(store, owner_id, project, "chat:" + uuid4().hex, prompt)
             except Exception:

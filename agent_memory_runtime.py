@@ -8,20 +8,51 @@ from datetime import datetime, timezone
 import json
 import os
 import re
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from agent_memory import Memory, Principal, Scope, digest, MemoryError
 from agent_memory_store import Repository
 
 
-def enabled(owner_id=None):
+def enabled(owner_id=None, project_id=None):
+    """Fail closed: one configured UUID, authenticated owner AND project required.
+
+    The owner allowlist is an additional authorization boundary, never a fallback
+    to enabling every project. This reads configuration only; it installs nothing.
+    """
     if os.environ.get('AGENCY_MEMORY_V1', '').strip() != '1':
         return False
+    if type(owner_id) is not int or owner_id <= 0 or not isinstance(project_id, str):
+        return False
     owners = {v.strip() for v in os.environ.get('AGENCY_MEMORY_V1_OWNERS', '').split(',') if v.strip()}
-    return bool(owners) if owner_id is None else str(owner_id) in owners
+    if str(owner_id) not in owners:
+        return False
+    selected = os.environ.get('AGENCY_MEMORY_V1_PROJECT_ID', '').strip()
+    try:
+        # Reject lists, wildcards, names and non-canonical IDs. A selector is ONE UUID.
+        if str(UUID(selected)) != selected or str(UUID(project_id)) != project_id:
+            return False
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return project_id == selected
+
+
+def legacy_project(project):
+    """Do not apply a cached v1 context after the selected project is switched/off.
+
+    Stored history/snapshots are never deleted. Only the transient model input is
+    stripped; ordinary legacy project objects retain identity and all old fields.
+    """
+    if '_agent_memory' not in project:
+        return project
+    result = deepcopy(project)
+    result.pop('_agent_memory')
+    return result
 
 
 def project_memory(store, owner_id, project, *, kind='agent'):
+    if not enabled(owner_id, project.get('id')):
+        raise MemoryError('Memory v1 is disabled for this project')
     if project.get('owner_id') != owner_id or not store.get_project(owner_id, project['id']):
         raise MemoryError('Project does not belong to this owner')
     scope = Scope(owner_id, 'kadrian', project['id'], project['id'])
@@ -32,8 +63,8 @@ def project_memory(store, owner_id, project, *, kind='agent'):
 
 
 def prepare_project(store, owner_id, project, task_id, request):
-    if not enabled(owner_id):
-        return project
+    if not enabled(owner_id, project.get('id')):
+        return legacy_project(project)
     project_memory(store, owner_id, project)  # validate the caller's owner/project binding
     project = store.get_project(owner_id, project['id'])
     memory = project_memory(store, owner_id, project)
@@ -57,8 +88,8 @@ def rule_fingerprint(context):
 
 
 def before_job(store, job, project):
-    if not enabled(job['owner_id']) or not (job.get('kadrian_auto') or job.get('kadrian_provider')):
-        return project
+    if not enabled(job['owner_id'], job['project_id']) or not (job.get('kadrian_auto') or job.get('kadrian_provider')):
+        return legacy_project(project)
     current = prepare_project(store, job['owner_id'], project, 'job:' + job['id'],
                               {'brief': (job.get('provider_spec') or {}).get('brief', job.get('topic', ''))})
     # Refresh for policy comparison; task snapshot itself remains immutable.
@@ -81,7 +112,7 @@ def job_event(job, changes=None):
 
 
 def record_job_state(store, job):
-    if not enabled(job['owner_id']) or not (job.get('kadrian_auto') or job.get('kadrian_provider') or job.get('memory_snapshot')):
+    if not enabled(job['owner_id'], job['project_id']) or not (job.get('kadrian_auto') or job.get('kadrian_provider') or job.get('memory_snapshot')):
         return
     pending = job.get('memory_outbox') or []
     if not pending and job.get('memory_journaled'):
@@ -108,7 +139,7 @@ def record_job_state(store, job):
 
 
 def drain_turns(store, owner_id, project):
-    if not enabled(owner_id):
+    if not enabled(owner_id, project.get('id')):
         return
     memory = project_memory(store, owner_id, project)
     # Legacy turns are the durable outbox: replay is idempotent after process/window restart.
@@ -128,7 +159,7 @@ def drain_turns(store, owner_id, project):
 
 def migrate_legacy(store, owner_id, project):
     """Explicit, owner-triggered idempotent import; old columns/files are untouched."""
-    if not enabled(owner_id):
+    if not enabled(owner_id, project.get('id')):
         raise MemoryError('Memory v1 is disabled')
     memory = project_memory(store, owner_id, project, kind='owner')
     for field in ('kadrian_notes', 'facts'):
@@ -140,7 +171,7 @@ def migrate_legacy(store, owner_id, project):
 
 
 def reconcile_project(store, owner_id, project):
-    if not enabled(owner_id):
+    if not enabled(owner_id, project.get('id')):
         return
     drain_turns(store, owner_id, project)
     for job in store.list_jobs(owner_id, project['id'], limit=1000):

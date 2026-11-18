@@ -2,6 +2,7 @@
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 from content_factory_store import SQLiteStore
 from agent_memory_store import Repository
@@ -13,6 +14,8 @@ class MemoryUiTests(unittest.TestCase):
             path=Path(tmp)/'synthetic.sqlite3';store=SQLiteStore(path)
             project=store.save_project(11,{'name':'Synthetic UI project'})
             Repository(store,initialize=True)
+            selected = patch.dict('os.environ', {'AGENCY_MEMORY_V1':'1','AGENCY_MEMORY_V1_OWNERS':'11','AGENCY_MEMORY_V1_PROJECT_ID':project['id']})
+            selected.start(); self.addCleanup(selected.stop)
             code=f'''
 from content_factory_store import SQLiteStore
 from agent_memory_ui import render_memory

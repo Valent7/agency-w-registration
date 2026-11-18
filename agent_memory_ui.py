@@ -4,11 +4,13 @@ from uuid import uuid4
 import streamlit as st
 
 from agent_memory import Memory, Principal, Scope, digest, validate_bundle
-from agent_memory_runtime import project_memory, migrate_legacy
+from agent_memory_runtime import enabled, project_memory, migrate_legacy
 from agent_memory_sync import import_local, validate_local_bundle
 
 
 def render_memory(store, owner_id, project):
+    if not enabled(owner_id, project.get('id')):
+        return
     key = 'memory_v1_' + project['id']
     with st.expander('Версионная память и проверенные правила'):
         try:

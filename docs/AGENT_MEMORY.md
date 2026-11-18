@@ -92,7 +92,15 @@ changing approved production. A check/fact/event that changes does not itself
 rewrite an approved screenplay. The content generator receives versioned context.
 
 Runtime UI and worker are OFF unless `AGENCY_MEMORY_V1=1` and the authenticated
-owner is explicitly included in `AGENCY_MEMORY_V1_OWNERS` (comma-separated IDs). With it ON, failure to
+owner is explicitly included in `AGENCY_MEMORY_V1_OWNERS` (comma-separated IDs),
+AND the exact project UUID matches the ONE `AGENCY_MEMORY_V1_PROJECT_ID`. A missing
+project identity/selector, invalid UUID, list, wildcard or owner-only call is OFF;
+there is no owner-wide fallback. Both web and worker must use the same selected UUID.
+UI, pre-task reads, legacy migration, reconciliation, job snapshots and event outboxes
+all use this gate. Other projects retain legacy behavior and do not open the new
+memory adapter. Disabling/switching a project retains all history and pending
+outboxes, and removes only transient cached v1 context from a legacy task input.
+With it ON, failure to
 read mandatory memory stops a new request before model/provider calls. An absent
 schema is an error, not a silent fallback to empty memory. Chat turns are a durable outbox; worker transitions include an explicit outbox
 committed with the job state. Pending transitions survive later updates until an
@@ -170,7 +178,8 @@ Installation is NOT authorized by this branch. Before any installation:
 2. Review SQL and restore test results. Run the SQL only after separate permission.
 3. Back up old notes/chat and code reference privately. Leave feature disabled.
 4. Deploy only after separate approval. Enable one owner/project through a reviewed
-   rollout using the explicit owner allowlist AGENCY_MEMORY_V1_OWNERS.
+   rollout using AGENCY_MEMORY_V1_OWNERS AND one AGENCY_MEMORY_V1_PROJECT_ID; verify
+   that web and worker configurations agree. Never use a project name or a list of UUIDs.
 5. Import legacy content, verify cloud/desktop round-trip, offline desktop operation,
    concurrent edits, revoked access and paid-operation protections with mocks.
 6. Expand only after owner acceptance.
@@ -183,3 +192,9 @@ Cost: no new paid service is required. Existing storage/worker/API usage can gro
 check capacity before enabling. CI uses ordinary repository Actions quota and an
 ephemeral test container. No provider credentials are used by these tests. Real
 SDK/model-based enrichment would have a separate API cost and is not enabled.
+
+## Local/cloud operator instructions
+
+See [the Russian step-by-step guide](KADRIAN_MEMORY_SYNC_RU.md) for both exchange
+directions, exact existing UI labels, manual versus automated steps, privacy,
+conflicts and rollback. It describes prepared code, not an installed integration.

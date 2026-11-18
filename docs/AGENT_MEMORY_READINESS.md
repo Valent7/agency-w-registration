@@ -39,3 +39,17 @@ On 84a0de257892d97070f826cdc63443ed8f947982 both jobs also passed:
 Final review additionally supplies scoped plaintext local comparison export and
 validated import preview. The full regression workflow now explicitly watches
 agent_memory files, so later core changes cannot bypass that regression check.
+
+## Single-project pilot revision
+
+Owner requested a strict one-project gate before installation. The revision adds
+one canonical UUID selector AGENCY_MEMORY_V1_PROJECT_ID in addition to the existing
+owner allowlist. Missing/invalid/multiple IDs fail closed. All runtime entry points,
+UI controls, worker outboxes, snapshots and reconciliation use owner AND project.
+Legacy behavior and existing data outside the pilot are preserved.
+
+The Russian operator guide docs/KADRIAN_MEMORY_SYNC_RU.md explicitly distinguishes
+implemented automatic behavior from manually initiated exchange. No file watcher,
+semantic auto-merge, instruction rewrite or deployed synchronization is claimed.
+Validation of this revision is run on the updated PR code; previous green checks
+are historical evidence only. Production installation remains unauthorized.

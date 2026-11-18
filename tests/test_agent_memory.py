@@ -24,6 +24,8 @@ class MemoryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.store = SQLiteStore(Path(self.tmp.name)/'data.sqlite3')
         self.project = self.store.save_project(11, {'name':'Synthetic project','facts':'Legacy fact', 'kadrian_notes':'Keep old notes'})
+        selector = patch.dict(os.environ, {'AGENCY_MEMORY_V1_PROJECT_ID':self.project['id']})
+        selector.start(); self.addCleanup(selector.stop)
         self.scope = Scope(11,'kadrian',self.project['id'],self.project['id'])
         self.owner = Principal(11,'owner:11','owner')
         self.agent = Principal(11,'agent:kadrian','agent','kadrian',self.scope.workspace_id)
