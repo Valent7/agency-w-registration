@@ -124,7 +124,7 @@ class ActionsTests(unittest.TestCase):
         app.session_state['ask']=Mock(return_value=json.dumps(self.spec))
         with patch('kadrian_studio_ui._runtime',return_value=(self.store,None,None)),patch('kadrian_studio_ui.connection_status',return_value={}):
             app.run()
-            app.chat_input[0].set_value('Создай первую сцену').run()
+            app.chat_input[0].set_value('Создай видеоролик из этой картинки').run()
             self.assertFalse(app.exception)
             jobs=self.store.list_jobs(77,self.project['id'])
             self.assertEqual(len(jobs),1)

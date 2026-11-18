@@ -222,7 +222,9 @@ def render_kadrian(owner_id, ask_ai):
             st.markdown(prompt)
         draw = re.match(
             r"^(?:пожалуйста[,]?\s+)?(?:нарисуй|перерисуй|покажи|создай|сделай|пришли)\b", prompt.strip(), re.I
-        ) and re.search(r"\b(?:портрет\w*|картинк\w*|эскиз\w*|иллюстраци\w*)", prompt, re.I)
+        ) and re.search(r"\b(?:портрет\w*|картинк\w*|эскиз\w*|иллюстраци\w*)", prompt, re.I) and not re.search(
+            r"\b(?:ролик\w*|видеоролик\w*|видео\w*|мультфильм\w*|ожив\w*|анимиру\w*)", prompt, re.I
+        )
         if draw:
             with turn, st.chat_message("assistant"):
                 try:
