@@ -714,6 +714,8 @@ class Generator:
             # The owner's accepted brief must not drift when project settings
             # change while its background job is waiting for a worker.
             clean_project = copy.deepcopy(reference["project"])
+        if project.get('_agent_memory'):
+            clean_project['versioned_memory'] = project['_agent_memory']
         mode = "live" if production else job.get("video_mode", project.get("video_mode", "illustrated"))
         if mode not in {"live", "illustrated"}:
             raise GenerationError("Выберите поддерживаемый режим создания видео.")

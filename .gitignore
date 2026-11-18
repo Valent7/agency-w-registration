@@ -8,3 +8,12 @@ __pycache__/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Private agent memory exchange/backup artifacts; never commit tenant data.
+.memory-exchange/
+.memory-backups/
+*.memory-backup.enc
+*.agent-memory.json
+context/SYNCED_MEMORY.md
+.memory-projection.lock
+context/.memory-projection-*

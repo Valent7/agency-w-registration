@@ -123,6 +123,16 @@ def render_kadrian(owner_id, ask_ai):
             if st.button("Повторить сохранение", key=key + "_retry_save"):
                 st.rerun()
             return
+    from agent_memory_runtime import enabled, prepare_project
+    if enabled(owner_id):
+        from agent_memory_runtime import reconcile_project
+        try:
+            reconcile_project(store, owner_id, project)
+        except Exception:
+            st.error("Память недоступна. Работа приостановлена до подтверждения сохранения.")
+            return
+        from agent_memory_ui import render_memory
+        render_memory(store, owner_id, project)
     with st.expander("Память проекта"):
         st.caption("Согласованные факты, стиль, решения и замечания для будущих разговоров.")
         notes = st.text_area("Что Кадриану нужно помнить", value=project.get("kadrian_notes", ""),
@@ -217,6 +227,12 @@ def render_kadrian(owner_id, ask_ai):
         if not prompt:
             st.warning("Запишите пожелание ещё раз или напишите его.")
             return
+        if enabled(owner_id):
+            try:
+                project = prepare_project(store, owner_id, project, "chat:" + uuid4().hex, prompt)
+            except Exception:
+                st.error("Актуальная память недоступна. Запрос к ИИ и платное производство не запущены.")
+                return
         history = "\n\n".join(f"{role}: {message}" for role, message in chat["messages"][-60:] if isinstance(message, str))
         with turn, st.chat_message("user"):
             st.markdown(prompt)
@@ -229,7 +245,7 @@ def render_kadrian(owner_id, ask_ai):
             with turn, st.chat_message("assistant"):
                 try:
                     with st.spinner("Кадриан рисует…"):
-                        image = _draw_chat_image(prompt, chat["brief"] + "\n" + history, style, chat.get("files", []))
+                        image = _draw_chat_image(prompt, project_context(project) + '\n' + chat["brief"] + "\n" + history, style, chat.get("files", []))
                 except Exception as exc:
                     import logging
                     status = getattr(exc, "status_code", None)

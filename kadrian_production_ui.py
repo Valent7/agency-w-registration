@@ -48,6 +48,8 @@ def enqueue_provider(store, owner_id, project_id, provider, spec, style, request
     project = store.get_project(owner_id, project_id)
     if not project:
         raise ValueError('Проект недоступен этому владельцу.')
+    from agent_memory_runtime import prepare_project
+    project = prepare_project(store, owner_id, project, 'provider:' + request_id, spec)
     if isinstance(quote_usd, bool) or not isinstance(quote_usd, (int, float)) or not math.isfinite(quote_usd) or quote_usd <= 0:
         raise ValueError('Нужна оценка стоимости перед запуском.')
     if provider == 'heygen':
@@ -63,7 +65,7 @@ def enqueue_provider(store, owner_id, project_id, provider, spec, style, request
         'platform': 'studio', 'format': 'reel', 'state': 'queued',
         'scheduled_at': now, 'available_at': now, 'requested_by_owner': True,
         'studio_master': True, 'video_style': style, 'review_required': True,
-        'kadrian_provider': provider, 'provider_spec': spec,
+        'kadrian_provider': provider, 'memory_snapshot': project.get('_agent_memory'), 'provider_spec': spec,
         'provider_fingerprint': fingerprint, 'approved_quote_usd': quote_usd,
         'approved_quote_cents': quote_cents,
         'dedupe_key': 'kadrian-provider:' + request_id,

@@ -52,7 +52,9 @@ class Worker:
             projects = [project]
         else:
             projects = self.store.list_projects(owner_id)
+        from agent_memory_runtime import reconcile_project
         for project in projects:
+            reconcile_project(self.store, project['owner_id'], project)
             if project.get("automation_enabled") and not is_agency_access_revoked(project["owner_id"]):
                 existing = {job["id"] for job in self.store.list_jobs(project["owner_id"], project["id"], limit=1000)}
                 planned = service.plan(project["owner_id"], project["id"], int(project.get("plan_days", 7)), connected_only=True)
@@ -170,7 +172,14 @@ class Worker:
             pass
 
     def _update(self, job, **changes):
-        return self.store.update_job(job["owner_id"], job["id"], changes, lease_owner=self.worker_id)
+        saved = self.store.update_job(job["owner_id"], job["id"], changes, lease_owner=self.worker_id)
+        # Durable job state remains the outbox if event delivery fails. Reconcile on next pass.
+        from agent_memory_runtime import record_job_state
+        try:
+            record_job_state(self.store, saved)
+        except Exception:
+            LOG.warning("Agent memory state event pending for reconciliation")
+        return saved
 
     def _finish(self, job, **changes):
         return self._update(job, **changes, lease_owner=None, lease_until=None)
@@ -192,6 +201,11 @@ class Worker:
         project = self.store.get_project(job["owner_id"], job["project_id"])
         if not project:
             raise ValueError("Проект больше недоступен.")
+        from agent_memory_runtime import before_job, enabled
+        project = before_job(self.store, job, project)
+        if enabled(job['owner_id']) and (job.get('kadrian_auto') or job.get('kadrian_provider')) and not job.get('memory_snapshot'):
+            job = {**job, 'memory_snapshot': project['_agent_memory']}
+            self._update(job, memory_snapshot=job['memory_snapshot'])
         studio_master = job.get("studio_master") is True
         if not studio_master and (
             job["platform"] not in project["platforms"] or job["format"] not in project["formats"]

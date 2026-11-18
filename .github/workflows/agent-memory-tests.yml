@@ -1,0 +1,42 @@
+name: Agent memory preparation tests
+on:
+  pull_request:
+    paths:
+      - 'agent_memory*.py'
+      - 'agent_memory_setup.sql'
+      - 'tests/test_agent_memory*.py'
+      - 'kadrian_*.py'
+      - 'content_factory_worker.py'
+      - '.github/workflows/agent-memory-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-memory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: synthetic-test-only
+          POSTGRES_DB: agent_memory_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AGENCY_MEMORY_V1: '0'
+      AGENCY_MEMORY_TEST_DSN: postgresql://postgres:synthetic-test-only@localhost:5432/agent_memory_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt 'psycopg[binary]==3.2.9'
+      - name: Memory behavior, security and real PostgreSQL transactions
+        run: python -m unittest discover -s tests -p 'test_agent_memory*.py' -v
+      - name: Existing Kadrian regression
+        run: python -m unittest discover -s tests -p 'test_kadrian*.py' -v
