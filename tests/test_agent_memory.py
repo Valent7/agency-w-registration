@@ -360,5 +360,37 @@ class MemoryTests(unittest.TestCase):
         from agent_memory import validate_bundle
         with self.assertRaises(AccessDenied):validate_bundle(bundle,self.scope)
 
+    def test_worker_outbox_retains_each_transition_during_memory_outage(self):
+        from content_factory_worker import Worker
+        from content_factory_core import iso,utc_now
+        from agent_memory_runtime import record_job_state
+        job=self.store.enqueue_job(11,self.project['id'],{'platform':'instagram','format':'reel',
+             'dedupe_key':'synthetic','state':'queued','scheduled_at':iso(utc_now()),
+             'kadrian_auto':True,'requested_by_owner':True})
+        claimed=self.store.claim_job('synthetic-worker',iso(utc_now()),owner_id=11,project_id=self.project['id'])
+        worker=Worker(self.store,worker_id='synthetic-worker')
+        with patch.dict(os.environ,{'AGENCY_MEMORY_V1':'1'}):
+            with patch('agent_memory_runtime.record_job_state',side_effect=MemoryError('offline')):
+                first=worker._update(claimed,state='generating')
+                worker._finish(first,state='ready')
+            saved=self.store.get_job(11,job['id'])
+            self.assertEqual([e['state'] for e in saved['memory_outbox']],['generating','ready'])
+            record_job_state(self.store,saved)
+            saved=self.store.get_job(11,job['id'])
+            self.assertEqual(saved['memory_outbox'],[])
+            self.assertEqual(self.mem.read()['revision'],2)
+            record_job_state(self.store,saved)
+            self.assertEqual(self.mem.read()['revision'],2)
+
+    def test_versioned_agency_profile_uses_explicit_project_id_not_display_name(self):
+        from agent_memory_runtime import prepare_project
+        from kadrian_memory import project_context
+        project=self.store.save_project(11,{'id':self.project['id'],'name':'Агентство W'})
+        with patch.dict(os.environ,{'AGENCY_MEMORY_V1':'1','AGENCY_MEMORY_AGENCY_PROJECT_IDS':''}):
+            ready=prepare_project(self.store,11,project,'task-profile',{})
+            self.assertNotIn('база_агентства',json.loads(project_context(ready)))
+        with patch.dict(os.environ,{'AGENCY_MEMORY_AGENCY_PROJECT_IDS':project['id']}):
+            self.assertIn('база_агентства',json.loads(project_context(ready)))
+
 
 if __name__=='__main__':unittest.main()

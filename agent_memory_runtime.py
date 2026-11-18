@@ -4,6 +4,7 @@ No schema installation, key changes, LLM extraction, or paid calls occur here.
 Every authenticated caller supplies identity from existing server auth, not the LLM.
 """
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -33,6 +34,8 @@ def project_memory(store, owner_id, project, *, kind='agent'):
 def prepare_project(store, owner_id, project, task_id, request):
     if not enabled(owner_id):
         return project
+    project_memory(store, owner_id, project)  # validate the caller's owner/project binding
+    project = store.get_project(owner_id, project['id'])
     memory = project_memory(store, owner_id, project)
     # Drain durable turn outbox before reading the next task context.
     drain_turns(store, owner_id, project)
@@ -67,23 +70,41 @@ def before_job(store, job, project):
     return current
 
 
+def job_event(job, changes=None):
+    changes = changes or {}
+    return {'id': uuid4().hex, 'job_id': job['id'],
+            'state': changes.get('state', job['state']),
+            'at': datetime.now(timezone.utc).isoformat(),
+            'assets': [{'sha256': a.get('sha256'), 'kind': a.get('kind')}
+                       for a in changes.get('assets', job.get('assets', []))],
+            'checks': 'Provider completion is not a perceptual quality approval.'}
+
+
 def record_job_state(store, job):
     if not enabled(job['owner_id']) or not (job.get('kadrian_auto') or job.get('kadrian_provider') or job.get('memory_snapshot')):
         return
+    pending = job.get('memory_outbox') or []
+    if not pending and job.get('memory_journaled'):
+        return
     project = store.get_project(job['owner_id'], job['project_id'])
     memory = project_memory(store, job['owner_id'], project)
-    # Artifact metadata and status only, never provider URLs/keys/raw exceptions.
-    payload = {'job_id': job['id'], 'state': job['state'], 'updated_at': job['updated_at'],
-               'assets': [{'sha256': a.get('sha256'), 'kind': a.get('kind')} for a in job.get('assets', [])],
-               'checks': 'Provider completion is not a perceptual quality approval.'}
-    for _ in range(3):
-        from agent_memory import Conflict
-        try:
-            return memory.record('execution', json.dumps(payload, ensure_ascii=False),
-                                 source='worker-state', key='job:' + job['id'] + ':' + job['updated_at'])
-        except Conflict:
-            continue
-    raise MemoryError('Состояние задания сохранено, но журнал памяти требует повторного чтения.')
+    if not pending:
+        # One explicit legacy snapshot. New worker transitions carry durable outbox IDs.
+        pending = [dict(job_event(job), id='legacy:' + job['updated_at'], at=job['updated_at'])]
+    from agent_memory import Conflict
+    for event in pending:
+        for attempt in range(3):
+            try:
+                memory.record('execution', json.dumps(event, ensure_ascii=False),
+                              source='worker-state', key='job:' + job['id'] + ':' + event['id'])
+                break
+            except Conflict:
+                if attempt == 2:raise
+    # Ack only the exact job version we delivered. A concurrent newer transition
+    # keeps its own outbox; replay after a lost ack is idempotent.
+    store.update_job(job['owner_id'], job['id'],
+                     {'memory_outbox': [], 'memory_journaled': True},
+                     lease_owner=job.get('lease_owner'), expected_updated_at=job['updated_at'])
 
 
 def drain_turns(store, owner_id, project):

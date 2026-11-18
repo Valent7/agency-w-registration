@@ -19,3 +19,14 @@ Production acceptance still requires separately authorized verification of the
 correct Supabase project, actual grants/backup capacity and authenticated owner
 identity. Other agents have a reusable core, not automatic deployment or implicit
 access to Kadrian data. Local bootstrap instructions remain unchanged until reviewed.
+
+## First GitHub verification
+
+On implementation commit 998eea4bb4b49017f081f7b7b27fc1acc5ac6882 both jobs passed:
+- Agent memory preparation tests, run 44326036982 (real PostgreSQL included).
+- Content factory autopilot, run 44326036375 (full Ubuntu/media regression).
+
+A subsequent review adds durable per-transition worker outboxes, a real Streamlit
+owner-approval test, strict backup shape validation and explicit project UUID
+knowledge-profile selection. Those changes receive a fresh CI run; prior green
+checks are not used as proof for untested changes.

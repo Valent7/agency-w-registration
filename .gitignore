@@ -17,3 +17,4 @@ __pycache__/
 context/SYNCED_MEMORY.md
 .memory-projection.lock
 context/.memory-projection-*
+agent-memory-backup.enc

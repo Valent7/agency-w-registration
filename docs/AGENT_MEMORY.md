@@ -28,7 +28,9 @@ Generic `agent_memory.py` is independent of Kadrian and of any LLM vendor. It us
   proposals. Only a trusted owner principal can approve/roll back policy.
 - Owner-level scopes: `agent_id=kadrian, workspace_id=owner` for one agent's common
   rules; `agent_id=*, workspace_id=owner` for explicitly approved rules for all agents
-  of this owner. No cross-owner global knowledge. Only approved rules from these
+  of this owner. No cross-owner global knowledge. For versioned tasks the Agency knowledge profile
+is selected by explicit AGENCY_MEMORY_AGENCY_PROJECT_IDS UUID configuration, not a
+mutable display name. Only approved rules from these
   scopes are supplied to a project; their raw client knowledge is not inherited.
 
 **Trust boundary:** Principal construction is server-side after existing Agency
@@ -92,9 +94,10 @@ rewrite an approved screenplay. The content generator receives versioned context
 Runtime UI and worker are OFF unless `AGENCY_MEMORY_V1=1` and the authenticated
 owner is explicitly included in `AGENCY_MEMORY_V1_OWNERS` (comma-separated IDs). With it ON, failure to
 read mandatory memory stops a new request before model/provider calls. An absent
-schema is an error, not a silent fallback to empty memory. Chat and job records are
-existing durable outboxes: successful old-store writes remain after event-delivery
-failure. Reconciliation replays turns and recent (up to 1000) jobs idempotently.
+schema is an error, not a silent fallback to empty memory. Chat turns are a durable outbox; worker transitions include an explicit outbox
+committed with the job state. Pending transitions survive later updates until an
+optimistic acknowledgement succeeds. Successful old-store writes remain after
+event-delivery failure. Reconciliation replays turns and recent (up to 1000) jobs idempotently.
 Legacy notes/facts are imported only through an explicit owner action, as legacy
 unknown data, and are never deleted or silently promoted to rules.
 

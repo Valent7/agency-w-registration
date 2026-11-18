@@ -45,9 +45,23 @@ def render_memory(store, owner_id, project):
                 if rules[rid]['status']=='proposed' and checks and st.button('Подготовить правило к утверждению', key=key+'_validate'):
                     mem.validate_rule(rid, checks, expected=snap['revision']); st.rerun()
                 if rules[rid]['status']=='validated':
+                    active = [i for i,e in entries.items() if e['kind']=='rule' and e['status']=='approved']
+                    replaces = st.selectbox('Заменяет прежнее правило', [None, *active],
+                                            format_func=lambda i: 'Новое независимое правило' if i is None else entries[i]['text'],
+                                            key=key+'_replaces')
                     approved = st.checkbox('Утверждаю именно этот текст для выбранной области памяти', key=key+'_approve_confirm')
                     if approved and st.button('Утвердить правило', key=key+'_approve'):
-                        mem.approve_rule(rid, expected=snap['revision']); st.rerun()
+                        mem.approve_rule(rid, expected=snap['revision'], replaces=replaces); st.rerun()
+            replaceable = {i:e for i,e in entries.items() if e['kind']=='rule' and e['status']=='approved'}
+            reversible = [i for i,e in replaceable.items() if e.get('replaces')]
+            if reversible:
+                rollback_id = st.selectbox('Вернуть предыдущую версию правила', reversible,
+                                           format_func=lambda i: entries[i]['text'], key=key+'_rollback_id')
+                rollback_confirm = st.checkbox('Подтверждаю возврат предыдущей утверждённой версии', key=key+'_rollback_confirm')
+                if rollback_confirm and st.button('Вернуть правило', key=key+'_rollback'):
+                    mem.rollback_rule(rollback_id, expected=snap['revision']); st.rerun()
+            if st.checkbox('Показать записи, достоверность и свидетельства', key=key+'_show_entries'):
+                st.json(list(entries.values()))
             bundle = mem.export()
             from agent_memory_backup import encrypt_backup, decrypt_backup
             if store.fernet_key:

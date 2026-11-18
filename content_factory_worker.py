@@ -172,9 +172,12 @@ class Worker:
             pass
 
     def _update(self, job, **changes):
+        from agent_memory_runtime import record_job_state, enabled, job_event
+        if enabled(job['owner_id']) and (job.get('kadrian_auto') or job.get('kadrian_provider') or job.get('memory_snapshot')):
+            fresh = self.store.get_job(job['owner_id'], job['id']) or job
+            changes['memory_outbox'] = [*(fresh.get('memory_outbox') or []), job_event(fresh, changes)]
         saved = self.store.update_job(job["owner_id"], job["id"], changes, lease_owner=self.worker_id)
-        # Durable job state remains the outbox if event delivery fails. Reconcile on next pass.
-        from agent_memory_runtime import record_job_state
+        # Transition and outbox commit together, even if memory storage is offline.
         try:
             record_job_state(self.store, saved)
         except Exception:

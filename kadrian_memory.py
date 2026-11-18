@@ -23,7 +23,11 @@ def project_context(project):
         data['versioned_memory'] = project['_agent_memory']
     data['память_владельца'] = project.get('kadrian_notes', '')
     # Agency knowledge applies only to the Agency's own project.
-    if str(project.get('name', '')).strip().casefold() in {'агентство w', 'agency w'}:
+    agency = str(project.get('name', '')).strip().casefold() in {'агентство w', 'agency w'}
+    if project.get('_agent_memory'):
+        # New memory never determines a knowledge profile from a mutable display name.
+        agency = str(project.get('id')) in {v.strip() for v in os.getenv('AGENCY_MEMORY_AGENCY_PROJECT_IDS', '').split(',') if v.strip()}
+    if agency:
         data['база_агентства'] = '\n\n'.join((CONTEXT / name).read_text(encoding='utf-8')
                                                for name in ('PROJECT.md', 'AGENCY_W_CORE.md'))
     return json.dumps(data, ensure_ascii=False)

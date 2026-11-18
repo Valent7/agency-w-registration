@@ -281,8 +281,25 @@ def validate_bundle(bundle, scope):
     if digest(body) != bundle.get('checksum'):
         raise MemoryError('Backup checksum mismatch')
     safe_content(body, max_bytes=64_000_000)
-    for n, row in enumerate(body.get('revisions', []), 1):
-        if row['revision'] != n or digest(row['document']) != row['hash']:
-            raise MemoryError('Backup history is incomplete or damaged')
-        if row['document'].get('schema') != 1:
+    rows = body.get('revisions')
+    if not isinstance(rows, list):
+        raise MemoryError('Backup history is missing')
+    for n, row in enumerate(rows, 1):
+        if not isinstance(row, dict) or row.get('revision') != n:
+            raise MemoryError('Backup history is incomplete')
+        doc = row.get('document')
+        if not isinstance(doc, dict) or digest(doc) != row.get('hash'):
+            raise MemoryError('Backup history is damaged')
+        if doc.get('schema') != 1 or not isinstance(doc.get('entries'), dict) or not isinstance(doc.get('tasks'), dict):
             raise MemoryError('Unsupported memory schema')
+        for entry_id, entry in doc['entries'].items():
+            if (not isinstance(entry, dict) or entry.get('id') != entry_id or
+                    not isinstance(entry.get('text'), str) or not entry.get('source') or
+                    entry.get('kind') not in {'fact','hypothesis','unknown','decision','feedback',
+                        'analysis','correction','check','rule','execution','legacy'} or
+                    entry.get('certainty') not in {'verified','hypothesis','unknown'} or
+                    entry.get('status') not in {'recorded','proposed','validated','approved','superseded','reverted'}):
+                raise MemoryError('Invalid entry in backup')
+        for task in doc['tasks'].values():
+            if not isinstance(task, dict) or 'request_hash' not in task:
+                raise MemoryError('Invalid task history in backup')
