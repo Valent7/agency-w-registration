@@ -95,7 +95,10 @@ def _render_chat_entry(role, entry, store=None, owner_id=None):
         elif isinstance(entry, bytes):
             st.image(entry)
         else:
-            st.markdown(entry)
+            if role == 'assistant' and isinstance(entry,str) and entry.strip() in {'Создаю сцену.','Создаю ролик.','Runway создаёт сцену.'}:
+                st.caption('История: задание было передано в производство. Текущий статус показан ниже.')
+            else:
+                st.markdown(entry)
 
 
 def render_kadrian(owner_id, ask_ai):
@@ -123,6 +126,17 @@ def render_kadrian(owner_id, ask_ai):
             if st.button("Повторить сохранение", key=key + "_retry_save"):
                 st.rerun()
             return
+    # Preserve a soundtrack still present in a browser session from before the fix.
+    cached_files = chat.get('files') or []
+    cached_music_key = sha256(b''.join(name.encode() + data for name,mime,data in cached_files if name.lower().endswith(('.mp3','.wav','.m4a')))).hexdigest()
+    if any(name.lower().endswith(('.mp3','.wav','.m4a')) for name,mime,data in cached_files) and chat.get('saved_music_key') != cached_music_key:
+        from kadrian_editing import remember_music_uploads
+        try:
+            chat['files'] = remember_music_uploads(store,owner_id,project_id,cached_files)
+            chat['saved_music_key'] = cached_music_key
+            chat['refresh_music_selection'] = True
+        except Exception:
+            st.warning('Прикреплённая музыка ещё не сохранена. Новые сцены по просьбе о музыке не запускаются.')
     with st.expander("Память проекта"):
         st.caption("Согласованные факты, стиль, решения и замечания для будущих разговоров.")
         notes = st.text_area("Что Кадриану нужно помнить", value=project.get("kadrian_notes", ""),
@@ -148,6 +162,12 @@ def render_kadrian(owner_id, ask_ai):
             except Exception:
                 st.error("Доступ к Runway не подтверждён. Проверьте ключ и баланс видеосервиса в настройках студии.")
     st.link_button("Прямая ссылка на Кадриана", "https://agency-w-web.onrender.com/?studio=kadrian")
+    from kadrian_editing_ui import render_edit_controls
+    try:
+        edit_sources, edit_music, edit_replace_audio = render_edit_controls(store, owner_id, project, key, chat)
+    except Exception:
+        st.warning("Материалы монтажа временно недоступны. Новые сцены по просьбе о музыке не запускаются.")
+        edit_sources, edit_music, edit_replace_audio = [], None, False
     gallery_key = key + "_gallery"
     first, second = st.columns(2)
     if first.button("Готовые видеоролики", key=key + "_live_library"):
@@ -196,10 +216,28 @@ def render_kadrian(owner_id, ask_ai):
             for role, entry in latest:
                 _render_chat_entry(role, entry, store, owner_id)
     if message:
+        from kadrian_editing import local_command, pause_production
+        early_command = local_command(message.text.strip())
+        if early_command and early_command['action'] == 'stop':
+            try:
+                pause_production(store,owner_id,project_id)
+                st.info(early_command['reply'])
+            except Exception:
+                st.error('Не удалось подтвердить остановку. Новые заказы не отправлены.')
+                return
         if message.files:
             files = [(item.name, item.type or "", item.getvalue()) for item in message.files]
             if len(files) > 8 or sum(len(data) for _, _, data in files) > 40 * 1024 * 1024:
                 st.error("Прикрепите до 8 файлов общим размером до 40 МБ.")
+                return
+            from kadrian_editing import remember_music_uploads
+            try:
+                files = remember_music_uploads(store,owner_id,project_id,files)
+                if any(mime.startswith('audio/') for _,mime,_ in files):
+                    chat['refresh_music_selection'] = True
+                    edit_music = None
+            except Exception:
+                st.error('Музыка не сохранена. Нужен MP3, WAV или M4A. Новые сцены не запускаются.')
                 return
             chat["files"] = files
         prompt = message.text.strip()
@@ -225,6 +263,28 @@ def render_kadrian(owner_id, ask_ai):
         ) and re.search(r"\b(?:портрет\w*|картинк\w*|эскиз\w*|иллюстраци\w*)", prompt, re.I) and not re.search(
             r"\b(?:ролик\w*|видеоролик\w*|видео\w*|мультфильм\w*|ожив\w*|анимиру\w*)", prompt, re.I
         )
+        from kadrian_editing import local_command, pause_production, STOP_REPLY
+        safe_command = local_command(prompt)
+        if safe_command:
+            try:
+                answer = str(safe_command.get('reply') or '')
+                if safe_command['action'] == 'stop':
+                    pause_production(store,owner_id,project_id)
+                    answer = STOP_REPLY
+                if safe_command['action'] == 'music_edit' or safe_command.get('edit_music'):
+                    from kadrian_editing_ui import execute_edit_command
+                    try:
+                        with st.spinner('Накладываю музыку на готовые сцены…'):
+                            edited = execute_edit_command(store,owner_id,project_id,prompt,edit_sources,edit_music,edit_replace_audio)
+                        answer = (answer + '\n\n' + edited).strip()
+                    except Exception as exc:
+                        answer = (answer + '\n\n' + (str(exc) if isinstance(exc, ValueError) else 'Монтаж не завершён. Исходники сохранены, новые сцены не создавались.')).strip()
+            except Exception:
+                st.error('Не удалось подтвердить остановку. Новые видеозапросы этим сообщением не запускались.')
+                return
+            chat['pending_save'] = {'turn_id':uuid4().hex,'prompt':prompt,'answer':answer,
+                                    'brief':chat['brief'],'request':chat['request']}
+            st.rerun()
         if draw:
             with turn, st.chat_message("assistant"):
                 try:
@@ -264,7 +324,13 @@ def render_kadrian(owner_id, ask_ai):
             try:
                 with turn, st.spinner("Выполняю задание…"):
                     decision = command(ask_ai, project, prompt, history, chat['brief'], style)
-                    if decision['action'] == 'status':
+                    if decision['action'] == 'stop':
+                        pause_production(store,owner_id,project_id)
+                        answer = STOP_REPLY
+                    elif decision['action'] == 'music_edit':
+                        from kadrian_editing_ui import execute_edit_command
+                        answer = execute_edit_command(store,owner_id,project_id,prompt,edit_sources,edit_music,edit_replace_audio)
+                    elif decision['action'] == 'status':
                         answer = status_text(store, owner_id, project)
                     elif decision['action'] == 'create':
                         decision['music_only'] = music_only
@@ -279,7 +345,7 @@ def render_kadrian(owner_id, ask_ai):
                             reference = next((entry for role, entry in reversed(chat['messages'])
                                               if isinstance(entry, dict) and entry.get('storage_path')), None)
                         request = chat.setdefault('auto_request', uuid4().hex)
-                        job, created = enqueue_runway(store, owner_id, project, decision, style, request, reference)
+                        job, created = enqueue_runway(store, owner_id, project, decision, style, request, reference, request_prompt=prompt)
                         answer = job['progress']['message'] if created else ((job.get('progress') or {}).get('message') or 'Задание уже выполняется. Готовое видео появится здесь.')
                         chat.pop('auto_request', None)
                         chat['brief'] = decision['brief']
