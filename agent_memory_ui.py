@@ -3,9 +3,9 @@ import json
 from uuid import uuid4
 import streamlit as st
 
-from agent_memory import Memory, Principal, Scope, digest
+from agent_memory import Memory, Principal, Scope, digest, validate_bundle
 from agent_memory_runtime import project_memory, migrate_legacy
-from agent_memory_sync import import_local
+from agent_memory_sync import import_local, validate_local_bundle
 
 
 def render_memory(store, owner_id, project):
@@ -63,6 +63,10 @@ def render_memory(store, owner_id, project):
             if st.checkbox('Показать записи, достоверность и свидетельства', key=key+'_show_entries'):
                 st.json(list(entries.values()))
             bundle = mem.export()
+            st.download_button('Скачать версию для локальной сверки (данные проекта)',
+                               json.dumps(bundle, ensure_ascii=False, indent=2),
+                               file_name=scope.agent_id+'-'+scope.workspace_id+'.agent-memory.json',
+                               mime='application/json', key=key+'_local_export')
             from agent_memory_backup import encrypt_backup, decrypt_backup
             if store.fernet_key:
                 st.download_button('Резервная копия памяти (зашифрована)', encrypt_backup(bundle, store.fernet_key),
@@ -75,6 +79,14 @@ def render_memory(store, owner_id, project):
                     st.error('Слишком большой пакет.'); return
                 candidate = (decrypt_backup(uploaded.getvalue(), store.fernet_key) if uploaded.name.endswith('.enc')
                              else json.loads(uploaded.getvalue()))
+                if uploaded.name.endswith('.enc'):
+                    validate_bundle(candidate, mem.scope)
+                    st.json({'scope':candidate['scope'], 'revisions':len(candidate['revisions']),
+                             'checksum':candidate['checksum']})
+                else:
+                    preview = validate_local_bundle(candidate, mem.scope)
+                    st.json({'scope':preview['scope'], 'cloud_base_revision':preview['base_revision'],
+                             'current_cloud_revision':snap['revision'], 'files':preview['files']})
                 st.caption('Импорт не изменяет AGENTS.md и не активирует правила. Конфликт версий остановит импорт.')
                 confirm = st.checkbox('Проверила область и разрешаю импорт в выбранную память', key=key+'_import_confirm')
                 if confirm and st.button('Импортировать', key=key+'_import'):

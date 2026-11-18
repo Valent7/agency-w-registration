@@ -6,6 +6,9 @@ on:
     paths:
       - "content_factory_*.py"
       - "kadrian_*.py"
+      - "agent_memory*.py"
+      - "agent_memory_setup.sql"
+      - "tests/test_agent_memory*.py"
       - "kadrian_context/**"
       - "tests/test_kadrian*.py"
       - "content_studio_*.py"

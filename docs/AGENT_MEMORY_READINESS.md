@@ -30,3 +30,12 @@ A subsequent review adds durable per-transition worker outboxes, a real Streamli
 owner-approval test, strict backup shape validation and explicit project UUID
 knowledge-profile selection. Those changes receive a fresh CI run; prior green
 checks are not used as proof for untested changes.
+
+On 84a0de257892d97070f826cdc63443ed8f947982 both jobs also passed:
+- Agent memory preparation tests: run 44327394987, 40 tests, no skips in the
+  memory suite (including four real PostgreSQL checks); 36 Kadrian tests, two skips.
+- Full application/media regression: run 44327395028, success.
+
+Final review additionally supplies scoped plaintext local comparison export and
+validated import preview. The full regression workflow now explicitly watches
+agent_memory files, so later core changes cannot bypass that regression check.

@@ -392,5 +392,26 @@ class MemoryTests(unittest.TestCase):
         with patch.dict(os.environ,{'AGENCY_MEMORY_AGENCY_PROJECT_IDS':project['id']}):
             self.assertIn('база_агентства',json.loads(project_context(ready)))
 
+    def test_malformed_backup_is_rejected_before_any_restore_write(self):
+        self.record();bundle=self.mem.export()
+        bundle['revisions'][0]['document']['entries']='malformed'
+        bundle['revisions'][0]['hash']=digest(bundle['revisions'][0]['document'])
+        bundle['checksum']=digest({k:v for k,v in bundle.items() if k!='checksum'})
+        other=SQLiteStore(Path(self.tmp.name)/'invalid-restore.sqlite3')
+        other.save_project(11,{k:v for k,v in self.project.items() if k not in {'created_at','updated_at'}})
+        target=Memory(Repository(other,initialize=True),self.owner,self.scope)
+        with self.assertRaises(MemoryError):target.restore(bundle)
+        self.assertEqual(target.read()['revision'],0)
+
+    def test_local_preview_validates_scope_checksum_and_file_allowlist(self):
+        from agent_memory_sync import validate_local_bundle
+        root=Path(self.tmp.name)/'preview';root.mkdir();(root/'Agent.md').write_text('Local notes')
+        bundle=local_bundle(root,self.scope,0)
+        self.assertEqual(validate_local_bundle(bundle,self.scope)['files'],{'Agent.md':'Local notes'})
+        for bad in ['AGENTS.md','../.env','clients/other/PROJECT.md']:
+            modified=deepcopy(bundle);modified['files'][bad]='forbidden'
+            modified['checksum']=digest({k:v for k,v in modified.items() if k!='checksum'})
+            with self.assertRaises(MemoryError):validate_local_bundle(modified,self.scope)
+
 
 if __name__=='__main__':unittest.main()

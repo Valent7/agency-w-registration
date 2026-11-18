@@ -120,6 +120,10 @@ to detect every possible secret. The owner reviews the allowlisted payload first
 `import_local` checks scope, checksum and base revision, imports one immutable
 legacy event, and never activates incoming instructions. A repeated package is
 idempotent. A changed cloud version stops the import; no last-write-wins merge.
+The owner UI previews the exact incoming scope, base version and file text before
+import. It also offers an explicit plaintext `.agent-memory.json` download for
+local review through the existing authenticated session; no server credential
+is copied to the desktop. This contains private data and is ignored by Git.
 `stage_cloud_export` writes a private 0600 versioned package in .memory-exchange.
 `apply_reviewed_projection` requires exact reviewed cloud checksum and current
 local digest. It atomically updates only context/SYNCED_MEMORY.md, retains the

@@ -28,17 +28,24 @@ def local_bundle(root, scope, base_revision):
     return {**body, 'checksum': digest(body)}
 
 
+def validate_local_bundle(bundle, scope):
+    body = {k: v for k, v in bundle.items() if k != 'checksum'}
+    if body.get('format') != 'agency-local/1' or body.get('scope') != scope.as_dict():
+        raise MemoryError('Local bundle scope mismatch')
+    if digest(body) != bundle.get('checksum'):
+        raise MemoryError('Local bundle checksum mismatch')
+    if not isinstance(body.get('files'), dict) or set(body['files']) - set(FILES):
+        raise MemoryError('Only allowlisted memory files can be imported')
+    if not all(isinstance(v,str) for v in body['files'].values()):
+        raise MemoryError('Local memory files must contain text')
+    safe_content(body)
+    return body
+
+
 def import_local(memory, bundle):
     """One CAS commit; stale imports stop, never erase newer cloud records."""
     memory.principal.authorize(memory.scope, 'sync')
-    body = {k: v for k, v in bundle.items() if k != 'checksum'}
-    if body.get('format') != 'agency-local/1' or body.get('scope') != memory.scope.as_dict():
-        raise MemoryError('Local bundle scope mismatch')
-    if body.get('checksum') is not None or digest(body) != bundle.get('checksum'):
-        raise MemoryError('Local bundle checksum mismatch')
-    if set(body.get('files', {})) - set(FILES):
-        raise MemoryError('Only allowlisted memory files can be imported')
-    safe_content(body)
+    body = validate_local_bundle(bundle, memory.scope)
     snap = memory.read(); doc = json.loads(canonical(snap['document']))
     key = 'local:' + bundle['checksum']
     if key in doc['entries']:
