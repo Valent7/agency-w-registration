@@ -112,7 +112,7 @@ def process_auto_job(worker, job, project):
         if not seed:
             generator = worker.generator
             def ask(system, prompt, **kwargs):
-                return json.dumps(generator._structured(system, prompt, model=kwargs.get('model')))
+                return json.dumps(generator._structured(system, json.dumps({'request': prompt}, ensure_ascii=False), model=kwargs.get('model')))
             plan = production_plan(ask, project, spec['brief'])
             from content_factory_editorial import build_reference_seed
             seed = build_reference_seed(job['owner_id'], job['project_id'], str(uuid4()), job['video_style'], plan, project)
@@ -160,7 +160,7 @@ def process_auto_job(worker, job, project):
         from kadrian_production import _check_asset
         _check_asset(job, image_asset)
         image = worker.store.read_asset(job['owner_id'], image_asset)
-        motion = spec['brief'][:650] + '\nPreserve the reference character and setting. Natural continuous motion. No captions.'
+        motion = spec['brief'].encode('utf-16-le')[:1700].decode('utf-16-le', errors='ignore') + '\nPreserve the reference character and setting. Natural continuous motion. No captions.'
         state['starting'] = True
         worker._update(job, production=state)
         task = client.create_scene(image, motion, spec['duration'], aspect_ratio=spec.get('aspect', '9:16'))

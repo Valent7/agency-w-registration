@@ -130,3 +130,15 @@ class ActionsTests(unittest.TestCase):
             self.assertEqual(len(jobs),1)
             self.assertEqual(jobs[0]['kadrian_provider'],'runway_auto')
             self.assertEqual(len(self.store.get_project(77,self.project['id'])['kadrian_chat']['turns']),1)
+
+    def test_film_planner_passes_valid_json_to_generator(self):
+        from tests.test_content_factory_generation import visual_plan
+        plan={'format':'reel','title':'Film','text':'Story','narration':' '.join(['История']*50),'visual_plan':visual_plan(4)}
+        def structured(system,payload,**kwargs):
+            self.assertIn('request',json.loads(payload))
+            return plan
+        self.worker.generator._structured.side_effect=structured
+        self.spec={**self.spec,'scope':'film'}
+        job,_=self.enqueue()
+        process_auto_job(self.worker,job,self.project)
+        self.worker._generate.assert_called_once()
