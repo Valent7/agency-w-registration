@@ -171,7 +171,8 @@ def render_production(owner_id, project, store, ask_ai, chat, route, style, key)
     cfg = _config()
     if route == 'music':
         from content_studio_music_ui import render_music_tool
-        music_prompt_key = f"studio_music_{owner_id}_{project['id']}_prompt"
+        from content_studio_music_ui import _workspace
+        music_prompt_key = f"studio_music_{_workspace(owner_id, project)}_{project['id']}_prompt"
         if music_prompt_key not in st.session_state and chat.get('brief'):
             st.session_state[music_prompt_key] = chat['brief']
         render_music_tool(owner_id, project, store)
@@ -329,19 +330,27 @@ def _assembly(owner_id, project, store, cfg, style, key):
 @st.fragment(run_every=30)
 def render_provider_progress(store, owner_id, project_id):
     try:
-        jobs = [job for job in store.list_jobs(owner_id, project_id, limit=30) if job.get('kadrian_provider') or job.get('kadrian_auto')]
+        jobs = [job for job in store.list_jobs(owner_id, project_id, limit=30) if job.get('studio_master') or job.get('kadrian_provider') or job.get('kadrian_auto')]
     except Exception:
         st.caption('Состояние последнего заказа временно недоступно.')
         return
     if not jobs:
         return
-    job = jobs[0]
+    for job in jobs:
+        with st.container(border=True):
+            _render_job_progress(store, owner_id, job)
+
+
+def _render_job_progress(store, owner_id, job):
+    from kadrian_films import production_status
+    st.caption('Статус задания ' + job['id'] + ' · обновлён ' + str(job.get('updated_at', '')))
+    st.info(production_status(job))
     state = job.get('state')
     if state in {'queued', 'generating'}:
-        st.info((job.get('progress') or {}).get('message') or 'Заказ ожидает фонового сборщика.')
+        pass
     elif job.get('error'):
         st.warning(str(job['error']))
-    elif state == 'ready':
+    elif state in {'ready', 'published', 'scheduled'}:
         try:
             if job.get('external_delivery'):
                 from kadrian_production import provider_preview_url
@@ -353,6 +362,6 @@ def render_provider_progress(store, owner_id, project_id):
             assets = store.resolve_assets(owner_id, job['assets'])
             for asset in assets:
                 if asset.get('mime_type') == 'video/mp4':
-                    st.video(asset['url'])
+                    st.video(asset.get('url') or asset.get('path'))
         except Exception:
             st.caption('Готовое видео временно недоступно для просмотра.')

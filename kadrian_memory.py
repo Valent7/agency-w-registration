@@ -35,7 +35,8 @@ def save_turn(store, owner_id, project_id, turn_id, prompt, answer, brief, reque
         turns = list(memory.get('turns') or [])
         if any(turn.get('id') == turn_id for turn in turns):
             return memory
-        turns.append({'id': turn_id, 'prompt': prompt, 'answer': answer, 'image_asset': image_asset})
+        turns.append({'id': turn_id, 'prompt': prompt, 'answer': answer, 'image_asset': image_asset,
+                      'brief': brief, 'request': request})
         changes = {'kadrian_chat': {'turns': turns, 'brief': brief, 'request': request}}
         try:
             saved = store.update_project_if_current(owner_id, project_id, changes, project['updated_at'])

@@ -3,6 +3,7 @@ from base64 import b64decode, b64encode
 import re
 import os
 
+from kadrian_films import FilmStore, films, create_film, change_film, save_drafts
 from kadrian_memory import director_instructions, project_context, restore_chat, save_turn, production_plan
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -95,7 +96,12 @@ def _render_chat_entry(role, entry, store=None, owner_id=None):
         elif isinstance(entry, bytes):
             st.image(entry)
         else:
-            st.markdown(entry)
+            if role == "assistant" and isinstance(entry, str) and entry.strip() in {
+                "Создаю сцену.", "Создаю ролик.", "Runway создаёт сцену."
+            }:
+                st.caption("История: задание было передано в производство. Актуальный статус — ниже.")
+            else:
+                st.markdown(entry)
 
 
 def render_kadrian(owner_id, ask_ai):
@@ -112,17 +118,100 @@ def render_kadrian(owner_id, ask_ai):
         return
     project = st.selectbox("Проект", projects, format_func=lambda item: item["name"])
     project_id = project["id"]
-    key = f"kadrian_{owner_id}_{project_id}"
-    chat = st.session_state.setdefault(key, restore_chat(project))
-    if chat.get("pending_save"):
+    base_key = f"kadrian_{owner_id}_{project_id}"
+    raw_store = store
+    # Flush responses before any navigation; never leave a paid job's reply behind.
+    for state_key in list(st.session_state):
+        if state_key.startswith(base_key + "_film_") and isinstance(st.session_state[state_key], dict):
+            previous_chat = st.session_state[state_key]
+            if previous_chat.get('film_id'):
+                try:
+                    save_drafts(raw_store, owner_id, project_id, previous_chat['film_id'], state_key, st.session_state)
+                except Exception:
+                    st.error('Изменения сценария ещё не сохранены. Переключение фильмов остановлено.')
+                    return
+            if previous_chat.get('unsaved_image'):
+                unsaved = previous_chat['unsaved_image']
+                try:
+                    previous_store = FilmStore(raw_store, owner_id, project_id, previous_chat['film_id'])
+                    asset = previous_store.put_asset(owner_id, project_id, None, 'kadrian-frame.png', unsaved['data'], 'image/png')
+                    previous_chat['pending_save'] = {k: v for k, v in unsaved.items() if k != 'data'}
+                    previous_chat['pending_save']['image_asset'] = asset
+                    previous_chat.pop('unsaved_image')
+                except Exception:
+                    st.warning('Эскиз создан, но ещё не сохранён. Переключение фильмов остановлено до сохранения.')
+                    st.image(unsaved['data'])
+                    st.download_button('Скачать несохранённый эскиз', unsaved['data'], 'kadrian-frame.png', 'image/png',
+                                       key=state_key + '_download_unsaved')
+                    if st.button('Повторить сохранение эскиза', key=state_key + '_retry_image'):
+                        st.rerun()
+                    return
+            if previous_chat.get("pending_save"):
+                try:
+                    previous_store = FilmStore(raw_store, owner_id, project_id, previous_chat['film_id'])
+                    save_turn(previous_store, owner_id, project_id, **previous_chat['pending_save'])
+                    previous_chat.pop('pending_save')
+                except Exception:
+                    st.warning("Сначала нужно сохранить ответ. Переключение фильмов временно остановлено.")
+                    if st.button("Повторить сохранение", key=base_key + '_retry_save'):
+                        st.rerun()
+                    return
+    try:
+        project = raw_store.get_project(owner_id, project_id)
+        catalog = films(project)
+        # Preserve attachments still held by a pre-upgrade browser window.
+        old_window = st.session_state.get(base_key)
+        if isinstance(old_window, dict) and not old_window.get('films_preserved'):
+            legacy_store = FilmStore(raw_store, owner_id, project_id, catalog['legacy_id'])
+            if old_window.get('pending_save'):
+                save_turn(legacy_store, owner_id, project_id, **old_window['pending_save'])
+            if old_window.get('files') and not catalog['items'][catalog['legacy_id']].get('attachments'):
+                legacy_store.save_attachments(old_window['files'])
+            old_window['films_preserved'] = True
+            project = raw_store.get_project(owner_id, project_id)
+            catalog = films(project)
+        selector_key = base_key + '_selected_film'
+        if st.button("🎬 Новый фильм / мультфильм", key=base_key + '_new_film'):
+            token_key = base_key + '_new_film_token'
+            token = st.session_state.setdefault(token_key, str(uuid4()))
+            created = create_film(raw_store, owner_id, project_id, token)
+            st.session_state[selector_key] = created['id']
+            st.session_state.pop(token_key, None)
+            st.rerun()
+        film_ids = sorted(catalog['items'], key=lambda fid: (
+            fid != catalog['legacy_id'], catalog['items'][fid].get('created_at', ''), fid))
+        if selector_key not in st.session_state and st.query_params.get('film') in film_ids:
+            st.session_state[selector_key] = st.query_params['film']
+        film_id = st.selectbox("Сохранённые фильмы", film_ids,
+                               format_func=lambda value: catalog['items'][value]['title'], key=selector_key)
+        st.query_params['film'] = film_id
+        store = FilmStore(raw_store, owner_id, project_id, film_id)
+        project = store.get_project(owner_id, project_id)
+    except Exception:
+        st.error("Не удалось открыть или сохранить фильм. История сохранённых фильмов не удалена. Повторите действие.")
+        return
+    key = base_key + '_film_' + film_id
+    item = films(project)['items'][film_id]
+    for suffix, value in item.get('drafts', {}).items():
+        if key + suffix not in st.session_state:
+            st.session_state[key + suffix] = value
+    chat = restore_chat(project)
+    chat['film_id'] = film_id
+    try:
+        chat['files'] = store.restore_attachments()
+    except Exception:
+        st.error("Вложения этого фильма временно недоступны. Производство остановлено, чтобы не потерять образцы.")
+        return
+    st.session_state[key] = chat
+    st.caption("Фильм: " + film_id + ". Переключение не отменяет и не повторяет заказы.")
+    title = st.text_input("Название фильма", value=item['title'], key=key + '_title', max_chars=120)
+    if title.strip() != item['title'] and st.button("Сохранить название", key=key + '_rename'):
         try:
-            save_turn(store, owner_id, project_id, **chat["pending_save"])
-            chat.pop("pending_save")
+            change_film(raw_store, owner_id, project_id, film_id, lambda film: film.update(title=title.strip()))
         except Exception:
-            st.warning("Ответ сохранён в открытом окне. Сохранение истории на сервер временно недоступно.")
-            if st.button("Повторить сохранение", key=key + "_retry_save"):
-                st.rerun()
-            return
+            st.error("Название не сохранено. Повторите действие.")
+        else:
+            st.rerun()
     with st.expander("Память проекта"):
         st.caption("Согласованные факты, стиль, решения и замечания для будущих разговоров.")
         notes = st.text_area("Что Кадриану нужно помнить", value=project.get("kadrian_notes", ""),
@@ -172,12 +261,29 @@ def render_kadrian(owner_id, ask_ai):
                 elif mime.startswith("video/"):
                     st.video(data, format=mime)
             if st.button("Убрать вложения", key=key + "_clear_files"):
-                chat.pop("files", None)
+                try:
+                    store.save_attachments([])
+                except Exception:
+                    st.error("Не удалось сохранить изменение вложений.")
+                    return
                 st.rerun()
+    settings = item.get('settings') or {}
+    for suffix, default in (('_style', 'Живое видео'), ('_music', False), ('_route', 'runway')):
+        if key + suffix not in st.session_state:
+            st.session_state[key + suffix] = settings.get(suffix, default)
     styles = {"Живое видео": "live", "Мультфильм": "cartoon"}
     style = styles[st.radio("Формат", list(styles), horizontal=True, key=key + "_style")]
     music_only = style == "cartoon" and st.checkbox("Только музыка", key=key + "_music")
     route = st.selectbox("Производство", list(ROUTES), format_func=ROUTES.get, key=key + "_route")
+    current_settings = {suffix: st.session_state.get(key + suffix) for suffix in ('_style', '_music', '_route')}
+    if current_settings != settings:
+        try:
+            change_film(raw_store, owner_id, project_id, film_id,
+                        lambda film: film.update(settings=current_settings))
+        except Exception:
+            st.error("Настройки фильма не сохранены. Повторите действие.")
+            return
+    st.caption("Переписка — история обсуждения. Текущее состояние заказов показано в статусе производства.")
     previous = chat["messages"][:-2] if len(chat["messages"]) > 2 else []
     latest = chat["messages"][len(previous):]
     if previous:
@@ -190,7 +296,7 @@ def render_kadrian(owner_id, ask_ai):
         message = st.chat_input("Напишите или наговорите, какой ролик хотите",
                             max_chars=5000, accept_audio=True, accept_file="multiple",
                             file_type=["png", "jpg", "jpeg", "webp", "mp3", "wav", "m4a", "ogg", "mp4", "mov", "webm"],
-                            max_upload_size=15)
+                            max_upload_size=15, key=key + "_input")
     if not message:
         with turn:
             for role, entry in latest:
@@ -200,6 +306,11 @@ def render_kadrian(owner_id, ask_ai):
             files = [(item.name, item.type or "", item.getvalue()) for item in message.files]
             if len(files) > 8 or sum(len(data) for _, _, data in files) > 40 * 1024 * 1024:
                 st.error("Прикрепите до 8 файлов общим размером до 40 МБ.")
+                return
+            try:
+                store.save_attachments(files)
+            except Exception:
+                st.error("Вложения не сохранены. Задание не запущено. Повторите загрузку.")
                 return
             chat["files"] = files
         prompt = message.text.strip()
@@ -247,14 +358,15 @@ def render_kadrian(owner_id, ask_ai):
                         error = "В студии не настроен ключ OpenAI для изображений."
                     else:
                         error = "Генератор изображений не вернул результат."
-                    chat["messages"].extend([("user", prompt), ("assistant", error)])
+                    chat["pending_save"] = {"turn_id": uuid4().hex, "prompt": prompt, "answer": error,
+                                            "brief": chat['brief'], "request": chat['request']}
                     st.rerun()
             try:
                 asset = store.put_asset(owner_id, project_id, None, "kadrian-frame.png", image, "image/png")
             except Exception:
-                st.error("Эскиз создан, но не сохранён на сервере. Скачайте изображение из предпросмотра перед закрытием окна.")
-                chat["messages"].extend([("user", prompt), ("assistant", image)])
-                return
+                chat['unsaved_image'] = {'data': image, 'turn_id': uuid4().hex, 'prompt': prompt,
+                                         'answer': 'Эскиз', 'brief': chat['brief'], 'request': chat['request']}
+                st.rerun()
             chat["messages"].extend([("user", prompt), ("assistant", asset)])
             chat["pending_save"] = {"turn_id": uuid4().hex, "prompt": prompt, "answer": "Эскиз",
                                     "brief": chat["brief"], "request": chat["request"], "image_asset": asset}
@@ -305,8 +417,10 @@ def render_kadrian(owner_id, ask_ai):
                                   if mime in {"image/png", "image/jpeg", "image/webp"}],
                 )
         if not answer or answer.startswith(("Ошибка OpenAI", "Ключ OpenAI", "Не удалось")):
-            st.error(answer or "Кадриан не получил ответ сервиса. Попробуйте отправить пожелание ещё раз.")
-            return
+            error = answer or "Кадриан не получил ответ сервиса. Попробуйте отправить пожелание ещё раз."
+            chat['pending_save'] = {"turn_id": uuid4().hex, "prompt": prompt, "answer": error,
+                                    "brief": chat['brief'], "request": chat['request']}
+            st.rerun()
         chat["messages"].extend([("user", prompt), ("assistant", answer)])
         if route != "runway":
             chat["brief"] = f"Пожелание партнёра: {prompt}\nПлан Кадриана: {answer}"[:6000]
@@ -320,4 +434,7 @@ def render_kadrian(owner_id, ask_ai):
         st.caption("Изображения можно использовать как опорный кадр сцены.")
     if route != "runway":
         render_production(owner_id, project, store, ask_ai, chat, route, style, key + "_" + route)
-        return
+    try:
+        save_drafts(raw_store, owner_id, project_id, film_id, key, st.session_state)
+    except Exception:
+        st.warning('Изменения полей сценария пока не сохранены. Повторите сохранение перед закрытием окна.')
