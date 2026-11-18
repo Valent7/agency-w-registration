@@ -191,7 +191,7 @@ class RunwayVideoClient:
             raise LiveVideoError("Не удалось оценить кредиты: неверный план длительности сцен.")
         return 12 * sum(scene_seconds) if self.model == "gen4.5" else None
 
-    def create_scene(self, image_bytes, prompt, duration):
+    def create_scene(self, image_bytes, prompt, duration, *, aspect_ratio="9:16"):
         if not isinstance(prompt, str) or not prompt.strip() or "\x00" in prompt:
             raise LiveVideoError("Опишите действие для живой сцены.")
         prompt = prompt.strip()
@@ -204,8 +204,10 @@ class RunwayVideoClient:
         allowed_duration = range(2, 11) if self.model == "gen4.5" else (5, 10)
         if type(duration) is not int or duration not in allowed_duration:
             raise LiveVideoError("Неверная длительность живой сцены.")
+        if aspect_ratio not in {"9:16", "16:9"}:
+            raise LiveVideoError("Выберите вертикальный или горизонтальный кадр.")
         payload = {"model": self.model, "promptImage": _source_image(image_bytes),
-                   "promptText": prompt, "ratio": "720:1280", "duration": duration}
+                   "promptText": prompt, "ratio": "720:1280" if aspect_ratio == "9:16" else "1280:720", "duration": duration}
         try:
             response = self.session.post(BASE_URL + "/image_to_video", headers=self._headers(), json=payload,
                                          timeout=(10, 120), allow_redirects=False)

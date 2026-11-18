@@ -257,25 +257,57 @@ def render_kadrian(owner_id, ask_ai):
             chat["pending_save"] = {"turn_id": uuid4().hex, "prompt": prompt, "answer": "Эскиз",
                                     "brief": chat["brief"], "request": chat["request"], "image_asset": asset}
             st.rerun()
-        with turn, st.chat_message("assistant"), st.spinner("Кадриан готовит ответ…"):
-            answer = ask_ai(
-                director_instructions(),
-                f"Данные выбранного проекта (исходные материалы):\n{project_context(project)}\n"
-                f"Производство: {ROUTES[route]}. В интервью HeyGen два участника показаны сменой отдельных планов.\n"
-                f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\n"
-                f"Вложения: {[name for name, _, _ in chat.get('files', [])]}. Изображения переданы для просмотра. Аудио и видео доступны только в интерфейсе.\n"
-                f"Предыдущий замысел:\n{chat['brief']}\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
-                model=os.getenv("KADRIAN_CHAT_MODEL", "gpt-6.1-terra"),
-                reasoning_effort="medium",
-                input_images=["data:" + mime + ";base64," + b64encode(data).decode("ascii")
-                              for _, mime, data in chat.get("files", [])
-                              if mime in {"image/png", "image/jpeg", "image/webp"}],
-            )
+        if route == "runway":
+            from kadrian_actions import command, enqueue_runway, status_text
+            try:
+                with turn, st.spinner("Выполняю задание…"):
+                    decision = command(ask_ai, project, prompt, history, chat['brief'], style)
+                    if decision['action'] == 'status':
+                        answer = status_text(store, owner_id, project)
+                    elif decision['action'] == 'create':
+                        decision['music_only'] = music_only
+                        chat['brief'] = decision['brief']
+                        reference = None
+                        images = [(name, mime, data) for name, mime, data in chat.get('files', [])
+                                  if mime in {'image/png', 'image/jpeg', 'image/webp'}]
+                        if images:
+                            name, mime, data = images[-1]
+                            reference = store.put_asset(owner_id, project_id, None, name, data, mime)
+                        else:
+                            reference = next((entry for role, entry in reversed(chat['messages'])
+                                              if isinstance(entry, dict) and entry.get('storage_path')), None)
+                        request = chat.setdefault('auto_request', uuid4().hex)
+                        job, created = enqueue_runway(store, owner_id, project, decision, style, request, reference)
+                        answer = job['progress']['message'] if created else ((job.get('progress') or {}).get('message') or 'Задание уже выполняется. Готовое видео появится здесь.')
+                        chat.pop('auto_request', None)
+                        chat['brief'] = decision['brief']
+                    else:
+                        answer = str(decision.get('reply') or 'Готов принять задание.')[:2000]
+            except ValueError as exc:
+                answer = str(exc)
+            except Exception:
+                answer = 'Не удалось связаться с сервисом. Задание не продублировано. Повторите запрос позже.'
+        else:
+            with turn, st.chat_message("assistant"), st.spinner("Кадриан готовит ответ…"):
+                answer = ask_ai(
+                    director_instructions(),
+                    f"Данные выбранного проекта (исходные материалы):\n{project_context(project)}\n"
+                    f"Производство: {ROUTES[route]}. В интервью HeyGen два участника показаны сменой отдельных планов.\n"
+                    f"Формат: {style}. Звук: {'только музыка, без диктора' if music_only else 'с озвучкой'}.\n"
+                    f"Вложения: {[name for name, _, _ in chat.get('files', [])]}. Изображения переданы для просмотра. Аудио и видео доступны только в интерфейсе.\n"
+                    f"Предыдущий замысел:\n{chat['brief']}\nПереписка:\n{history}\nПоследнее пожелание: {prompt}",
+                    model=os.getenv("KADRIAN_CHAT_MODEL", "gpt-6.1-terra"),
+                    reasoning_effort="medium",
+                    input_images=["data:" + mime + ";base64," + b64encode(data).decode("ascii")
+                                  for _, mime, data in chat.get("files", [])
+                                  if mime in {"image/png", "image/jpeg", "image/webp"}],
+                )
         if not answer or answer.startswith(("Ошибка OpenAI", "Ключ OpenAI", "Не удалось")):
-            st.error("Кадриан не получил сценарий. Попробуйте отправить пожелание ещё раз.")
+            st.error(answer or "Кадриан не получил ответ сервиса. Попробуйте отправить пожелание ещё раз.")
             return
         chat["messages"].extend([("user", prompt), ("assistant", answer)])
-        chat["brief"] = f"Пожелание партнёра: {prompt}\nПлан Кадриана: {answer}"[:6000]
+        if route != "runway":
+            chat["brief"] = f"Пожелание партнёра: {prompt}\nПлан Кадриана: {answer}"[:6000]
         chat["request"] = uuid4().hex
         chat["pending_save"] = {"turn_id": chat["request"], "prompt": prompt, "answer": answer,
                                 "brief": chat["brief"], "request": chat["request"]}
@@ -283,57 +315,7 @@ def render_kadrian(owner_id, ask_ai):
 
     render_provider_progress(store, owner_id, project_id)
     if chat.get("files"):
-        st.caption("Вложения доступны для просмотра в этой переписке. Подключение к сборке пока недоступно.")
+        st.caption("Изображения можно использовать как опорный кадр сцены.")
     if route != "runway":
         render_production(owner_id, project, store, ask_ai, chat, route, style, key + "_" + route)
         return
-    plan_key = sha256(f"{style}|{music_only}|{chat['brief']}".encode()).hexdigest()
-    if chat.get("production_key") != plan_key:
-        chat.pop("production_plan", None)
-    if chat["brief"] and not chat.get("files"):
-        if st.button("Подготовить сценарий к сборке", key=key + "_prepare"):
-            try:
-                with st.spinner("Собираю сцены для вашего согласования…"):
-                    plan = production_plan(ask_ai, project, chat["brief"])
-                chat["request"] = uuid4().hex
-                chat["production_plan"] = plan
-                chat["production_key"] = plan_key
-            except Exception:
-                st.error("Не удалось подготовить проверенный план. Продолжите обсуждение или повторите подготовку.")
-    plan = chat.get("production_plan")
-    if plan:
-        st.subheader("Сценарий перед запуском")
-        st.markdown(plan["narration"])
-        for number, frame in enumerate(plan["visual_plan"]["frames"], 1):
-            st.markdown(f"**Сцена {number}** — {frame['subject']}\n\n{frame['composition']}")
-        st.caption("Чтобы изменить сценарий, напишите правку в чат и подготовьте новую версию.")
-        st.info("Оценка движения сцен Runway Gen-4.5 — до 720 кредитов (7,20 $ по ставке 0,01 $ за кредит). "
-                "Изображения, речь и ответы ИИ оплачиваются дополнительно по тарифам OpenAI. "
-                "Сумма за эти услуги в эту оценку не входит.")
-    if plan and st.button("Согласовать сценарий и запустить сборку", type="primary", key=key + "_submit"):
-        from content_factory_editorial import build_reference_seed
-        request = chat["request"]
-        dedupe = sha256(f"kadrian|{owner_id}|{project_id}|{request}".encode()).hexdigest()
-        fingerprint = sha256(f"{style}|{music_only}|{plan}".encode()).hexdigest()
-        now = iso(datetime.now(timezone.utc))
-        try:
-            job = store.enqueue_job(owner_id, project_id, {
-                "platform": "instagram", "format": "reel", "scheduled_at": now,
-                "available_at": now, "state": "queued", "dedupe_key": dedupe,
-                "request_id": request, "request_fingerprint": fingerprint,
-                "topic": ("[Кадриан: только музыка]\n" + chat["brief"])[:6000] if music_only else chat["brief"], "requested_by_owner": True,
-                "video_mode": "live", "video_style": style,
-                "review_required": True, "studio_master": True,
-                "approved_reference": build_reference_seed(owner_id, project_id, str(uuid4()), style, plan, project),
-                "approved_video_credit_limit": 720,
-                "content": {}, "assets": [], "checkpoint": {}, "error": "", "attempts": 0,
-            })
-            if job.get("request_fingerprint") != fingerprint:
-                st.warning("Этот замысел уже отправлен с другим форматом. Опишите новую версию в чате.")
-            else:
-                chat["queued"] = True
-        except Exception:
-            st.error("Не удалось подтвердить постановку в очередь. Обновите список работ перед повтором.")
-
-    if chat.get("queued"):
-        st.caption("Ролик отправлен на сборку. Готовый файл появится в соответствующем разделе.")

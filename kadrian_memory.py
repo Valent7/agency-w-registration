@@ -67,7 +67,7 @@ def production_plan(ask_ai, project, brief):
     result = ask_ai(
         director_instructions() + '\nВерни только JSON для сборщика по указанной схеме. '
         'Разверни frames в 4–6 разных сцен. Сохрани реплики владельца. '
-        'Эта версия будет показана владельцу для согласования до запуска.',
+        'Владелец уже поручил создание. Технические детали выбери сам без дополнительных вопросов.',
         project_context(project) + '\nЗамысел и обсуждение:\n' + brief
         + '\nСхема:\n' + json.dumps(schema, ensure_ascii=False),
         model=os.getenv('KADRIAN_CHAT_MODEL', 'gpt-6.1-terra'), reasoning_effort='medium',

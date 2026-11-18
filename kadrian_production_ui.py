@@ -329,7 +329,7 @@ def _assembly(owner_id, project, store, cfg, style, key):
 @st.fragment(run_every=30)
 def render_provider_progress(store, owner_id, project_id):
     try:
-        jobs = [job for job in store.list_jobs(owner_id, project_id, limit=30) if job.get('kadrian_provider')]
+        jobs = [job for job in store.list_jobs(owner_id, project_id, limit=30) if job.get('kadrian_provider') or job.get('kadrian_auto')]
     except Exception:
         st.caption('Состояние последнего заказа временно недоступно.')
         return

@@ -38,6 +38,14 @@ def process_provider_job(worker, job, project):
     from content_factory_runtime import _configuration
 
     provider = job.get('kadrian_provider')
+    if provider == 'runway_auto':
+        from kadrian_actions import process_auto_job
+        try:
+            return process_auto_job(worker, job, project)
+        except Exception as exc:
+            if getattr(exc, 'provider_details', {}).get('code') == 'insufficient_quota':
+                raise LiveVideoPending('Недостаточно средств в OpenAI. Пополните баланс OpenAI API — продолжу автоматически.', retry_after=60) from None
+            raise
     client = provider_client(provider, _configuration())
     production = dict(job.get('production') or {})
     task_id = production.get('task_id')
