@@ -79,7 +79,7 @@ def enqueue_runway(store, owner_id, project, spec, style, request_id, reference=
         from kadrian_production import _check_asset
         _check_asset({'owner_id': owner_id, 'project_id': project['id']}, reference)
     waiting = spec['scope'] == 'scene' and balance < estimate
-    message = (f'Недостаточно кредитов в Runway. Нужно {estimate:g}, доступно {balance:g}, не хватает {estimate-balance:g}. Пополните Runway API — продолжу автоматически.' if waiting else ('Создаю сцену.' if spec['scope'] == 'scene' else 'Создаю ролик.'))
+    message = (f'Недостаточно кредитов в Runway. Нужно {estimate:g}, доступно {balance:g}, не хватает {estimate-balance:g}. Пополните Runway API — продолжу автоматически.' if waiting else 'Задание в очереди.')
     job = store.enqueue_job(owner_id, project['id'], {
         'platform': 'instagram', 'format': 'reel', 'state': 'queued',
         'scheduled_at': now, 'available_at': now, 'requested_by_owner': True,
@@ -99,7 +99,8 @@ def status_text(store, owner_id, project):
     text = f'Runway API: {balance:g} кредитов.'
     if jobs:
         job = jobs[0]
-        text += ' ' + (job.get('error') or ('Видео готово.' if job['state'] == 'ready' else (job.get('progress') or {}).get('message', 'Задание в работе.')))
+        from kadrian_films import production_status
+        text += ' ' + production_status(job)
     return text
 
 

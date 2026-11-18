@@ -293,7 +293,7 @@ class _StoreBase:
                 raise StoreError("Задание для сохранения медиа не найдено.")
         if not isinstance(data, bytes) or not data or len(data) > 100 * 1024 * 1024:
             raise StoreError("Нужен непустой медиафайл размером до 100 МБ.")
-        if mime_type not in {"image/jpeg", "image/png", "image/webp", "video/mp4", "audio/mpeg", "audio/mp4", "audio/wav"}:
+        if mime_type not in {"image/jpeg", "image/png", "image/webp", "video/mp4", "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "video/quicktime", "video/webm"}:
             raise StoreError("Неподдерживаемый тип медиа.")
         filename = re.sub(r"[^A-Za-z0-9._-]", "_", Path(str(filename)).name)[:120] or "media"
         digest = hashlib.sha256(data).hexdigest()
@@ -496,6 +496,15 @@ class SQLiteStore(_StoreBase):
     def list_jobs(self, owner_id: int, project_id: str, limit: int = 100) -> list[dict]:
         with self._db() as db:
             return [_unpack(row) for row in db.execute("SELECT * FROM content_factory_jobs WHERE owner_id=? AND project_id=? ORDER BY scheduled_at DESC,created_at DESC LIMIT ?", (_owner(owner_id), _id(project_id), max(1, min(1000, int(limit)))))]
+
+    def list_film_jobs(self, owner_id, project_id, film_id, *, legacy=False, limit=100):
+        film_id = _id(film_id)
+        predicate = "(json_extract(data, '$.film_id') = ? OR json_extract(data, '$.film_id') IS NULL)" if legacy else "json_extract(data, '$.film_id') = ?"
+        with self._db() as db:
+            return [_unpack(row) for row in db.execute(
+                "SELECT * FROM content_factory_jobs WHERE owner_id=? AND project_id=? AND " + predicate +
+                " ORDER BY scheduled_at DESC,created_at DESC LIMIT ?",
+                (_owner(owner_id), _id(project_id), film_id, max(1, min(1000, int(limit)))))]
 
     def get_job(self, owner_id: int, job_id: str) -> dict | None:
         with self._db() as db:
@@ -862,6 +871,16 @@ class SupabaseStore(_StoreBase):
 
     def list_jobs(self, owner_id: int, project_id: str, limit: int = 100) -> list[dict]:
         return [_unpack(row) for row in self._rows("content_factory_jobs", {"owner_id": f"eq.{_owner(owner_id)}", "project_id": f"eq.{_id(project_id)}", "order": "scheduled_at.desc,created_at.desc", "limit": max(1, min(1000, int(limit)))})]
+
+    def list_film_jobs(self, owner_id, project_id, film_id, *, legacy=False, limit=100):
+        film_id = _id(film_id)
+        params = {"owner_id": f"eq.{_owner(owner_id)}", "project_id": f"eq.{_id(project_id)}",
+                  "order": "scheduled_at.desc,created_at.desc", "limit": max(1, min(1000, int(limit)))}
+        if legacy:
+            params['or'] = f'(data->>film_id.eq.{film_id},data->>film_id.is.null)'
+        else:
+            params['data->>film_id'] = 'eq.' + film_id
+        return [_unpack(row) for row in self._rows('content_factory_jobs', params)]
 
     def get_job(self, owner_id: int, job_id: str) -> dict | None:
         rows = self._rows("content_factory_jobs", {"owner_id": f"eq.{_owner(owner_id)}", "id": f"eq.{_id(job_id)}", "limit": 1})

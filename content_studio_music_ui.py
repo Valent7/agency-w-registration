@@ -23,6 +23,10 @@ DURATIONS = {
 }
 
 
+def _workspace(owner_id, project):
+    return str(owner_id) + ('_' + project['film_id'] if project.get('film_id') else '')
+
+
 def _secret(name):
     try:
         value = st.secrets.get(name)
@@ -100,7 +104,7 @@ def _generate(owner_id, project, store, description, prompt, duration_ms, instru
     )
     if not isinstance(job, dict) or job.get("studio_complete") is not True:
         raise MusicProviderError("Музыка создана, но не удалось сохранить её в проекте. Повторите ещё раз.")
-    st.session_state[f"studio_music_{owner_id}_selected_job"] = job["id"]
+    st.session_state[f"studio_music_{_workspace(owner_id, project)}_selected_job"] = job["id"]
     return job
 
 
@@ -112,7 +116,7 @@ def _render_step_three(owner_id, project, store):
         return
 
     recent = jobs[:3]
-    selected_id = st.session_state.get(f"studio_music_{owner_id}_selected_job")
+    selected_id = st.session_state.get(f"studio_music_{_workspace(owner_id, project)}_selected_job")
     for index, job in enumerate(recent, 1):
         title = str((job.get("content") or {}).get("title") or f"Вариант {index}")
         with st.container(border=True):
@@ -129,10 +133,10 @@ def _render_step_three(owner_id, project, store):
                 label,
                 type="primary" if job["id"] != selected_id else "secondary",
                 width="stretch",
-                key=f"studio_music_{owner_id}_{project['id']}_{job['id']}_select",
+                key=f"studio_music_{_workspace(owner_id, project)}_{project['id']}_{job['id']}_select",
                 disabled=job["id"] == selected_id,
             ):
-                st.session_state[f"studio_music_{owner_id}_selected_job"] = job["id"]
+                st.session_state[f"studio_music_{_workspace(owner_id, project)}_selected_job"] = job["id"]
                 st.success("Музыка выбрана для видео.")
                 st.rerun()
 
@@ -145,7 +149,7 @@ def render_music_tool(owner_id, project, store):
         st.info("Сначала выберите или сохраните проект Агентства W.")
         return
 
-    key = f"studio_music_{owner_id}_{project['id']}"
+    key = f"studio_music_{_workspace(owner_id, project)}_{project['id']}"
     st.markdown("### 1. Расскажите, какую музыку Вы хотите")
     with st.form(key + "_intent_form"):
         description = st.text_area(
