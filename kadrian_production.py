@@ -38,6 +38,18 @@ def process_provider_job(worker, job, project):
     from content_factory_runtime import _configuration
 
     provider = job.get('kadrian_provider')
+    if provider == 'runway_auto':
+        from kadrian_actions import process_auto_job
+        try:
+            return process_auto_job(worker, job, project)
+        except Exception as exc:
+            if getattr(exc, 'provider_details', {}).get('code') == 'insufficient_quota':
+                fresh = worker.store.get_job(job['owner_id'], job['id']) or job
+                if (job.get('provider_spec') or {}).get('scope') == 'film' and (fresh.get('checkpoint') or {}).get('generation_started'):
+                    from content_factory_generation import GenerationError
+                    raise GenerationError('Недостаточно средств в OpenAI API. Готовые материалы сохранены; продолжение сборки требует проверки после пополнения.') from None
+                raise LiveVideoPending('Недостаточно средств в OpenAI. Пополните баланс OpenAI API — продолжу автоматически.', retry_after=60) from None
+            raise
     client = provider_client(provider, _configuration())
     production = dict(job.get('production') or {})
     task_id = production.get('task_id')
