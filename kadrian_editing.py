@@ -211,6 +211,8 @@ def assemble_music(store, owner, project_id, source_ids, music_job, *, replace_a
         raise ValueError('Материалы недоступны в выбранном проекте. Новые сцены не запускаются.')
     selected = [next(a for a in available[i]['assets'] if a.get('mime_type') == 'video/mp4') for i in source_ids]
     track = next(a for a in audio[music_job['id']]['assets'] if a.get('mime_type') in AUDIO_MIMES.values())
+    if sum(int(a.get('size') or 0) for a in selected + [track]) > 100*1024*1024:
+        raise ValueError('Общий размер исходников монтажа превышает 100 МБ. Новые сцены не запускаются.')
     from kadrian_production import _check_asset
     for asset in selected + [track]:
         _check_asset({'owner_id':owner,'project_id':project_id}, asset)

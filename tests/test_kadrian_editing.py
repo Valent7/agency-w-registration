@@ -170,6 +170,14 @@ class EditingTests(unittest.TestCase):
         self.assertEqual(params['data->>studio_master'],'eq.true')
         self.assertEqual(request.call_args.kwargs['json']['data']['production'],{'task_id':'paid'})
 
+    def test_large_source_set_is_rejected_before_loading_into_web_memory(self):
+        track=self.music()
+        asset={**self.clip['assets'][0],'size':101*1024*1024}
+        self.store.update_job(77,self.clip['id'],{'assets':[asset]})
+        with patch.object(self.store,'read_asset') as read:
+            with self.assertRaises(ValueError):assemble_music(self.store,77,self.pid,[self.clip['id']],track)
+        read.assert_not_called()
+
 @unittest.skipUnless(shutil.which('ffprobe') and shutil.which('ffmpeg'),'Real media tools required')
 class RealEditingTests(unittest.TestCase):
     def test_real_edit_preserves_two_scene_order_frame_count_speed_and_has_music(self):
