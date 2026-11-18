@@ -48,6 +48,8 @@ def enqueue_provider(store, owner_id, project_id, provider, spec, style, request
     project = store.get_project(owner_id, project_id)
     if not project:
         raise ValueError('Проект недоступен этому владельцу.')
+    if project.get('kadrian_production_paused'):
+        raise ValueError('Создание новых сцен остановлено. Монтаж готовых сцен остаётся доступен.')
     if isinstance(quote_usd, bool) or not isinstance(quote_usd, (int, float)) or not math.isfinite(quote_usd) or quote_usd <= 0:
         raise ValueError('Нужна оценка стоимости перед запуском.')
     if provider == 'heygen':
@@ -329,7 +331,7 @@ def _assembly(owner_id, project, store, cfg, style, key):
 @st.fragment(run_every=30)
 def render_provider_progress(store, owner_id, project_id):
     try:
-        jobs = [job for job in store.list_jobs(owner_id, project_id, limit=30) if job.get('kadrian_provider') or job.get('kadrian_auto')]
+        jobs = [job for job in store.list_jobs(owner_id, project_id, limit=30) if job.get('kadrian_provider') or job.get('kadrian_auto') or job.get('kadrian_local_edit')]
     except Exception:
         st.caption('Состояние последнего заказа временно недоступно.')
         return
@@ -337,11 +339,16 @@ def render_provider_progress(store, owner_id, project_id):
         return
     job = jobs[0]
     state = job.get('state')
-    if state in {'queued', 'generating'}:
-        st.info((job.get('progress') or {}).get('message') or 'Заказ ожидает фонового сборщика.')
+    st.caption('Статус задания ' + job['id'] + ' · ' + str(job.get('updated_at','')))
+    if state == 'paused':
+        st.info((job.get('progress') or {}).get('message') or 'Создание приостановлено.')
+    elif state in {'queued', 'generating'}:
+        progress = job.get('progress') or {}
+        st.info('Задание в очереди.' if progress.get('stage') == 'queued' else (progress.get('message') or 'Заказ ожидает фонового сборщика.'))
     elif job.get('error'):
         st.warning(str(job['error']))
     elif state == 'ready':
+        st.success('Готовое видео сохранено.')
         try:
             if job.get('external_delivery'):
                 from kadrian_production import provider_preview_url

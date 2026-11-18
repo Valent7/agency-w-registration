@@ -170,6 +170,10 @@ class Worker:
             pass
 
     def _update(self, job, **changes):
+        if job.get('studio_master') and changes.get('state') != 'paused':
+            project = self.store.get_project(job['owner_id'], job['project_id'])
+            if project and project.get('kadrian_production_paused') is True:
+                raise PauseRequested()
         return self.store.update_job(job["owner_id"], job["id"], changes, lease_owner=self.worker_id)
 
     def _finish(self, job, **changes):
