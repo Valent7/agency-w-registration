@@ -35,7 +35,7 @@ blockquote{margin:24px 0;padding:15px 20px;border-left:4px solid var(--gold);bac
 .gallery p{color:var(--muted)}
 .gallery .muted{font-size:14px}
 .gallery video{display:block;width:100%;max-height:520px;background:#020914;border-radius:10px;margin:15px 0}
-@media(max-width:620px){main{margin-top:30px}.lead{font-size:18px}.gallery{padding:18px}}
+.studio-gallery-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}.studio-film{min-width:0;padding:18px;background:#07192a;border:1px solid #354961;border-radius:11px}.studio-film h3{font:normal 23px/1.25 Georgia,serif;color:#f3d49b;margin:0 0 10px}.studio-film p{margin:8px 0 12px}.studio-film video{width:100%;height:auto;max-height:460px;object-fit:contain}.studio-video-slot{min-height:55px}.studio-film .muted{font-size:14px}.gallery .muted{line-height:1.55}@media(max-width:700px){.studio-gallery-grid{grid-template-columns:1fr}}@media(max-width:620px){main{margin-top:30px}.lead{font-size:18px}.gallery{padding:18px}}
 </style>
 </head>
 <body>
@@ -91,13 +91,45 @@ blockquote{margin:24px 0;padding:15px 20px;border-left:4px solid var(--gold);bac
 <p>Расскажите нам! Возможно, именно с этого желания и начнётся ваша первая творческая история. ❤️</p>
 </article>
 <section class="gallery" id="studio-film-gallery" aria-labelledby="studio-film-gallery-title">
-<h2 id="studio-film-gallery-title">🎬 Наши первые работы</h2>
-<p>Первое живое видео уже опубликовано. Два мультфильма готовятся к публикации.</p>
-<p class="muted">Видеогалерея будет дополнена после получения и проверки исходных роликов. Пока здесь нет неработающих проигрывателей.</p>
+<h2 id="studio-film-gallery-title">🎬 Наши первые работы студии «Контент»</h2>
+<p>Четыре творческие работы: два мультфильма, музыкальная зарисовка и видео Агентства W. Здесь можно будет смотреть их прямо в журнале.</p>
+<div class="studio-gallery-grid">
+<article class="studio-film"><h3>🐈 Кот и лень</h3><p>Мультфильм о том, как иногда важно разрешить себе отдохнуть.</p><div class="studio-video-slot" data-src="../assets/studio-content/kot-i-len.mp4" data-label="Мультфильм «Кот и лень»"><p class="muted">Видео готовится к размещению.</p></div></article>
+<article class="studio-film"><h3>🍂 Время жить. Осенний вальс Шопена</h3><p>Мультфильм «Время жить» под музыку осеннего вальса.</p><div class="studio-video-slot" data-src="../assets/studio-content/vremya-zhit-osenniy-vals.mp4" data-label="Мультфильм «Время жить. Осенний вальс Шопена»"><p class="muted">Видео готовится к размещению.</p></div></article>
+<article class="studio-film"><h3>🌍 Как прекрасен этот мир, посмотри</h3><p>Короткая музыкальная видеозарисовка.</p><div class="studio-video-slot" data-src="../assets/studio-content/kak-prekrasen-etot-mir.mp4" data-label="Видео «Как прекрасен этот мир, посмотри»"><p class="muted">Видео готовится к размещению.</p></div></article>
+<article class="studio-film"><h3>✨ Agency-W</h3><p>Видео о нашем Агентстве W.</p><div class="studio-video-slot" data-src="../assets/studio-content/agency-w.mp4" data-label="Видео «Agency-W»"><p class="muted">Видео готовится к размещению.</p></div></article>
+</div>
+<p class="muted">Проигрыватель появляется только после фактической загрузки MP4 на сайт; недоступные ссылки не показываются.</p>
 </section>
 </main>
 <footer>Агентство W · Мы возвращаем человеку время · <a href="/privacy.html">Статистика и конфиденциальность</a></footer>
 <script src="../assets/reader-contact.js" defer></script>
 <script src="../assets/metrika-consent.js" defer></script>
+<script>
+(function(){
+  'use strict';
+  const slots=document.querySelectorAll('.studio-video-slot[data-src]');
+  for(const slot of slots){
+    const src=slot.getAttribute('data-src');
+    const label=slot.getAttribute('data-label')||'Видео студии «Контент»';
+    if(!src || !/^\.\.\/assets\/studio-content\/[a-z0-9-]+\.mp4$/.test(src))continue;
+    // On a static site only reveal a player once a real video asset is present.
+    fetch(src,{method:'HEAD',cache:'no-store'}).then(response=>{
+      if(!response.ok)return;
+      const type=(response.headers.get('content-type')||'').toLowerCase();
+      if(type && !type.includes('video') && !type.includes('octet-stream'))return;
+      const video=document.createElement('video');
+      video.controls=true;video.playsInline=true;video.preload='metadata';
+      video.setAttribute('aria-label',label);
+      const source=document.createElement('source');
+      source.src=src;source.type='video/mp4';
+      video.append(source);slot.replaceChildren(video);
+      video.addEventListener('error',()=>{
+        slot.replaceChildren(Object.assign(document.createElement('p'),{className:'muted',textContent:'Видео временно недоступно.'}));
+      },{once:true});
+    }).catch(()=>{});
+  }
+})();
+</script>
 </body>
 </html>
