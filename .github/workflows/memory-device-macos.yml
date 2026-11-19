@@ -11,7 +11,7 @@ permissions:
   contents: read
 jobs:
   synthetic-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
