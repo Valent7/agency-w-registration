@@ -62,3 +62,5 @@ class DeviceApiTests(unittest.TestCase):
         with self.assertRaises(MemoryError):transport({'request':'synthetic'})
         self.assertFalse(transport.session.post.call_args.kwargs['allow_redirects'])
         self.assertFalse(transport.session.trust_env)
+        self.assertIsInstance(transport.session.post.call_args.kwargs['data'],bytes)
+        self.assertEqual(transport.session.post.call_args.kwargs['headers']['Content-Type'],'application/json')

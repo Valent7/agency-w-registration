@@ -59,7 +59,7 @@ class HTTPS:
         self.endpoint=endpoint;self.session=requests.Session();self.session.trust_env=False
 
     def __call__(self,envelope):
-        with self.session.post(self.endpoint,json=envelope,timeout=(5,20),allow_redirects=False,stream=True) as response:
+        with self.session.post(self.endpoint,data=canonical(envelope).encode(),headers={'Content-Type':'application/json'},timeout=(5,20),allow_redirects=False,stream=True) as response:
             if response.status_code!=200:raise MemoryError('Cloud sync unavailable')
             raw=bytearray()
             for chunk in response.iter_content(65536):
