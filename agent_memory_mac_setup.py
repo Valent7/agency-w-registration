@@ -18,13 +18,15 @@ LABEL='com.agency-w.kadrian-memory-sync'
 
 def prepare(root,output,python,code,scope,endpoint,device_id=None):
     """Creates files only at operator-selected staging destination, no installation."""
-    HTTPS(endpoint)  # validation only, no request
+    from agent_memory_edge import EdgeHTTPS
+    backend='supabase-edge' if '/functions/v1/' in endpoint else 'standalone'
+    (EdgeHTTPS if backend=='supabase-edge' else HTTPS)(endpoint)  # validation only, no request
     root=Path(root).absolute();code=Path(code).absolute();python=Path(python).absolute()
     output=private_dir(Path(output).absolute())
     for name in ('config.json','launch-agent.plist','codex-hooks.json'):
         if (output/name).exists():raise MemoryError('Staging destination already populated')
     cfg={'root':str(root),'state_dir':str(output/'transport'),'scope':scope.as_dict(),
-         'device_id':device_id or uuid4().hex,'endpoint':endpoint}
+         'device_id':device_id or uuid4().hex,'endpoint':endpoint,'backend':backend}
     config=output/'config.json'
     atomic(config,canonical(cfg).encode())
     command=[str(python),str(code/'agent_memory_daemon.py'),'--config',str(config)]
@@ -51,7 +53,9 @@ def enroll(config_path,keychain):
         key=Ed25519PrivateKey.generate()
         raw=key.private_bytes(serialization.Encoding.Raw,serialization.PrivateFormat.Raw,serialization.NoEncryption())
         keychain.create(cfg['device_id'],raw)
-        sync=Sync(cfg['root'],directory,Scope(**cfg['scope']),cfg['device_id'],raw,HTTPS(cfg['endpoint']))
+        from agent_memory_edge import EdgeHTTPS
+        sync=Sync(cfg['root'],directory,Scope(**cfg['scope']),cfg['device_id'],raw,
+                  (EdgeHTTPS if cfg.get('backend')=='supabase-edge' else HTTPS)(cfg['endpoint']))
         sync.initialize()
         public=key.public_key().public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
         registry={cfg['device_id']:{'public_key':base64.b64encode(public).decode(),'scope':cfg['scope'],'revoked':False}}

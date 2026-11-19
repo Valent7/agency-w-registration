@@ -1,0 +1,5 @@
+# REVIEW ONLY. Merge this function-specific block; never replace existing config.
+[functions.kadrian-memory-sync]
+verify_jwt = false
+# Custom Ed25519 authentication is mandatory INSIDE the function, before database access.
+# Do not apply verify_jwt=false to any other function.

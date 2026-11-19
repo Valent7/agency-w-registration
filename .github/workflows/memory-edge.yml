@@ -1,0 +1,51 @@
+name: Isolated Supabase Edge memory
+on:
+  pull_request:
+    paths:
+      - 'supabase/functions/kadrian-memory-sync/**'
+      - 'agent_memory*.py'
+      - 'tests/edge/**'
+      - 'tests/test_agent_memory_edge*.py'
+      - 'tools/memory_edge_release.py'
+      - 'deploy/memory-edge/**'
+      - 'docs/KADRIAN_MEMORY_EDGE_RU.md'
+      - '.github/workflows/memory-edge.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-edge:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse shared production branch as PR target
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.base_ref }}
+        run: test "$PR_BASE" = codex/memory-sync-integration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.8
+      - run: python -m pip install -r deploy/memory-sync/requirements-mac.txt
+      - run: deno check supabase/functions/kadrian-memory-sync/index.ts
+      - run: deno test tests/edge/protocol_test.ts
+      - name: Actual Python to Deno exchange, restart, offline, replay, budgets
+        run: python -m unittest discover -s tests -p 'test_agent_memory_edge*.py' -v
+      - name: Existing Mac transport and Keychain bindings
+        if: runner.os == 'macOS'
+        run: |
+          python -m unittest discover -s tests -p test_agent_memory_continuous.py -v
+          python -c "from agent_memory_mac_keychain import Keychain; k=Keychain(); q=k.item('synthetic-unused'); k.cf.CFRelease(q)"
+      - name: Build isolated exact-commit artifact, no deployment
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python tools/memory_edge_release.py build --source-sha "$SOURCE_SHA" --destination "$RUNNER_TEMP/edge-memory-release"
+          python tools/memory_edge_release.py verify --destination "$RUNNER_TEMP/edge-memory-release"
