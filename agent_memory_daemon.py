@@ -88,7 +88,7 @@ class Sync:
     def initialize(self):
         if self.state_path.exists() or self.state_path.is_symlink():raise MemoryError('Transport already initialized')
         self.save({'scope':self.scope.as_dict(),'device_id':self.device_id,'sequence':0,
-            'observed':{},'observed_text':{},'pending':[],'cloud_revision':0,'cloud_hash':None,'synced_at':None})
+            'observed':{},'observed_text':{},'pending':[],'cloud_revision':0,'cloud_hash':None,'parents':{},'synced_at':None})
 
     def save(self,state):atomic(self.state_path,self.cipher.encrypt(canonical(state).encode()))
 
@@ -129,11 +129,18 @@ class Sync:
         snapshot=self.request('pull',{}); row=validate_snapshot(snapshot,self.scope)
         if row['revision']<state['cloud_revision'] or (row['revision']==state['cloud_revision'] and state['cloud_hash'] and row['hash']!=state['cloud_hash']):
             raise Conflict('Cloud history rewound or changed')
+        checkpoints={}
+        for parent in snapshot.get('parents',[]):
+            name=parent['scope']['agent_id'];previous=state.get('parents',{}).get(name)
+            if previous and (parent['revision']<previous['revision'] or (parent['revision']==previous['revision'] and parent['checksum']!=previous['checksum'])):
+                raise Conflict('Parent history rewound or changed')
+            checkpoints[name]={'revision':parent['revision'],'checksum':parent['checksum']}
+        if set(state.get('parents',{}))-set(checkpoints):raise Conflict('Parent rules disappeared')
         target=self.root/'context/SYNCED_MEMORY.md'
         if target.is_symlink():raise MemoryError('Symlink projection')
         previous=target.read_text() if target.exists() else None
         apply_automatic_projection(self.root,snapshot,self.scope,expected_local_hash=digest(previous))
-        state.update(cloud_revision=row['revision'],cloud_hash=row['hash'])
+        state.update(cloud_revision=row['revision'],cloud_hash=row['hash'],parents=checkpoints)
         self.save(state)
 
     def cycle(self, max_events=20):

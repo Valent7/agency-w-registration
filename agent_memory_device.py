@@ -23,6 +23,23 @@ def validate_snapshot(snapshot, scope):
     row['revision'] = 1
     body = {'format':'agency-memory/1','scope':scope.as_dict(),'revisions':[row]}
     validate_bundle({**body,'checksum':digest(body)}, scope)
+    parents=snapshot.get('parents',[])
+    if not isinstance(parents,list) or len(parents)>2:raise MemoryError('Invalid parent rules')
+    seen=set()
+    for parent in parents:
+        if set(parent)!={'scope','revision','rules','checksum'}:raise MemoryError('Invalid parent projection')
+        ps=Scope(**parent['scope'])
+        if ps.owner_id!=scope.owner_id or ps.project_id is not None or ps.workspace_id!='owner' or ps.agent_id not in {'*',scope.agent_id} or ps.agent_id in seen:
+            raise MemoryError('Parent scope mismatch')
+        seen.add(ps.agent_id)
+        if type(parent['revision']) is not int or parent['revision']<0:raise MemoryError('Invalid parent revision')
+        body={k:v for k,v in parent.items() if k!='checksum'}
+        if digest(body)!=parent['checksum']:raise MemoryError('Parent checksum mismatch')
+        safe_content(body,max_bytes=256_000)
+        if not isinstance(parent['rules'],list):raise MemoryError('Invalid parent rules')
+        for rule in parent['rules']:
+            if set(rule)!={'id','kind','text','status','certainty','source'} or rule['kind']!='rule' or rule['status']!='approved' or not isinstance(rule['text'],str):
+                raise MemoryError('Only approved parent rules allowed')
     return snapshot['snapshot']
 
 
@@ -56,7 +73,16 @@ class DeviceService:
         memory = Memory(self.repository,principal,scope)
         if request['operation'] == 'pull':
             if request['payload'] != {}: raise MemoryError('Unexpected pull payload')
-            result = {'scope':scope.as_dict(),'snapshot':memory.read()}
+            parents=[]
+            for agent in ('*',scope.agent_id):
+                ps=Scope(scope.owner_id,agent,'owner')
+                reader=Principal(scope.owner_id,'approved-rule-reader','agent',agent,'owner',frozenset({'read'}))
+                context=Memory(self.repository,reader,ps).context()
+                # Explicit allowlist: no parent/client knowledge, task or evidence export.
+                rules=[{k:e[k] for k in ('id','kind','text','status','certainty','source')} for e in context['rules']]
+                body={'scope':ps.as_dict(),'revision':context['revision'],'rules':rules}
+                parents.append({**body,'checksum':digest(body)})
+            result = {'scope':scope.as_dict(),'snapshot':memory.read(),'parents':parents}
             validate_snapshot(result,scope)
             return result
         if request['operation'] != 'push':

@@ -181,3 +181,26 @@ class ContinuousTests(unittest.TestCase):
         path=self.root/SYNC_FILES[1];path.write_text('api_key: ');self.sync.cycle()
         path.write_text('api_key: sk-'+('x'*30))
         with self.assertRaises(MemoryError):self.sync.cycle()
+
+    def test_approved_parent_rules_return_without_private_parent_facts(self):
+        scope=Scope(11,'*','owner');owner=Memory(self.repo,Principal(11,'synthetic-owner','owner'),scope)
+        owner.record('fact','Private parent note not for project export',source='synthetic',key='private')
+        owner.record('rule','Approved shared behavior',source='synthetic',key='rule')
+        rule_id=digest({'scope':scope.as_dict(),'key':'rule'})[:32]
+        owner.record('check','Synthetic check',source='test',key='check',related=[rule_id],evidence={'passed':True,'rule_hash':digest('Approved shared behavior')})
+        check_id=digest({'scope':scope.as_dict(),'key':'check'})[:32]
+        owner.validate_rule(rule_id,[check_id],expected=owner.read()['revision'])
+        owner.approve_rule(rule_id,expected=owner.read()['revision'])
+        owner.record('rule','Unapproved idea must stay off',source='synthetic',key='unapproved')
+        self.sync.cycle();text=(self.root/'context/SYNCED_MEMORY.md').read_text()
+        self.assertIn('Approved shared behavior',text)
+        self.assertNotIn('Private parent note',text);self.assertNotIn('Unapproved idea',text)
+        self.assertEqual((self.root/'Agent.md').read_text(),'General rule: owner approval only')
+
+    def test_parent_scope_and_rewind_are_rejected(self):
+        from agent_memory_device import validate_snapshot
+        snapshot=self.sync.request('pull',{});changed=deepcopy(snapshot)
+        changed['parents'][0]['scope']['owner_id']=12
+        with self.assertRaises(MemoryError):validate_snapshot(changed,self.scope)
+        self.sync.cycle();self.sync.transport=lambda e:{'scope':self.scope.as_dict(),'snapshot':snapshot['snapshot']}
+        self.assertEqual(self.sync.cycle()['status'],'offline_or_blocked')
