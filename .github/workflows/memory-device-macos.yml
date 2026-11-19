@@ -1,0 +1,28 @@
+name: Mac memory sync synthetic tests
+on:
+  pull_request:
+    paths:
+      - 'agent_memory*.py'
+      - 'tests/test_agent_memory*.py'
+      - 'deploy/memory-sync/**'
+      - '.github/workflows/memory-device-macos.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-macos:
+    runs-on: macos-14
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r deploy/memory-sync/requirements-mac.txt starlette==1.10.0 httpx==0.28.1
+      - name: Synthetic transport, restart, conflict, HTTP and launch assets
+        run: |
+          python -m unittest discover -s tests -p test_agent_memory_continuous.py -v
+          python -m unittest discover -s tests -p test_agent_memory_device_api.py -v
+      - name: Load native Keychain bindings without accessing credentials
+        run: |
+          python -c "from agent_memory_mac_keychain import Keychain; k=Keychain(); q=k.item('synthetic-unused'); k.cf.CFRelease(q)"

@@ -18,3 +18,7 @@ context/SYNCED_MEMORY.md
 .memory-projection.lock
 context/.memory-projection-*
 agent-memory-backup.enc
+
+# Mac transport queue/config and generated install assets (private, never source).
+.memory-sync/
+*.sync-state.enc
