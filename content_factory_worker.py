@@ -172,6 +172,10 @@ class Worker:
             pass
 
     def _update(self, job, **changes):
+        if job.get('studio_master') and changes.get('state') != 'paused':
+            project = self.store.get_project(job['owner_id'], job['project_id'])
+            if project and project.get('kadrian_production_paused') is True:
+                raise PauseRequested()
         from agent_memory_runtime import record_job_state, enabled, job_event
         if enabled(job['owner_id'], job['project_id']) and (job.get('kadrian_auto') or job.get('kadrian_provider') or job.get('memory_snapshot')):
             fresh = self.store.get_job(job['owner_id'], job['id']) or job

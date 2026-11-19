@@ -176,3 +176,30 @@ render_memory(store,11,store.get_project(11,st.session_state['project_id']))
         self.assertFalse(app.exception);self.assertFalse(app.error)
         self.assertEqual(self.count(self.b),0)
         self.assertEqual(self.store.get_project(11,self.b['id'])['kadrian_chat']['turns'][0]['answer'],'Legacy answer')
+
+    def test_memory_outage_does_not_hide_owner_stop(self):
+        from streamlit.testing.v1 import AppTest
+        self.store.list_projects=Mock(return_value=[self.a])
+        ask=Mock(side_effect=AssertionError('A stop must not call a model'))
+        app=AppTest.from_string('import streamlit as st\nfrom kadrian_studio_ui import render_kadrian\nrender_kadrian(11,st.session_state["ask"])')
+        app.session_state['ask']=ask
+        with patch('kadrian_studio_ui._runtime',return_value=(self.store,None,None)), \
+             patch('kadrian_studio_ui.connection_status',return_value={}), \
+             patch('agent_memory_runtime.reconcile_project',side_effect=MemoryError('offline')):
+            app.run(timeout=20)
+            stop=next(b for b in app.button if b.label=='⏹ Остановить создание сцен')
+            stop.click().run(timeout=20)
+        self.assertFalse(app.exception)
+        self.assertTrue(self.store.get_project(11,self.a['id'])['kadrian_production_paused'])
+        ask.assert_not_called()
+
+    def test_memory_enabled_worker_still_honors_owner_pause(self):
+        from content_factory_worker import Worker, PauseRequested
+        queued=self.job(self.a)
+        queued=self.store.update_job(11,queued['id'],{'studio_master':True})
+        claimed=self.store.claim_job('paused-worker',iso(utc_now()),owner_id=11,project_id=self.a['id'])
+        p=self.store.get_project(11,self.a['id'])
+        self.store.update_project_if_current(11,p['id'],{'kadrian_production_paused':True},p['updated_at'])
+        with self.assertRaises(PauseRequested):
+            Worker(self.store,worker_id='paused-worker')._update(claimed,progress={'stage':'must not advance'})
+        self.assertEqual(self.count(self.a),0)

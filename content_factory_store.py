@@ -521,6 +521,24 @@ class SQLiteStore(_StoreBase):
             db.execute(f"UPDATE content_factory_jobs SET {','.join(key+'=?' for key in keys)} WHERE owner_id=? AND id=?", [*values, owner_id, job_id])
             return _unpack(row)
 
+    def pause_studio_job(self, owner_id, project_id, job_id, expected_updated_at, message):
+        owner_id, project_id, job_id = _owner(owner_id), _id(project_id), _id(job_id)
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = _unpack(db.execute("SELECT * FROM content_factory_jobs WHERE owner_id=? AND project_id=? AND id=?", (owner_id,project_id,job_id)).fetchone())
+            if not previous or previous.get('studio_master') is not True:
+                raise StoreError("Задание студии недоступно.")
+            if _time(previous['updated_at']) != _time(expected_updated_at):
+                raise StoreError("Задание изменилось. Повторите остановку.")
+            if previous['state'] not in {'queued','generating'}:
+                return previous
+            row = _updated_job(previous, {'state':'paused','lease_owner':None,'lease_until':None,
+                'owner_stop_requested':True,'progress':{'stage':'paused','message':str(message)[:1000]}})
+            keys = [key for key in row if key not in _IMMUTABLE]
+            values = [_json(row[key]) if key == 'data' else row[key] for key in keys]
+            db.execute(f"UPDATE content_factory_jobs SET {','.join(key+'=?' for key in keys)} WHERE owner_id=? AND project_id=? AND id=?",[*values,owner_id,project_id,job_id])
+            return _unpack(row)
+
     def resume_stalled_video_job(self, owner_id: int, job_id: str, now: str, stale_seconds: int = 180) -> dict:
         owner_id, job_id = _owner(owner_id), _id(job_id)
         with self._db() as db:
@@ -886,6 +904,26 @@ class SupabaseStore(_StoreBase):
         result = self._request("PATCH", "/rest/v1/content_factory_jobs", params=params, json={key: value for key, value in row.items() if key not in _IMMUTABLE}, prefer="return=representation")
         if not result:
             raise StoreError("Материал изменён или уже обрабатывается. Обновите список.")
+        return _unpack(result[0])
+
+    def pause_studio_job(self, owner_id, project_id, job_id, expected_updated_at, message):
+        owner_id, project_id, job_id = _owner(owner_id), _id(project_id), _id(job_id)
+        previous = self.get_job(owner_id,job_id)
+        if not previous or previous['project_id'] != project_id or previous.get('studio_master') is not True:
+            raise StoreError("Задание студии недоступно.")
+        if _time(previous['updated_at']) != _time(expected_updated_at):
+            raise StoreError("Задание изменилось. Повторите остановку.")
+        if previous['state'] not in {'queued','generating'}:
+            return previous
+        row = _updated_job(previous,{'state':'paused','lease_owner':None,'lease_until':None,
+            'owner_stop_requested':True,'progress':{'stage':'paused','message':str(message)[:1000]}})
+        result = self._request('PATCH','/rest/v1/content_factory_jobs',params={
+            'owner_id':f'eq.{owner_id}','project_id':f'eq.{project_id}','id':f'eq.{job_id}',
+            'updated_at':'eq.'+_time(expected_updated_at),'state':'in.(queued,generating)',
+            'data->>studio_master':'eq.true'},
+            json={key:value for key,value in row.items() if key not in _IMMUTABLE}, prefer='return=representation')
+        if not result:
+            raise StoreError("Задание изменилось. Повторите остановку.")
         return _unpack(result[0])
 
     def resume_stalled_video_job(self, owner_id: int, job_id: str, now: str, stale_seconds: int = 180) -> dict:
