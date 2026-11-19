@@ -6,6 +6,7 @@ cloud-approved rules are NEVER accepted from an imported local document.
 from pathlib import Path
 import json
 import os
+import fcntl
 from uuid import uuid4
 
 from agent_memory import Conflict, MemoryError, canonical, digest, safe_content
@@ -138,11 +139,13 @@ def _apply_projection(root, last, *, expected_local_hash, parents=()):
         raise MemoryError('Backup directory cannot be a symlink')
     backup_dir.mkdir(mode=0o700,exist_ok=True);backup_dir.chmod(0o700)
     lock = root / '.memory-projection.lock'
+    fd = None
     try:
-        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, FileExistsError):
+        if fd is not None:os.close(fd)
         raise Conflict('Another local memory update is in progress') from None
-    os.close(fd)
     temp = target_dir / ('.memory-projection-' + uuid4().hex)
     try:
         current = target.read_text() if target.exists() else None
@@ -151,13 +154,23 @@ def _apply_projection(root, last, *, expected_local_hash, parents=()):
         if previous is not None:
             b = backup_dir / (digest(previous) + '.md')
             if b.is_symlink():raise MemoryError('Backup destination is a symlink')
+            if b.exists() and b.read_text()!=previous:raise Conflict('Existing projection backup differs; preserve both for review')
             if not b.exists():
                 f = os.open(b, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(f,'w') as stream:stream.write(previous)
+                with os.fdopen(f,'w') as stream:
+                    stream.write(previous);stream.flush();os.fsync(stream.fileno())
+                backup_fd=os.open(backup_dir,os.O_RDONLY)
+                try:os.fsync(backup_fd)
+                finally:os.close(backup_fd)
         f = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(f,'w') as stream:
             stream.write(content);stream.flush();os.fsync(stream.fileno())
         os.replace(temp,target)
+        target_fd=os.open(target_dir,os.O_RDONLY)
+        try:os.fsync(target_fd)
+        finally:os.close(target_fd)
     finally:
-        temp.unlink(missing_ok=True);lock.unlink(missing_ok=True)
+        temp.unlink(missing_ok=True);os.close(fd)
+        # Keep the inode: unlinking a flock lock can let a third writer bypass it.
+        # macOS releases flock even after SIGKILL, so a reboot never leaves a stale lock.
     return target

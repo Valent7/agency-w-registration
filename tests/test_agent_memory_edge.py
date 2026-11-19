@@ -8,6 +8,7 @@ import plistlib
 import select
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -144,6 +145,22 @@ class EdgeClientTests(unittest.TestCase):
         self.sync.transport=lambda e:(_ for _ in ()).throw(OSError('offline'))
         self.sync.cycle();state=self.sync.load();self.assertEqual(state['edge_usage']['requests'],1)
         self.now=32*86400;usage=self.sync._usage(state);self.assertEqual(usage['requests'],0);self.assertEqual(len(state['pending']),1)
+
+    def test_projection_lock_released_after_forced_process_exit(self):
+        from agent_memory import Conflict
+        self.sync.cycle();state=self.sync.load();snapshot=state['edge_snapshot']
+        lock=self.root/'.memory-projection.lock'
+        code="import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('locked',flush=True); time.sleep(30)"
+        process=subprocess.Popen([sys.executable,'-c',code,str(lock)],stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertTrue(select.select([process.stdout],[],[],5)[0]);self.assertEqual(process.stdout.readline().strip(),'locked')
+            with self.assertRaises(Conflict):self.sync.apply_snapshot(state,snapshot)
+            process.kill();process.wait(timeout=5)
+            self.sync.apply_snapshot(state,snapshot)  # no stale-lock deletion required
+            self.assertTrue(lock.exists())
+        finally:
+            if process.poll() is None:process.kill();process.wait(timeout=5)
+            process.stdout.close()
 
     def test_launchd_assets_codex_hooks_scoped_and_not_installed(self):
         cfg=prepare(self.root,self.base/'stage',Path('/synthetic/python'),Path('/synthetic/code'),self.scope,'https://synthetic.supabase.co/functions/v1/kadrian-memory-sync')
