@@ -20,6 +20,7 @@ import {
 } from "./protocol.ts";
 
 export interface Store {
+  authorize?(scope: Scope, device: string): Promise<Store>;
   metadata(scope: Scope): Promise<Meta>;
   read(scope: Scope): Promise<string>; // one raw JSON row; never reserialize old document
   commit(
@@ -109,7 +110,7 @@ async function limitedBody(req: Request) {
 }
 export function handler(
   config: Config,
-  store: Store,
+  source: Store,
   clock = () => Date.now() / 1000,
 ) {
   return async (req: Request): Promise<Response> => {
@@ -149,6 +150,9 @@ export function handler(
           ? (p.base_document === null || typeof p.base_document === "string")
           : p.base_document === null,
       );
+      const store = source.authorize
+        ? await source.authorize(scope, r.device_id)
+        : source;
       const scopes = [scope, parent(scope, "*"), parent(scope, scope.agent_id)];
       const names = ["project", "global", "agent"];
       const mm = await Promise.all(scopes.map((s) => store.metadata(s)));

@@ -79,3 +79,24 @@ def main():
 
 
 if __name__=='__main__':main()
+
+
+def prepare_gated_existing(config_path, output, python, code):
+    """Review-only assets using EXISTING identity/config/queue; no enrollment/start."""
+    config=Path(config_path).resolve(strict=True)
+    cfg=json.loads(config.read_text())
+    if config.stat().st_mode & 0o077:raise MemoryError('Private config required')
+    output=private_dir(Path(output).absolute())
+    if any(output.iterdir()):raise MemoryError('Empty staging directory required')
+    command=[str(Path(python).absolute()),str(Path(code).absolute()/'agent_memory_run.py'),'--config',str(config)]
+    plist={'Label':LABEL,'ProgramArguments':command,'RunAtLoad':True,'StartInterval':60,
+           'WatchPaths':[str(Path(cfg['root'])/n) for n in SYNC_FILES],
+           'ThrottleInterval':30,'ProcessType':'Background','LimitLoadToSessionType':'Aqua','Umask':0o077,
+           'StandardOutPath':'/dev/null','StandardErrorPath':'/dev/null'}
+    atomic(output/'launch-agent.plist',plistlib.dumps(plist))
+    hooks={'hooks':{event:[{'hooks':[{'type':'command','command':shlex.join(command+['--hook',event]),
+           'timeout':70}]}] for event in ('SessionStart','UserPromptSubmit')}}
+    atomic(output/'codex-hooks.json',json.dumps(hooks,ensure_ascii=False,indent=2).encode())
+    atomic(output/'identity.json',canonical({'scope':cfg['scope'],'device_id':cfg['device_id'],
+           'config':str(config),'state_dir':cfg['state_dir'],'installed':False}).encode())
+    return cfg

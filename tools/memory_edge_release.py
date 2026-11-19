@@ -6,10 +6,11 @@ from pathlib import Path
 import subprocess
 
 FUNCTION='kadrian-memory-sync'
-FILES={**{f'supabase/functions/{FUNCTION}/{n}':f'supabase/functions/{FUNCTION}/{n}' for n in ('index.ts','service.ts','protocol.ts')},
-       **{n:'mac/'+n for n in ('agent_memory.py','agent_memory_device.py','agent_memory_daemon.py','agent_memory_edge.py','agent_memory_sync.py','agent_memory_mac_setup.py','agent_memory_mac_keychain.py')},
+FILES={**{f'supabase/functions/{FUNCTION}/{n}':f'supabase/functions/{FUNCTION}/{n}' for n in ('index.ts','service.ts','protocol.ts','binding.ts','gate.ts')},
+       **{n:'mac/'+n for n in ('agent_memory.py','agent_memory_device.py','agent_memory_daemon.py','agent_memory_edge.py','agent_memory_sync.py','agent_memory_mac_setup.py','agent_memory_mac_keychain.py','agent_memory_run.py')},
        'deploy/memory-sync/requirements-mac.txt':'mac/requirements.txt',
-       'deploy/memory-edge/config.fragment.toml':'supabase/config.toml'}
+       'deploy/memory-edge/config.fragment.toml':'supabase/config.toml',
+       'deploy/memory-edge/safety-gate.sql':'operator/safety-gate.sql'}
 
 
 def verify(destination):

@@ -26,7 +26,7 @@ class EdgeReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):verify(out)
 
     def test_release_has_no_customer_data_keys_or_production_entrypoints(self):
-        self.assertEqual(len(FILES),12)
+        self.assertEqual(len(FILES),16)
         for forbidden in ('Agent.md','AGENTS.md','context/PROJECT.md','render.yaml','content_factory_oauth.py','content_factory_worker.py','neola-knowledge-search'):
             self.assertFalse(any(forbidden in name for name in FILES))
         root=Path(__file__).resolve().parents[1]

@@ -174,7 +174,7 @@ class Sync:
             return status
 
 
-def main(argv=None):
+def main(argv=None, permit_check=None):
     parser=argparse.ArgumentParser();parser.add_argument('--config',required=True);parser.add_argument('--preflight',action='store_true');parser.add_argument('--hook',choices=['SessionStart','UserPromptSubmit'])
     args=parser.parse_args(argv)
     cfg=None
@@ -189,6 +189,12 @@ def main(argv=None):
             sync=EdgeSync(cfg['root'],cfg['state_dir'],scope,cfg['device_id'],key,EdgeHTTPS(cfg['endpoint']),budget=cfg.get('budget'))
         else:
             sync=Sync(cfg['root'],cfg['state_dir'],scope,cfg['device_id'],key,HTTPS(cfg['endpoint']))
+        if permit_check:
+            transport=sync.transport
+            def checked(envelope):
+                if not permit_check():raise MemoryError('Local stop active')
+                return transport(envelope)
+            sync.transport=checked
         status=sync.cycle(max_events=0 if args.hook or args.preflight else 20)
     except Exception:
         status={'status':'offline_or_blocked','pending':'unknown','checked_at':time.time()}

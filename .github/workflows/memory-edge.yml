@@ -7,8 +7,10 @@ on:
       - 'tests/edge/**'
       - 'tests/test_agent_memory_edge*.py'
       - 'tools/memory_edge_release.py'
+      - 'tools/memory_gate_*.py'
       - 'deploy/memory-edge/**'
       - 'docs/KADRIAN_MEMORY_EDGE_RU.md'
+      - 'docs/KADRIAN_MEMORY_SAFETY_GATE_RU.md'
       - '.github/workflows/memory-edge.yml'
   workflow_dispatch:
 permissions:
@@ -39,7 +41,7 @@ jobs:
           deno-version: ${{ matrix.deno }}
       - run: python -m pip install -r deploy/memory-sync/requirements-mac.txt
       - run: deno check supabase/functions/kadrian-memory-sync/index.ts
-      - run: deno test tests/edge/protocol_test.ts
+      - run: deno test tests/edge/protocol_test.ts tests/edge/gate_test.ts
       - name: Actual Python to Deno exchange, restart, offline, replay, budgets
         run: python -m unittest discover -s tests -p 'test_agent_memory_edge*.py' -v
       - name: Existing Mac transport and Keychain bindings
