@@ -219,6 +219,7 @@ function members(
 ): { key: string; start: number; value: number; end: number }[] {
   assert(s[start] === "{");
   const out: { key: string; start: number; value: number; end: number }[] = [];
+  const seen = new Set<string>();
   let i = start + 1;
   while (i < s.length) {
     while (/[\s,]/.test(s[i] ?? "") && i < s.length) i++;
@@ -226,11 +227,12 @@ function members(
     const begin = i;
     const end = valueEnd(s, i);
     const key = JSON.parse(s.slice(i, end));
-    assert(typeof key === "string" && !out.some((x) => x.key === key));
+    assert(typeof key === "string" && !seen.has(key));
     i = end;
     while (/\s/.test(s[i] ?? "") && i < s.length) i++;
     assert(s[i++] === ":");
     while (/\s/.test(s[i] ?? "") && i < s.length) i++;
+    seen.add(key);
     const value = i;
     i = valueEnd(s, i);
     out.push({ key, start: begin, value, end: i });

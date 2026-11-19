@@ -75,6 +75,7 @@ class EdgeSync(Sync):
             for name,agent in [('global','*'),('agent',self.scope.agent_id)]:
                 if known[name]['revision']!=parents[agent]['revision']:raise Conflict('Parent metadata mismatch')
             state['edge_snapshot']=snapshot
+            state['edge_projection_hash']=digest((self.root/'context/SYNCED_MEMORY.md').read_text())
         elif known!=state.get('edge_known'):
             raise Conflict('Changed version without content')
         state['edge_known']=known;state['edge_quota']=response.get('quota',{})
@@ -93,6 +94,14 @@ class EdgeSync(Sync):
             state=self.load();self.capture(state);usage=self._usage(state)
             now=self.clock()
             try:
+                cached=state.get('edge_snapshot')
+                if cached and cached['snapshot']['revision']==state['cloud_revision'] and cached['snapshot']['hash']==state['cloud_hash']:
+                    target=self.root/'context/SYNCED_MEMORY.md'
+                    if target.is_symlink():raise MemoryError('Symlink projection')
+                    local_hash=digest(target.read_text()) if target.exists() else None
+                    if local_hash!=state.get('edge_projection_hash'):
+                        self.apply_snapshot(state,cached)
+                        state['edge_projection_hash']=digest(target.read_text())
                 if now<state.get('edge_retry_at',0):
                     state['status']='offline_or_blocked'
                 elif usage['requests']>=self.budget['requests'] or usage['response_bytes']+3_000_000>self.budget['response_bytes']:

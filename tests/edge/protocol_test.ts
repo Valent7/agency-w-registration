@@ -322,3 +322,35 @@ Deno.test("oversized document fails without truncation", async () => {
     )
   );
 });
+
+Deno.test("signed payload tampering is denied cryptographically before DB", async () => {
+  const { k, pub } = await keys();
+  const store = new FakeStore();
+  const serve = handler(
+    {
+      enabled: true,
+      pilot,
+      devices: { synthetic: { scope: pilot, public_key: pub } },
+    },
+    store,
+    () => 1000,
+  );
+  const e = await envelope(k.privateKey, initial);
+  e.request.request_id = "b".repeat(32);
+  eq((await serve(request(e))).status, 503);
+  eq(store.metas, 0);
+});
+
+Deno.test("oversized requests are rejected before signature work or database", async () => {
+  const { serve, store } = await setup();
+  const r = new Request(
+    "https://synthetic.supabase.co/functions/v1/kadrian-memory-sync",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "x".repeat(3_000_001),
+    },
+  );
+  eq((await serve(r)).status, 503);
+  eq(store.metas, 0);
+});

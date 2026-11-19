@@ -134,6 +134,17 @@ class EdgeClientTests(unittest.TestCase):
             r=original(e);r['known']['project']['hash']='0'*64;r['snapshot']=None;return r
         self.sync.transport=altered;self.assertEqual(self.sync.cycle()['status'],'offline_or_blocked');self.assertEqual(len(self.sync.load()['pending']),1)
 
+    def test_manually_changed_projection_is_backed_up_and_rebuilt_without_full_poll(self):
+        self.sync.cycle();projection=self.root/'context/SYNCED_MEMORY.md';projection.write_text('Manual projection version')
+        calls=self.calls;self.sync.cycle(max_events=0);self.assertEqual(self.calls,calls)
+        self.assertNotEqual(projection.read_text(),'Manual projection version')
+        self.assertTrue(any(p.read_text()=='Manual projection version' for p in (self.root/'.memory-backups').glob('*.md')))
+
+    def test_monthly_local_budget_reset_keeps_durable_pending(self):
+        self.sync.transport=lambda e:(_ for _ in ()).throw(OSError('offline'))
+        self.sync.cycle();state=self.sync.load();self.assertEqual(state['edge_usage']['requests'],1)
+        self.now=32*86400;usage=self.sync._usage(state);self.assertEqual(usage['requests'],0);self.assertEqual(len(state['pending']),1)
+
     def test_launchd_assets_codex_hooks_scoped_and_not_installed(self):
         cfg=prepare(self.root,self.base/'stage',Path('/synthetic/python'),Path('/synthetic/code'),self.scope,'https://synthetic.supabase.co/functions/v1/kadrian-memory-sync')
         self.assertEqual(cfg['backend'],'supabase-edge');self.assertNotIn('service_role',canonical(cfg))

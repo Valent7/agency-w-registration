@@ -119,7 +119,7 @@ export function handler(
       "X-Content-Type-Options": "nosniff",
     };
     try {
-      assert(config.enabled, "Pilot disabled");
+      assert(config.enabled === true, "Pilot disabled");
       assert(
         req.method === "POST" &&
           new URL(req.url).pathname.endsWith("/kadrian-memory-sync") &&

@@ -4,7 +4,7 @@ import { Config, handler, SupabaseMemoryStore } from "./service.ts";
 const config: Config = JSON.parse(
   Deno.env.get("KADRIAN_MEMSYNC_CONFIG") ?? '{"enabled":false}',
 );
-const serve = config.enabled
+const serve = config.enabled === true
   ? handler(
     config,
     new SupabaseMemoryStore(

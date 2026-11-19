@@ -17,7 +17,11 @@ jobs:
   synthetic-edge:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-15]
+        include:
+          - os: ubuntu-latest
+            deno: v2.1.4
+          - os: macos-15
+            deno: v2.9.8
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -32,7 +36,7 @@ jobs:
           python-version: '3.12'
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.9.8
+          deno-version: ${{ matrix.deno }}
       - run: python -m pip install -r deploy/memory-sync/requirements-mac.txt
       - run: deno check supabase/functions/kadrian-memory-sync/index.ts
       - run: deno test tests/edge/protocol_test.ts
