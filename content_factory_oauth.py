@@ -12,7 +12,6 @@ import hmac
 from html import escape
 import ipaddress
 import json
-import os
 import re
 import secrets
 import threading
@@ -331,9 +330,6 @@ def create_app(store, config: dict) -> Starlette:
 
     app = Starlette(routes=[Route("/health", health), Route("/connect/{platform}", start),
                             Route("/oauth/{platform}/callback", callback)])
-    from agent_memory_device_api import device_routes
-    if os.environ.get("AGENCY_MEMORY_DEVICE_SYNC") == "1":
-        app.router.routes.extend(device_routes(store))
     app.state.oauth_session = requests
     return app
 

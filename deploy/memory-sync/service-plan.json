@@ -1,0 +1,22 @@
+{
+  "status": "preparation-only-cost-choice-requires-owner-approval",
+  "name": "kadrian-memory-sync",
+  "source_branch": "release/kadrian-memory-sync",
+  "auto_deploy": "off",
+  "runtime": "python",
+  "python_version": "3.12",
+  "region": "frankfurt",
+  "build_command": "python -m pip install -r requirements.txt",
+  "start_command": "uvicorn agent_memory_server:runtime_app --factory --host 0.0.0.0 --port $PORT --no-access-log",
+  "health_check": "/ready",
+  "plan": null,
+  "instances": 1,
+  "persistent_disk": false,
+  "environment_groups": [],
+  "required_server_secrets": ["SUPABASE_URL", "SUPABASE_SECRET_KEY"],
+  "required_private_config": ["AGENCY_MEMORY_SYNC_DEVICES", "AGENCY_MEMORY_V1_OWNERS", "AGENCY_MEMORY_V1_PROJECT_ID"],
+  "required_flags": {"AGENCY_MEMORY_V1": "1", "AGENCY_MEMORY_DEVICE_SYNC": "1", "AGENCY_MEMORY_SYNC_AGENT_ID": "kadrian"},
+  "database_migrations": [],
+  "deploy_hook": null,
+  "automatic_release_workflow": false
+}

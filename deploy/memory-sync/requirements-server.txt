@@ -1,0 +1,5 @@
+# Isolated ASGI service: no OpenAI, social APIs, media tools or Streamlit.
+requests==2.34.2
+cryptography==45.0.7
+starlette==1.10.0
+uvicorn==0.38.0

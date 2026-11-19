@@ -1,0 +1,35 @@
+name: Isolated memory channel
+on:
+  pull_request:
+    paths:
+      - 'agent_memory*.py'
+      - 'tools/memory_sync_release.py'
+      - 'deploy/memory-sync/**'
+      - 'tests/test_agent_memory*.py'
+      - 'docs/KADRIAN_MEMORY_ISOLATION_RU.md'
+      - '.github/workflows/memory-sync-isolation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-channel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reject unsafe PR target
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.base_ref }}
+        run: test "$PR_BASE" = codex/memory-sync-integration
+      - run: python -m pip install -r deploy/memory-sync/requirements-server.txt httpx==0.28.1
+      - run: python -m unittest discover -s tests -p test_agent_memory_isolation.py -v
+      - name: Build and verify exact release artifact without publishing
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python tools/memory_sync_release.py build --root . --destination "$RUNNER_TEMP/memory-release" --source-sha "$SOURCE_SHA"
+          python tools/memory_sync_release.py verify --destination "$RUNNER_TEMP/memory-release"

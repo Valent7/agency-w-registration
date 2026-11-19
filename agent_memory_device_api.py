@@ -10,8 +10,9 @@ from agent_memory_runtime import enabled
 from agent_memory_store import Repository
 
 
-def device_routes(store, env=None):
+def device_routes(store, env=None, *, allowed=None):
     env = os.environ if env is None else env
+    allowed = enabled if allowed is None else allowed
     async def exchange(request):
         headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}
         if env.get('AGENCY_MEMORY_DEVICE_SYNC') != '1':
@@ -22,7 +23,7 @@ def device_routes(store, env=None):
                 raw.extend(chunk)
                 if len(raw)>MAX_BYTES: return JSONResponse({'error':'too_large'},413,headers=headers)
             devices=json.loads(env.get('AGENCY_MEMORY_SYNC_DEVICES','{}'))
-            service=DeviceService(Repository(store,initialize=False),devices,enabled)
+            service=DeviceService(Repository(store,initialize=False),devices,allowed)
             result=await run_in_threadpool(service.handle,json.loads(raw))
             return JSONResponse(result,headers=headers)
         except Conflict:
