@@ -61,7 +61,7 @@ class BindingTests(unittest.TestCase):
     def test_offline_binding_exact_source_public_only_and_no_overwrite(self):
         import base64
         from tools.memory_edge_release import FILES,build
-        from tools.memory_gate_binding import bind
+        from tools.memory_gate_binding import bind,verify_bound
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)/'repo';root.mkdir()
             def git(*args):return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
@@ -73,6 +73,9 @@ class BindingTests(unittest.TestCase):
             reg=Path(tmp)/'public.json';reg.write_text(json.dumps({'synthetic':{'scope':scope,'public_key':base64.b64encode(bytes(32)).decode()}}))
             out=Path(tmp)/'bound';result=bind(source,out,reg,'a'*32,'x'*20)
             self.assertFalse(result['enabled']);self.assertEqual(result['source_sha'],sha)
+            self.assertEqual(verify_bound(out)['release_id'],'a'*32)
+            victim=out/'mac/agent_memory_run.py';victim.write_text('tampered')
+            with self.assertRaises(ValueError):verify_bound(out)
             self.assertNotIn('Deno.env', (out/'supabase/functions/kadrian-memory-sync/binding.ts').read_text())
             with self.assertRaises(ValueError):bind(source,out,reg,'a'*32,'x'*20)
             data=json.loads(reg.read_text());data['synthetic']['private_key']='forbidden';reg.write_text(json.dumps(data))
