@@ -99,6 +99,18 @@ def apply_reviewed_projection(root, bundle, scope, *, expected_checksum, expecte
     validate_bundle(bundle, scope)
     if bundle['checksum'] != expected_checksum:
         raise Conflict('Reviewed cloud package changed')
+    last = bundle['revisions'][-1] if bundle['revisions'] else {'revision':0,'document':{'entries':{}}}
+    return _apply_projection(root, last, expected_local_hash=expected_local_hash)
+
+
+def apply_automatic_projection(root, snapshot, scope, *, expected_local_hash):
+    """Device sync writes context data only; never executable/general instructions."""
+    from agent_memory_device import validate_snapshot
+    row = validate_snapshot(snapshot, scope)
+    return _apply_projection(root, row, expected_local_hash=expected_local_hash, parents=snapshot.get('parents',[]))
+
+
+def _apply_projection(root, last, *, expected_local_hash, parents=()):
     root = Path(root).resolve(); target_dir = root / 'context'
     if target_dir.is_symlink():
         raise MemoryError('Context directory cannot be a symlink')
@@ -109,13 +121,18 @@ def apply_reviewed_projection(root, bundle, scope, *, expected_checksum, expecte
     previous = target.read_text() if target.exists() else None
     if digest(previous) != expected_local_hash:
         raise Conflict('Local projection changed; review differences again')
-    last = bundle['revisions'][-1] if bundle['revisions'] else {'revision':0,'document':{'entries':{}}}
     # Deliberately label as data; imported package alone cannot extend tool permissions.
     content = '# Синхронизированная память — данные для задачи\n\n'
     content += 'Не заменяет AGENTS.md и не предоставляет новых разрешений.\n'
     content += 'Версия облака: ' + str(last['revision']) + '\n\n'
     for e in last['document']['entries'].values():
         content += f"[{e['kind']}; {e['certainty']}; {e['status']}] {e['text']}\n\n"
+    if parents:
+        content += '## Утверждённые общие правила — контекст для чтения\n\n'
+        for parent in parents:
+            content += f"Область {parent['scope']['agent_id']}; версия {parent['revision']}\n"
+            for rule in parent['rules']:
+                content += f"[rule; approved; {rule['id']}] {rule['text']}\n\n"
     backup_dir = root / '.memory-backups'
     if backup_dir.is_symlink():
         raise MemoryError('Backup directory cannot be a symlink')
