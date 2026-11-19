@@ -96,6 +96,7 @@ def enqueue_runway(store, owner_id, project, spec, style, request_id, reference=
         'studio_master': True, 'review_required': True, 'kadrian_auto': True,
         'kadrian_provider': 'runway_auto', 'provider_spec': {**spec, 'reference_asset': reference},
         'dedupe_key': 'kadrian_auto:' + request_id, 'request_id': request_id,
+        'memory_snapshot': project.get('_agent_memory'),
         'topic': ('[Кадриан: только музыка]\n' if spec.get('music_only') and style == 'cartoon' else '') + spec['brief'], 'video_mode': 'live', 'video_style': style,
         'approved_video_credit_limit': estimate, 'content': {}, 'assets': [], 'checkpoint': {}, 'error': '',
         'progress': {'stage': 'credits' if waiting else 'queued', 'message': message},
