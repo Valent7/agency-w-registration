@@ -1,0 +1,3 @@
+# Minimal local device runtime; no OpenAI/Supabase client or provider SDK.
+requests==2.34.2
+cryptography==45.0.7
