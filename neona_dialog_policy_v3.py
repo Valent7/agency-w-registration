@@ -21,6 +21,7 @@ from pathlib import Path
 
 import requests
 import neona_dialog_policy_v2 as v2
+from neona_farewell_gift import closing_gift
 
 legacy = v2.legacy
 core = v2.core
@@ -618,6 +619,16 @@ def _process_v3(
     stage, context = _repair_false_legacy_stage(stage, context)
     state["stage"] = stage
     state["context"] = context
+
+    # Одно мягкое прощание после вежливого отказа от сотрудничества/встречи:
+    # нейтральный подарок, не новый заход в продажу. Жёсткий запрет контакта
+    # остаётся у прежней безопасной детерминированной ветки без ссылки.
+    if stage in {"idle", "awaiting_meeting_consent", "invited_to_meeting"} and not _must_use_deterministic_policy(text):
+        farewell = closing_gift(text, stage, context, config, owner_id)
+        if farewell is not None:
+            farewell_reply, farewell_context = farewell
+            farewell_context["neona_v3_last_action"] = "close_gently"
+            return farewell_reply, "idle", True, farewell_context
 
     # После реального согласия календарь остаётся детерминированным.
     if stage in {
