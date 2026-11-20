@@ -9,9 +9,12 @@
   var IDENTITY = 'https://instagram-webhook-zeuv.onrender.com/public/neona/identity';
   var APPOINTMENT = 'https://instagram-webhook-zeuv.onrender.com/public/neona/appointment';
   var PRIVACY = 'https://instagram-webhook-zeuv.onrender.com/public/neona/privacy';
+  var VOICE = 'https://instagram-webhook-zeuv.onrender.com/public/neona/voice';
   var MAIL = 'mailto:polesski.immobilien@gmail.com?subject=' + encodeURIComponent('Вопрос после знакомства с Агентством W');
   var history = [];
   var busy = false;
+  var voiceBusy = false;
+  var cancelActiveVoice = null;
   var ui = null;
   var session = '';
   var ownerName = '';
@@ -75,6 +78,7 @@
     ensureIdentity().catch(function(e){ui.err.textContent=e.message||'Связь временно недоступна.';});
   }
   function closeChat() {
+    if (typeof cancelActiveVoice === 'function') cancelActiveVoice();
     ui.panel.hidden = true;
     ui.open.setAttribute('aria-expanded', 'false');
     ui.open.focus();
@@ -105,6 +109,14 @@
       '#agency-w-neona .neona-note{margin:7px 0 0;color:#5a6b7a;font-size:11px}',
       '#agency-w-neona .neona-note a{color:#155b8e;text-decoration:underline}',
       '#agency-w-neona .neona-error{color:#a12626;font-size:12px;min-height:16px;margin:4px 0 0}',
+      '#agency-w-neona .neona-voice-row{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:8px 0 3px}',
+      '#agency-w-neona .neona-mic{display:inline-block;width:auto;border:1px solid #c5a55b;border-radius:8px;background:#fff9e9;color:#153450;padding:8px 11px;font-size:14px;font-weight:700;cursor:pointer}',
+      '#agency-w-neona .neona-mic.recording{background:#ffe5e5;color:#9b1c1c;border-color:#d86666}',
+      '#agency-w-neona .neona-mic:disabled{opacity:.55;cursor:wait}',
+      '#agency-w-neona .neona-cancel-voice{display:inline-block;width:auto;border:1px solid #a2aeb9;border-radius:8px;background:#fff;color:#243f59;padding:8px 10px;font-size:13px;cursor:pointer}',
+      '#agency-w-neona .neona-cancel-voice[hidden]{display:none}',
+      '#agency-w-neona .neona-voice-status{font-size:12px;line-height:1.3;color:#405369;flex:1 1 100%}',
+      '#agency-w-neona .neona-voice-status.error{color:#a12626}',
       '#agency-w-neona .neona-book{flex:1 1 100%;order:-1;display:block;width:100%;font-size:13px;border:1px solid #a88548;border-radius:7px;background:#fff9ec;color:#17324f;padding:8px 11px;cursor:pointer;font-weight:700}',
       '#agency-w-neona .neona-booking{padding:12px;border-top:1px solid #d3c198;background:#fcf7ec;overflow:auto;max-height:325px}',
       '#agency-w-neona .neona-booking[hidden]{display:none}',
@@ -142,7 +154,15 @@
     var consent = node('label', 'neona-consent');
     var check = node('input');
     check.type = 'checkbox'; check.required = true;
-    consent.append(check, node('span', '', 'Разрешаю передать мои сообщения ИИ-сервису для ответа. Без регистрации.'));
+    consent.append(check, node('span', '', 'Разрешаю передавать мои текстовые или голосовые сообщения ИИ-сервису для ответа. Без регистрации.'));
+    var voiceRow=node('div','neona-voice-row');
+    var mic=node('button','neona-mic','🎙 Наговорить вопрос');
+    mic.type='button';mic.setAttribute('aria-label','Записать голосовой вопрос Неоне');
+    var cancelVoice=node('button','neona-cancel-voice','Отменить запись');
+    cancelVoice.type='button';cancelVoice.hidden=true;
+    var voiceStatus=node('span','neona-voice-status','До 30 секунд. После записи текст можно проверить.');
+    voiceStatus.setAttribute('role','status');voiceStatus.setAttribute('aria-live','polite');
+    voiceRow.append(mic,cancelVoice,voiceStatus);
     var actions = node('div', 'neona-actions');
     var email = node('a', 'neona-contact', 'Связаться с Агентством');
     email.href = MAIL;
@@ -157,7 +177,7 @@
     note.append('Не отправляйте личные или платёжные данные. ', (function () {
       var a=node('a','','Конфиденциальность');a.href=PRIVACY;a.target='_blank';a.rel='noopener noreferrer';return a;
     })());
-    foot.append(input, consent, actions, err, note);
+    foot.append(input, consent, voiceRow, actions, err, note);
     var booking = node('div','neona-booking');
     booking.hidden = true;
     var bookTitle=node('strong','','Запись на встречу');
@@ -208,8 +228,141 @@
     root.append(panel, open);
     document.body.appendChild(root);
     ui = { panel:panel, open:open, close:close, log:log, input:input, consent:check, send:send, err:err,
-           title:title, booking:booking, fields:fields, meetingStatus:meetingStatus,
+           title:title, mic:mic, cancelVoice:cancelVoice, voiceStatus:voiceStatus,
+           booking:booking, fields:fields, meetingStatus:meetingStatus,
            checkButton:checkButton,confirmButton:confirmButton,meetingConsent:consentCheck };
+    // Opt-in recording only. The audio is sent for transcription after Stop,
+    // but never posted to the chat until the visitor reviews the text and
+    // presses the existing Send button.
+    var recorder=null;
+    var stream=null;
+    var recordTimeout=null;
+    var speechAbort=null;
+    var cancelled=false;
+    var startedAt=0;
+    function stopTracks(){
+      if(stream){stream.getTracks().forEach(function(t){t.stop();});stream=null;}
+      if(recordTimeout){clearTimeout(recordTimeout);recordTimeout=null;}
+    }
+    function voiceState(message,error){
+      voiceStatus.textContent=message;
+      voiceStatus.classList.toggle('error',!!error);
+    }
+    function finishVoiceUi(){
+      voiceBusy=false;
+      mic.disabled=false;
+      mic.textContent='🎙 Наговорить вопрос';
+      mic.classList.remove('recording');
+      mic.setAttribute('aria-label','Записать голосовой вопрос Неоне');
+      cancelVoice.hidden=true;
+      if(!busy)send.disabled=false;
+    }
+    function stopRecording(shouldCancel){
+      if(!recorder||recorder.state==='inactive'){
+        if(shouldCancel && speechAbort){speechAbort.abort();speechAbort=null;voiceState('Распознавание отменено.');finishVoiceUi();}
+        return;
+      }
+      cancelled=!!shouldCancel;
+      try{recorder.stop();}catch(_){stopTracks();finishVoiceUi();}
+      if(!shouldCancel){voiceState('Расшифровываю запись...');mic.disabled=true;}
+    }
+    cancelActiveVoice=function(){stopRecording(true);stopTracks();};
+    async function startVoice(){
+      if(voiceBusy||busy)return;
+      if(!check.checked){
+        ui.err.textContent='Отметьте согласие на обработку голосового сообщения.';
+        check.focus();return;
+      }
+      if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||typeof window.MediaRecorder==='undefined'){
+        voiceState('В этом браузере запись не поддерживается. Используйте Chrome или Safari с доступом к микрофону.',true);return;
+      }
+      var preferred=['audio/webm;codecs=opus','audio/mp4','audio/webm','audio/ogg'];
+      var selected=preferred.find(function(t){return MediaRecorder.isTypeSupported(t);});
+      if(!selected){voiceState('Браузер не поддерживает доступный формат записи.',true);return;}
+      ui.err.textContent='';
+      voiceBusy=true;
+      mic.disabled=true;
+      try{
+        await ensureIdentity();
+        stream=await navigator.mediaDevices.getUserMedia({
+          audio:{echoCancellation:true,noiseSuppression:true,channelCount:1}
+        });
+        // A tab can be closed while a permission prompt is still open.
+        if(ui.panel.hidden){stopTracks();finishVoiceUi();return;}
+        cancelled=false;
+        var mime=selected.split(';',1)[0];
+        var chunks=[];
+        recorder=new MediaRecorder(stream,{mimeType:selected,audioBitsPerSecond:32000});
+        recorder.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data);};
+        recorder.onerror=function(){
+          cancelled=true;stopTracks();voiceState('Ошибка записи. Попробуйте ещё раз.',true);finishVoiceUi();
+        };
+        recorder.onstop=async function(){
+          stopTracks();
+          recorder=null;
+          if(cancelled){voiceState('Запись отменена.');finishVoiceUi();return;}
+          var blob=new Blob(chunks,{type:mime});
+          chunks=[];
+          if(blob.size<512||blob.size>1500000){
+            voiceState('Запись слишком короткая или длинная. Допустимо до 30 секунд.',true);
+            finishVoiceUi();return;
+          }
+          mic.disabled=true;
+          try{
+            speechAbort=new AbortController();
+            var timeout=setTimeout(function(){if(speechAbort)speechAbort.abort();},30000);
+            var response, data;
+            try {
+              response=await fetch(VOICE,{
+                method:'POST',mode:'cors',credentials:'omit',
+                headers:{'Content-Type':mime,'X-Neona-Session':session},
+                body:blob,signal:speechAbort.signal
+              });
+              data=await response.json();
+            } finally {clearTimeout(timeout);}
+            if(!response.ok||!data.text)throw new Error(data.error||'Речь не распознана.');
+            var prefix=input.value.trim();
+            input.value=(prefix?prefix+' ':'')+data.text;
+            input.value=input.value.slice(0,input.maxLength);
+            voiceState('Готово! Проверьте текст и нажмите «Отправить».');
+            input.focus();
+          }catch(e){
+            voiceState(e.name==='AbortError'?'Распознавание отменено или превысило время ожидания.':
+              (e.message||'Не удалось распознать речь.'),true);
+          }finally{speechAbort=null;finishVoiceUi();}
+        };
+        recorder.start();
+        startedAt=Date.now();
+        mic.textContent='⏹ Остановить запись';
+        mic.setAttribute('aria-label','Остановить запись и расшифровать');
+        mic.classList.add('recording');
+        mic.disabled=false;
+        cancelVoice.hidden=false;
+        send.disabled=true;
+        voiceState('🔴 Идёт запись. Нажмите «Остановить». Максимум 30 секунд.');
+        recordTimeout=setTimeout(function(){
+          if(recorder&&recorder.state==='recording')stopRecording(false);
+        },30000);
+      }catch(e){
+        stopTracks();
+        voiceState(e.name==='NotAllowedError'?'Разрешите доступ к микрофону в браузере и попробуйте ещё раз.':
+          'Не удалось запустить микрофон.',true);
+        finishVoiceUi();
+      }
+    }
+    mic.addEventListener('click',function(){
+      if(recorder&&recorder.state==='recording')stopRecording(false);
+      else if(!voiceBusy)startVoice();
+    });
+    cancelVoice.addEventListener('click',function(){stopRecording(true);});
+    document.addEventListener('visibilitychange',function(){
+      if(document.hidden&&recorder&&recorder.state==='recording')stopRecording(true);
+    });
+    window.addEventListener('pagehide',function(){cancelActiveVoice();});
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||typeof window.MediaRecorder==='undefined'){
+      mic.disabled=true;
+      voiceState('На этом устройстве микрофон недоступен. Можно написать вопрос.');
+    }
     var offer='';
     bookButton.addEventListener('click',function(){
       booking.hidden = !booking.hidden;
@@ -274,7 +427,7 @@
     }
   }
   async function sendMessage() {
-    if (!ui || busy) return;
+    if (!ui || busy || voiceBusy) return;
     var msg = ui.input.value.trim();
     if (!msg) { ui.err.textContent='Напишите вопрос.'; return; }
     if (!ui.consent.checked) { ui.err.textContent='Для ответа нужно согласие на обработку сообщения.'; return; }
