@@ -111,7 +111,7 @@
       '#agency-w-neona .neona-error{color:#a12626;font-size:12px;min-height:16px;margin:4px 0 0}',
       '#agency-w-neona .neona-voice-row{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:8px 0 3px}',
       '#agency-w-neona .neona-mic{display:inline-block;width:auto;border:1px solid #c5a55b;border-radius:8px;background:#fff9e9;color:#153450;padding:8px 11px;font-size:14px;font-weight:700;cursor:pointer}',
-      '#agency-w-neona .neona-mic.recording{background:#ffe5e5;color:#9b1c1c;border-color:#d86666}',
+      '#agency-w-neona .neona-mic.recording{background:#def7e8;color:#12653b;border-color:#36a466}',
       '#agency-w-neona .neona-mic:disabled{opacity:.55;cursor:wait}',
       '#agency-w-neona .neona-cancel-voice{display:inline-block;width:auto;border:1px solid #a2aeb9;border-radius:8px;background:#fff;color:#243f59;padding:8px 10px;font-size:13px;cursor:pointer}',
       '#agency-w-neona .neona-cancel-voice[hidden]{display:none}',
@@ -339,7 +339,7 @@
         mic.disabled=false;
         cancelVoice.hidden=false;
         send.disabled=true;
-        voiceState('🔴 Идёт запись. Нажмите «Остановить». Максимум 30 секунд.');
+        voiceState('🟢 Идёт запись. Нажмите «Остановить». Максимум 30 секунд.');
         recordTimeout=setTimeout(function(){
           if(recorder&&recorder.state==='recording')stopRecording(false);
         },30000);
