@@ -24,6 +24,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from agency_core import agency_core_prompt
+from neona_farewell_gift import closing_gift
 
 NEONA_DIALOG_CORE = agency_core_prompt(
     "Неона",
@@ -2198,6 +2199,15 @@ def _process_message(
         context.pop("contact_dialog_closed_reason", None)
         context["contact_dialog_reopened_at"] = datetime.now(UTC).isoformat()
         stage = "idle"
+
+    # Отказ от сотрудничества/встречи — один короткий подарок без дожима.
+    # Если попросили прекратить общение, предыдущая стоп-ветка уже завершила
+    # диалог; сюда подобное сообщение никогда не попадёт с подарком.
+    if stage in {"idle", "invited_to_meeting", "awaiting_meeting_consent"}:
+        farewell = closing_gift(text, stage, context, config, owner_id)
+        if farewell is not None:
+            farewell_reply, farewell_context = farewell
+            return farewell_reply, "idle", True, farewell_context
 
     # Если Неона в прошлом сообщении предложила прислать материал, одно короткое
     # «да/пришлите» достаточно. В остальных стадиях одиночное «да» не трактуем
