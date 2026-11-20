@@ -207,8 +207,8 @@ async def public_neona_chat(request):
                   "к вашей работе?")
     # The site has already greeted the visitor: do not say hello again.
     answer = re.sub(
-        r"^\\s*(?:здравствуйте|здравствуй|добрый\\s+день|добрый\\s+вечер|"
-        r"доброе\\s+утро|приветствую|привет)[!.,\\s—-]*",
+        r"^\s*(?:здравствуйте|здравствуй|добрый\s+день|добрый\s+вечер|"
+        r"доброе\s+утро|приветствую|привет)[!.,\s—-]*",
         "", answer, flags=re.IGNORECASE
     ).strip() or answer
     display_name, _ = owner_presentation(identity["owner_name"])
