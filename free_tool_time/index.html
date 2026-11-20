@@ -62,5 +62,6 @@
   <script>
     (()=>{const ids=["m","c","s","a","r"];const form=document.getElementById("calc");const result=document.getElementById("result");const num=id=>{const n=Number(document.getElementById(id).value);return Number.isFinite(n)?Math.max(0,Math.min(100,n)):0};form.addEventListener("submit",e=>{e.preventDefault();const weekly=ids.reduce((x,id)=>x+num(id),0);const monthly=weekly*4.33;const days=monthly/8;const saved=monthly*.5;document.getElementById("monthly").textContent=monthly.toFixed(1).replace(".0","");document.getElementById("days").textContent=days.toFixed(1).replace(".0","");document.getElementById("saved").textContent=saved.toFixed(1).replace(".0","");document.getElementById("message").textContent=monthly<15?"Рутины пока немного, но даже несколько освобождённых часов можно вернуть жизни.":monthly<40?"Это уже заметная часть месяца. Есть смысл посмотреть, что можно делегировать.":"Это серьёзный ресурс времени. Значительную часть повторяющейся работы уже можно передать цифровым сотрудникам.";result.style.display="block";result.scrollIntoView({behavior:"smooth",block:"start"})})})();
   </script>
+  <script src="neona-chat.js" defer></script>
 </body>
 </html>
