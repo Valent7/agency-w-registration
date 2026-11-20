@@ -20,23 +20,34 @@
   var ownerName = '';
   var identityLoading = null;
   function referralCode() {
-    var ref = new URL(window.location.href).searchParams.get('ref') || '';
-    return /^W[1-9][0-9]{4,14}$/.test(ref) ? ref : '';
+    var query = new URL(window.location.href).searchParams;
+    var ref = query.get('ref');
+    try {
+      if (query.has('ref')) {
+        // Preserve even an invalid explicit code so the server can reject it.
+        sessionStorage.setItem('agency-w-neona-ref', ref || 'invalid');
+        return ref || 'invalid';
+      }
+      return sessionStorage.getItem('agency-w-neona-ref') || '';
+    } catch (e) {
+      return query.has('ref') ? (ref || 'invalid') : '';
+    }
   }
   function calculatedTime() {
     var result = document.getElementById('result');
     if (!result || result.style.display !== 'block') return null;
     var fields = ['m','c','s','a','r'];
-    var weekly = 0, max = -1, title = '';
+    var weekly = 0, max = -1, title = '', tasks = [];
     fields.forEach(function(id){
       var element = document.getElementById(id);
       if(!element) return;
       var val = Math.max(0,Math.min(100, Number(element.value)||0));
       weekly += val;
+      tasks.push({id:id,hours:val});
       if(val>max){max=val;title=element.closest('.field').querySelector('label').textContent.trim();}
     });
     return {weekly_hours:Number(weekly.toFixed(1)),
-            monthly_hours:Number((weekly*4.33).toFixed(1)),top_task:title};
+            monthly_hours:Number((weekly*4.33).toFixed(1)),top_task:title,tasks:tasks};
   }
   async function ensureIdentity() {
     if(session) return session;
