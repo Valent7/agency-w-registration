@@ -3504,8 +3504,12 @@ def _audit_vk_partner_links_on_startup() -> None:
     )
 
 
+from public_neona_webchat import public_neona_chat, public_neona_privacy
+
 routes = [
     Route("/", health, methods=["GET"]),
+    Route("/public/neona/chat", public_neona_chat, methods=["POST", "OPTIONS"]),
+    Route("/public/neona/privacy", public_neona_privacy, methods=["GET"]),
     Route("/health", health, methods=["GET"]),
     Route("/privacy", privacy, methods=["GET"]),
     Route("/terms", terms, methods=["GET"]),
