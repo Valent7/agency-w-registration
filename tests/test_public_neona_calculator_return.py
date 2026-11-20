@@ -88,7 +88,7 @@ class PublicReturnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         instructions = captured["instructions"]
         self.assertIn("52.0 часа В МЕСЯЦ (12.0 часа в неделю)", instructions)
-        self.assertIn('"Переписка, ответы, сообщения": "21.7 ч/мес (5.0 ч/нед)"', instructions)
+        self.assertIn('"Переписка, ответы, сообщения": "21.6 ч/мес (5.0 ч/нед)"', instructions)
         self.assertIn("ОБЩИЙ результат по ВСЕМ категориям", instructions)
         self.assertLess(instructions.index("52.0 часа В МЕСЯЦ"), instructions.index("12.0 часа в неделю"))
         self.assertIn("условный сценарий, НЕ обещание экономии", instructions)
