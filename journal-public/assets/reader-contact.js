@@ -77,7 +77,7 @@
   actions.append(contact, calc);
   const note = document.createElement("p");
   note.className = "reader-note";
-  note.textContent = "Для переписки откроется VK. Читать журнал можно бесплатно и без регистрации. Первое сообщение встретит цифровой помощник Агентства W.";
+  note.textContent = "Можете написать через VK по кнопке выше или открыть чат «Спросить Неону» прямо на этой странице — без регистрации. Журнал остаётся бесплатным.";
   panel.append(small, title, text, actions, note);
   section.appendChild(panel);
   target.appendChild(section);
