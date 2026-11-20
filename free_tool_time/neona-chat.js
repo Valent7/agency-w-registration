@@ -44,12 +44,13 @@
       var response=await fetch(url,{mode:'cors',credentials:'omit',cache:'no-store'});
       var data=await response.json();
       if(!response.ok || !data.session)throw Error(data.error||'Не удалось определить владельца.');
-      session=data.session;ownerName=data.owner_name||'Агентства W';
+      session=data.session;ownerName=data.owner_name||'Агентство W';
       if(ui) {
-        ui.title.textContent='Неона · ' + ownerName;
+        ui.title.textContent='Неона · Агентство W';
         var first=ui.log.firstElementChild;
         if(first&&first.classList.contains('from-neona'))
-          first.textContent='Здравствуйте! Я Неона, ИИ-секретарь-референт. Представляю аккаунт «'+ownerName+'» в Агентстве W. Могу помочь с вашими задачами и организовать встречу.';
+          first.textContent=data.owner_intro||
+            ('Здравствуйте! Я Неона, ИИ-секретарь-референт Агентства W. Встречу с вами проведёт '+ownerName+'.');
       }
       return session;
     })();
@@ -127,7 +128,7 @@
     panel.hidden = true;
     panel.setAttribute('aria-label', 'Разговор с ИИ-секретарём Неоной');
     var head = node('div', 'neona-head');
-    var title = node('strong', '', 'Неона · ИИ-секретарь');
+    var title = node('strong', '', 'Неона · Агентство W');
     var close = node('button', 'neona-close', '×');
     close.type = 'button'; close.title = 'Закрыть чат'; close.setAttribute('aria-label', 'Закрыть чат');
     head.append(title, close);
@@ -254,7 +255,7 @@
       }catch(e){meetingStatus.style.color='#a12626';meetingStatus.textContent=e.message||'Запись не подтверждена.';}
       finally{confirmButton.disabled=false;}
     });
-    addMessage('assistant', 'Здравствуйте! Я Неона, ИИ-секретарь-референт Агентства W. Я помогу понять, какую рутину можно поручить нашим цифровым сотрудникам, и при желании организую встречу.');
+    addMessage('assistant', 'Здравствуйте! Я Неона, ИИ-секретарь-референт Агентства W. Могу рассказать, как наша команда освобождает время для важных дел, и помочь организовать встречу.');
     open.addEventListener('click',function(){panel.hidden?openChat():closeChat();});
     close.addEventListener('click',closeChat);
     document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!panel.hidden)closeChat();});
