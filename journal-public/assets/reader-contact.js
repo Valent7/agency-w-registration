@@ -82,3 +82,17 @@
   section.appendChild(panel);
   target.appendChild(section);
 }());
+
+
+/* Shared public Neona chat. Present on the journal home and article pages.
+ * The link loads the same widget used by the open time calculator.
+ * Existing editorial referral links and contact controls remain unchanged.
+ */
+(function () {
+  if (document.getElementById("agency-w-neona-loader")) return;
+  var script = document.createElement("script");
+  script.id = "agency-w-neona-loader";
+  script.src = "https://agency-w-time.onrender.com/neona-chat.js";
+  script.async = true;
+  document.head.appendChild(script);
+}());
