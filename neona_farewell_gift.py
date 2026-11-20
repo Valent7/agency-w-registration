@@ -22,6 +22,13 @@ def _norm(text: str) -> str:
 def is_hard_stop(text: str) -> bool:
     """Never pitch a gift to someone who forbids further messages."""
     t = _norm(text)
+    # "I don't want to talk to AI, connect me to a person" is a request
+    # for a human, not a prohibition of further contact.
+    if re.search(
+        r"\bне\s+хочу\s+(?:общаться|разговаривать)\s+с\s+"
+        r"(?:ии|ботом|роботом|искусственным\s+интеллектом)\b", t
+    ):
+        return False
     return any(re.search(pattern, t) for pattern in (
         r"\bне\s+пиши(?:те)?\b",
         r"\bбольше\s+не\s+(?:пиши(?:те)?|звони(?:те)?|беспокой(?:те)?)\b",
@@ -63,6 +70,8 @@ def polite_offer_refusal(text: str, stage: str = "idle") -> bool:
         r"\b(?:не\s+хочу|не\s+планирую)\s+(?:встреч|сотруднич|регистр|участв|покуп|подключ|начинать)\w*\b",
         r"\b(?:не\s+нужн|не\s+интересн|неинтересн)\w*\s+(?:мне\s+)?(?:сотрудничество|встреча|проект|агентство|автоматизация)\b",
         r"\b(?:мне\s+)?(?:это|ваше\s+предложение)\s+не\s+подходит\b",
+        r"\b(?:спасибо\s+)?(?:мне|меня|это)\s+(?:не\s+интересно|неинтересно|не\s+интересует)\b",
+        r"\b(?:спасибо\s+)?(?:не\s+интересует|неинтересно)\s+(?:меня\s+)?(?:агентство|предложение|сотрудничество|встреча)\b",
         r"\b(?:пока|сейчас)\s+не\s+интересует\b",
     )
     return any(re.search(pattern, compact) for pattern in patterns)
