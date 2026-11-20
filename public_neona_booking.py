@@ -232,6 +232,8 @@ async def appointment(request):
         if len(data_raw) > 5000:
             raise ValueError("size")
         data = json.loads(data_raw)
+        if not isinstance(data,dict) or data.get("consent") is not True:
+            return reply({"error":"Для записи необходимо согласие на обработку контактных данных."},400,origin)
         mode = str(data.get("action") or "")
         session = verify(data.get("session"), "identity")
         if mode == "check":
