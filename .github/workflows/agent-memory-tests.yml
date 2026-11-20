@@ -3,6 +3,9 @@ on:
   pull_request:
     paths:
       - 'agent_memory*.py'
+      - 'agent_workspaces.py'
+      - 'scout_center.py'
+      - 'tools/prepare_agent_workspaces.py'
       - 'agent_memory_setup.sql'
       - 'tests/test_agent_memory*.py'
       - 'kadrian_*.py'

@@ -18,3 +18,10 @@ context/SYNCED_MEMORY.md
 .memory-projection.lock
 context/.memory-projection-*
 agent-memory-backup.enc
+
+
+# Private professional workspaces and exact local tenant bindings.
+/agents/
+/channels/
+.agent-profile.json
+.agent-binding.json
