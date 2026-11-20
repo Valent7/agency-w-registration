@@ -30,7 +30,6 @@ from agency_calendar import (
 )
 from team_center import render_team_center
 from personal_tasks import render_personal_tasks
-from agency_diary import render_agency_diary
 from agency_results import render_agency_results
 import stagirite_center as _stagirite_center
 
@@ -8677,9 +8676,9 @@ if telegram_login_valid or remembered_data:
             st.session_state["kadrian_link_opened"] = True
         pending_main_section = st.session_state.pop("agency_open_main_section", None)
         locked_content = "🔒 Контент"
-        if pending_main_section in ("🏭 Контент", locked_content):
+        if pending_main_section in ("🏭 Контент", locked_content, "📖 Дневник"):
             pending_main_section = "☀️ День"
-        if st.session_state.get("main_section") in ("🏭 Контент", locked_content):
+        if st.session_state.get("main_section") in ("🏭 Контент", locked_content, "📖 Дневник"):
             st.session_state["main_section"] = "☀️ День"
         if pending_main_section:
             st.session_state["main_section"] = pending_main_section
@@ -8687,7 +8686,6 @@ if telegram_login_valid or remembered_data:
         main_menu_options = [
             "☀️ День",
             "📅 Календарь",
-            "📖 Дневник",
             "🤖 Агенты",
             locked_content,
             "🎬 Студия контента",
@@ -8702,7 +8700,6 @@ if telegram_login_valid or remembered_data:
             accessible_main_labels = {
                 "☀️ День": "День",
                 "📅 Календарь": "Календарь",
-                "📖 Дневник": "Дневник",
                 "🤖 Агенты": "Агенты",
                 locked_content: locked_content,
                 "🎬 Студия контента": "Студия контента",
@@ -9265,11 +9262,6 @@ if telegram_login_valid or remembered_data:
             render_agency_calendar(
                 owner_telegram_id=int(telegram_id),
                 owner_name=first_name,
-            )
-
-        elif main_section == "📖 Дневник":
-            render_agency_diary(
-                owner_telegram_id=int(telegram_id),
             )
 
         elif main_section == "🤖 Агенты":
