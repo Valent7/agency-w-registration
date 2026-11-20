@@ -6,11 +6,55 @@
   if (window.__agencyWPublicNeonaLoaded) return;
   window.__agencyWPublicNeonaLoaded = true;
   var API = 'https://instagram-webhook-zeuv.onrender.com/public/neona/chat';
+  var IDENTITY = 'https://instagram-webhook-zeuv.onrender.com/public/neona/identity';
+  var APPOINTMENT = 'https://instagram-webhook-zeuv.onrender.com/public/neona/appointment';
   var PRIVACY = 'https://instagram-webhook-zeuv.onrender.com/public/neona/privacy';
   var MAIL = 'mailto:polesski.immobilien@gmail.com?subject=' + encodeURIComponent('Вопрос после знакомства с Агентством W');
   var history = [];
   var busy = false;
   var ui = null;
+  var session = '';
+  var ownerName = '';
+  var identityLoading = null;
+  function referralCode() {
+    var ref = new URL(window.location.href).searchParams.get('ref') || '';
+    return /^W[1-9][0-9]{4,14}$/.test(ref) ? ref : '';
+  }
+  function calculatedTime() {
+    var result = document.getElementById('result');
+    if (!result || result.style.display !== 'block') return null;
+    var fields = ['m','c','s','a','r'];
+    var weekly = 0, max = -1, title = '';
+    fields.forEach(function(id){
+      var element = document.getElementById(id);
+      if(!element) return;
+      var val = Math.max(0,Math.min(100, Number(element.value)||0));
+      weekly += val;
+      if(val>max){max=val;title=element.closest('.field').querySelector('label').textContent.trim();}
+    });
+    return {weekly_hours:Number(weekly.toFixed(1)),
+            monthly_hours:Number((weekly*4.33).toFixed(1)),top_task:title};
+  }
+  async function ensureIdentity() {
+    if(session) return session;
+    if(identityLoading) return identityLoading;
+    identityLoading = (async function(){
+      var query = referralCode();
+      var url = IDENTITY + (query ? '?ref=' + encodeURIComponent(query):'');
+      var response=await fetch(url,{mode:'cors',credentials:'omit',cache:'no-store'});
+      var data=await response.json();
+      if(!response.ok || !data.session)throw Error(data.error||'Не удалось определить владельца.');
+      session=data.session;ownerName=data.owner_name||'Агентства W';
+      if(ui) {
+        ui.title.textContent='Неона · ' + ownerName;
+        var first=ui.log.firstElementChild;
+        if(first&&first.classList.contains('from-neona'))
+          first.textContent='Здравствуйте! Я Неона, ИИ-секретарь-референт. Представляю аккаунт «'+ownerName+'» в Агентстве W. Могу помочь с вашими задачами и организовать встречу.';
+      }
+      return session;
+    })();
+    try{return await identityLoading;}finally{identityLoading=null;}
+  }
 
   function node(tag, className, textValue) {
     var e = document.createElement(tag);
@@ -27,6 +71,7 @@
     ui.panel.hidden = false;
     ui.open.setAttribute('aria-expanded', 'true');
     ui.input.focus();
+    ensureIdentity().catch(function(e){ui.err.textContent=e.message||'Связь временно недоступна.';});
   }
   function closeChat() {
     ui.panel.hidden = true;
@@ -59,6 +104,16 @@
       '#agency-w-neona .neona-note{margin:7px 0 0;color:#5a6b7a;font-size:11px}',
       '#agency-w-neona .neona-note a{color:#155b8e;text-decoration:underline}',
       '#agency-w-neona .neona-error{color:#a12626;font-size:12px;min-height:16px;margin:4px 0 0}',
+      '#agency-w-neona .neona-book{font-size:13px;border:1px solid #a88548;border-radius:7px;background:#fff9ec;color:#17324f;padding:7px 10px;cursor:pointer;font-weight:700}',
+      '#agency-w-neona .neona-booking{padding:12px;border-top:1px solid #d3c198;background:#fcf7ec;overflow:auto;max-height:325px}',
+      '#agency-w-neona .neona-booking[hidden]{display:none}',
+      '#agency-w-neona .neona-booking strong{display:block;font-size:15px;margin-bottom:7px}',
+      '#agency-w-neona .neona-booking label{display:block;margin:6px 0;font-size:12px;color:#28415a}',
+      '#agency-w-neona .neona-booking input,#agency-w-neona .neona-booking select{display:block;width:100%;font:14px system-ui,Arial;padding:7px;margin-top:3px;background:white;border:1px solid #a9b9c8;border-radius:6px;color:#132e47;text-align:left}',
+      '#agency-w-neona .neona-booking .neona-consent input{display:inline-block;width:15px;margin:0 6px 0 0}',
+      '#agency-w-neona .neona-booking button{padding:8px 11px;border-radius:7px;border:1px solid #17406a;background:#17406a;color:white;font-weight:650;font-size:13px;cursor:pointer;margin:8px 7px 0 0}',
+      '#agency-w-neona .neona-booking button:disabled{opacity:.6;cursor:wait}',
+      '#agency-w-neona .neona-booking .neona-cancel{background:#fff;color:#17406a}',
       '.neona-result-box{background:#102d47;border:1px solid #e9bd64;border-radius:12px;padding:17px;margin:16px 0;color:#fff}',
       '.neona-result-box p{margin:8px 0 12px;line-height:1.5;color:#e4e9f0}',
       '.neona-result-box button{display:block;width:100%;padding:12px;border:0;border-radius:9px;background:#f2d18d;color:#082239;font-size:16px;font-weight:750;cursor:pointer}',
@@ -92,7 +147,9 @@
     email.href = MAIL;
     var send = node('button', 'neona-send', 'Отправить');
     send.type = 'button';
-    actions.append(email, send);
+    var bookButton=node('button','neona-book','Записаться на встречу');
+    bookButton.type='button';
+    actions.append(email, bookButton, send);
     var err = node('p', 'neona-error');
     err.setAttribute('role','status');
     var note = node('p', 'neona-note');
@@ -100,15 +157,104 @@
       var a=node('a','','Конфиденциальность');a.href=PRIVACY;a.target='_blank';a.rel='noopener noreferrer';return a;
     })());
     foot.append(input, consent, actions, err, note);
-    panel.append(head, log, foot);
+    var booking = node('div','neona-booking');
+    booking.hidden = true;
+    var bookTitle=node('strong','','Запись на встречу');
+    var form=node('form');
+    form.setAttribute('autocomplete','on');
+    var defDate=new Date(Date.now()+24*60*60*1000).toISOString().slice(0,10);
+    var schema=[
+      ['name','Ваше имя','text','Например, Анна'],
+      ['email','Email для связи по встрече','email',''],
+      ['date','Дата','date',''],
+      ['time','Время (по выбранному часовому поясу)','time','']
+    ];
+    var fields={};
+    schema.forEach(function(item){
+      var label=node('label','',item[1]);
+      var inputField=node('input');
+      inputField.type=item[2];inputField.name=item[0];inputField.required=true;
+      inputField.placeholder=item[3];inputField.maxLength=item[0]==='name'?80:120;
+      if(item[0]==='date')inputField.value=defDate;
+      if(item[0]==='time')inputField.value='15:00';
+      fields[item[0]]=inputField;label.appendChild(inputField);form.appendChild(label);
+    });
+    function selectField(name,labelText,items,defaultValue){
+      var label=node('label','',labelText);
+      var sel=node('select');sel.name=name;
+      items.forEach(function(item){
+        var option=node('option','',item[1]);option.value=item[0];sel.append(option);
+      });
+      sel.value=defaultValue;fields[name]=sel;label.appendChild(sel);form.appendChild(label);
+    }
+    selectField('timezone','Часовой пояс',[['Europe/Moscow','Москва (МСК)'],['Europe/Berlin','Германия / Берлин'],['Asia/Almaty','Алматы'],['Asia/Astana','Астана'],['Europe/London','Лондон'],['Asia/Tashkent','Ташкент'],['Asia/Tbilisi','Тбилиси'],['Asia/Yerevan','Ереван'],['America/New_York','Нью-Йорк']], 'Europe/Moscow');
+    selectField('format','Формат встречи',[['Zoom','Zoom'],['Telegram','Telegram'],['WhatsApp','WhatsApp']],'Zoom');
+    var meetingConsent=node('label','neona-consent');
+    var consentCheck=node('input');consentCheck.type='checkbox';consentCheck.required=true;
+    meetingConsent.append(consentCheck,node('span','','Разрешаю использовать имя и email для организации встречи.'));
+    form.appendChild(meetingConsent);
+    var meetingStatus=node('p','neona-error');meetingStatus.setAttribute('role','status');
+    var checkButton=node('button','','Проверить время');checkButton.type='submit';
+    var confirmButton=node('button','','Подтвердить запись');confirmButton.type='button';confirmButton.hidden=true;
+    var cancelButton=node('button','neona-cancel','Закрыть');cancelButton.type='button';
+    form.append(checkButton,confirmButton,cancelButton,meetingStatus);
+    booking.append(bookTitle,form);
+    panel.append(head,log,booking,foot);
     var open = node('button', 'neona-open', '💬 Спросить Неону');
     open.id = 'neona-w-open'; open.type = 'button';
     open.setAttribute('aria-controls','neona-chat-panel');
     open.setAttribute('aria-expanded','false');
     root.append(panel, open);
     document.body.appendChild(root);
-    ui = { panel:panel, open:open, close:close, log:log, input:input, consent:check, send:send, err:err };
-    addMessage('assistant', 'Здравствуйте! Я Неона, ИИ-секретарь Агентства W. Помогу разобраться, какие дела можно поручить цифровому помощнику. Что отнимает у вас больше всего времени?');
+    ui = { panel:panel, open:open, close:close, log:log, input:input, consent:check, send:send, err:err,
+           title:title, booking:booking, fields:fields, meetingStatus:meetingStatus,
+           checkButton:checkButton,confirmButton:confirmButton,meetingConsent:consentCheck };
+    var offer='';
+    bookButton.addEventListener('click',function(){
+      booking.hidden = !booking.hidden;
+      if(!booking.hidden) {
+        ensureIdentity().catch(function(e){meetingStatus.textContent=e.message;});
+        fields.name.focus();
+      }
+    });
+    cancelButton.addEventListener('click',function(){booking.hidden=true;});
+    form.addEventListener('submit',async function(e){
+      e.preventDefault();meetingStatus.textContent='';
+      if(!consentCheck.checked){meetingStatus.textContent='Нужно согласие на организацию встречи.';return;}
+      checkButton.disabled=true;
+      confirmButton.hidden=true;offer='';
+      try {
+        await ensureIdentity();
+        var payload={action:'check',session:session,form:{
+          name:fields.name.value.trim(),email:fields.email.value.trim(),
+          date:fields.date.value,time:fields.time.value,
+          timezone:fields.timezone.value,format:fields.format.value
+        },consent:true};
+        var response=await fetch(APPOINTMENT,{method:'POST',mode:'cors',credentials:'omit',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        var data=await response.json();
+        if(!response.ok||!data.offer)throw Error(data.error||'Календарь пока недоступен.');
+        offer=data.offer;
+        meetingStatus.style.color='#145628';
+        meetingStatus.textContent='Время свободно: '+data.slot+'. Подтвердите запись.';
+        confirmButton.hidden=false;
+      }catch(e){meetingStatus.style.color='#a12626';meetingStatus.textContent=e.message||'Не удалось проверить время.';}
+      finally{checkButton.disabled=false;}
+    });
+    confirmButton.addEventListener('click',async function(){
+      if(!offer)return;
+      confirmButton.disabled=true;meetingStatus.textContent='Записываю встречу...';
+      try{
+        await ensureIdentity();
+        var response=await fetch(APPOINTMENT,{method:'POST',mode:'cors',credentials:'omit',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'confirm',session:session,offer:offer,consent:true})});
+        var data=await response.json();
+        if(!response.ok||!data.booked)throw Error(data.error||'Нет подтверждения календаря.');
+        var message='Встреча с '+data.owner_name+' подтверждена: '+data.slot+'. Формат: '+data.format+'. Запись внесена в календарь.';
+        addMessage('assistant',message);
+        booking.hidden=true;offer='';confirmButton.hidden=true;
+      }catch(e){meetingStatus.style.color='#a12626';meetingStatus.textContent=e.message||'Запись не подтверждена.';}
+      finally{confirmButton.disabled=false;}
+    });
+    addMessage('assistant', 'Здравствуйте! Я Неона, ИИ-секретарь-референт Агентства W. Я помогу понять, какую рутину можно поручить нашим цифровым сотрудникам, и при желании организую встречу.');
     open.addEventListener('click',function(){panel.hidden?openChat():closeChat();});
     close.addEventListener('click',closeChat);
     document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!panel.hidden)closeChat();});
@@ -140,10 +286,15 @@
       var timer=setTimeout(function(){ctrl.abort();},25000);
       var response;
       try {
-        response=await fetch(API,{method:'POST',mode:'cors',credentials:'omit',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,history:context}),signal:ctrl.signal});
+        await ensureIdentity();
+        response=await fetch(API,{method:'POST',mode:'cors',credentials:'omit',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          message:msg,history:context,session:session,ref:referralCode(),calc:calculatedTime()
+        }),signal:ctrl.signal});
       } finally {clearTimeout(timer);}
       var data=await response.json();
       if(!response.ok||!data.reply)throw Error(data.error||'Не удалось получить ответ.');
+      if(data.session) session=data.session;
+      if(data.owner_name) ownerName=data.owner_name;
       addMessage('assistant',data.reply);
       history.push({role:'user',content:msg},{role:'assistant',content:data.reply});
       history=history.slice(-8);
