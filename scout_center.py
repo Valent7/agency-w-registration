@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import requests
 import streamlit as st
@@ -416,11 +418,129 @@ def _render_report(result: dict[str, Any], key_prefix: str) -> None:
     )
 
 
+def cabinet_workspace(owner_id: int):
+    """Use only the binding configured on the server for the authenticated owner."""
+    if (os.environ.get("SCOUT_MEMORY_ENABLED") != "1"
+            or os.environ.get("SCOUT_MEMORY_OWNER_ID") != str(owner_id)):
+        return None
+
+    from agent_memory import AccessDenied
+    from agent_memory_store import Repository
+    from agent_memory_team import Binding, TeamMemory
+    from agent_workspaces import AgentWorkspace
+    from content_factory_runtime import build_store, get_capabilities
+
+    project_id = os.environ.get("SCOUT_MEMORY_PROJECT_ID", "")
+    root = os.environ.get("SCOUT_MEMORY_WORKSPACE", "")
+    path = Path(root)
+    if not path.is_absolute() or not path.is_dir():
+        raise AccessDenied("Scout workspace unavailable")
+    binding = Binding(owner_id, "scout", project_id)
+
+    def authorized(candidate):
+        return (
+            candidate == binding
+            and os.environ.get("SCOUT_MEMORY_ENABLED") == "1"
+            and os.environ.get("SCOUT_MEMORY_OWNER_ID") == str(owner_id)
+            and os.environ.get("SCOUT_MEMORY_PROJECT_ID") == project_id
+            and os.environ.get("SCOUT_MEMORY_WORKSPACE") == root
+        )
+
+    if get_capabilities()["storage"] != "supabase":
+        raise AccessDenied("Existing server memory store required")
+    team = TeamMemory(Repository(build_store(), initialize=False),
+                      grants=(binding,), access_check=authorized)
+    return AgentWorkspace(path, APP_DIR, team, binding)
+
+
+def scoped_reports(workspace):
+    workspace._bind()
+    entries = workspace.team.context(workspace.binding)["project"]["knowledge"]
+    reports = {}
+    for entry in entries:
+        if entry["kind"] != "execution" or not entry["source"].startswith("scout-runtime:cabinet:"):
+            continue
+        event = json.loads(entry["text"])
+        if event["scope"] == workspace.binding.scope().as_dict():
+            reports[entry["id"]] = json.loads(event["result"])
+    return reports
+
+
+def save_director_feedback(workspace, report_id, feedback, correction="", evidence=""):
+    from agent_memory import AccessDenied, Principal, digest
+
+    feedback, correction, evidence = (value.strip() for value in (feedback, correction, evidence))
+    if not feedback or bool(correction) != bool(evidence):
+        raise ValueError("Введите замечание. Для исправления укажите текст и источник проверки.")
+    report = scoped_reports(workspace).get(report_id)
+    if report is None:
+        raise AccessDenied("Report is outside the authorized Scout workspace")
+    event_id = digest([report_id, feedback, correction, evidence])
+    prepared = workspace.begin("review:" + event_id, {"report": report_id})
+    event = {
+        "date": prepared["started_at"], "task": report["competitor_name"],
+        "expected": feedback, "result": feedback, "assessment": "error",
+        "source": "scout-director:report:" + report_id, "cause": "", "cause_status": "unknown",
+        "correction": correction, "check": evidence,
+        "next_application": "Применять после проверки исправления",
+    }
+    workspace.finish("feedback", event_id, event)
+    if correction:
+        workspace.finish("correction", event_id, {
+            **event, "result": correction, "assessment": "success",
+        })
+        owner = workspace.binding.owner_id
+        workspace.check("correction", event_id,
+                        reviewer=Principal(owner, f"cabinet-owner:{owner}", "owner"),
+                        passed=True, source=evidence)
+
+
+def _render_memory_reports(workspace):
+    try:
+        reports = sorted(scoped_reports(workspace).items(),
+                         key=lambda item: item[1]["checked_at"], reverse=True)
+    except Exception:
+        st.error("Не удалось прочитать сохранённые исследования.")
+        return
+    if reports:
+        st.markdown("### Исследования с профессиональной памятью")
+    for report_id, report in reports[:8]:
+        with st.expander(f"{report['checked_at'][:10]} · {report['competitor_name']}"):
+            _render_report(report, "scout_memory_" + report_id)
+            with st.form("scout_feedback_" + report_id):
+                feedback = st.text_area("Замечание директора", max_chars=3000)
+                correction = st.text_area("Исправление (необязательно)", max_chars=3000)
+                evidence = st.text_input("Источник проверки исправления", max_chars=1200)
+                verified = st.checkbox("Я сверил(а) исправление с указанным источником")
+                if st.form_submit_button("Сохранить замечание"):
+                    if correction.strip() and not verified:
+                        st.warning("Подтвердите проверку исправления.")
+                    else:
+                        try:
+                            save_director_feedback(workspace, report_id, feedback, correction, evidence)
+                        except ValueError as exc:
+                            st.warning(str(exc))
+                        except Exception:
+                            st.error("Запись не подтверждена. Повторите сохранение с тем же текстом.")
+                        else:
+                            st.success("Замечание сохранено.")
+
+
 def render_scout_center(owner_telegram_id: int, owner_name: str) -> None:
     st.markdown("### 🛰️ Разведчик W")
     st.caption(
         "Анализирует только открытые источники: находит, проверяет, сравнивает и предлагает, "
         "чему W стоит научиться. Ничего сам не публикует и не меняет в Агентстве."
+    )
+
+    try:
+        workspace = cabinet_workspace(owner_telegram_id)
+    except Exception:
+        st.error("Профессиональная память Разведчика недоступна. Исследование остановлено.")
+        return
+    scope_key = (
+        f"scout:{owner_telegram_id}:{workspace.binding.project_id}"
+        if workspace is not None else f"scout:{owner_telegram_id}:legacy"
     )
 
     with st.container(border=True):
@@ -445,28 +565,41 @@ def render_scout_center(owner_telegram_id: int, owner_name: str) -> None:
             else:
                 with st.spinner("Разведчик проверяет открытые источники и сравнивает их с W..."):
                     try:
-                        result = run_competitor_research(competitor_name, website)
-                        st.session_state["scout_last_report"] = result
-                        saved, save_error = save_report(owner_telegram_id, result)
-                        st.session_state["scout_last_saved"] = saved
-                        st.session_state["scout_last_save_error"] = save_error
+                        if workspace is None:
+                            result = run_competitor_research(competitor_name, website)
+                            saved, save_error = save_report(owner_telegram_id, result)
+                            st.session_state[scope_key + ":report"] = result
+                            st.session_state[scope_key + ":saved"] = saved
+                            st.session_state[scope_key + ":save_error"] = save_error
+                        else:
+                            run_competitor_research(
+                                competitor_name, website, experience_workspace=workspace,
+                                task_id="cabinet:" + uuid4().hex,
+                            )
+                            st.success("Отчёт сохранён в памяти Разведчика.")
                     except requests.exceptions.HTTPError as exc:
+                        if workspace is not None:
+                            st.error("Не удалось выполнить исследование с профессиональной памятью.")
+                            return
                         details = ""
                         if exc.response is not None:
                             details = exc.response.text[:700]
                         st.error("Не удалось выполнить веб-разведку. " + (details or str(exc)))
                     except Exception as exc:
+                        if workspace is not None:
+                            st.error("Исследование с профессиональной памятью не завершено.")
+                            return
                         st.error(f"Не удалось выполнить разведку: {exc}")
 
-    last = st.session_state.get("scout_last_report")
+    last = st.session_state.get(scope_key + ":report")
     if isinstance(last, dict):
         st.divider()
         st.markdown("### 📌 Последний отчёт")
         _render_report(last, "scout_last")
-        if st.session_state.get("scout_last_saved"):
+        if st.session_state.get(scope_key + ":saved"):
             st.success("Отчёт сохранён в истории Разведчика.")
         else:
-            save_error = str(st.session_state.get("scout_last_save_error") or "").strip()
+            save_error = str(st.session_state.get(scope_key + ":save_error") or "").strip()
             st.warning("Отчёт получен, но пока не сохранён в истории.")
             if save_error:
                 with st.expander("Техническая причина"):
@@ -477,13 +610,16 @@ def render_scout_center(owner_telegram_id: int, owner_name: str) -> None:
                 key="scout_retry_save",
             ):
                 saved, retry_error = save_report(owner_telegram_id, last)
-                st.session_state["scout_last_saved"] = saved
-                st.session_state["scout_last_save_error"] = retry_error
+                st.session_state[scope_key + ":saved"] = saved
+                st.session_state[scope_key + ":save_error"] = retry_error
                 if saved:
                     st.success("Отчёт сохранён в истории Разведчика.")
                     st.rerun()
                 else:
                     st.error("Сохранить отчёт пока не удалось. Откройте «Техническая причина».")
+
+    if workspace is not None:
+        _render_memory_reports(workspace)
 
     recent = load_reports(owner_telegram_id)
     if recent:
