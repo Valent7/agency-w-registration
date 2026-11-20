@@ -133,7 +133,8 @@ def _extract_text_and_sources(data: dict[str, Any]) -> tuple[str, list[dict[str,
     return decorated, unique
 
 
-def run_competitor_research(competitor_name: str, website: str = "") -> dict[str, Any]:
+def run_competitor_research(competitor_name: str, website: str = "", *,
+                            experience_workspace=None, task_id=None) -> dict[str, Any]:
     competitor_name = str(competitor_name or "").strip()
     website = str(website or "").strip()
     if not competitor_name:
@@ -141,6 +142,25 @@ def run_competitor_research(competitor_name: str, website: str = "") -> dict[str
 
     today = datetime.now().astimezone().date().isoformat()
     agency_context = _agency_context()
+    prepared = None
+    if experience_workspace is not None:
+        if experience_workspace.binding.agent_id != "scout" or not task_id:
+            raise ValueError("A verified scout workspace and stable task ID are required")
+        prepared = experience_workspace.begin(
+            task_id, {"competitor_name": competitor_name, "website": website})
+        if prepared["completed_result"] is not None:
+            return json.loads(prepared["completed_result"])
+        role_memory = prepared["memory"]
+        agency_context += (
+            "\nSCOPED PROFESSIONAL MATERIALS AND VERIFIED EXPERIENCE:\n"
+            + json.dumps({
+                "materials": prepared["materials"],
+                "verified_experience": prepared["verified_experience"],
+                "approved_project_rules": role_memory["project"]["rules"],
+                "approved_shared_rules": role_memory["parents"],
+                "boundary": prepared["boundary"],
+            }, ensure_ascii=False)
+        )
 
     system_prompt = f"""
 Ты — Разведчик W, аналитик конкурентной разведки Агентства W.
@@ -218,26 +238,40 @@ def run_competitor_research(competitor_name: str, website: str = "") -> dict[str
         "официальной документацией или help-страницами, когда это возможно."
     )
 
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers=_headers(),
-        json={
-            "model": SCOUT_MODEL,
-            "instructions": system_prompt,
-            "input": user_prompt,
-            "tools": [
-                {
-                    "type": "web_search",
-                    "search_context_size": "medium",
-                }
-            ],
-            "store": False,
-        },
-        timeout=240,
-    )
-    response.raise_for_status()
-    data = response.json()
-    report, sources = _extract_text_and_sources(data)
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers=_headers(),
+            json={
+                "model": SCOUT_MODEL,
+                "instructions": system_prompt,
+                "input": user_prompt,
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "search_context_size": "medium",
+                    }
+                ],
+                "store": False,
+            },
+            timeout=240,
+        )
+        response.raise_for_status()
+        data = response.json()
+        report, sources = _extract_text_and_sources(data)
+    except Exception as error:
+        if prepared is not None:
+            experience_workspace.finish("error", "task:" + task_id, {
+                "date": prepared["started_at"], "task": competitor_name,
+                "expected": "Отчёт с проверяемыми источниками",
+                "result": "Research failed: " + type(error).__name__,
+                "assessment": "error", "source": "scout-runtime:" + task_id,
+                "cause": "Provider or response processing failure",
+                "cause_status": "fact", "correction": "", "check": "",
+                "next_application": "Проверить причину перед повторным запуском",
+            })
+        raise
+
 
     # Разведчик завершает отчёт рекомендацией Директору, без сервисных предложений в финале.
     report = re.split(
@@ -254,7 +288,7 @@ def run_competitor_research(competitor_name: str, website: str = "") -> dict[str
     )
     verdict = verdict_match.group(1).upper() if verdict_match else "НАБЛЮДАТЬ"
 
-    return {
+    result = {
         "competitor_name": competitor_name,
         "website": website,
         "report": report,
@@ -262,6 +296,18 @@ def run_competitor_research(competitor_name: str, website: str = "") -> dict[str
         "verdict": verdict,
         "checked_at": datetime.now().astimezone().isoformat(),
     }
+    if prepared is not None:
+        experience_workspace.finish("success", "task:" + task_id, {
+            "date": prepared["started_at"], "task": competitor_name,
+            "expected": "Отчёт с проверяемыми источниками",
+            "result": json.dumps(result, ensure_ascii=False, sort_keys=True),
+            "assessment": "unknown", "source": "scout-runtime:" + task_id,
+            "cause": "", "cause_status": "unknown", "correction": "",
+            "check": "Отчёт сформирован; качество требует проверки",
+            "next_application": "",
+        })
+    return result
+
 
 
 def _storage_headers() -> dict[str, str]:
