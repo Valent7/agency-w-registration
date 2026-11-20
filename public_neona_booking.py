@@ -24,6 +24,36 @@ ORIGINS = frozenset(("https://agency-w-time.onrender.com", "https://agency-w-jou
 TZ_CHOICES = ("Europe/Moscow", "Europe/Berlin", "Europe/London", "Asia/Almaty",
               "Asia/Astana", "Asia/Tbilisi", "Asia/Yerevan", "Asia/Tashkent", "America/New_York")
 FORMATS = ("Zoom", "Telegram", "WhatsApp")
+
+def owner_presentation(raw_name):
+    """Present a REAL person, never an 'account' or a name in quotation marks."""
+    raw = str(raw_name or "").strip()
+    if raw.casefold() in ("valentina", "валентина"):
+        return ("Валентина", "Валентины")
+    if raw and re.fullmatch(r"[А-Яа-яЁё-]+", raw):
+        if raw.endswith("а"):
+            stem=raw[:-1]
+            suffix="и" if stem.lower().endswith(("г","к","х","ж","ч","ш","щ")) else "ы"
+            return (raw,stem+suffix)
+        if raw.endswith("я"):
+            return (raw,raw[:-1]+"и")
+        if raw.endswith("й"):
+            return (raw,raw[:-1]+"я")
+        if raw.endswith("ь"):
+            return (raw,raw[:-1]+"я")
+        return (raw,raw+"а")
+    return (raw or "представитель Агентства W", None)
+
+def owner_intro(raw_name):
+    nominative, genitive = owner_presentation(raw_name)
+    if genitive:
+        return ("Здравствуйте! Я Неона, ИИ-секретарь-референт " + genitive +
+                " в Агентстве W. Помогаю разобраться, как сократить рутину, "
+                "и по желанию организую встречу.")
+    return ("Здравствуйте! Я Неона, ИИ-секретарь-референт Агентства W. " +
+            nominative + " — человек, с которым я могу организовать вашу встречу. " +
+            "Давайте разберёмся, как освободить ваше время.")
+
 _LOCK = threading.Lock()
 _BOOKINGS_IP = defaultdict(deque)
 _BOOKINGS_GLOBAL = deque()
@@ -153,7 +183,9 @@ async def identity(request):
         if len(ref) > 40:
             raise ValueError("ref")
         token, owner = create_identity(ref)
-        return reply({"session":token,"owner_name":owner["owner_name"],
+        name,_ = owner_presentation(owner["owner_name"])
+        return reply({"session":token,"owner_name":name,
+                      "owner_intro":owner_intro(owner["owner_name"]),
                       "attribution":owner["attribution"]},origin=origin)
     except ValueError:
         return reply({"error":"Неверная ссылка."},400,origin)
@@ -250,8 +282,9 @@ async def appointment(request):
                           "sid":session["sid"],"owner_id":session["owner_id"],
                           "owner_name":session["owner_name"],"form":form})
             start = datetime.fromisoformat(form["start"]).astimezone(timezone.utc)
+            name,_ = owner_presentation(session["owner_name"])
             return reply({"offer":offer,"slot":_format_slot(start,form["timezone"]),
-                          "owner_name":session["owner_name"]},origin=origin)
+                          "owner_name":name},origin=origin)
         if mode != "confirm":
             raise ValueError("action")
         offer = verify(data.get("offer"),"offer")
@@ -296,8 +329,9 @@ async def appointment(request):
             return reply({"error":"Календарь не подтвердил запись. Обратитесь к Агентству напрямую."},503,origin)
         _booking_rate(_client_ip(request),consume=True)
         start=datetime.fromisoformat(offer["form"]["start"])
+        name,_ = owner_presentation(session["owner_name"])
         return reply({"booked":True,"slot":_format_slot(start,offer["form"]["timezone"]),
-                      "owner_name":session["owner_name"],"format":offer["form"]["format"]},origin=origin)
+                      "owner_name":name,"format":offer["form"]["format"]},origin=origin)
     except (ValueError,KeyError,TypeError,AttributeError):
         return reply({"error":"Проверьте данные встречи или обновите страницу."},400,origin)
     except Exception:
