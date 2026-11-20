@@ -176,7 +176,8 @@ async def public_neona_chat(request):
             weekly, monthly = calc.get("weekly_hours"), calc.get("monthly_hours")
             top_task = str(calc.get("top_task") or "").strip()[:70]
             if all(isinstance(v,(int,float)) and not isinstance(v,bool) for v in (weekly,monthly)) and 0 <= weekly <= 500 and 0 <= monthly <= 2200:
-                calc_context = (f"Посетитель УЖЕ заполнил калькулятор: {weekly:.1f} ч/нед, {monthly:.1f} ч/мес; "\n                                f"ведущая категория: {top_task}. Используй эти данные, а не переспрашивай.")
+                calc_context = (f"Посетитель УЖЕ заполнил калькулятор: {weekly:.1f} ч/нед, {monthly:.1f} ч/мес; "
+                                f"ведущая категория: {top_task}. Используй эти данные, а не переспрашивай.")
 
     except (ValueError, TypeError, AttributeError):
         return _reply({"error": "Проверьте текст сообщения."}, 400, origin)
