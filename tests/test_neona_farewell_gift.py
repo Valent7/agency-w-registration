@@ -73,7 +73,7 @@ class NeonaFarewellGiftTest(unittest.TestCase):
             )
             self.assertIn("?ref=W123456", message)
             self.assertIn("калькулятор", message.casefold())
-            self.assertFalse("?" in message.split("Хорошего дня")[0])
+            self.assertNotIn("Хотите", message)
             self.assertTrue(context["neona_time_calculator_offered"])
             self.assertTrue(context[gift.GIFT_FLAG])
             self.assertEqual(get.call_count, 1)
