@@ -89,7 +89,7 @@ async def public_neona_voice(request):
 
     # Require the same verified short-lived visitor identity as the chat.
     try:
-        verify(request.headers.get("x-neona-session", ""), "identity")
+        identity = verify(request.headers.get("x-neona-session", ""), "identity")
     except Exception:
         return _reply({"error": "Обновите страницу и попробуйте снова."}, origin, 401)
 
@@ -113,8 +113,9 @@ async def public_neona_voice(request):
     if not os.getenv("OPENAI_API_KEY", "").strip():
         return _reply({"error": "Распознавание речи пока недоступно."}, origin, 503)
 
-    client_ip = request.client.host if request.client else "unknown"
-    if not _allowed(client_ip):
+    # Per signed visitor session (rather than shared Render proxy IP).
+    # The global daily cap still bounds total transcription costs.
+    if not _allowed(identity["sid"]):
         return _reply({"error": "Лимит голосовых обращений исчерпан. Можно написать вопрос текстом."}, origin, 429)
 
     filename = _TYPES[content_type][0]
