@@ -11,6 +11,19 @@
   // Preserve referral attribution when the reader follows another journal page.
   // Do not attach the code to external sites or tracking links.
   if (code) {
+    // Keep the inviting partner when a reader moves to the free calculator.
+    document.addEventListener("click",function(event){
+      const anchor=event.target.closest && event.target.closest("a[href]");
+      if(!anchor)return;
+      let destination;
+      try{destination=new URL(anchor.href,window.location.href);}catch(_){return;}
+      if(destination.origin==="https://agency-w-time.onrender.com"){
+        if(!destination.searchParams.has("ref")){
+          destination.searchParams.set("ref",code);
+          anchor.href=destination.toString();
+        }
+      }
+    },true);
     document.addEventListener("click", function (event) {
       const link = event.target.closest && event.target.closest("a[href]");
       if (!link) return;
@@ -70,7 +83,7 @@
   contact.rel = "noopener noreferrer";
   contact.textContent = code ? "Написать и познакомиться" : "Написать в редакцию";
   const calc = document.createElement("a");
-  calc.href = "https://agency-w-time.onrender.com/";
+  calc.href = "https://agency-w-time.onrender.com/" + (code ? "?ref=" + encodeURIComponent(code) : "");
   calc.target = "_blank";
   calc.rel = "noopener noreferrer";
   calc.textContent = "Проверить, куда уходит время";
