@@ -51,7 +51,7 @@ def polite_offer_refusal(text: str, stage: str = "idle") -> bool:
         return False
     if re.search(r"\b(?:не\s+отказываюсь|не\s+против|хочу\s+узнать|интересно\s+узнать)\b", t):
         return False
-    compact = re.sub(r"[^a-zа-я0-9 ]+", " ", t).strip()
+    compact = _norm(re.sub(r"[^a-zа-я0-9 ]+", " ", t))
     simple = {
         "нет спасибо", "нет благодарю", "пока нет", "пока нет спасибо",
         "мне это не нужно", "мне не интересно", "мне неинтересно",

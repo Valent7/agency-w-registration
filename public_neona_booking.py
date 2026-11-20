@@ -142,7 +142,9 @@ def resolve_owner(ref_code):
         raise RuntimeError("Cannot verify Agency W director")
     director = director_rows[0]
 
-    if code and re.fullmatch(r"W[1-9][0-9]{4,14}", code):
+    if code:
+        if not re.fullmatch(r"W[1-9][0-9]{4,14}", code):
+            raise ValueError("unverified referral")
         rows = _rows("agency_members", {
             "member_code":"eq."+code, "select":"telegram_id,first_name,member_code", "limit":1})
         if rows:
@@ -154,6 +156,7 @@ def resolve_owner(ref_code):
                 return {"owner_id":int(person["telegram_id"]),
                         "owner_name":str(person.get("first_name") or "партнёра").strip()[:65],
                         "code":code, "attribution":"partner_ref"}
+        raise ValueError("unverified referral")
     return {"owner_id":int(director["telegram_id"]),
             "owner_name":str(director.get("first_name") or "Валентины").strip()[:65],
             "code":str(director.get("member_code") or "").strip()[:24],
@@ -188,7 +191,7 @@ async def identity(request):
                       "owner_intro":owner_intro(owner["owner_name"]),
                       "attribution":owner["attribution"]},origin=origin)
     except ValueError:
-        return reply({"error":"Неверная ссылка."},400,origin)
+        return reply({"error":"Не удалось подтвердить пригласившего. Откройте исходную ссылку на калькулятор из его сообщения."},400,origin)
     except Exception:
         return reply({"error":"Временно не удалось определить владельца аккаунта."},503,origin)
 

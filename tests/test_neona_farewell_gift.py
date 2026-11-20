@@ -27,6 +27,7 @@ class NeonaFarewellGiftTest(unittest.TestCase):
     def test_soft_refusals_and_questions(self):
         for text in (
             "Нет, спасибо",
+            "Нет,   спасибо!",
             "Мне это неинтересно",
             "Спасибо, мне не интересно",
             "Пока не готова",
