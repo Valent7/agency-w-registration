@@ -1,96 +1,95 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
 
 import vk_scout
 import vk_scout_worker
+from vk_desk_fixture import OWNER, VKDeskFixture
 
 
 class VKWorkDeskTests(unittest.TestCase):
-    def setUp(self):
-        self.now = datetime.now(timezone.utc).isoformat()
-        self.assignments = {
-            71: [
-                {"id": 12, "vk_user_id": 4, "status": "invited", "invited_at": self.now},
-                {"id": 11, "vk_user_id": 4, "status": "invited", "invited_at": self.now},
-                {"id": 10, "vk_user_id": 5, "status": "skipped", "invited_at": self.now},
-            ],
-            72: [{"id": 20, "vk_user_id": 4, "status": "invited", "invited_at": self.now}],
-        }
-        self.states = {71: [], 72: []}
-        self.meetings = {71: [], 72: []}
-        self.contact = vk_scout._vk_dialog_contact_id(4)
+    def test_partitions_and_owner_scoped_reads(self):
+        from collections import Counter
 
-    def storage(self, table, filters):
-        if table == "agency_vk_candidates":
-            return [{"vk_user_id": 4, "first_name": "Тест"}]
-        owner = int(filters["owner_telegram_id"].split(".")[1])
-        return {
-            "agency_vk_assignments": self.assignments,
-            "agency_dialog_states": self.states,
-            "agency_meetings": self.meetings,
-        }[table][owner]
+        db = VKDeskFixture()
+        with db.connected():
+            rows = vk_scout.load_vk_private_desk(OWNER)
+            self.assertEqual(Counter(row["group"] for row in rows),
+                             {"waiting": 28, "active": 4, "meeting": 1, "refusal": 3, "unsent": 6})
+            self.assertEqual(len(vk_scout.load_today_vk_assignments(OWNER)), 5)
+            self.assertEqual(vk_scout.load_vk_private_desk(OWNER + 1), [])
+            with self.assertRaises(vk_scout.VKScoutError):
+                vk_scout.mark_vk_desk_event(OWNER + 1, 6, refusal=True)
+        self.assertLess(db.reads, 14)
 
-    def test_waiting_reply_draft_restart_and_owner_isolation(self):
-        with patch.object(vk_scout, "_sb_get", side_effect=self.storage):
-            first, archive = vk_scout.load_vk_private_desk(71)
-            self.assertEqual((first["group"], first["id"], archive["group"]), ("waiting", 12, "history"))
-            self.states[71].append({
-                "contact_telegram_id": self.contact, "stage": "idle",
-                "context": {
-                    "vk_manual_pending_inbound": "Сколько времени занимает встреча?",
-                    "vk_manual_pending_reply": "Обычно 30 минут.",
-                    "vk_manual_last_processed_at": self.now,
-                },
-            })
-            first, _ = vk_scout.load_vk_private_desk(71)
+    def test_review_then_new_reply_and_refusal_are_durable(self):
+        db = VKDeskFixture()
+        def contact():
+            return next(row for row in vk_scout.load_vk_private_desk(OWNER) if row["vk_user_id"] == 6)
+
+        with db.connected():
+            self.assertEqual(contact()["group"], "waiting")
+            db.manual_reply(6, OWNER, "Первый ответ")
+            first = contact()
             self.assertEqual(first["group"], "active")
-            self.assertTrue(first["recent_reply"])
-            self.assertEqual(first["draft"], "Обычно 30 минут.")
-            self.assertEqual(vk_scout.load_vk_private_desk(72)[0]["group"], "waiting")
+            vk_scout.mark_vk_desk_event(OWNER, 6, event_key="personal", viewed_at=first["inbound_at"])
+        with db.connected():
+            self.assertEqual(contact()["group"], "history")
+            db.manual_reply(6, OWNER, "Новый ответ")
+            self.assertEqual(contact()["group"], "active")
+            vk_scout.mark_vk_desk_event(OWNER, 6, refusal=True)
+        with db.connected():
+            row = contact()
+            self.assertEqual((row["group"], row["inbound"]), ("refusal", "Новый ответ"))
+            self.assertTrue(row["refused_at"])
 
-            # Existing rows can have only relationship memory after a draft was copied.
-            self.states[71][0]["context"] = {
-                "vk_manual_last_processed_at": self.now,
-                "relationship_memory": {"turns": [{"incoming": "Уточню завтра"}]},
-            }
-            reopened, _ = vk_scout.load_vk_private_desk(71)
-            self.assertEqual(reopened["inbound"], "Уточню завтра")
-            self.assertFalse(reopened["draft"])
+    def test_date_rollover_and_confirmation_move_to_waiting(self):
+        db = VKDeskFixture()
+        with db.connected():
+            db.assignments[0]["assignment_date"] = db.yesterday
+            self.assertNotIn(1, {row["id"] for row in vk_scout.load_today_vk_assignments(OWNER)})
+            lookup = lambda: next(row for row in vk_scout.load_vk_private_desk(OWNER) if row["vk_user_id"] == 1)
+            self.assertEqual(lookup()["group"], "unsent")
+            vk_scout.mark_vk_invited(1, owner_id=OWNER + 1)
+            self.assertEqual(lookup()["group"], "unsent")
+            vk_scout.mark_vk_invited(1, owner_id=OWNER)
+            self.assertEqual(lookup()["group"], "waiting")
 
-    def test_community_reply_is_green_with_community_source(self):
-        self.states[71].append({
-            "contact_telegram_id": self.contact, "stage": "idle",
-            "context": {
-                "vk_last_incoming_text": "Ответ в сообществе",
-                "vk_last_processed_at": self.now,
-                "vk_manual_pending_reply": "Черновик личного сообщения",
-            },
-        })
-        with patch.object(vk_scout, "_sb_get", side_effect=self.storage):
-            row = vk_scout.load_vk_private_desk(71)[0]
-        self.assertEqual((row["group"], row["source"], row["inbound"]),
-                         ("active", "community", "Ответ в сообществе"))
-        self.assertIsNone(row["draft"])
-        self.assertEqual(row["dialog"]["pending_reply"], "Черновик личного сообщения")
+    def test_actual_outbound_confirmation_clears_notification(self):
+        db = VKDeskFixture()
+        with db.connected():
+            db.manual_reply(6, OWNER, "Первая реплика")
+            db.sent(6, OWNER, "Уже ответили")
+            row = next(row for row in vk_scout.load_vk_private_desk(OWNER) if row["vk_user_id"] == 6)
+            self.assertEqual(row["group"], "history")
+            self.assertEqual(row["inbound"], "Первая реплика")
+            self.assertEqual(row["last_outbound"], "Уже ответили")
 
-    def test_only_confirmed_saved_meeting_for_the_same_contact_is_purple(self):
-        state = {
-            "contact_telegram_id": self.contact, "stage": "awaiting_confirmation",
-            "context": {"meeting_id": 9, "vk_manual_last_inbound_text": "Мне подходит"},
-        }
-        self.states[71].append(state)
-        self.meetings[72].append({"id": 9, "contact_telegram_id": self.contact, "start_at": self.now})
-        with patch.object(vk_scout, "_sb_get", side_effect=self.storage) as storage:
-            self.assertEqual(vk_scout.load_vk_private_desk(71)[0]["group"], "active")
-            state["stage"] = "scheduled"
-            self.assertEqual(vk_scout.load_vk_private_desk(71)[0]["group"], "active")
-            self.meetings[71] = [{"id": 9, "contact_telegram_id": self.contact - 1, "start_at": self.now}]
-            self.assertEqual(vk_scout.load_vk_private_desk(71)[0]["group"], "active")
-            self.meetings[71][0]["contact_telegram_id"] = self.contact
-            self.assertEqual(vk_scout.load_vk_private_desk(71)[0]["group"], "meeting")
-            self.assertEqual(storage.call_args.args[1]["status"], "eq.Подтверждена")
-            self.assertTrue(storage.call_args.args[1]["end_at"].startswith("gt."))
+    def test_same_vk_id_keeps_personal_and_community_events_separate(self):
+        db = VKDeskFixture()
+        db.manual_reply(35, OWNER, "Личный ответ")
+        with db.connected():
+            matching = [row for row in vk_scout.load_vk_private_desk(OWNER) if row["vk_user_id"] == 35]
+            self.assertEqual(len(matching), 1)
+            row = matching[0]
+            self.assertEqual({e["source"]: e["text"] for e in row["events"]},
+                             {"personal": "Личный ответ", "community": "Могу созвониться завтра"})
+            self.assertEqual(row["dialog"]["pending_inbound"], "Личный ответ")
+            vk_scout.mark_vk_desk_event(OWNER, 35, event_key="personal", viewed_at=row["inbound_at"])
+            row = next(row for row in vk_scout.load_vk_private_desk(OWNER) if row["vk_user_id"] == 35)
+            self.assertEqual((row["source"], row["group"]), ("community", "active"))
+            self.assertIsNone(row["draft"])
+            self.assertNotEqual(vk_scout._vk_dialog_contact_id(35), vk_scout._vk_dialog_contact_id(35, personal=True))
+
+    def test_comment_link_and_confirmed_calendar_belong_to_owner(self):
+        db = VKDeskFixture()
+        with db.connected():
+            rows = {row["vk_user_id"]: row for row in vk_scout.load_vk_private_desk(OWNER)}
+            self.assertEqual(rows[36]["reply_url"], "https://vk.com/wall36_13?reply=7")
+            self.assertEqual(rows[38]["meeting"]["id"], 501)
+            db.meetings[0]["owner_telegram_id"] = OWNER + 1
+            rows = {row["vk_user_id"]: row for row in vk_scout.load_vk_private_desk(OWNER)}
+            self.assertIsNone(rows[38]["meeting"])
 
     def test_owner_pages_continue_past_api_page(self):
         full_page = [{"id": i} for i in range(200)]
@@ -141,84 +140,24 @@ class VKWorkDeskTests(unittest.TestCase):
         score.assert_called_once()
         self.assertFalse(score.call_args.kwargs["reanalyze_exhausted"])
 
-    def test_read_only_ui_order_and_waiting_folder(self):
+    def test_read_only_app_order_and_hidden_archive(self):
         from streamlit.testing.v1 import AppTest
 
-        script = """
-from unittest.mock import patch
-import streamlit as st
-import vk_scout_ui as ui
-from contextlib import ExitStack
-with ExitStack() as mocks:
-    mocks.enter_context(patch.object(ui, "_render_today_vk_candidates",
-        side_effect=lambda *a, **k: st.markdown("### 💙 VK 5 на сегодня · отбор Неонии")))
-    mocks.enter_context(patch.object(ui, "_sb_get", return_value=[]))
-    mocks.enter_context(patch.object(ui, "load_vk_private_desk", return_value=[
-        {"id": 1, "vk_user_id": 4, "first_name": "Ждущий", "group": "waiting",
-         "status": "invited", "meeting": None, "turns": [], "dialog": {}},
-        {"id": 2, "vk_user_id": 5, "first_name": "Ответил раньше", "group": "active",
-         "status": "invited", "meeting": None, "turns": [], "dialog": {}, "inbound_at": "2026-11-01T09:00:00+00:00"},
-        {"id": 3, "vk_user_id": 6, "first_name": "Ответил позже", "group": "active",
-         "status": "dialogue", "meeting": None, "turns": [], "dialog": {}, "inbound_at": "2026-11-01T10:00:00+00:00",
-         "inbound": "Последний ответ", "draft": "Черновик", "recent_reply": True},
-    ]))
-    for name in ("_render_vk_dialog_center", "_render_vk_feed_radar",
-                 "_render_known_vk_contacts", "_render_vk_source_settings",
-                 "_render_vk_private_dialog_followup"):
-        mocks.enter_context(patch.object(ui, name))
-    ui.render_vk_sources(71)
-"""
-        app = AppTest.from_string(script).run()
+        app = AppTest.from_string("""
+from vk_desk_fixture import OWNER, VKDeskFixture
+from vk_scout_ui import render_vk_sources
+with VKDeskFixture().connected():
+    render_vk_sources(OWNER, "test")
+""").run()
         self.assertFalse(app.exception)
-        self.assertIn("VK 5 на сегодня", app.markdown[0].value)
-        self.assertIn("Активные диалоги VK", app.markdown[1].value)
-        self.assertEqual([metric.value for metric in app.metric], ["2", "0", "1"])
-        self.assertIn("Ответил позже", app.text[0].value)
-        self.assertIn("Последний ответ", app.text[1].value)
-        self.assertIn("Черновик", app.text[2].value)
-        self.assertIn("Ответил раньше", app.text[3].value)
-        folder = next(item for item in app.expander if item.label.startswith("📁 Ожидаем ответа ·"))
-        self.assertEqual(len(folder.text), 1)
-        self.assertIn("Ждущий", folder.text[0].value)
-
-    def test_manual_reply_moves_waiting_card_and_prepares_only_once(self):
-        from streamlit.testing.v1 import AppTest
-
-        script = """
-from unittest.mock import patch
-import streamlit as st
-import vk_scout_ui as ui
-
-def load(owner_id):
-    reply = st.session_state.get("registered_reply")
-    return [{
-        "id": 1, "vk_user_id": 4, "first_name": "Контакт", "status": "invited",
-        "group": "active" if reply else "waiting", "meeting": None, "turns": [],
-        "inbound": reply, "recent_reply": bool(reply), "draft": "Черновик" if reply else "",
-        "dialog": {"pending_inbound": reply, "pending_reply": "Черновик" if reply else ""},
-    }]
-
-def register(assignment_id, owner_id, text):
-    assert (assignment_id, owner_id) == (1, 71)
-    st.session_state["registered_reply"] = text
-    st.session_state["registration_count"] = st.session_state.get("registration_count", 0) + 1
-
-with patch.object(ui, "load_vk_private_desk", side_effect=load), patch.object(
-    ui, "process_manual_vk_private_reply", side_effect=register,
-), patch.object(ui, "mark_manual_vk_private_reply_sent", side_effect=AssertionError("Unexpected send")):
-    ui._render_vk_private_desk(71)
-"""
-        app = AppTest.from_string(script).run()
-        self.assertFalse(app.exception)
-        self.assertEqual([metric.value for metric in app.metric], ["0", "0", "1"])
-        app.text_area[0].set_value("Да, расскажите подробнее").run()
-        app.button[0].click().run()
-        self.assertFalse(app.exception)
-        self.assertEqual([metric.value for metric in app.metric], ["1", "0", "0"])
-        self.assertTrue(any("Новый ответ" in element.value for element in app.success))
-        self.assertEqual(app.session_state["registration_count"], 1)
-        app.run()
-        self.assertEqual(app.session_state["registration_count"], 1)
+        headings = [row.value for row in app.markdown]
+        self.assertIn("Новые кандидаты", headings[0])
+        self.assertIn("VK-диалоги · 4", " ".join(headings))
+        self.assertIn("Встречи · 1", " ".join(headings))
+        for folder in ("Отправленные · 28", "Неотправленные · 6", "Отказ · 3"):
+            self.assertTrue(any(folder in panel.label for panel in app.expander))
+        self.assertNotIn("Кандидат 06", " ".join(headings))
+        self.assertNotIn("Кандидат 42", " ".join(headings))
 
 
 if __name__ == "__main__":

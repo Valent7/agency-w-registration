@@ -36,7 +36,7 @@ from vk_scout import (
     mark_manual_vk_reply_published,
     load_manual_vk_private_dialog,
     load_vk_private_desk,
-    _vk_recent_reply,
+    mark_vk_desk_event,
     process_manual_vk_private_reply,
     mark_manual_vk_private_reply_sent,
     mark_vk_partner,
@@ -180,106 +180,151 @@ def _render_vk_material_followup(
     )
 
 
-def _render_vk_desk_card(owner_id: int, row: dict) -> None:
-    assignment_id = int(row["id"])
+def _vk_display_time(raw_date: str | None) -> str:
+    if not raw_date:
+        return ""
+    try:
+        return datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(
+            ZoneInfo("Europe/Moscow")
+        ).strftime("%d.%m.%Y %H:%M МСК")
+    except ValueError:
+        return str(raw_date)
+
+
+def _render_vk_desk_card(owner_id: int, row: dict, ask_openai_fn=None, *, member_code: str = "") -> None:
+    assignment_id = int(row.get("id") or 0)
     uid = int(row["vk_user_id"])
     name = " ".join(filter(None, (row.get("first_name"), row.get("last_name")))) or f"VK {uid}"
     group = row["group"]
-    label = {
-        "meeting": "🟣 Встреча назначена",
-        "active": "🟢 Получен ответ",
-        "waiting": "🟡 Ожидаем ответа",
-        "history": "📚 История",
-    }[group]
-    meeting = row["meeting"]
-    raw_date = meeting["start_at"] if meeting else row.get("inbound_at") or row.get("invited_at")
-    event_at = ""
-    if raw_date:
-        try:
-            event_at = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(
-                ZoneInfo("Europe/Moscow")
-            ).strftime("%d.%m.%Y %H:%M МСК")
-        except ValueError:
-            event_at = str(raw_date)
-    community = row.get("source") == "community"
-    source_label = "Сообщения сообщества VK" if community else "Личный VK"
-    with st.container(border=True):
-        st.text(f"{name} · {label} · {source_label}" + (f" · {event_at}" if event_at else ""))
-        if row.get("inbound") and group != "history":
-            st.text(str(row["inbound"]))
-        if group == "active" and row.get("recent_reply"):
-            st.success(f"Новый ответ · {source_label}")
-        if community:
-            group_id = str(os.getenv("VK_GROUP_ID") or "241237638").strip()
-            if group_id.isdecimal():
-                st.link_button("Открыть сообщения сообщества VK", f"https://vk.com/im?gim={group_id}&sel={uid}")
-        else:
-            st.link_button("Открыть VK и ответить", f"https://vk.com/im?sel={uid}")
-        if meeting and group == "meeting" and st.button(
-            "Открыть запись в календаре", key=f"vk_calendar_{owner_id}_{assignment_id}",
-        ):
-            st.session_state[f"vk_calendar_meeting_{owner_id}"] = str(meeting["id"])
-            st.session_state["agency_open_main_section"] = "📅 Календарь"
-            st.rerun()
+    source_names = {"personal": "Личный VK", "community": "Сообщество VK", "comment": "Комментарий VK"}
+    green_status = "🟢 Требует просмотра" if row.get("source") == "community" else "🟢 Требует ответа"
+    label = {"meeting": "🟣 Назначена", "active": green_status, "waiting": "🟡 Отправлено",
+             "unsent": "Не отправлено", "refusal": "Отказ", "history": "История"}[group]
+    meeting = row.get("meeting")
+    raw_date = meeting["start_at"] if meeting else row.get("refused_at") or row.get("inbound_at") or row.get("invited_at") or row.get("assignment_date")
+    source = row.get("source", "personal")
+    key = f"vk_desk_{owner_id}_{uid}"
+    with st.container(border=True, gap="xxsmall"):
+        if group == "unsent":
+            _render_vk_candidate_details(owner_id, member_code, row, ask_openai_fn=ask_openai_fn)
+            return
+        info, primary = st.columns([3, 2] if meeting else [4, 2], gap="xsmall")
+        with info:
+            st.markdown(f"**{name}** · {label}")
+            st.caption(" · ".join(filter(None, (source_names[source], _vk_display_time(raw_date)))))
+            if row.get("inbound") and group in {"active", "meeting"}:
+                st.text(str(row["inbound"])[:160])
+            if row.get("refusal_reason"):
+                st.caption(row["refusal_reason"])
+        with primary:
+            if meeting and group == "meeting":
+                if st.button("Запись в календаре", key=f"{key}_calendar"):
+                    st.session_state[f"vk_calendar_meeting_{owner_id}"] = str(meeting["id"])
+                    st.session_state["agency_open_main_section"] = "📅 Календарь"
+                    st.rerun()
+            elif group != "refusal":
+                url = row.get("reply_url") or f"https://vk.com/im?sel={uid}"
+                st.link_button("Открыть переписку VK", url)
 
-        if group in {"active", "meeting"}:
-            if row.get("draft"):
-                st.caption("Ответ Неоны готов к ручной отправке")
-                st.text(str(row["draft"]))
-            followup_label = (
-                "Зарегистрировать ответ из личного VK"
-                if community else "Ответ Неоны и следующая реплика"
-            )
-            with st.expander(followup_label):
-                _render_vk_private_dialog_followup(
-                    owner_id, assignment_id, name, row["status"], scope="desk", dialog=row["dialog"],
-                )
-        elif group == "waiting":
-            with st.expander("Зарегистрировать ответ из личного VK"):
-                _render_vk_private_dialog_followup(
-                    owner_id, assignment_id, name, row["status"], scope="desk", dialog=row["dialog"],
-                )
-        with st.expander("История диалога"):
-            if row.get("invitation_text"):
-                st.caption("Первое сообщение")
-                st.text(str(row["invitation_text"]))
-            for turn in row["turns"]:
-                if not isinstance(turn, dict) or turn.get("category") == "first_touch":
-                    continue
-                if turn.get("incoming"):
-                    st.text(f"Собеседник · {turn['incoming']}")
-                if turn.get("neona_reply"):
-                    st.text(f"Неона · {turn['neona_reply']}")
-            if row.get("last_outbound"):
-                st.caption("Последний подтверждённый ответ в VK")
-                st.text(str(row["last_outbound"]))
+        details_label = "Действия и история"
+        if row.get("draft") and group in {"active", "meeting"}:
+            details_label += " · черновик Неоны"
+        with st.expander(details_label, key=f"{key}_details", type="compact", on_change="rerun") as details:
+            if details.open:
+                action1, action2 = st.columns(2)
+                with action1:
+                    if group == "active" and row.get("needs_action") and st.button("Отметить просмотренным", key=f"{key}_seen"):
+                        try:
+                            mark_vk_desk_event(owner_id, uid, event_key=row["event_key"], viewed_at=row["inbound_at"])
+                            st.rerun()
+                        except VKScoutError as exc:
+                            st.error(str(exc))
+                with action2:
+                    if group in {"active", "waiting", "meeting"} and st.button("Отказ", key=f"{key}_refuse"):
+                        try:
+                            mark_vk_desk_event(owner_id, uid, refusal=True)
+                            st.rerun()
+                        except VKScoutError as exc:
+                            st.error(str(exc))
+                if assignment_id and row.get("invited_at") and group != "refusal" and row.get("status") not in {
+                    "partner", "client", "skipped", "blocked", "released", "not_fit",
+                }:
+                    _render_vk_private_dialog_followup(
+                        owner_id, assignment_id, name, row["status"], scope="desk", dialog=row.get("dialog"),
+                    )
+                if row.get("invitation_text"):
+                    st.text(str(row["invitation_text"]))
+                for index, event in enumerate(row.get("events") or []):
+                    st.caption(f"{source_names[event['source']]} · {_vk_display_time(event['at'])}")
+                    st.text(str(event["text"]))
+                    if event.get("url"):
+                        st.link_button("Открыть этот ответ", event["url"], key=f"{key}_event_{index}")
+                    if event.get("draft"):
+                        st.text(str(event["draft"]))
+                        if event["source"] == "comment" and group != "refusal":
+                            with st.form(f"{key}_comment_sent_{index}"):
+                                sent = st.text_area("Текст, опубликованный в VK", value=event["draft"])
+                                confirmed = st.form_submit_button("Подтвердить публикацию в VK")
+                            if confirmed:
+                                try:
+                                    mark_manual_vk_reply_published(event["id"], sent, owner_id=owner_id)
+                                    st.rerun()
+                                except VKScoutError as exc:
+                                    st.error(str(exc))
+                if row.get("legacy_turns"):
+                    st.caption("Сохранённая история прежнего потока VK")
+                    for turn in row["legacy_turns"]:
+                        if isinstance(turn, dict):
+                            if turn.get("incoming"):
+                                st.text(f"Собеседник · {turn['incoming']}")
+                            if turn.get("neona_reply"):
+                                st.text(f"Неона · {turn['neona_reply']}")
+                for turn in row.get("turns") or []:
+                    if not isinstance(turn, dict):
+                        continue
+                    if turn.get("incoming"):
+                        st.text(f"Собеседник · {turn['incoming']}")
+                    if turn.get("neona_reply"):
+                        st.text(f"Неона · {turn['neona_reply']}")
+                if row.get("last_outbound"):
+                    st.text(f"Отправленный ответ · {row['last_outbound']}")
 
 
-@st.fragment(run_every=300)
-def _render_vk_private_desk(owner_id: int) -> None:
-    st.markdown("### 💬 Активные диалоги VK")
-    st.caption("Ответ из личной переписки VK внесите вручную. Ответы в сообщения сообщества поступают через его подключение.")
+@st.fragment(run_every=30)
+def _render_vk_private_desk(owner_id: int, ask_openai_fn=None, *, member_code: str = "") -> None:
     try:
         rows = load_vk_private_desk(owner_id)
     except VKScoutError:
-        st.warning("Не удалось загрузить личные диалоги VK.")
+        st.warning("Не удалось загрузить диалоги VK.")
         return
-    groups = {group: [] for group in ("active", "meeting", "waiting", "history")}
+    groups = {group: [] for group in ("active", "meeting", "waiting", "unsent", "refusal", "history")}
     for row in rows:
         groups[row["group"]].append(row)
     groups["active"].sort(key=lambda row: row.get("inbound_at") or "", reverse=True)
     groups["meeting"].sort(key=lambda row: row["meeting"]["start_at"])
-    metrics = st.columns(3)
-    metrics[0].metric("🟢 Активные диалоги", len(groups["active"]))
-    metrics[1].metric("🟣 Назначенные встречи", len(groups["meeting"]))
-    metrics[2].metric("🟡 Ожидаем ответа", len(groups["waiting"]))
-
-    for row in groups["active"] + groups["meeting"]:
-        _render_vk_desk_card(owner_id, row)
-    for group, label in (("waiting", "📁 Ожидаем ответа"), ("history", "📚 История")):
-        with st.expander(f"{label} · {len(groups[group])}", expanded=False):
-            if groups[group]:
-                page_size = 20
+    green, purple = st.columns([2, 1], gap="small")
+    for group, label, column in (
+        ("active", "🟢 VK-диалоги", green), ("meeting", "🟣 Встречи", purple),
+    ):
+        with column:
+            st.markdown(f"### {label} · {len(groups[group])}")
+            if group == "active":
+                for start in range(0, len(groups[group]), 2):
+                    for row, card in zip(groups[group][start:start + 2], st.columns(2, gap="small")):
+                        with card:
+                            _render_vk_desk_card(owner_id, row, ask_openai_fn, member_code=member_code)
+            else:
+                for row in groups[group]:
+                    _render_vk_desk_card(owner_id, row, ask_openai_fn, member_code=member_code)
+    for group, label in (
+        ("unsent", "📁 Неотправленные"), ("waiting", "🟡 Отправленные"),
+        ("refusal", "📁 Отказ"), ("history", "📚 История"),
+    ):
+        with st.expander(
+            f"{label} · {len(groups[group])}", key=f"vk_desk_folder_{owner_id}_{group}", on_change="rerun",
+        ) as folder:
+            if folder.open and groups[group]:
+                page_size = 15
                 page_count = (len(groups[group]) + page_size - 1) // page_size
                 page = st.number_input(
                     "Страница", min_value=1, max_value=page_count, step=1,
@@ -287,7 +332,7 @@ def _render_vk_private_desk(owner_id: int) -> None:
                 ) if page_count > 1 else 1
                 start = (int(page) - 1) * page_size
                 for row in groups[group][start:start + page_size]:
-                    _render_vk_desk_card(owner_id, row)
+                    _render_vk_desk_card(owner_id, row, ask_openai_fn, member_code=member_code)
 
 
 def _render_vk_private_dialog_followup(
@@ -300,7 +345,7 @@ def _render_vk_private_dialog_followup(
     dialog: dict | None = None,
 ) -> None:
     """Personal VK DM handoff: one pasted inbound turn -> the shared Neona brain."""
-    if str(status or "").strip() not in {"invited", "dialogue", "meeting"} or not assignment_id:
+    if str(status or "").strip() not in {"invited", "entered", "lead", "dialogue", "meeting"} or not assignment_id:
         return
 
     st.divider()
@@ -375,21 +420,19 @@ def _render_vk_private_dialog_followup(
     if st.session_state.pop(reset_key, False):
         st.session_state[inbound_key] = ""
 
-    st.text_area(
-        "Новая реплика человека из личного VK",
-        key=inbound_key,
-        height=100,
-        placeholder="Вставьте только последнее сообщение кандидата",
-    )
-    inbound_text = str(st.session_state.get(inbound_key, "") or "").strip()
-
-    if st.button(
-        "🧠 Передать Неоне",
-        key=f"vk_private_to_neona_{widget_scope}",
-        type="primary",
-        use_container_width=True,
-        disabled=not bool(inbound_text),
-    ):
+    with st.form(f"vk_private_reply_{widget_scope}"):
+        inbound_text = st.text_area(
+            "Новая реплика человека из личного VK",
+            key=inbound_key,
+            height=100,
+            placeholder="Вставьте только последнее сообщение кандидата",
+        )
+        submitted = st.form_submit_button("🧠 Передать Неоне", type="primary")
+    if submitted:
+        inbound_text = str(inbound_text or "").strip()
+        if not inbound_text:
+            st.warning("Вставьте новую реплику человека из VK.")
+            return
         try:
             process_manual_vk_private_reply(
                 int(assignment_id),
@@ -400,6 +443,7 @@ def _render_vk_private_dialog_followup(
             st.rerun()
         except Exception as exc:
             st.error(f"Неона не смогла обработать ответ: {exc}")
+
 
     st.caption(
         "Важно: обычная личная страница VK сейчас не передаёт Агентству такие входящие "
@@ -473,24 +517,6 @@ def _render_vk_comment_followup(
         "Поэтому ответ человека вставляем сюда вручную. Неона уже знает исходный пост, "
         "свой предыдущий комментарий и историю этой ветки."
     )
-
-    # Keep this thread out of the background watcher while VK rejects the
-    # required read methods for the current auth profile. This also clears the
-    # noisy historic 1051/27 error once the user starts the manual path.
-    if str(thread.get("status") or "") not in {"paused", "closed"} or thread.get("last_error"):
-        try:
-            _sb_patch(
-                "agency_vk_comment_threads",
-                {"id": f"eq.{thread_id}"},
-                {
-                    "status": "paused",
-                    "last_error": None,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            )
-            thread = {**thread, "status": "paused", "last_error": None}
-        except Exception:
-            pass
 
     mode_key = f"vk_manual_input_mode_{widget_scope}"
     if mode_key not in st.session_state:
@@ -592,7 +618,7 @@ def _render_vk_comment_followup(
         st.write(last_inbound)
 
     reply_text = str(thread.get("neona_reply_text") or "").strip()
-    if pending_kind in {"manual_comment", "manual_reaction"} and reply_text:
+    if pending_kind and reply_text:
         st.markdown("**Ответ Неоны готов:**")
         edit_key = f"vk_manual_neona_reply_{widget_scope}_{thread.get('pending_event_key') or 'pending'}"
         if edit_key not in st.session_state:
@@ -612,7 +638,7 @@ def _render_vk_comment_followup(
             use_container_width=True,
         ):
             try:
-                mark_manual_vk_reply_published(thread_id, edited_reply)
+                mark_manual_vk_reply_published(thread_id, edited_reply, owner_id=owner_id)
                 st.success("Продолжение сохранено. Следующий ответ человека можно снова вставить сюда.")
                 st.rerun()
             except Exception as exc:
@@ -634,34 +660,6 @@ def _load_vk_dialog_threads(owner_id: int) -> list[dict]:
         "select": "*",
         "order": "updated_at.desc.nullslast,created_at.desc,id.desc",
     })
-
-
-@st.fragment(run_every=60)
-def _render_vk_comment_alerts(owner_id: int) -> None:
-    """Read since the last day from the existing VK worker, without calling VK."""
-    try:
-        rows = _sb_get("agency_vk_comment_threads", {
-            "owner_telegram_id": f"eq.{int(owner_id)}",
-            "last_inbound_at": f"gte.{(datetime.now(UTC) - timedelta(days=1)).isoformat()}",
-            "status": "neq.closed",
-            "select": "first_name,last_inbound_at,last_inbound_comment_id,last_inbound_text,post_owner_id,post_id",
-            "order": "last_inbound_at.desc,id.desc",
-            "limit": 5,
-        })
-    except VKScoutError:
-        return
-    for row in rows:
-        if not row.get("post_owner_id") or not row.get("post_id"):
-            continue
-        post = f"{int(row['post_owner_id'])}_{int(row['post_id'])}"
-        comment_id = int(row.get("last_inbound_comment_id") or 0)
-        link = f"https://vk.com/wall{post}" + (f"?reply={comment_id}" if comment_id > 0 else "")
-        name = str(row.get("first_name") or "VK-контакт")
-        with st.container(border=True):
-            st.success(f"Новый ответ под публикацией VK · {name}")
-            if row.get("last_inbound_text"):
-                st.text(str(row["last_inbound_text"]))
-            st.link_button("Открыть обсуждение VK", link)
 
 
 def _vk_thread_label(thread: dict) -> str:
@@ -1155,6 +1153,7 @@ def _render_today_vk_candidates(
     owner_id: int,
     member_code: str,
     ask_openai_fn=None,
+    *, compact: bool = False,
 ) -> None:
     """Показывает владельцу его сегодняшнюю VK-пятёрку и действия Неоны."""
     st.markdown("### 💙 VK 5 на сегодня · отбор Неонии")
@@ -1221,15 +1220,16 @@ def _render_today_vk_candidates(
 
     result = st.session_state.pop(f"vk_top_up_result_{owner_id}", None)
     if result is not None:
+        message = (
+            f"Последний добор: проверено {int(result.get('analyzed') or 0)} → "
+            f"прошли порог {int(result.get('passed_threshold') or 0)} → "
+            f"выдано {int(result.get('created') or 0)}. "
+            f"Сегодня {int(result.get('count') or 0)}/5. " + str(result.get("reason") or "")
+        )
         if result.get("complete"):
-            st.success("Сегодняшняя VK-пятёрка собрана.")
+            st.success(message)
         else:
-            st.info(
-                f"Последний добор: {int(result.get('count') or 0)}/5 · "
-                f"проверено профилей: {int(result.get('analyzed') or 0)}. "
-                + str(result.get("reason") or "")
-            )
-
+            st.info(message)
     if today_count < 5:
         st.caption(
             "Если текущих кандидатов мало или прошлые не отвечают, можно не ждать "
@@ -1275,239 +1275,264 @@ def _render_today_vk_candidates(
         )
         return
 
-    for item in assignments:
-        assignment_id = int(item.get("id") or 0)
-        position = int(item.get("daily_position") or 0)
-        first_name = str(item.get("first_name") or "").strip()
-        last_name = str(item.get("last_name") or "").strip()
-        full_name = " ".join(x for x in (first_name, last_name) if x) or "VK-кандидат"
-        queue_meta = vk_queue_assignment_meta(item)
-        city = str(item.get("city_name") or "").strip()
-        country = str(item.get("country_name") or "").strip()
-        place = ", ".join(x for x in (city, country) if x)
-        source_name = str(
-            queue_meta.get("community_name")
-            or "VK-сообщество"
-        ).strip()
-        profile_url = str(item.get("profile_url") or "").strip()
-        status = str(item.get("status") or "reserved").strip()
-        invitation_text = str(item.get("invitation_text") or "").strip()
-        auto_neona_link = bool(
-            invitation_text
-            and (
-                "vk.me/club" in invitation_text
-                or "ref_source=agency_w" in invitation_text
-            )
+    if not compact:
+        for item in assignments:
+            _render_vk_candidate_details(owner_id, member_code, item, ask_openai_fn=ask_openai_fn)
+
+
+def _render_vk_new_candidates(owner_id: int, member_code: str, ask_openai_fn=None) -> None:
+    st.markdown("### 💙 Новые кандидаты на сегодня")
+    try:
+        rows = [row for row in load_today_vk_assignments(owner_id)
+                if not row.get("invited_at") and row.get("status") in {"reserved", "prepared"}][:5]
+    except VKScoutError:
+        st.warning("Не удалось загрузить сегодняшних кандидатов VK.")
+        return
+    if not rows:
+        st.caption("Новых карточек на сегодня нет.")
+        return
+    for row, column in zip(rows, st.columns(len(rows))):
+        name = " ".join(filter(None, (row.get("first_name"), row.get("last_name")))) or "VK-кандидат"
+        with column:
+            st.markdown(f"**{name}**")
+            if row.get("score"):
+                st.caption(f"Оценка {row['score']}/100")
+            label = "Открыть черновик" if row.get("invitation_text") else "Подготовить сообщение"
+            with st.expander(label, key=f"vk_fresh_{owner_id}_{row['id']}", on_change="rerun") as details:
+                if details.open:
+                    _render_vk_candidate_details(owner_id, member_code, row, ask_openai_fn=ask_openai_fn)
+
+
+def _render_vk_candidate_details(owner_id: int, member_code: str, item: dict, ask_openai_fn=None) -> None:
+    assignment_id = int(item.get("id") or 0)
+    position = int(item.get("daily_position") or 0)
+    first_name = str(item.get("first_name") or "").strip()
+    last_name = str(item.get("last_name") or "").strip()
+    full_name = " ".join(x for x in (first_name, last_name) if x) or "VK-кандидат"
+    queue_meta = vk_queue_assignment_meta(item)
+    city = str(item.get("city_name") or "").strip()
+    country = str(item.get("country_name") or "").strip()
+    place = ", ".join(x for x in (city, country) if x)
+    source_name = str(
+        queue_meta.get("community_name")
+        or "VK-сообщество"
+    ).strip()
+    profile_url = str(item.get("profile_url") or "").strip()
+    status = str(item.get("status") or "reserved").strip()
+    invitation_text = str(item.get("invitation_text") or "").strip()
+    auto_neona_link = bool(
+        invitation_text
+        and (
+            "vk.me/club" in invitation_text
+            or "ref_source=agency_w" in invitation_text
+        )
+    )
+
+    title = f"{position}. {full_name}" if position else full_name
+    with st.container(border=True):
+        st.markdown(f"#### {title}")
+        meta = [f"источник: {source_name}"]
+        if place:
+            meta.append(place)
+        st.caption(" · ".join(meta))
+        score = int(item.get("score") or 0)
+        st.write(
+            "**Почему сегодня:** профиль прошёл отбор Неонии по Вашей ЦА"
+            + (f" · оценка {score}/100." if score else ".")
         )
 
-        title = f"{position}. {full_name}" if position else full_name
-        with st.container(border=True):
-            st.markdown(f"#### {title}")
-            meta = [f"источник: {source_name}"]
-            if place:
-                meta.append(place)
-            st.caption(" · ".join(meta))
-            score = int(item.get("score") or 0)
-            st.write(
-                "**Почему сегодня:** профиль прошёл отбор Неонии по Вашей ЦА"
-                + (f" · оценка {score}/100." if score else ".")
+        if profile_url:
+            st.link_button(
+                "Открыть профиль VK",
+                profile_url,
+                use_container_width=False,
             )
 
-            if profile_url:
-                st.link_button(
-                    "Открыть профиль VK",
-                    profile_url,
-                    use_container_width=False,
+        if status == "skipped":
+            st.info(
+                "⏭ Кандидат пропущен. Он уже считается отработанным "
+                "и повторно в ежедневную пятёрку не вернётся."
+            )
+            return
+
+        _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn)
+        st.divider()
+
+        editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
+        if invitation_text:
+            st.markdown("**Сообщение Неоны:**")
+
+            if st.session_state.get(editing_key, False):
+                edited_text = st.text_area(
+                    "Отредактируйте сообщение перед отправкой",
+                    value=invitation_text,
+                    key=f"vk_edit_text_{owner_id}_{assignment_id}",
+                    height=190,
+                    label_visibility="collapsed",
                 )
-
-            if status == "skipped":
-                st.info(
-                    "⏭ Кандидат пропущен. Он уже считается отработанным "
-                    "и повторно в ежедневную пятёрку не вернётся."
-                )
-                continue
-
-            _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn)
-            st.divider()
-
-            editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
-            if invitation_text:
-                st.markdown("**Сообщение Неоны:**")
-
-                if st.session_state.get(editing_key, False):
-                    edited_text = st.text_area(
-                        "Отредактируйте сообщение перед отправкой",
-                        value=invitation_text,
-                        key=f"vk_edit_text_{owner_id}_{assignment_id}",
-                        height=190,
-                        label_visibility="collapsed",
-                    )
-                    edit_cols = st.columns(2)
-                    with edit_cols[0]:
-                        if st.button(
-                            "💾 Сохранить",
-                            key=f"vk_save_edit_{owner_id}_{assignment_id}",
-                            type="primary",
-                            use_container_width=True,
-                        ):
-                            cleaned = str(edited_text or "").strip()
-                            if not cleaned:
-                                st.warning("Сообщение не может быть пустым.")
-                            else:
-                                try:
-                                    _sb_patch(
-                                        "agency_vk_assignments",
-                                        {
-                                            "id": f"eq.{assignment_id}",
-                                            "owner_telegram_id": f"eq.{owner_id}",
-                                        },
-                                        {
-                                            "invitation_text": cleaned,
-                                            "status": "prepared",
-                                            "updated_at": datetime.now(UTC).isoformat(),
-                                        },
-                                    )
-                                    st.session_state[editing_key] = False
-                                    st.success("Сообщение сохранено.")
-                                    st.rerun()
-                                except Exception as exc:
-                                    st.error(f"Не удалось сохранить сообщение: {exc}")
-                    with edit_cols[1]:
-                        if st.button(
-                            "Отмена",
-                            key=f"vk_cancel_edit_{owner_id}_{assignment_id}",
-                            use_container_width=True,
-                        ):
-                            st.session_state[editing_key] = False
-                            st.rerun()
-
-                    # Пока текст редактируется, не показываем кнопки
-                    # «Отправлено» и «Пропустить», чтобы не отметить
-                    # сообщение до сохранения правок.
-                    continue
-
-                st.code(invitation_text, language=None)
-
-                if auto_neona_link:
-                    st.caption(
-                        "🔗 Персональная ссылка в конце сообщения — это автоматический вход к Неоне. "
-                        "После первого сообщения человека в открывшемся диалоге Неона продолжит сама."
-                    )
-                elif assignment_id and status != "invited":
-                    st.warning(
-                        "У этого ранее подготовленного сообщения ещё нет автоматического перехода к Неоне."
-                    )
+                edit_cols = st.columns(2)
+                with edit_cols[0]:
                     if st.button(
-                        "🔄 Добавить автоматический переход к Неоне",
-                        key=f"vk_restore_neona_bridge_{owner_id}_{assignment_id}",
+                        "💾 Сохранить",
+                        key=f"vk_save_edit_{owner_id}_{assignment_id}",
                         type="primary",
-                        use_container_width=False,
+                        use_container_width=True,
                     ):
-                        try:
-                            prepare_vk_invitation(
-                                assignment_id,
-                                member_code,
-                                ask_openai_fn=ask_openai_fn,
-                            )
-                            st.success("Автоматический переход к Неоне добавлен.")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(f"Не удалось обновить сообщение: {exc}")
-                elif status == "invited":
-                    st.caption(
-                        "ℹ️ Это сообщение уже было отправлено без автоматического перехода. "
-                        "Для него ниже остаётся резервный ручной режим."
-                    )
-                if status != "invited" and assignment_id:
+                        cleaned = str(edited_text or "").strip()
+                        if not cleaned:
+                            st.warning("Сообщение не может быть пустым.")
+                        else:
+                            try:
+                                _sb_patch(
+                                    "agency_vk_assignments",
+                                    {
+                                        "id": f"eq.{assignment_id}",
+                                        "owner_telegram_id": f"eq.{owner_id}",
+                                    },
+                                    {
+                                        "invitation_text": cleaned,
+                                        "status": "prepared",
+                                        "updated_at": datetime.now(UTC).isoformat(),
+                                    },
+                                )
+                                st.session_state[editing_key] = False
+                                st.success("Сообщение сохранено.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Не удалось сохранить сообщение: {exc}")
+                with edit_cols[1]:
                     if st.button(
-                        "✏️ Редактировать",
-                        key=f"vk_edit_{owner_id}_{assignment_id}",
-                        use_container_width=False,
+                        "Отмена",
+                        key=f"vk_cancel_edit_{owner_id}_{assignment_id}",
+                        use_container_width=True,
                     ):
-                        st.session_state[editing_key] = True
+                        st.session_state[editing_key] = False
                         st.rerun()
-            elif status in {"reserved", "prepared"} and assignment_id:
+
+                # Пока текст редактируется, не показываем кнопки
+                # «Отправлено» и «Пропустить», чтобы не отметить
+                # сообщение до сохранения правок.
+                return
+
+            st.code(invitation_text, language=None)
+
+            if auto_neona_link:
+                st.caption(
+                    "🔗 Персональная ссылка в конце сообщения — это автоматический вход к Неоне. "
+                    "После первого сообщения человека в открывшемся диалоге Неона продолжит сама."
+                )
+            elif assignment_id and status != "invited":
+                st.warning(
+                    "У этого ранее подготовленного сообщения ещё нет автоматического перехода к Неоне."
+                )
                 if st.button(
-                    "✍️ Подготовить сообщение Неоны",
-                    key=f"vk_prepare_{owner_id}_{assignment_id}",
+                    "🔄 Добавить автоматический переход к Неоне",
+                    key=f"vk_restore_neona_bridge_{owner_id}_{assignment_id}",
                     type="primary",
+                    use_container_width=False,
+                ):
+                    try:
+                        prepare_vk_invitation(
+                            assignment_id,
+                            member_code,
+                            owner_id=owner_id,
+                            ask_openai_fn=ask_openai_fn,
+                        )
+                        st.success("Автоматический переход к Неоне добавлен.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось обновить сообщение: {exc}")
+            elif status == "invited":
+                st.caption(
+                    "ℹ️ Это сообщение уже было отправлено без автоматического перехода. "
+                    "Для него ниже остаётся резервный ручной режим."
+                )
+            if status != "invited" and assignment_id:
+                if st.button(
+                    "✏️ Редактировать",
+                    key=f"vk_edit_{owner_id}_{assignment_id}",
+                    use_container_width=False,
+                ):
+                    st.session_state[editing_key] = True
+                    st.rerun()
+        elif status in {"reserved", "prepared"} and assignment_id:
+            if st.button(
+                "✍️ Подготовить сообщение Неоны",
+                key=f"vk_prepare_{owner_id}_{assignment_id}",
+                type="primary",
+                use_container_width=True,
+            ):
+                try:
+                    prepared = prepare_vk_invitation(
+                        assignment_id,
+                        member_code,
+                        owner_id=owner_id,
+                        ask_openai_fn=ask_openai_fn,
+                    )
+                    st.success("Сообщение Неоны готово.")
+                    st.session_state[
+                        f"vk_prepared_message_{assignment_id}"
+                    ] = prepared.get("invitation_text") or ""
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Не удалось подготовить сообщение: {exc}")
+
+        cols = st.columns(2)
+        with cols[0]:
+            if status != "invited" and assignment_id:
+                if st.button(
+                    "✅ Отправлено",
+                    key=f"vk_invited_{owner_id}_{assignment_id}",
                     use_container_width=True,
                 ):
                     try:
-                        prepared = prepare_vk_invitation(
-                            assignment_id,
-                            member_code,
-                            ask_openai_fn=ask_openai_fn,
-                        )
-                        st.success("Сообщение Неоны готово.")
-                        st.session_state[
-                            f"vk_prepared_message_{assignment_id}"
-                        ] = prepared.get("invitation_text") or ""
+                        mark_vk_invited(assignment_id, owner_id=owner_id)
+                        st.success("Отмечено как отправленное.")
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Не удалось подготовить сообщение: {exc}")
+                        st.error(f"Не удалось сохранить статус: {exc}")
+            elif status == "invited":
+                st.success("✅ Отправлено")
 
-            cols = st.columns(2)
-            with cols[0]:
-                if status != "invited" and assignment_id:
-                    if st.button(
-                        "✅ Отправлено",
-                        key=f"vk_invited_{owner_id}_{assignment_id}",
-                        use_container_width=True,
-                    ):
-                        try:
-                            mark_vk_invited(assignment_id)
-                            st.success("Отмечено как отправленное.")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(f"Не удалось сохранить статус: {exc}")
-                elif status == "invited":
-                    st.success("✅ Отправлено")
+        with cols[1]:
+            if status != "invited" and assignment_id:
+                if st.button(
+                    "⏭ Пропустить",
+                    key=f"vk_skip_{owner_id}_{assignment_id}",
+                    use_container_width=True,
+                ):
+                    try:
+                        skip_vk_assignment(assignment_id, owner_id=owner_id)
+                        st.success("Кандидат пропущен.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Не удалось пропустить кандидата: {exc}")
 
-            with cols[1]:
-                if status != "invited" and assignment_id:
-                    if st.button(
-                        "⏭ Пропустить",
-                        key=f"vk_skip_{owner_id}_{assignment_id}",
-                        use_container_width=True,
-                    ):
-                        try:
-                            skip_vk_assignment(assignment_id)
-                            st.success("Кандидат пропущен.")
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(f"Не удалось пропустить кандидата: {exc}")
+        if assignment_id:
+            st.divider()
+            _render_vk_partner_mark(
+                owner_id,
+                assignment_id,
+                first_name,
+                scope="daily",
+            )
 
-            if assignment_id:
-                st.divider()
-                _render_vk_partner_mark(
-                    owner_id,
-                    assignment_id,
-                    first_name,
-                    scope="daily",
-                )
-
-            if status == "invited" and not auto_neona_link:
-                _render_vk_private_dialog_followup(
-                    owner_id,
-                    assignment_id,
-                    first_name,
-                    status,
-                    scope="daily",
-                )
-            _render_vk_material_followup(
+        if status == "invited" and not auto_neona_link:
+            _render_vk_private_dialog_followup(
                 owner_id,
                 assignment_id,
                 first_name,
                 status,
                 scope="daily",
             )
+        _render_vk_material_followup(
+            owner_id,
+            assignment_id,
+            first_name,
+            status,
+            scope="daily",
+        )
 
-    st.caption(
-        "Первое сообщение отправляется из личного VK вручную. В конце текста есть персональная "
-        "ссылка: человек открывает её и пишет ответ — после этого Неона автоматически подхватывает "
-        "диалог и ведёт его дальше до встречи."
-    )
 
 
 def _render_known_vk_contacts(
@@ -1700,6 +1725,7 @@ def _render_known_vk_contacts(
                         prepare_vk_invitation(
                             assignment_id,
                             member_code,
+                            owner_id=owner_id,
                             ask_openai_fn=ask_openai_fn,
                         )
                         st.success("Сообщение Неоны готово.")
@@ -1716,7 +1742,7 @@ def _render_known_vk_contacts(
                         use_container_width=True,
                     ):
                         try:
-                            mark_vk_invited(assignment_id)
+                            mark_vk_invited(assignment_id, owner_id=owner_id)
                             st.success("Отмечено как отправленное.")
                             st.rerun()
                         except Exception as exc:
@@ -1731,7 +1757,7 @@ def _render_known_vk_contacts(
                         use_container_width=True,
                     ):
                         try:
-                            skip_vk_assignment(assignment_id)
+                            skip_vk_assignment(assignment_id, owner_id=owner_id)
                             st.success("Контакт убран из активной работы.")
                             st.rerun()
                         except Exception as exc:
@@ -1770,17 +1796,23 @@ def render_vk_sources(
 ) -> None:
     """Рабочий экран VK владельца."""
     owner_id = int(owner_id)
-    _render_today_vk_candidates(owner_id, member_code, ask_openai_fn=ask_openai_fn)
-    _render_vk_private_desk(owner_id)
-    _render_vk_comment_alerts(owner_id)
-    with st.expander("💬 Комментарии под публикациями VK", expanded=False):
-        _render_vk_dialog_center(owner_id, ask_openai_fn=ask_openai_fn)
-    with st.expander("🌿 Лента VK", expanded=False):
-        _render_vk_feed_radar(owner_id, ask_openai_fn=ask_openai_fn)
-    with st.expander("👥 Свои знакомые VK", expanded=False):
-        _render_known_vk_contacts(owner_id, member_code, ask_openai_fn=ask_openai_fn)
-    with st.expander("⚙️ Источники поиска и подключение VK", expanded=False):
-        _render_vk_source_settings(owner_id)
+    _render_vk_new_candidates(owner_id, member_code, ask_openai_fn)
+    _render_vk_private_desk(owner_id, ask_openai_fn, member_code=member_code)
+    with st.expander("📊 Очередь VK и добор", key=f"vk_tools_queue_{owner_id}", on_change="rerun") as queue:
+        if queue.open:
+            _render_today_vk_candidates(owner_id, member_code, ask_openai_fn=ask_openai_fn, compact=True)
+    with st.expander("💬 Комментарии под публикациями VK", key=f"vk_tools_comments_{owner_id}", on_change="rerun") as folder:
+        if folder.open:
+            _render_vk_dialog_center(owner_id, ask_openai_fn=ask_openai_fn)
+    with st.expander("🌿 Лента VK", key=f"vk_tools_feed_{owner_id}", on_change="rerun") as folder:
+        if folder.open:
+            _render_vk_feed_radar(owner_id, ask_openai_fn=ask_openai_fn)
+    with st.expander("👥 Свои знакомые VK", key=f"vk_tools_known_{owner_id}", on_change="rerun") as folder:
+        if folder.open:
+            _render_known_vk_contacts(owner_id, member_code, ask_openai_fn=ask_openai_fn)
+    with st.expander("⚙️ Источники поиска и подключение VK", key=f"vk_tools_sources_{owner_id}", on_change="rerun") as folder:
+        if folder.open:
+            _render_vk_source_settings(owner_id)
 
 
 def _render_vk_source_settings(owner_id: int) -> None:
@@ -1790,8 +1822,8 @@ def _render_vk_source_settings(owner_id: int) -> None:
     st.markdown("### 💙 Источники поиска VK")
     st.caption(
         "Добавьте публичные VK-сообщества в нужном порядке. Неония отрабатывает "
-        "участников последовательно: 5 новых человек в день, без повторов и без "
-        "отбора по ЦА. Закончилось одно сообщество — очередь переходит к следующему."
+        "участников последовательно и выдаёт до 5 новых кандидатов в день, если они прошли "
+        "отбор по ЦА. Закончилось одно сообщество — очередь переходит к следующему."
     )
 
     # VK user authorization for the background scanner. Tokens are encrypted

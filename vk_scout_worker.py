@@ -3,7 +3,7 @@ from __future__ import annotations
 """Agency W — background worker for VK Partner Scout.
 
 Работает отдельно от Streamlit UI. Первый холодный контакт не рассылает автоматически;
-для уже начатых VK-веток может автоматически продолжить текстовый ответ человека.
+для начатых VK-веток готовит черновики ответов.
 Цикл:
 1) читает активных партнёров Агентства W;
 2) берёт сохранённый живой портрет ЦА из agency_workspace_states;
@@ -13,7 +13,7 @@ from __future__ import annotations
 6) отдельно и чаще проверяет опубликованные комментарии Неоны и подхватывает реальные ответы.
 
 Первый комментарий по-прежнему публикуется владельцем вручную. После регистрации
-комментария worker следит за веткой; текстовые ответы Неона продолжает автоматически.
+комментария worker следит за веткой, а владелец подтверждает публикацию ответа.
 """
 
 import json
@@ -311,6 +311,8 @@ def _score_until_daily_five(
 ) -> tuple[dict[str, Any], int, int | None]:
     """Keep scoring fresh VK profiles until today's 5/5 is complete or pool is exhausted."""
     total_analyzed = 0
+    total_passed = 0
+    total_created = 0
     best_score: int | None = None
 
     prepared = ensure_quality_vk_assignments(
@@ -319,6 +321,7 @@ def _score_until_daily_five(
         limit=daily_limit,
         min_score=min_score,
     )
+    total_created += int(prepared.get("created") or 0)
     if prepared.get("complete"):
         return prepared, total_analyzed, best_score
 
@@ -332,9 +335,12 @@ def _score_until_daily_five(
             limit=analysis_limit,
             priority_ids=(priority_ids if round_no == 1 else None),
             reanalyze_exhausted=False,
+            min_score=min_score,
         )
         analyzed_now = int(score_result.get("analyzed") or 0)
         total_analyzed += analyzed_now
+        passed_now = int(score_result.get("passed_threshold") or 0)
+        total_passed += passed_now
 
         try:
             round_best = int(score_result.get("best_score"))
@@ -349,9 +355,11 @@ def _score_until_daily_five(
             limit=daily_limit,
             min_score=min_score,
         )
+        total_created += int(prepared.get("created") or 0)
         _log(
             f"{owner_id}: VK отбор раунд={round_no}; "
             f"оценено_в_раунде={analyzed_now}; всего_оценено={total_analyzed}; "
+            f"прошли_порог={passed_now}; выдано_в_раунде={prepared.get('created') or 0}; "
             f"готово={prepared.get('count') or 0}/{daily_limit}; "
             f"лучший_балл={round_best}; "
             f"диагностика={prepared.get('diagnostics') or {}}"
@@ -364,7 +372,7 @@ def _score_until_daily_five(
         if analyzed_now <= 0 or str(score_result.get("mode") or "") == "повторный анализ":
             break
 
-    return prepared, total_analyzed, best_score
+    return {**prepared, "passed_threshold": total_passed, "created": total_created}, total_analyzed, best_score
 
 
 def top_up_vk_owner_now(
@@ -440,7 +448,12 @@ def top_up_vk_owner_now(
                     if str(x).isdigit()
                 ],
             )
-            prepared = prepared2
+            prepared = {
+                **prepared2,
+                "passed_threshold": int(prepared.get("passed_threshold") or 0)
+                + int(prepared2.get("passed_threshold") or 0),
+                "created": int(prepared.get("created") or 0) + int(prepared2.get("created") or 0),
+            }
             analyzed_total += analyzed2
             if best2 is not None:
                 best_score = best2 if best_score is None else max(best_score, best2)
@@ -464,6 +477,7 @@ def top_up_vk_owner_now(
         "complete": bool(prepared.get("complete")),
         "created": int(prepared.get("created") or 0),
         "analyzed": int(analyzed_total),
+        "passed_threshold": int(prepared.get("passed_threshold") or 0),
         "best_score": best_score,
         "message": str(prepared.get("message") or "").strip(),
         "scan_found": int(scan_result.get("candidates_found") or 0),
@@ -776,7 +790,7 @@ def worker_forever(poll_seconds: int | None = None) -> None:
         try:
             comment_stats = watch_vk_comment_threads(
                 ask_openai_fn=_ask_openai,
-                auto_send=True,
+                auto_send=False,
                 limit=100,
             )
             if comment_stats.get("replies") or comment_stats.get("ready") or comment_stats.get("errors"):
