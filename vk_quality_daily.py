@@ -18,6 +18,7 @@ from vk_scout import (
     _sb_patch,
     _sb_post,
     _used_vk_ids,
+    _vk_owner_pages,
     load_today_vk_assignments,
     load_vk_sources,
 )
@@ -33,16 +34,11 @@ def _int(value: Any) -> int:
 
 
 def _qualified_scores(owner_id: int, min_score: int) -> list[dict[str, Any]]:
-    return _sb_get(
-        "agency_vk_candidate_scores",
-        {
-            "owner_telegram_id": f"eq.{int(owner_id)}",
-            "score": f"gte.{int(min_score)}",
-            "select": "vk_user_id,score,fit_summary,positive_signals,weak_fit_signals,analyzed_at",
-            "order": "score.desc,analyzed_at.desc",
-            "limit": 5000,
-        },
-    )
+    return _vk_owner_pages("agency_vk_candidate_scores", owner_id, {
+        "score": f"gte.{int(min_score)}",
+        "select": "vk_user_id,score,fit_summary,positive_signals,weak_fit_signals,analyzed_at",
+        "order": "score.desc,analyzed_at.desc,vk_user_id.asc",
+    })
 
 
 def _candidate_rows(ids: list[int]) -> dict[int, dict[str, Any]]:
@@ -133,10 +129,12 @@ def ensure_quality_vk_assignments(
         uid = _int(row.get("vk_user_id"))
         if assignment_id <= 0:
             continue
+        if row.get("invited_at") or row.get("status") in {"invited", "dialogue", "meeting", "partner"}:
+            continue
         if uid in qualified_ids:
             _sb_patch(
                 "agency_vk_assignments",
-                {"id": f"eq.{assignment_id}"},
+                {"id": f"eq.{assignment_id}", "owner_telegram_id": f"eq.{owner_id}"},
                 {
                     "score": _int(score_by_id[uid].get("score")),
                     "updated_at": now_iso,
@@ -145,7 +143,7 @@ def ensure_quality_vk_assignments(
             continue
         _sb_patch(
             "agency_vk_assignments",
-            {"id": f"eq.{assignment_id}"},
+            {"id": f"eq.{assignment_id}", "owner_telegram_id": f"eq.{owner_id}"},
             {
                 "daily_position": None,
                 "status": "not_fit",

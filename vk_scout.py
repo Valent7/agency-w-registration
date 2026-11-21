@@ -141,17 +141,20 @@ def _sb_post(
     return data if isinstance(data, list) else []
 
 
-def _sb_patch(table: str, filters: dict[str, Any], payload: dict[str, Any]) -> None:
+def _sb_patch(
+    table: str, filters: dict[str, Any], payload: dict[str, Any], *, return_rows: bool = False,
+) -> list[dict[str, Any]] | None:
     cfg = _config()
     response = requests.patch(
         f"{cfg['supabase_url']}/rest/v1/{table}",
-        headers=_sb_headers("return=minimal"),
+        headers=_sb_headers("return=representation" if return_rows else "return=minimal"),
         params=filters,
         json=payload,
         timeout=30,
     )
     if not response.ok:
         raise VKScoutError(f"Supabase PATCH {table}: {response.status_code}: {response.text[:800]}")
+    return response.json() if return_rows else None
 
 
 def _vk_api(method: str, **params: Any) -> Any:
@@ -1288,6 +1291,8 @@ def score_vk_candidates(
     ask_openai_fn: Callable[..., Any] | None,
     limit: int = 30,
     priority_ids: Iterable[int] | None = None,
+    reanalyze_exhausted: bool = True,
+    min_score: int = 50,
 ) -> dict[str, Any]:
     if ask_openai_fn is None:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
@@ -1334,14 +1339,9 @@ def score_vk_candidates(
     # Раньше каждый цикл снова оценивал одни и те же последние 30 профилей,
     # поэтому VK Scout мог навсегда застрять на 0/5, даже если в общем пуле
     # были сотни других кандидатов.
-    scored_rows = _sb_get(
-        "agency_vk_candidate_scores",
-        {
-            "owner_telegram_id": f"eq.{owner_id}",
-            "select": "vk_user_id,analyzed_at",
-            "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc",
-            "limit": 5000,
-        },
+    scored_rows = _vk_owner_pages(
+        "agency_vk_candidate_scores", owner_id,
+        {"select": "vk_user_id,analyzed_at", "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc"},
     )
     already_scored: set[int] = set()
     partner_vk_ids = _partner_vk_ids()
@@ -1408,17 +1408,14 @@ def score_vk_candidates(
         for candidate in rows
         if str(candidate.get("vk_user_id") or "").isdigit()
     }
-    # Ограничиваем число страниц, чтобы worker не мог случайно читать бесконечный пул.
-    for _ in range(25):
-        if len(rows) >= analysis_limit:
-            break
+    while len(rows) < analysis_limit:
         page = _sb_get(
             "agency_vk_candidates",
             {
                 "can_write_private_message": "eq.true",
                 "source_community_id": source_filter,
                 "select": "*",
-                "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
+                "order": "vk_user_id.asc",
                 "limit": page_size,
                 "offset": offset,
             },
@@ -1443,8 +1440,8 @@ def score_vk_candidates(
     # Когда весь доступный пул уже пройден, переоцениваем САМЫЕ ДАВНО
     # анализировавшиеся профили. После изменения портрета/политики это позволяет
     # пройти всю старую базу по новым правилам, а не крутить одни и те же 30.
-    reanalysis = bool(priority_list and rows)
-    if not rows:
+    reanalysis = False
+    if not rows and reanalyze_exhausted:
         reanalysis = True
         stale_ids: list[int] = []
         for item in scored_rows:
@@ -1673,6 +1670,7 @@ automation_need_signal=true означает, что из его реально�
     return {
         "ok": True,
         "analyzed": analyzed,
+        "passed_threshold": sum(score >= min_score for score in scores_this_cycle),
         "best_score": best,
         "mode": mode,
         "message": f"Неония оценила VK-кандидатов: {analyzed}; режим: {mode}; лучший балл цикла: {best_text}.",
@@ -4024,11 +4022,15 @@ def prepare_vk_invitation(
     assignment_id: int,
     member_code: str,
     *,
+    owner_id: int | None = None,
     ask_openai_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
+    filters = {"id": f"eq.{int(assignment_id)}"}
+    if owner_id is not None:
+        filters["owner_telegram_id"] = f"eq.{int(owner_id)}"
     rows = _sb_get(
         "agency_vk_assignments",
-        {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1},
+        {**filters, "select": "*", "limit": 1},
     )
     if not rows:
         raise VKScoutError("VK-назначение не найдено")
@@ -4119,7 +4121,7 @@ def prepare_vk_invitation(
     now = datetime.now(UTC).isoformat()
     _sb_patch(
         "agency_vk_assignments",
-        {"id": f"eq.{int(assignment_id)}"},
+        filters,
         {
             "status": "prepared",
             "invitation_text": message,
@@ -4153,17 +4155,260 @@ def prepare_vk_invitation(
         ),
     }
 
-def mark_vk_invited(assignment_id: int) -> None:
+def mark_vk_invited(assignment_id: int, *, owner_id: int | None = None) -> None:
     now = datetime.now(UTC).isoformat()
-    _sb_patch("agency_vk_assignments", {"id": f"eq.{int(assignment_id)}"}, {"status": "invited", "invited_at": now, "updated_at": now})
+    filters = {"id": f"eq.{int(assignment_id)}"}
+    if owner_id is not None:
+        filters["owner_telegram_id"] = f"eq.{int(owner_id)}"
+    _sb_patch("agency_vk_assignments", filters, {"status": "invited", "invited_at": now, "updated_at": now})
 
 
-def _vk_dialog_contact_id(vk_user_id: int) -> int:
-    """Stable negative id for VK dialogs inside Neona's shared dialog-state table."""
-    raw = f"vk-user:{int(vk_user_id)}".encode("utf-8")
-    digest = hashlib.sha256(raw).digest()
-    value = int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
-    return -abs(value)
+def _vk_owner_pages(table: str, owner_id: int, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    while True:
+        page = _sb_get(table, {
+            **filters,
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "limit": 200,
+            "offset": len(rows),
+        })
+        rows.extend(page)
+        if len(page) < 200:
+            return rows
+
+
+def _vk_id_filter(ids: Iterable[int]) -> str:
+    return "in.(" + ",".join(str(int(uid)) for uid in ids) + ")"
+
+
+def _vk_dialog_contact_id(vk_user_id: int, *, personal: bool = False) -> int:
+    """Keep community/calendar IDs stable, and isolate new personal handoffs."""
+    namespace = "vk-personal" if personal else "vk-user"
+    digest = hashlib.sha256(f"{namespace}:{int(vk_user_id)}".encode()).digest()
+    return -(int.from_bytes(digest[:8], "big") & ((1 << 63) - 1))
+
+
+def _vk_manual_state(personal: dict, legacy: dict) -> dict:
+    if (personal.get("context") or {}).get("vk_manual_last_processed_at"):
+        return personal
+    old = legacy.get("context") or {}
+    if not old.get("vk_manual_last_processed_at"):
+        return personal
+    if not old.get("vk_last_processed_at") and not old.get("vk_peer_id"):
+        return legacy
+    # Shared legacy state stays in storage. Transfer only personal delivery
+    # markers when an old conversation already used both channels.
+    context = {key: value for key, value in old.items() if key.startswith("vk_manual_")}
+    return {"context": context, "stage": "idle"}
+
+
+def _vk_desk_state(owner_id: int, contact_id: int) -> dict:
+    rows = _sb_get("agency_dialog_states", {
+        "owner_telegram_id": f"eq.{int(owner_id)}",
+        "contact_telegram_id": f"eq.{int(contact_id)}",
+        "select": "*", "limit": 1,
+    })
+    return rows[0] if rows else {}
+
+
+def _vk_comment_desk_events(owner_id: int) -> dict[int, list[dict]]:
+    rows = _vk_owner_pages("agency_vk_comment_threads", owner_id, {
+        "last_inbound_at": "not.is.null",
+        "status": "neq.closed",
+        "select": "id,assignment_id,candidate_vk_user_id,post_owner_id,post_id,first_name,status,"
+                  "last_inbound_comment_id,last_inbound_text,last_inbound_at,pending_event_kind,"
+                  "neona_reply_text,replied_at,dialogue_history",
+        "order": "last_inbound_at.desc,id.desc",
+    })
+    events = {}
+    for row in rows:
+        if row.get("status") == "closed" or row.get("pending_event_kind") in {"reaction", "manual_reaction"} or not row.get("last_inbound_text"):
+            continue
+        history = row.get("dialogue_history") or []
+        inbound = next((event for event in reversed(history) if isinstance(event, dict) and event.get("direction") == "in"), {})
+        if inbound.get("kind") in {"reaction", "manual_reaction"}:
+            continue
+        uid = int(row.get("candidate_vk_user_id") or row.get("post_owner_id") or 0)
+        if uid <= 0 or not row.get("post_id"):
+            continue
+        url = f"https://vk.com/wall{int(row['post_owner_id'])}_{int(row['post_id'])}"
+        if int(row.get("last_inbound_comment_id") or 0) > 0:
+            url += f"?reply={int(row['last_inbound_comment_id'])}"
+        events.setdefault(uid, []).append({
+            "id": row["id"], "key": f"comment:{row['id']}", "source": "comment", "url": url,
+            "at": row["last_inbound_at"], "text": row["last_inbound_text"],
+            "draft": row.get("neona_reply_text") if row.get("pending_event_kind") else None,
+            "needs_action": row["last_inbound_at"] > (row.get("replied_at") or ""),
+            "first_name": row.get("first_name"), "thread": row,
+        })
+    return events
+
+
+def mark_vk_desk_event(owner_id: int, vk_user_id: int, *, event_key: str = "", viewed_at: str = "", refusal: bool = False) -> None:
+    uid = int(vk_user_id)
+    assignments = _sb_get("agency_vk_assignments", {
+        "owner_telegram_id": f"eq.{int(owner_id)}", "vk_user_id": f"eq.{uid}",
+        "select": "id,status", "limit": 200,
+    })
+    comments = [] if assignments else _vk_comment_desk_events(owner_id).get(uid, [])
+    if not (assignments or comments) or any(row.get("status") in {"partner", "client"} for row in assignments):
+        raise VKScoutError("Контакт недоступен для этого действия.")
+    contact_id = _vk_dialog_contact_id(uid, personal=True)
+    state = _vk_desk_state(owner_id, contact_id)
+    context = dict(state.get("context") or {})
+    now = datetime.now(UTC).isoformat()
+    if refusal:
+        if context.get("vk_desk_refused_at"):
+            return
+        context["vk_desk_refused_at"] = now
+        context["vk_desk_refusal_reason"] = "Владелец отметил завершение сотрудничества"
+    else:
+        if not event_key or not viewed_at:
+            raise VKScoutError("Событие для отметки просмотра не найдено.")
+        viewed = dict(context.get("vk_desk_viewed_events") or {})
+        viewed[event_key] = max(viewed.get(event_key, ""), viewed_at)
+        context["vk_desk_viewed_events"] = viewed
+    if state:
+        filters = {"owner_telegram_id": f"eq.{int(owner_id)}", "contact_telegram_id": f"eq.{contact_id}"}
+        if state.get("updated_at"):
+            filters["updated_at"] = f"eq.{state['updated_at']}"
+        changed = _sb_patch("agency_dialog_states", filters, {"context": context, "updated_at": now}, return_rows=True)
+        if not changed:
+            raise VKScoutError("Диалог обновился одновременно. Повторите действие.")
+    else:
+        _sb_post("agency_dialog_states", {
+            "owner_telegram_id": int(owner_id), "contact_telegram_id": contact_id,
+            "stage": "idle", "last_incoming_message_id": 0, "greeted": False,
+            "context": context, "updated_at": now,
+        })
+
+
+def load_vk_private_desk(owner_id: int) -> list[dict[str, Any]]:
+    assignments = _vk_owner_pages("agency_vk_assignments", owner_id, {
+        "select": "*",
+        "order": "invited_at.desc.nullslast,assignment_date.desc,id.desc",
+    })
+    comments = _vk_comment_desk_events(owner_id)
+    by_user = {}
+    for assignment in assignments:
+        uid = int(assignment.get("vk_user_id") or 0)
+        if uid <= 0:
+            continue
+        existing = by_user.get(uid)
+        if not existing or assignment.get("status") in {"partner", "client"}:
+            by_user[uid] = assignment
+    for uid, events in comments.items():
+        by_user.setdefault(uid, {"id": 0, "vk_user_id": uid, "first_name": events[0]["first_name"]})
+
+    contacts = {uid: (_vk_dialog_contact_id(uid), _vk_dialog_contact_id(uid, personal=True)) for uid in by_user}
+    states, people = {}, {}
+    user_ids = list(by_user)
+    for start in range(0, len(user_ids), 60):
+        chunk = user_ids[start:start + 60]
+        states.update({
+            int(row["contact_telegram_id"]): row
+            for row in _sb_get("agency_dialog_states", {
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "contact_telegram_id": _vk_id_filter(contact for uid in chunk for contact in contacts[uid]),
+                "select": "contact_telegram_id,stage,context,last_incoming_message_id",
+            })
+        })
+        people.update({
+            int(row["vk_user_id"]): row
+            for row in _sb_get("agency_vk_candidates", {
+                "vk_user_id": _vk_id_filter(chunk),
+                "select": "vk_user_id,first_name,last_name,domain,city_name,country_name",
+            })
+        })
+
+    now = datetime.now(UTC)
+    meetings = _vk_owner_pages("agency_meetings", owner_id, {
+        "status": "eq.Подтверждена", "end_at": f"gt.{now.isoformat()}",
+        "select": "id,start_at,contact_telegram_id",
+        "order": "start_at.asc,id.asc",
+    }) if any(row.get("stage") == "scheduled" for row in states.values()) else []
+    meetings_by_id = {str(row["id"]): row for row in meetings}
+    today = date.today().isoformat()
+    result = []
+    for uid, (community_id, personal_id) in contacts.items():
+        assignment = by_user[uid]
+        legacy = states.get(community_id, {})
+        personal = states.get(personal_id, {})
+        markers = personal.get("context") or {}
+        manual = _vk_manual_state(personal, legacy)
+        context = manual.get("context") or {}
+        community = legacy.get("context") or {}
+        memory = context.get("relationship_memory") or {}
+        manual_at = context.get("vk_manual_last_processed_at") or ""
+        manual_text = context.get("vk_manual_last_inbound_text") or context.get("vk_manual_pending_inbound")
+        if manual_at and not manual_text:
+            manual_text = next((turn["incoming"] for turn in reversed(memory.get("turns") or [])
+                                if isinstance(turn, dict) and turn.get("incoming")), memory.get("last_incoming"))
+        viewed_events = markers.get("vk_desk_viewed_events") or {}
+        events = list(comments.get(uid, []))
+        if manual_text and manual_at:
+            events.append({
+                "key": "personal", "source": "personal", "url": f"https://vk.com/im?sel={uid}",
+                "text": manual_text, "at": manual_at, "draft": context.get("vk_manual_pending_reply"),
+                "needs_action": manual_at > (context.get("vk_manual_last_outbound_at") or ""),
+            })
+        if community.get("vk_last_incoming_text") and community.get("vk_last_processed_at"):
+            group_id = str(os.getenv("VK_GROUP_ID") or "241237638").strip()
+            events.append({
+                "key": "community", "source": "community", "url": f"https://vk.com/im?gim={int(group_id)}&sel={uid}" if group_id.isdecimal() else "",
+                "text": community["vk_last_incoming_text"], "at": community["vk_last_processed_at"],
+                "needs_action": True, "draft": None,
+            })
+        events = [{**event, "needs_action": bool(event["needs_action"] and event["at"] > viewed_events.get(event["key"], ""))}
+                  for event in events]
+        events.sort(key=lambda event: (event["needs_action"], event["at"]), reverse=True)
+        event = events[0] if events else {}
+        meeting = None
+        for state, contact_id in ((personal, personal_id), (legacy, community_id)):
+            if state.get("stage") != "scheduled":
+                continue
+            record = meetings_by_id.get(str((state.get("context") or {}).get("meeting_id")))
+            if record and str(record.get("contact_telegram_id")) == str(contact_id):
+                meeting = record
+                break
+
+        status = str(assignment.get("status") or "").casefold()
+        stage = str(manual.get("stage") or "").casefold()
+        refused_at = markers.get("vk_desk_refused_at")
+        if status in {"partner", "client"}:
+            group = "history"
+        elif refused_at:
+            group = "refusal"
+        elif meeting:
+            group = "meeting"
+        elif any(item["needs_action"] for item in events):
+            group = "active"
+        elif event or status in {"skipped", "not_fit", "released", "blocked", "closed"}:
+            group = "history"
+        elif assignment.get("invited_at"):
+            group = "waiting"
+        elif assignment.get("assignment_date") and assignment["assignment_date"] < today and assignment.get("daily_position"):
+            group = "unsent"
+        else:
+            continue
+        result.append({
+            **assignment, **people.get(uid, {}), "group": group, "meeting": meeting,
+            "refused_at": refused_at, "refusal_reason": markers.get("vk_desk_refusal_reason"),
+            "inbound": event.get("text"), "inbound_at": event.get("at"),
+            "source": event.get("source", "personal"), "reply_url": event.get("url"),
+            "events": events, "event_key": event.get("key"), "draft": event.get("draft"), "needs_action": event.get("needs_action"),
+            "turns": memory.get("turns") or [],
+            "legacy_turns": (community.get("relationship_memory") or {}).get("turns") or []
+            if legacy and legacy is not manual else [],
+            "last_outbound": context.get("vk_manual_last_outbound_text"),
+            "dialog": {
+                "stage": "idle" if stage == "scheduled" and not meeting else stage,
+                "pending_inbound": context.get("vk_manual_pending_inbound"),
+                "pending_reply": context.get("vk_manual_pending_reply"),
+                "last_incoming_message_id": manual.get("last_incoming_message_id"),
+            },
+        })
+    return result
 
 
 def _vk_assignment_dialog_context(
@@ -4209,17 +4454,9 @@ def load_manual_vk_private_dialog(
         owner_id=int(owner_id),
     )
     vk_user_id = int(assignment.get("vk_user_id") or 0)
-    contact_id = _vk_dialog_contact_id(vk_user_id)
-    rows = _sb_get(
-        "agency_dialog_states",
-        {
-            "owner_telegram_id": f"eq.{int(owner_id)}",
-            "contact_telegram_id": f"eq.{contact_id}",
-            "select": "*",
-            "limit": 1,
-        },
-    )
-    state = rows[0] if rows else {}
+    contact_id = _vk_dialog_contact_id(vk_user_id, personal=True)
+    personal = _vk_desk_state(owner_id, contact_id)
+    state = _vk_manual_state(personal, _vk_desk_state(owner_id, _vk_dialog_contact_id(vk_user_id)))
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
     return {
         "assignment_id": int(assignment_id),
@@ -4251,14 +4488,14 @@ def process_manual_vk_private_reply(
         owner_id=int(owner_id),
     )
     status = str(assignment.get("status") or "").strip()
-    if status not in {"invited", "dialogue", "meeting"}:
+    if not assignment.get("invited_at") or status not in {"invited", "entered", "lead", "dialogue", "meeting"}:
         raise VKScoutError(
             "Сначала отправьте человеку первое сообщение и нажмите «✅ Отправлено»."
         )
 
     vk_user_id = int(assignment.get("vk_user_id") or 0)
     first_name = str(candidate.get("first_name") or "").strip()
-    contact_id = _vk_dialog_contact_id(vk_user_id)
+    contact_id = _vk_dialog_contact_id(vk_user_id, personal=True)
 
     import neona_dialog_policy as policy
 
@@ -4280,7 +4517,11 @@ def process_manual_vk_private_reply(
         else "Владелец"
     ) or "Владелец"
 
-    state = core._dialog_state(config, int(owner_id), contact_id)
+    personal = _vk_desk_state(owner_id, contact_id)
+    markers = personal.get("context") or {}
+    if markers.get("vk_desk_refused_at"):
+        raise VKScoutError("Контакт находится в папке «Отказ».")
+    state = _vk_manual_state(personal, _vk_desk_state(owner_id, _vk_dialog_contact_id(vk_user_id))) or None
     if not isinstance(state, dict):
         invited_at = str(assignment.get("invited_at") or datetime.now(UTC).isoformat())
         first_message = str(assignment.get("invitation_text") or "").strip()
@@ -4390,6 +4631,7 @@ def process_manual_vk_private_reply(
         )
 
     new_context = dict(new_context or {})
+    new_context.update({k: v for k, v in markers.items() if k.startswith("vk_desk_")})
     new_context.update(
         {
             "channel": "vk",
@@ -4399,6 +4641,7 @@ def process_manual_vk_private_reply(
             "vk_manual_pending_reply": reply_text,
             "vk_manual_pending_fingerprint": fingerprint,
             "vk_manual_last_processed_at": message_dt.isoformat(),
+            "vk_manual_last_inbound_text": text,
         }
     )
     incoming_id = int.from_bytes(
@@ -4439,14 +4682,18 @@ def mark_manual_vk_private_reply_sent(
         owner_id=int(owner_id),
     )
     vk_user_id = int(assignment.get("vk_user_id") or 0)
-    contact_id = _vk_dialog_contact_id(vk_user_id)
+    contact_id = _vk_dialog_contact_id(vk_user_id, personal=True)
 
     import neona_dialog_policy as policy
 
     policy.apply_policy()
     core = policy.core
     config = core.load_config()
-    state = core._dialog_state(config, int(owner_id), contact_id)
+    personal = _vk_desk_state(owner_id, contact_id)
+    markers = personal.get("context") or {}
+    if markers.get("vk_desk_refused_at"):
+        raise VKScoutError("Контакт находится в папке «Отказ».")
+    state = _vk_manual_state(personal, _vk_desk_state(owner_id, _vk_dialog_contact_id(vk_user_id))) or None
     if not isinstance(state, dict):
         raise VKScoutError("Память этого VK-диалога Неоны не найдена.")
 
@@ -4460,6 +4707,9 @@ def mark_manual_vk_private_reply_sent(
         raise VKScoutError("У Неоны сейчас нет подготовленного VK-ответа.")
 
     now = datetime.now(UTC).isoformat()
+    context.update({k: v for k, v in markers.items() if k.startswith("vk_desk_")})
+    if not context.get("vk_manual_last_inbound_text"):
+        context["vk_manual_last_inbound_text"] = context.get("vk_manual_pending_inbound")
     context.update(
         {
             "channel": "vk",
@@ -4493,9 +4743,12 @@ def mark_manual_vk_private_reply_sent(
     }
 
 
-def skip_vk_assignment(assignment_id: int) -> None:
+def skip_vk_assignment(assignment_id: int, *, owner_id: int | None = None) -> None:
     now = datetime.now(UTC).isoformat()
-    _sb_patch("agency_vk_assignments", {"id": f"eq.{int(assignment_id)}"}, {"status": "skipped", "released_at": now, "updated_at": now})
+    filters = {"id": f"eq.{int(assignment_id)}"}
+    if owner_id is not None:
+        filters["owner_telegram_id"] = f"eq.{int(owner_id)}"
+    _sb_patch("agency_vk_assignments", filters, {"status": "skipped", "released_at": now, "updated_at": now})
 
 
 def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
@@ -5471,6 +5724,7 @@ def process_manual_vk_comment_reply(
 def mark_manual_vk_reply_published(
     thread_id: int,
     reply_text: str | None = None,
+    *, owner_id: int | None = None,
 ) -> dict[str, Any]:
     """Records that the owner manually posted Neona's prepared reply in VK.
 
@@ -5479,9 +5733,12 @@ def mark_manual_vk_reply_published(
     manual/paused mode and is ready for the next copied inbound reply.
     """
     thread = load_vk_comment_thread_by_id(int(thread_id))
-    if not thread:
+    if not thread or (owner_id is not None and int(thread["owner_telegram_id"]) != int(owner_id)):
         raise VKScoutError("VK-ветка комментария не найдена")
 
+    pending_kind = str(thread.get("pending_event_kind") or "")
+    if not pending_kind or not thread.get("neona_reply_text"):
+        raise VKScoutError("Этот ответ уже отмечен или черновик недоступен.")
     text = _compact_ws(reply_text or thread.get("neona_reply_text"))
     if not text:
         raise VKScoutError("Нет подготовленного ответа Неоны для отметки публикации.")
@@ -5499,7 +5756,7 @@ def mark_manual_vk_reply_published(
         },
     )
     patch = {
-        "status": "paused",
+        "status": "paused" if pending_kind.startswith("manual_") else "watching",
         "last_outbound_text": text,
         "dialogue_history": history,
         "pending_event_kind": None,
@@ -5513,7 +5770,11 @@ def mark_manual_vk_reply_published(
         "last_checked_at": now,
         "updated_at": now,
     }
-    _sb_patch("agency_vk_comment_threads", {"id": f"eq.{int(thread_id)}"}, patch)
+    _sb_patch(
+        "agency_vk_comment_threads",
+        {"id": f"eq.{int(thread_id)}", "owner_telegram_id": f"eq.{int(thread['owner_telegram_id'])}"},
+        patch,
+    )
     return {**thread, **patch}
 
 def send_pending_vk_comment_reply(thread_id: int) -> dict[str, Any]:
