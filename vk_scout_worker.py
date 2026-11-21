@@ -331,6 +331,7 @@ def _score_until_daily_five(
             ask_openai_fn=_ask_openai,
             limit=analysis_limit,
             priority_ids=(priority_ids if round_no == 1 else None),
+            reanalyze_exhausted=False,
         )
         analyzed_now = int(score_result.get("analyzed") or 0)
         total_analyzed += analyzed_now
@@ -391,13 +392,16 @@ def top_up_vk_owner_now(
     legacy_access_token = _env("VK_ACCESS_TOKEN")
     fallback_access_token = service_access_token or legacy_access_token
 
-    try:
-        scout_access_token = get_valid_vk_scout_access_token(owner_id)
-        os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
-    except VKScoutOAuthError:
-        if not fallback_access_token:
-            raise VKScoutError("Нет рабочего VK-токена для добора.")
-        os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
+    service_mode = _env("VK_SCOUT_SERVICE_MODE").casefold() in {"1", "true", "yes", "on"}
+    if service_mode and service_access_token:
+        os.environ["VK_SCOUT_ACCESS_TOKEN"] = service_access_token
+    else:
+        try:
+            os.environ["VK_SCOUT_ACCESS_TOKEN"] = get_valid_vk_scout_access_token(owner_id)
+        except VKScoutOAuthError:
+            if not fallback_access_token:
+                raise VKScoutError("Нет рабочего VK-токена для добора.")
+            os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
 
     # Сначала используем уже сохранённый большой пул. Кнопка «Добрать»
     # не должна ждать VK API, если в базе уже есть тысячи профилей.
@@ -440,7 +444,21 @@ def top_up_vk_owner_now(
             analyzed_total += analyzed2
             if best2 is not None:
                 best_score = best2 if best_score is None else max(best_score, best2)
+    diagnostics = prepared.get("diagnostics") or {}
+    if prepared.get("complete"):
+        reason = ""
+    elif scan_result.get("errors"):
+        reason = "Обновление источников VK завершилось с ошибкой."
+    elif diagnostics.get("insert_errors"):
+        reason = "При сохранении карточек произошла ошибка. Подробности в журнале worker."
+    elif analyzed_total == 0:
+        reason = "За этот запуск не найдено новых профилей, доступных для оценки."
+    elif diagnostics.get("eligible_attempts"):
+        reason = "Часть подходящих профилей не удалось выдать."
+    else:
+        reason = "В проверенных профилях не хватило кандидатов, прошедших порог и правила выдачи."
     return {
+        "reason": reason,
         "ok": True,
         "count": int(prepared.get("count") or len(prepared.get("assignments") or [])),
         "complete": bool(prepared.get("complete")),

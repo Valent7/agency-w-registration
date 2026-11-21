@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -16,6 +17,7 @@ from vk_scout_worker import top_up_vk_owner_now
 from vk_scout import (
     VKScoutError,
     _sb_get,
+    _vk_owner_pages,
     _sb_patch,
     add_known_vk_contact,
     load_known_vk_contacts,
@@ -33,6 +35,8 @@ from vk_scout import (
     process_manual_vk_comment_reply,
     mark_manual_vk_reply_published,
     load_manual_vk_private_dialog,
+    load_vk_private_desk,
+    _vk_recent_reply,
     process_manual_vk_private_reply,
     mark_manual_vk_private_reply_sent,
     mark_vk_partner,
@@ -176,6 +180,116 @@ def _render_vk_material_followup(
     )
 
 
+def _render_vk_desk_card(owner_id: int, row: dict) -> None:
+    assignment_id = int(row["id"])
+    uid = int(row["vk_user_id"])
+    name = " ".join(filter(None, (row.get("first_name"), row.get("last_name")))) or f"VK {uid}"
+    group = row["group"]
+    label = {
+        "meeting": "🟣 Встреча назначена",
+        "active": "🟢 Получен ответ",
+        "waiting": "🟡 Ожидаем ответа",
+        "history": "📚 История",
+    }[group]
+    meeting = row["meeting"]
+    raw_date = meeting["start_at"] if meeting else row.get("inbound_at") or row.get("invited_at")
+    event_at = ""
+    if raw_date:
+        try:
+            event_at = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).astimezone(
+                ZoneInfo("Europe/Moscow")
+            ).strftime("%d.%m.%Y %H:%M МСК")
+        except ValueError:
+            event_at = str(raw_date)
+    community = row.get("source") == "community"
+    source_label = "Сообщения сообщества VK" if community else "Личный VK"
+    with st.container(border=True):
+        st.text(f"{name} · {label} · {source_label}" + (f" · {event_at}" if event_at else ""))
+        if row.get("inbound") and group != "history":
+            st.text(str(row["inbound"]))
+        if group == "active" and row.get("recent_reply"):
+            st.success(f"Новый ответ · {source_label}")
+        if community:
+            group_id = str(os.getenv("VK_GROUP_ID") or "241237638").strip()
+            if group_id.isdecimal():
+                st.link_button("Открыть сообщения сообщества VK", f"https://vk.com/im?gim={group_id}&sel={uid}")
+        else:
+            st.link_button("Открыть VK и ответить", f"https://vk.com/im?sel={uid}")
+        if meeting and group == "meeting" and st.button(
+            "Открыть запись в календаре", key=f"vk_calendar_{owner_id}_{assignment_id}",
+        ):
+            st.session_state[f"vk_calendar_meeting_{owner_id}"] = str(meeting["id"])
+            st.session_state["agency_open_main_section"] = "📅 Календарь"
+            st.rerun()
+
+        if group in {"active", "meeting"}:
+            if row.get("draft"):
+                st.caption("Ответ Неоны готов к ручной отправке")
+                st.text(str(row["draft"]))
+            followup_label = (
+                "Зарегистрировать ответ из личного VK"
+                if community else "Ответ Неоны и следующая реплика"
+            )
+            with st.expander(followup_label):
+                _render_vk_private_dialog_followup(
+                    owner_id, assignment_id, name, row["status"], scope="desk", dialog=row["dialog"],
+                )
+        elif group == "waiting":
+            with st.expander("Зарегистрировать ответ из личного VK"):
+                _render_vk_private_dialog_followup(
+                    owner_id, assignment_id, name, row["status"], scope="desk", dialog=row["dialog"],
+                )
+        with st.expander("История диалога"):
+            if row.get("invitation_text"):
+                st.caption("Первое сообщение")
+                st.text(str(row["invitation_text"]))
+            for turn in row["turns"]:
+                if not isinstance(turn, dict) or turn.get("category") == "first_touch":
+                    continue
+                if turn.get("incoming"):
+                    st.text(f"Собеседник · {turn['incoming']}")
+                if turn.get("neona_reply"):
+                    st.text(f"Неона · {turn['neona_reply']}")
+            if row.get("last_outbound"):
+                st.caption("Последний подтверждённый ответ в VK")
+                st.text(str(row["last_outbound"]))
+
+
+@st.fragment(run_every=300)
+def _render_vk_private_desk(owner_id: int) -> None:
+    st.markdown("### 💬 Активные диалоги VK")
+    st.caption("Ответ из личной переписки VK внесите вручную. Ответы в сообщения сообщества поступают через его подключение.")
+    try:
+        rows = load_vk_private_desk(owner_id)
+    except VKScoutError:
+        st.warning("Не удалось загрузить личные диалоги VK.")
+        return
+    groups = {group: [] for group in ("active", "meeting", "waiting", "history")}
+    for row in rows:
+        groups[row["group"]].append(row)
+    groups["active"].sort(key=lambda row: row.get("inbound_at") or "", reverse=True)
+    groups["meeting"].sort(key=lambda row: row["meeting"]["start_at"])
+    metrics = st.columns(3)
+    metrics[0].metric("🟢 Активные диалоги", len(groups["active"]))
+    metrics[1].metric("🟣 Назначенные встречи", len(groups["meeting"]))
+    metrics[2].metric("🟡 Ожидаем ответа", len(groups["waiting"]))
+
+    for row in groups["active"] + groups["meeting"]:
+        _render_vk_desk_card(owner_id, row)
+    for group, label in (("waiting", "📁 Ожидаем ответа"), ("history", "📚 История")):
+        with st.expander(f"{label} · {len(groups[group])}", expanded=False):
+            if groups[group]:
+                page_size = 20
+                page_count = (len(groups[group]) + page_size - 1) // page_size
+                page = st.number_input(
+                    "Страница", min_value=1, max_value=page_count, step=1,
+                    key=f"vk_desk_page_{group}_{owner_id}",
+                ) if page_count > 1 else 1
+                start = (int(page) - 1) * page_size
+                for row in groups[group][start:start + page_size]:
+                    _render_vk_desk_card(owner_id, row)
+
+
 def _render_vk_private_dialog_followup(
     owner_id: int,
     assignment_id: int,
@@ -183,6 +297,7 @@ def _render_vk_private_dialog_followup(
     status: str,
     *,
     scope: str,
+    dialog: dict | None = None,
 ) -> None:
     """Personal VK DM handoff: one pasted inbound turn -> the shared Neona brain."""
     if str(status or "").strip() not in {"invited", "dialogue", "meeting"} or not assignment_id:
@@ -196,11 +311,12 @@ def _render_vk_private_dialog_followup(
         "дальше ведёт этот же разговор по тем же правилам, что в Telegram."
     )
 
-    try:
-        dialog = load_manual_vk_private_dialog(int(assignment_id), int(owner_id))
-    except Exception as exc:
-        st.warning(f"Не удалось открыть память VK-диалога: {exc}")
-        return
+    if dialog is None:
+        try:
+            dialog = load_manual_vk_private_dialog(int(assignment_id), int(owner_id))
+        except Exception as exc:
+            st.warning(f"Не удалось открыть память VK-диалога: {exc}")
+            return
 
     stage = str(dialog.get("stage") or "idle")
     if stage == "scheduled":
@@ -512,18 +628,40 @@ def _render_vk_comment_followup(
     )
 
 
-def _load_vk_dialog_threads(owner_id: int, limit: int = 100) -> list[dict]:
-    """Loads saved VK comment threads independently of today's Neonia lists."""
-    rows = _sb_get(
-        "agency_vk_comment_threads",
-        {
+def _load_vk_dialog_threads(owner_id: int) -> list[dict]:
+    """Read the owner's saved comment threads, including closed threads."""
+    return _vk_owner_pages("agency_vk_comment_threads", owner_id, {
+        "select": "*",
+        "order": "updated_at.desc.nullslast,created_at.desc,id.desc",
+    })
+
+
+@st.fragment(run_every=60)
+def _render_vk_comment_alerts(owner_id: int) -> None:
+    """Read since the last day from the existing VK worker, without calling VK."""
+    try:
+        rows = _sb_get("agency_vk_comment_threads", {
             "owner_telegram_id": f"eq.{int(owner_id)}",
-            "select": "*",
-            "order": "updated_at.desc.nullslast,created_at.desc",
-            "limit": max(1, min(300, int(limit))),
-        },
-    )
-    return [row for row in rows if isinstance(row, dict)]
+            "last_inbound_at": f"gte.{(datetime.now(UTC) - timedelta(days=1)).isoformat()}",
+            "status": "neq.closed",
+            "select": "first_name,last_inbound_at,last_inbound_comment_id,last_inbound_text,post_owner_id,post_id",
+            "order": "last_inbound_at.desc,id.desc",
+            "limit": 5,
+        })
+    except VKScoutError:
+        return
+    for row in rows:
+        if not row.get("post_owner_id") or not row.get("post_id"):
+            continue
+        post = f"{int(row['post_owner_id'])}_{int(row['post_id'])}"
+        comment_id = int(row.get("last_inbound_comment_id") or 0)
+        link = f"https://vk.com/wall{post}" + (f"?reply={comment_id}" if comment_id > 0 else "")
+        name = str(row.get("first_name") or "VK-контакт")
+        with st.container(border=True):
+            st.success(f"Новый ответ под публикацией VK · {name}")
+            if row.get("last_inbound_text"):
+                st.text(str(row["last_inbound_text"]))
+            st.link_button("Открыть обсуждение VK", link)
 
 
 def _vk_thread_label(thread: dict) -> str:
@@ -564,8 +702,8 @@ def _render_vk_dialog_center(
         thread for thread in threads
         if str(thread.get("status") or "").strip().casefold() != "closed"
     ]
-    if not active_threads:
-        st.info("Пока нет сохранённых VK-диалогов. Они появятся после кнопки «Комментарий опубликован».")
+    if not threads:
+        st.info("Пока нет сохранённых веток комментариев VK.")
         st.caption("📚 История диалогов пока пуста.")
         return
 
@@ -584,8 +722,18 @@ def _render_vk_dialog_center(
         f"ждём ответа: {waiting} · ответ Неоны готов: {ready}"
     )
 
-    current_threads = active_threads[:20]
-    history_threads = active_threads[20:]
+    current_threads = sorted(
+        (thread for thread in active_threads if thread.get("last_inbound_at")),
+        key=lambda thread: str(thread["last_inbound_at"]), reverse=True,
+    )[:20]
+    current_ids = {thread["id"] for thread in current_threads}
+    waiting_threads = [
+        thread for thread in active_threads if not thread.get("last_inbound_at")
+    ]
+    waiting_ids = {thread["id"] for thread in waiting_threads}
+    history_threads = [
+        thread for thread in threads if thread["id"] not in current_ids | waiting_ids
+    ]
 
     st.caption(
         f"На рабочем экране: {len(current_threads)} · "
@@ -650,7 +798,13 @@ def _render_vk_dialog_center(
             )
 
     for thread in current_threads:
+        if _vk_recent_reply(thread.get("last_inbound_at")):
+            st.success("Новый ответ под публикацией VK")
         _render_vk_dialog_thread(thread)
+
+    with st.expander(f"📁 Ожидаем ответа под публикацией · {len(waiting_threads)}"):
+        for thread in waiting_threads:
+            _render_vk_dialog_thread(thread)
 
     history_key = f"vk_dialog_history_open_{int(owner_id)}"
     history_open = bool(st.session_state.get(history_key, False))
@@ -1065,6 +1219,17 @@ def _render_today_vk_candidates(
         )
     )
 
+    result = st.session_state.pop(f"vk_top_up_result_{owner_id}", None)
+    if result is not None:
+        if result.get("complete"):
+            st.success("Сегодняшняя VK-пятёрка собрана.")
+        else:
+            st.info(
+                f"Последний добор: {int(result.get('count') or 0)}/5 · "
+                f"проверено профилей: {int(result.get('analyzed') or 0)}. "
+                + str(result.get("reason") or "")
+            )
+
     if today_count < 5:
         st.caption(
             "Если текущих кандидатов мало или прошлые не отвечают, можно не ждать "
@@ -1085,14 +1250,7 @@ def _render_today_vk_candidates(
                         min_score=50,
                         analysis_limit=30,
                     )
-                count = int(result.get("count") or 0)
-                if count >= 5:
-                    st.success("✅ Готово: сегодняшняя VK-пятёрка собрана 5/5.")
-                else:
-                    st.info(
-                        f"Неония продолжила поиск. Сейчас собрано {count}/5; "
-                        f"проверено дополнительно: {int(result.get('analyzed') or 0)}."
-                    )
+                st.session_state[f"vk_top_up_result_{owner_id}"] = result
                 st.rerun()
             except Exception as exc:
                 error_text = str(exc or "")
@@ -1610,6 +1768,22 @@ def render_vk_sources(
     member_code: str = "",
     ask_openai_fn=None,
 ) -> None:
+    """Рабочий экран VK владельца."""
+    owner_id = int(owner_id)
+    _render_today_vk_candidates(owner_id, member_code, ask_openai_fn=ask_openai_fn)
+    _render_vk_private_desk(owner_id)
+    _render_vk_comment_alerts(owner_id)
+    with st.expander("💬 Комментарии под публикациями VK", expanded=False):
+        _render_vk_dialog_center(owner_id, ask_openai_fn=ask_openai_fn)
+    with st.expander("🌿 Лента VK", expanded=False):
+        _render_vk_feed_radar(owner_id, ask_openai_fn=ask_openai_fn)
+    with st.expander("👥 Свои знакомые VK", expanded=False):
+        _render_known_vk_contacts(owner_id, member_code, ask_openai_fn=ask_openai_fn)
+    with st.expander("⚙️ Источники поиска и подключение VK", expanded=False):
+        _render_vk_source_settings(owner_id)
+
+
+def _render_vk_source_settings(owner_id: int) -> None:
     """Интерфейс Неонии для управления тематическими VK-сообществами."""
     owner_id = int(owner_id)
 
@@ -1703,32 +1877,6 @@ def render_vk_sources(
                     use_container_width=True,
                 )
                 st.caption("После разрешения VK вернёт вас обратно в Агентство W.")
-
-    if vk_ready:
-        _render_vk_dialog_center(
-            owner_id,
-            ask_openai_fn=ask_openai_fn,
-        )
-        st.divider()
-        _render_vk_feed_radar(
-            owner_id,
-            ask_openai_fn=ask_openai_fn,
-        )
-        st.divider()
-        # Знакомые владельца показываем СРАЗУ сверху, чтобы блок не терялся
-        # после пяти карточек ежедневной подборки Неонии.
-        _render_known_vk_contacts(
-            owner_id,
-            str(member_code or "").strip(),
-            ask_openai_fn=ask_openai_fn,
-        )
-        st.divider()
-        _render_today_vk_candidates(
-            owner_id,
-            str(member_code or "").strip(),
-            ask_openai_fn=ask_openai_fn,
-        )
-        st.divider()
 
     with st.form(
         f"neonia_vk_source_add_{owner_id}",

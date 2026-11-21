@@ -1573,7 +1573,9 @@ def _render_new_meeting(owner_telegram_id: int, owner_name: str) -> None:
             st.error(str(exc))
 
 
-def render_agency_calendar(owner_telegram_id: int, owner_name: str) -> None:
+def render_agency_calendar(
+    owner_telegram_id: int, owner_name: str, *, focused_meeting_id: str | None = None,
+) -> None:
     """Полный раздел внутреннего календаря Агентства W."""
 
     st.markdown("### 📅 Календарь встреч")
@@ -1597,6 +1599,23 @@ def render_agency_calendar(owner_telegram_id: int, owner_name: str) -> None:
             "вернитесь на сайт и обновите страницу."
         )
         return
+
+    if focused_meeting_id:
+        from vk_scout import _sb_get
+
+        try:
+            rows = _sb_get("agency_meetings", {
+                "id": f"eq.{focused_meeting_id}",
+                "owner_telegram_id": f"eq.{int(owner_telegram_id)}",
+                "select": "*",
+                "limit": 1,
+            })
+        except RuntimeError:
+            rows = []
+        if rows:
+            _render_meeting_card(rows[0], "vk_focused")
+        else:
+            st.info("Выбранная запись календаря недоступна.")
 
     calendar_tab, create_tab, manual_tab, recurring_tab = st.tabs(
         [

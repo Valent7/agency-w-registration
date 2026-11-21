@@ -1288,6 +1288,7 @@ def score_vk_candidates(
     ask_openai_fn: Callable[..., Any] | None,
     limit: int = 30,
     priority_ids: Iterable[int] | None = None,
+    reanalyze_exhausted: bool = True,
 ) -> dict[str, Any]:
     if ask_openai_fn is None:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
@@ -1334,14 +1335,9 @@ def score_vk_candidates(
     # Раньше каждый цикл снова оценивал одни и те же последние 30 профилей,
     # поэтому VK Scout мог навсегда застрять на 0/5, даже если в общем пуле
     # были сотни других кандидатов.
-    scored_rows = _sb_get(
-        "agency_vk_candidate_scores",
-        {
-            "owner_telegram_id": f"eq.{owner_id}",
-            "select": "vk_user_id,analyzed_at",
-            "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc",
-            "limit": 5000,
-        },
+    scored_rows = _vk_owner_pages(
+        "agency_vk_candidate_scores", owner_id,
+        {"select": "vk_user_id,analyzed_at", "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc"},
     )
     already_scored: set[int] = set()
     partner_vk_ids = _partner_vk_ids()
@@ -1408,17 +1404,14 @@ def score_vk_candidates(
         for candidate in rows
         if str(candidate.get("vk_user_id") or "").isdigit()
     }
-    # Ограничиваем число страниц, чтобы worker не мог случайно читать бесконечный пул.
-    for _ in range(25):
-        if len(rows) >= analysis_limit:
-            break
+    while len(rows) < analysis_limit:
         page = _sb_get(
             "agency_vk_candidates",
             {
                 "can_write_private_message": "eq.true",
                 "source_community_id": source_filter,
                 "select": "*",
-                "order": "last_enriched_at.desc.nullslast,first_discovered_at.desc",
+                "order": "vk_user_id.asc",
                 "limit": page_size,
                 "offset": offset,
             },
@@ -1443,8 +1436,8 @@ def score_vk_candidates(
     # Когда весь доступный пул уже пройден, переоцениваем САМЫЕ ДАВНО
     # анализировавшиеся профили. После изменения портрета/политики это позволяет
     # пройти всю старую базу по новым правилам, а не крутить одни и те же 30.
-    reanalysis = bool(priority_list and rows)
-    if not rows:
+    reanalysis = False
+    if not rows and reanalyze_exhausted:
         reanalysis = True
         stale_ids: list[int] = []
         for item in scored_rows:
@@ -4158,6 +4151,133 @@ def mark_vk_invited(assignment_id: int) -> None:
     _sb_patch("agency_vk_assignments", {"id": f"eq.{int(assignment_id)}"}, {"status": "invited", "invited_at": now, "updated_at": now})
 
 
+def _vk_owner_pages(table: str, owner_id: int, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    while True:
+        page = _sb_get(table, {
+            **filters,
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "limit": 200,
+            "offset": len(rows),
+        })
+        rows.extend(page)
+        if len(page) < 200:
+            return rows
+
+
+def _vk_id_filter(ids: Iterable[int]) -> str:
+    return "in.(" + ",".join(str(int(uid)) for uid in ids) + ")"
+
+
+def _vk_recent_reply(value: Any) -> bool:
+    if not value:
+        return False
+    try:
+        event_time = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.now(UTC) - timedelta(days=1) <= event_time <= datetime.now(UTC)
+    except (TypeError, ValueError):
+        return False
+
+
+def load_vk_private_desk(owner_id: int) -> list[dict[str, Any]]:
+    assignments = _vk_owner_pages("agency_vk_assignments", owner_id, {
+        "invited_at": "not.is.null",
+        "select": "id,vk_user_id,status,invited_at,invitation_text,fit_summary",
+        "order": "invited_at.desc,id.desc",
+    })
+    # Known contacts and daily cards can point to the same personal VK chat.
+    by_user = {}
+    for assignment in assignments:
+        uid = int(assignment.get("vk_user_id") or 0)
+        if uid > 0:
+            by_user.setdefault(uid, assignment)
+    if not by_user:
+        return []
+
+    contacts = {_vk_dialog_contact_id(uid): uid for uid in by_user}
+    states, people = {}, {}
+    contact_ids = list(contacts)
+    user_ids = list(by_user)
+    for start in range(0, len(user_ids), 100):
+        states.update({
+            int(row["contact_telegram_id"]): row
+            for row in _sb_get("agency_dialog_states", {
+                "owner_telegram_id": f"eq.{int(owner_id)}",
+                "contact_telegram_id": _vk_id_filter(contact_ids[start:start + 100]),
+                "select": "contact_telegram_id,stage,context,last_incoming_message_id",
+            })
+        })
+        people.update({
+            int(row["vk_user_id"]): row
+            for row in _sb_get("agency_vk_candidates", {
+                "vk_user_id": _vk_id_filter(user_ids[start:start + 100]),
+                "select": "vk_user_id,first_name,last_name",
+            })
+        })
+
+    now = datetime.now(UTC)
+    meetings = _vk_owner_pages("agency_meetings", owner_id, {
+        "status": "eq.Подтверждена",
+        "end_at": f"gt.{now.isoformat()}",
+        "select": "id,start_at,contact_telegram_id",
+        "order": "start_at.asc,id.asc",
+    }) if any(row.get("stage") == "scheduled" for row in states.values()) else []
+    meetings_by_id = {str(row["id"]): row for row in meetings}
+    result = []
+    for contact_id, uid in contacts.items():
+        assignment = by_user[uid]
+        state = states.get(contact_id, {})
+        context = state.get("context") or {}
+        memory = context.get("relationship_memory") or {}
+        inbound = (
+            context.get("vk_manual_last_inbound_text")
+            or context.get("vk_manual_pending_inbound")
+            or memory.get("last_incoming")
+        )
+        manual_at = context.get("vk_manual_last_processed_at") or ""
+        community_at = context.get("vk_last_processed_at") or ""
+        community_inbound = context.get("vk_last_incoming_text")
+        is_community = bool(community_inbound and community_at and community_at > manual_at)
+        if is_community:
+            inbound = community_inbound
+        elif not inbound:
+            inbound = next((
+                turn["incoming"] for turn in reversed(memory.get("turns") or [])
+                if isinstance(turn, dict) and turn.get("incoming")
+            ), "")
+        inbound_at = community_at if is_community else manual_at
+        meeting = meetings_by_id.get(str(context.get("meeting_id"))) if state.get("stage") == "scheduled" else None
+        if meeting and str(meeting.get("contact_telegram_id")) != str(contact_id):
+            meeting = None
+        status = str(assignment.get("status") or "").casefold()
+        stage = str(state.get("stage") or "").casefold()
+        if status not in {"invited", "dialogue", "meeting"} or stage in {"closed", "archived", "completed", "declined"}:
+            group = "history"
+        elif meeting:
+            group = "meeting"
+        elif inbound:
+            group = "active"
+        else:
+            group = "waiting"
+        result.append({
+            **assignment, **people.get(uid, {}), "group": group, "meeting": meeting,
+            "inbound": inbound,
+            "inbound_at": inbound_at,
+            "source": "community" if is_community else "personal",
+            "draft": context.get("vk_manual_pending_reply") if not is_community else None,
+            "recent_reply": _vk_recent_reply(inbound_at),
+            "turns": memory.get("turns") or [],
+            "last_outbound": context.get("vk_manual_last_outbound_text"),
+            "dialog": {
+                "stage": "idle" if stage == "scheduled" and not meeting else stage,
+                "pending_inbound": context.get("vk_manual_pending_inbound"),
+                "pending_reply": context.get("vk_manual_pending_reply"),
+                "last_incoming_message_id": state.get("last_incoming_message_id"),
+            },
+        })
+    return result
+
+
 def _vk_dialog_contact_id(vk_user_id: int) -> int:
     """Stable negative id for VK dialogs inside Neona's shared dialog-state table."""
     raw = f"vk-user:{int(vk_user_id)}".encode("utf-8")
@@ -4399,6 +4519,7 @@ def process_manual_vk_private_reply(
             "vk_manual_pending_reply": reply_text,
             "vk_manual_pending_fingerprint": fingerprint,
             "vk_manual_last_processed_at": message_dt.isoformat(),
+            "vk_manual_last_inbound_text": text,
         }
     )
     incoming_id = int.from_bytes(

@@ -9262,6 +9262,7 @@ if telegram_login_valid or remembered_data:
             render_agency_calendar(
                 owner_telegram_id=int(telegram_id),
                 owner_name=first_name,
+                focused_meeting_id=st.session_state.pop(f"vk_calendar_meeting_{telegram_id}", None),
             )
 
         elif main_section == "🤖 Агенты":
@@ -9429,7 +9430,8 @@ if telegram_login_valid or remembered_data:
                             "даёт каждому короткую характеристику, а решение принимает владелец."
                         ),
                         }
-                        st.info(mode_messages[neonia_mode])
+                        if neonia_mode != "💙 Источники поиска VK":
+                            st.info(mode_messages[neonia_mode])
                         if neonia_mode == "💙 Источники поиска VK":
                             render_vk_sources(
                                 int(telegram_id),
