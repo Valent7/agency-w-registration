@@ -1540,7 +1540,7 @@ def _render_vk_candidate_details(
                 draft_key = f"vk_first_draft_{owner_id}_{assignment_id}"
                 with st.expander("Обсудить текст с Неоной"):
                     try:
-                        direction = _vk_draft_direction(f"{draft_key}_form", "Переписать")
+                        direction = _vk_draft_direction(f"{draft_key}_form", "Отправить")
                         if direction is not None:
                             direction = direction or "Предложи другую формулировку."
                             revised = prepare_vk_invitation(
