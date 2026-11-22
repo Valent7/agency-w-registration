@@ -1382,6 +1382,9 @@ def _render_vk_new_candidates(owner_id: int, member_code: str, ask_openai_fn=Non
 
 def _render_vk_profile_link(item: dict) -> None:
     profile_url = str(item.get("profile_url") or "").strip()
+    vk_user_id = str(item.get("vk_user_id") or "").strip()
+    if not profile_url and vk_user_id.isdecimal() and int(vk_user_id) > 0:
+        profile_url = f"https://vk.com/id{vk_user_id}"
     if profile_url:
         st.link_button("Перейти в профиль", profile_url)
 
