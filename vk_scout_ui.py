@@ -272,15 +272,14 @@ def _render_vk_desk_card(owner_id: int, row: dict, ask_openai_fn=None, *, member
         if group == "unsent":
             _render_vk_candidate_details(owner_id, member_code, row, ask_openai_fn=ask_openai_fn)
             return
-        info, primary = st.columns([3, 2] if meeting else [4, 2], gap="xsmall")
-        with info:
-            st.markdown(f"**{name}** · {label}")
-            st.caption(" · ".join(filter(None, (source_names[source], _vk_display_time(raw_date)))))
-            if row.get("inbound") and group in {"active", "meeting"}:
-                st.text(str(row["inbound"])[:160])
-            if row.get("refusal_reason"):
-                st.caption(row["refusal_reason"])
-        with primary:
+        st.markdown(f"#### {name}")
+        st.caption(" · ".join(filter(None, (label, source_names[source], _vk_display_time(raw_date)))))
+        if row.get("inbound") and group in {"active", "meeting"}:
+            st.text(str(row["inbound"]))
+        if row.get("refusal_reason"):
+            st.caption(row["refusal_reason"])
+
+        with st.container(horizontal=True, gap="small"):
             if meeting and group == "meeting":
                 if st.button("Запись в календаре", key=f"{key}_calendar"):
                     st.session_state[f"vk_calendar_meeting_{owner_id}"] = str(meeting["id"])
@@ -296,15 +295,13 @@ def _render_vk_desk_card(owner_id: int, row: dict, ask_openai_fn=None, *, member
             details_label += " · черновик Неоны"
         with st.expander(details_label, key=f"{key}_details", type="compact", on_change="rerun") as details:
             if details.open:
-                action1, action2 = st.columns(2)
-                with action1:
+                with st.container(horizontal=True, gap="small"):
                     if group == "active" and row.get("needs_action") and st.button("Отметить просмотренным", key=f"{key}_seen"):
                         try:
                             mark_vk_desk_event(owner_id, uid, event_key=row["event_key"], viewed_at=row["inbound_at"])
                             st.rerun()
                         except VKScoutError as exc:
                             st.error(str(exc))
-                with action2:
                     if group in {"active", "waiting", "meeting"} and st.button("Отказ", key=f"{key}_refuse"):
                         try:
                             mark_vk_desk_event(owner_id, uid, refusal=True)
@@ -370,20 +367,10 @@ def _render_vk_private_desk(owner_id: int, ask_openai_fn=None, *, member_code: s
         groups[row["group"]].append(row)
     groups["active"].sort(key=lambda row: row.get("inbound_at") or "", reverse=True)
     groups["meeting"].sort(key=lambda row: row["meeting"]["start_at"])
-    green, purple = st.columns([2, 1], gap="small")
-    for group, label, column in (
-        ("active", "🟢 VK-диалоги", green), ("meeting", "🟣 Встречи", purple),
-    ):
-        with column:
-            st.markdown(f"### {label} · {len(groups[group])}")
-            if group == "active":
-                for start in range(0, len(groups[group]), 2):
-                    for row, card in zip(groups[group][start:start + 2], st.columns(2, gap="small")):
-                        with card:
-                            _render_vk_desk_card(owner_id, row, ask_openai_fn, member_code=member_code)
-            else:
-                for row in groups[group]:
-                    _render_vk_desk_card(owner_id, row, ask_openai_fn, member_code=member_code)
+    for group, label in (("active", "🟢 VK-диалоги"), ("meeting", "🟣 Встречи")):
+        st.markdown(f"### {label} · {len(groups[group])}")
+        for row in groups[group]:
+            _render_vk_desk_card(owner_id, row, ask_openai_fn, member_code=member_code)
     for group, label in (
         ("unsent", "📁 Неотправленные"), ("waiting", "🟡 Отправленные"),
         ("refusal", "📁 Отказ"), ("history", "📚 История"),
