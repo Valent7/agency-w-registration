@@ -20,6 +20,8 @@ from vk_scout import (
     _vk_owner_pages,
     _sb_patch,
     add_known_vk_contact,
+    delete_vk_invitation_draft,
+    update_vk_followup_draft,
     load_known_vk_contacts,
     load_today_vk_assignments,
     load_vk_sources,
@@ -191,6 +193,68 @@ def _vk_display_time(raw_date: str | None) -> str:
         return str(raw_date)
 
 
+def _vk_show_discussion(key: str) -> None:
+    for role, text in st.session_state.get(f"{key}_discussion", []):
+        with st.chat_message(role):
+            st.text(text)
+
+
+def _vk_record_discussion(key: str, direction: str, draft: str) -> None:
+    history_key = f"{key}_discussion"
+    history = st.session_state.get(history_key, [])
+    st.session_state[history_key] = (history + [("user", direction), ("assistant", draft)])[-12:]
+
+
+def _vk_draft_direction(key: str, label: str) -> str | None:
+    _vk_show_discussion(key)
+    with st.form(key, clear_on_submit=True):
+        direction = st.text_area("Сообщение Неоне", max_chars=3000)
+        voice = st.audio_input("Или надиктуйте задание Неоне")
+        submitted = st.form_submit_button(label)
+    if not submitted:
+        return None
+    if voice:
+        from content_studio_intent import transcribe_audio
+
+        direction = "\n".join(filter(None, (
+            direction.strip(), transcribe_audio(voice.getvalue(), filename=voice.name),
+        )))
+    return direction.strip()
+
+
+def _render_vk_followup_draft(owner_id, member_code, row, ask_openai_fn, key):
+    with st.expander("Ещё одно сообщение"):
+        if row.get("followup_sent"):
+            st.caption("Повторное сообщение отправлено")
+            st.text(row["followup_sent"]["text"])
+            return
+        st.caption("Если в личном VK сообщение прочитано и ответа нет, задайте Неоне направление.")
+        draft = row.get("followup_draft")
+        if draft:
+            st.code(draft, language=None)
+        try:
+            direction = _vk_draft_direction(f"{key}_followup_form", "Переписать" if draft else "Подготовить сообщение")
+            action = None
+            if direction is not None:
+                action = "draft"
+            elif draft:
+                if st.button("Удалить черновик", key=f"{key}_followup_delete"):
+                    action = "delete"
+                if st.button("Отметить отправленным", key=f"{key}_followup_sent"):
+                    action = "sent"
+            if action:
+                revised = update_vk_followup_draft(
+                    int(row["id"]), owner_id, member_code,
+                    action=action, expected_draft=draft or "", direction=direction or "",
+                    ask_openai_fn=ask_openai_fn,
+                )
+                if revised:
+                    _vk_record_discussion(f"{key}_followup_form", direction or "", revised)
+                st.rerun()
+        except Exception:
+            st.error("Не удалось обновить черновик. Проверьте задание и попробуйте ещё раз.")
+
+
 def _render_vk_desk_card(owner_id: int, row: dict, ask_openai_fn=None, *, member_code: str = "") -> None:
     assignment_id = int(row.get("id") or 0)
     uid = int(row["vk_user_id"])
@@ -225,6 +289,7 @@ def _render_vk_desk_card(owner_id: int, row: dict, ask_openai_fn=None, *, member
             elif group != "refusal":
                 url = row.get("reply_url") or f"https://vk.com/im?sel={uid}"
                 st.link_button("Открыть переписку VK", url)
+                _render_vk_profile_link(row)
 
         details_label = "Действия и история"
         if row.get("draft") and group in {"active", "meeting"}:
@@ -246,6 +311,9 @@ def _render_vk_desk_card(owner_id: int, row: dict, ask_openai_fn=None, *, member
                             st.rerun()
                         except VKScoutError as exc:
                             st.error(str(exc))
+                if assignment_id and group == "waiting":
+                    _render_vk_followup_draft(owner_id, member_code, row, ask_openai_fn, key)
+                    _render_vk_warmup(owner_id, assignment_id, name.split()[0], ask_openai_fn, scope="waiting", member_code=member_code)
                 if assignment_id and row.get("invited_at") and group != "refusal" and row.get("status") not in {
                     "partner", "client", "skipped", "blocked", "released", "not_fit",
                 }:
@@ -349,7 +417,7 @@ def _render_vk_private_dialog_followup(
         return
 
     st.divider()
-    st.markdown("**💬 Личный диалог VK — Неона**")
+    st.markdown("**💬 Ответить в личном VK**")
     st.caption(
         "Первое сообщение уже отправлено вручную. Когда человек ответит в личном VK, "
         "вставьте сюда только его новую реплику. Неона помнит своё первое сообщение и "
@@ -854,29 +922,34 @@ def _render_vk_warmup(
     assignment_id: int,
     first_name: str = "",
     ask_openai_fn=None,
+    *,
+    scope: str = "candidate",
+    member_code: str = "",
 ) -> None:
-    """Мягкое знакомство через свежую публичную публикацию кандидата."""
+    """Обсуждение комментария к последней доступной публикации кандидата."""
     if not assignment_id:
         return
 
-    state_key = f"vk_warmup_{owner_id}_{assignment_id}"
-    edit_key = f"vk_warmup_comment_{owner_id}_{assignment_id}"
+    state_key = f"vk_warmup_{scope}_{owner_id}_{assignment_id}"
+    edit_key = f"vk_warmup_comment_{scope}_{owner_id}_{assignment_id}"
     result = st.session_state.get(state_key)
 
     st.markdown("**🌿 Утепление**")
     if not isinstance(result, dict):
         st.caption(
-            "Неона найдёт свежую публичную публикацию и подготовит тёплый комментарий — "
+            "Неона предложит комментарий к одной из последних доступных публикаций — "
             "без предложения бизнеса и без рекламы."
         )
         if st.button(
             "🌿 Найти пост и подготовить комментарий",
-            key=f"vk_warmup_prepare_{owner_id}_{assignment_id}",
+            key=f"vk_warmup_prepare_{scope}_{owner_id}_{assignment_id}",
             use_container_width=True,
         ):
             try:
                 result = prepare_vk_warmup_comment(
                     assignment_id,
+                    owner_id=owner_id,
+                    member_code=member_code,
                     ask_openai_fn=ask_openai_fn,
                 )
                 st.session_state[state_key] = result
@@ -891,9 +964,12 @@ def _render_vk_warmup(
     if post_url:
         st.link_button("Открыть выбранную публикацию VK", post_url, use_container_width=False)
     if preview:
-        short_preview = preview if len(preview) <= 320 else preview[:317].rstrip() + "..."
-        st.caption(f"Неона выбрала: {short_preview}")
+        with st.expander("Содержание поста"):
+            st.text(preview)
 
+    pending = st.session_state.pop(f"{edit_key}_pending", None)
+    if pending is not None:
+        st.session_state[edit_key] = pending
     comment = st.text_area(
         "Комментарий Неоны",
         value=str(st.session_state.get(edit_key) or result.get("comment") or ""),
@@ -904,32 +980,29 @@ def _render_vk_warmup(
         result = {**result, "comment": comment.strip()}
         st.session_state[state_key] = result
 
-    cols = st.columns(2)
-    with cols[0]:
-        if st.button(
-            "🔄 Другой вариант",
-            key=f"vk_warmup_refresh_{owner_id}_{assignment_id}",
-            use_container_width=True,
-        ):
-            try:
-                fresh = prepare_vk_warmup_comment(
-                    assignment_id,
-                    ask_openai_fn=ask_openai_fn,
+    with st.expander("Обсудить комментарий с Неоной"):
+        discussion_key = f"{state_key}_comment_discussion"
+        try:
+            direction = _vk_draft_direction(discussion_key, "Предложить новую версию")
+            if direction is not None:
+                direction = direction or "Предложи более содержательный отклик на ту же мысль."
+                revised = prepare_vk_warmup_comment(
+                    assignment_id, owner_id=owner_id, ask_openai_fn=ask_openai_fn,
+                    direction=direction, previous=result, member_code=member_code,
                 )
-                st.session_state[state_key] = fresh
-                st.session_state[edit_key] = str(fresh.get("comment") or "")
+                st.session_state[state_key] = revised
+                st.session_state[f"{edit_key}_pending"] = revised["comment"]
+                _vk_record_discussion(discussion_key, direction, revised["comment"])
                 st.rerun()
-            except Exception as exc:
-                st.error(f"Не удалось подготовить другой вариант: {exc}")
-    with cols[1]:
-        if st.button(
-            "🧹 Очистить",
-            key=f"vk_warmup_clear_{owner_id}_{assignment_id}",
-            use_container_width=True,
-        ):
-            st.session_state.pop(state_key, None)
-            st.session_state.pop(edit_key, None)
-            st.rerun()
+        except VKScoutError as exc:
+            st.warning(str(exc))
+        except Exception:
+            st.warning("Не удалось подготовить комментарий. Прежний текст сохранён.")
+    if st.button("Выбрать другой пост", key=f"{state_key}_clear"):
+        st.session_state.pop(state_key, None)
+        st.session_state.pop(edit_key, None)
+        st.session_state.pop(f"{state_key}_comment_discussion_discussion", None)
+        st.rerun()
 
     st.caption(
         "Комментарий пока публикуется вручную из вашего VK. Неона ничего не отправляет автоматически."
@@ -1310,7 +1383,7 @@ def _render_vk_new_candidates(owner_id: int, member_code: str, ask_openai_fn=Non
 def _render_vk_profile_link(item: dict) -> None:
     profile_url = str(item.get("profile_url") or "").strip()
     if profile_url:
-        st.link_button("Зайти на профиль", profile_url)
+        st.link_button("Перейти в профиль", profile_url)
 
 
 def _render_vk_candidate_details(
@@ -1368,7 +1441,7 @@ def _render_vk_candidate_details(
             )
             return
 
-        _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn)
+        _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn, member_code=member_code)
         st.divider()
 
         editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
@@ -1460,7 +1533,28 @@ def _render_vk_candidate_details(
                     "ℹ️ Это сообщение уже было отправлено без автоматического перехода. "
                     "Для него ниже остаётся резервный ручной режим."
                 )
-            if status != "invited" and assignment_id:
+            if status in {"reserved", "prepared"} and not item.get("invited_at") and assignment_id:
+                draft_key = f"vk_first_draft_{owner_id}_{assignment_id}"
+                with st.expander("Обсудить текст с Неоной"):
+                    try:
+                        direction = _vk_draft_direction(f"{draft_key}_form", "Переписать")
+                        if direction is not None:
+                            direction = direction or "Предложи другую формулировку."
+                            revised = prepare_vk_invitation(
+                                assignment_id, member_code, owner_id=owner_id,
+                                ask_openai_fn=ask_openai_fn, direction=direction,
+                            )
+                            _vk_record_discussion(f"{draft_key}_form", direction, revised["invitation_text"])
+                            st.rerun()
+                    except Exception:
+                        st.error("Не удалось переписать сообщение. Прежний черновик сохранён.")
+                if st.checkbox("Подтверждаю удаление черновика", key=f"{draft_key}_confirm"):
+                    if st.button("Удалить черновик", key=f"{draft_key}_delete"):
+                        try:
+                            delete_vk_invitation_draft(assignment_id, owner_id, invitation_text)
+                            st.rerun()
+                        except VKScoutError as exc:
+                            st.error(str(exc))
                 if st.button(
                     "✏️ Редактировать",
                     key=f"vk_edit_{owner_id}_{assignment_id}",
@@ -1634,7 +1728,7 @@ def _render_known_vk_contacts(
             if profile_url:
                 st.link_button("Открыть профиль VK", profile_url, use_container_width=False)
 
-            _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn)
+            _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn, member_code=member_code)
             st.divider()
 
             editing_key = f"vk_known_editing_{owner_id}_{assignment_id}"
