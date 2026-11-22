@@ -1291,19 +1291,36 @@ def _render_vk_new_candidates(owner_id: int, member_code: str, ask_openai_fn=Non
     if not rows:
         st.caption("Новых карточек на сегодня нет.")
         return
-    for row, column in zip(rows, st.columns(len(rows))):
+    for row in rows:
         name = " ".join(filter(None, (row.get("first_name"), row.get("last_name")))) or "VK-кандидат"
-        with column:
-            st.markdown(f"**{name}**")
-            if row.get("score"):
+        with st.container(border=True):
+            st.markdown(f"#### {name}")
+            if row.get("score") is not None:
                 st.caption(f"Оценка {row['score']}/100")
+            _render_vk_profile_link(row)
             label = "Открыть черновик" if row.get("invitation_text") else "Подготовить сообщение"
             with st.expander(label, key=f"vk_fresh_{owner_id}_{row['id']}", on_change="rerun") as details:
                 if details.open:
-                    _render_vk_candidate_details(owner_id, member_code, row, ask_openai_fn=ask_openai_fn)
+                    _render_vk_candidate_details(
+                        owner_id, member_code, row, ask_openai_fn=ask_openai_fn,
+                        show_card_header=False,
+                    )
 
 
-def _render_vk_candidate_details(owner_id: int, member_code: str, item: dict, ask_openai_fn=None) -> None:
+def _render_vk_profile_link(item: dict) -> None:
+    profile_url = str(item.get("profile_url") or "").strip()
+    if profile_url:
+        st.link_button("Зайти на профиль", profile_url)
+
+
+def _render_vk_candidate_details(
+    owner_id: int,
+    member_code: str,
+    item: dict,
+    ask_openai_fn=None,
+    *,
+    show_card_header: bool = True,
+) -> None:
     assignment_id = int(item.get("id") or 0)
     position = int(item.get("daily_position") or 0)
     first_name = str(item.get("first_name") or "").strip()
@@ -1317,7 +1334,6 @@ def _render_vk_candidate_details(owner_id: int, member_code: str, item: dict, as
         queue_meta.get("community_name")
         or "VK-сообщество"
     ).strip()
-    profile_url = str(item.get("profile_url") or "").strip()
     status = str(item.get("status") or "reserved").strip()
     invitation_text = str(item.get("invitation_text") or "").strip()
     auto_neona_link = bool(
@@ -1329,8 +1345,9 @@ def _render_vk_candidate_details(owner_id: int, member_code: str, item: dict, as
     )
 
     title = f"{position}. {full_name}" if position else full_name
-    with st.container(border=True):
-        st.markdown(f"#### {title}")
+    with st.container(border=show_card_header):
+        if show_card_header:
+            st.markdown(f"#### {title}")
         meta = [f"источник: {source_name}"]
         if place:
             meta.append(place)
@@ -1341,12 +1358,8 @@ def _render_vk_candidate_details(owner_id: int, member_code: str, item: dict, as
             + (f" · оценка {score}/100." if score else ".")
         )
 
-        if profile_url:
-            st.link_button(
-                "Открыть профиль VK",
-                profile_url,
-                use_container_width=False,
-            )
+        if show_card_header:
+            _render_vk_profile_link(item)
 
         if status == "skipped":
             st.info(
