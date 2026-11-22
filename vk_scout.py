@@ -2560,14 +2560,9 @@ def fetch_public_vk_posts(
     vk_user_id: int,
     *,
     count: int = 5,
-    max_age_days: int = 180,
+    max_age_days: int | None = 180,
 ) -> list[dict[str, Any]]:
-    """Читает свежие публичные записи, под которыми владелец кабинета реально может комментировать.
-
-    Для утепления мало просто увидеть пост: у него должны быть открыты комментарии.
-    Также не используем очень старые публикации — комментарий к записи многолетней давности
-    выглядит не как естественное знакомство.
-    """
+    """Read public posts open to comments, newest first."""
     wanted = max(1, min(10, int(count)))
     # Берём запас, потому что часть записей может быть закреплена, слишком стара
     # или иметь закрытые комментарии.
@@ -2584,7 +2579,7 @@ def fetch_public_vk_posts(
         return []
 
     now_ts = int(datetime.now(UTC).timestamp())
-    max_age_seconds = max(1, int(max_age_days)) * 24 * 60 * 60
+    max_age_seconds = None if max_age_days is None else max(1, max_age_days) * 86400
 
     result: list[dict[str, Any]] = []
     for post in response.get("items") or []:
@@ -2592,7 +2587,7 @@ def fetch_public_vk_posts(
             continue
 
         post_date = int(post.get("date") or 0)
-        if not post_date or now_ts - post_date > max_age_seconds:
+        if not post_date or (max_age_seconds is not None and now_ts - post_date > max_age_seconds):
             continue
 
         comments = post.get("comments") if isinstance(post.get("comments"), dict) else {}
@@ -2613,9 +2608,7 @@ def fetch_public_vk_posts(
             "url": f"https://vk.com/wall{int(post.get('owner_id') or vk_user_id)}_{post_id}",
             "can_comment": True,
         })
-        if len(result) >= wanted:
-            break
-    return result
+    return sorted(result, key=lambda post: post["date"], reverse=True)[:wanted]
 
 
 def _extract_json_object(answer: Any) -> dict[str, Any]:
@@ -2644,11 +2637,18 @@ def prepare_vk_warmup_comment(
     *,
     ask_openai_fn: Callable[..., Any] | None = None,
     posts_limit: int = 5,
+    owner_id: int | None = None,
+    direction: str = "",
+    member_code: str = "",
+    previous: dict | None = None,
 ) -> dict[str, Any]:
     """Выбирает свежий публичный пост и готовит мягкий человеческий комментарий."""
+    filters = {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1}
+    if owner_id is not None:
+        filters["owner_telegram_id"] = f"eq.{int(owner_id)}"
     rows = _sb_get(
         "agency_vk_assignments",
-        {"id": f"eq.{int(assignment_id)}", "select": "*", "limit": 1},
+        filters,
     )
     if not rows:
         raise VKScoutError("VK-назначение не найдено")
@@ -2669,11 +2669,15 @@ def prepare_vk_warmup_comment(
             int(assignment.get("owner_telegram_id") or 0),
             vk_user_id,
             count=posts_limit,
+            max_age_days=None,
         )
     except VKScoutError as exc:
         raise VKScoutError(f"Не удалось прочитать публичную ленту VK: {exc}") from exc
+    posts = [post for post in posts if str(post.get("material") or "").strip()]
+    if previous:
+        posts = [post for post in posts if post["post_id"] == previous.get("post_id")]
     if not posts:
-        raise VKScoutError("У этого профиля сейчас нет свежих публичных постов с открытыми комментариями. Для утепления выберем другого кандидата.")
+        raise VKScoutError("Нет доступного текста публикации с открытыми комментариями.")
 
     # Неона получает до пяти последних публикаций и сама выбирает лучшую точку касания.
     public_posts = [
@@ -2685,33 +2689,50 @@ def prepare_vk_warmup_comment(
         for item in posts
     ]
 
+    code = str(member_code or "").strip()
+    calculator_available = bool(re.fullmatch(r"W[0-9]+", code))
     parsed: dict[str, Any] = {}
     if ask_openai_fn is not None:
         system = """
 Ты — Неона. Сейчас ты не продаёшь и не предлагаешь Агентство W.
 Твоя задача — мягко познакомить владельца кабинета с человеком через его публичный контент VK.
 
-Из нескольких свежих публикаций выбери ОДНУ, к которой естественнее всего оставить доброжелательный комментарий.
+Из последних доступных публикаций выбери ОДНУ, к которой естественнее всего оставить доброжелательный комментарий.
 Комментарий должен дать человеку маленькую приятность: показать, что его публикацию действительно заметили и прочитали.
 
 Правила:
-- 1–2 естественных предложения;
+- назови конкретную мысль автора и откликнись на неё собственным наблюдением;
+- если владелец дал позицию, сохрани её и его интонацию, включая аргументированное несогласие;
+- отделяй слова автора от мнения владельца, не приписывай автору другие взгляды;
+- верни пустой комментарий, если в публикации недостаточно смысла для содержательного отклика;
+- обычно 1–3 естественных предложения, а если уместен подарок, можно добавить короткую подводку и вопрос;
 - комментарий пишется от лица обычного человека, НЕ от имени Неоны;
-- не упоминать Агентство W, ИИ, бизнес-предложение, партнёрство, доход или встречу;
+- не рекламировать Агентство W, партнёрство, доход или встречу;
+- можно упомянуть ИИ как практический способ освободить время, когда это связано с мыслью автора;
+- если пост по существу о времени, приоритетах, рутине или нагрузке и уместен подарок, установи calculator=true.
+  Сначала развей мысль автора своим наблюдением, затем коротко предложи в подарок калькулятор
+  «Куда уходит ваше время?». При уместности спроси, на что человек потратил бы свободные часы.
+  Если калькулятор не продолжает мысль поста или нет персональной ссылки, установи calculator=false
+  и не предлагай инструмент. Не пиши URL: ссылку добавит кабинет.
 - не льстить чрезмерно и не писать шаблонное «Отличный пост!»;
 - опираться только на реально предоставленное содержание;
-- если пост простой или бытовой — всё равно можно тепло откликнуться на реальную мысль, подпись или сам факт, что человек делится моментом;
+- ни общей похвалы, ни комментария только ради знакомства;
 - если указано «фото/видео без описания», НЕ придумывать, что именно изображено или сказано;
 - вопрос НЕ обязателен. Добавляй один короткий вопрос только если он звучит совершенно естественно и помогает разговору;
 - не использовать фамилию человека.
 
 Верни ТОЛЬКО JSON:
-{"post_id":123,"comment":"..."}
+{"post_id":123,"comment":"...","calculator":false}
 """.strip()
         request = (
             f"Имя человека: {first_name or 'неизвестно'}\n"
             "Свежие публичные публикации:\n"
-            + json.dumps(public_posts, ensure_ascii=False, indent=2)
+            + json.dumps({
+                "posts": public_posts,
+                "calculator_link_available": calculator_available,
+                "owner_direction": direction[:3000],
+                "previous_comment": (previous or {}).get("comment"),
+            }, ensure_ascii=False, indent=2)
         )
         parsed = _extract_json_object(ask_openai_fn(system, request))
 
@@ -2723,11 +2744,11 @@ def prepare_vk_warmup_comment(
     chosen = available_by_id.get(chosen_id) or posts[0]
 
     comment = re.sub(r"\s+", " ", str(parsed.get("comment") or "")).strip()
-    if not comment:
-        if chosen.get("material"):
-            comment = "Спасибо, что поделились — приятно встретить в ленте живую мысль, а не просто очередную публикацию."
-        else:
-            comment = "Спасибо, что делитесь такими моментами — иногда даже небольшая публикация делает ленту чуточку теплее."
+    if not comment or re.search(r"https?://", comment, re.I):
+        raise VKScoutError("Неона пока не подготовила содержательный комментарий. Добавьте свою мысль о посте.")
+
+    if parsed.get("calculator") is True and calculator_available:
+        comment += f"\n\n🎁 https://agency-w-time.onrender.com/?ref={code}"
 
     return {
         "assignment_id": int(assignment_id),
@@ -4024,6 +4045,7 @@ def prepare_vk_invitation(
     *,
     owner_id: int | None = None,
     ask_openai_fn: Callable[..., Any] | None = None,
+    direction: str = "",
 ) -> dict[str, Any]:
     filters = {"id": f"eq.{int(assignment_id)}"}
     if owner_id is not None:
@@ -4035,6 +4057,14 @@ def prepare_vk_invitation(
     if not rows:
         raise VKScoutError("VK-назначение не найдено")
     assignment = rows[0]
+    if assignment.get("invited_at") or assignment.get("status") not in {"reserved", "prepared"}:
+        raise VKScoutError("Изменить можно только неотправленный черновик.")
+    if direction and (owner_id is None or ask_openai_fn is None):
+        raise VKScoutError("Неона сейчас недоступна для переписывания.")
+    filters["invited_at"] = "is.null"
+    filters["status"] = "in.(reserved,prepared)"
+    if assignment.get("updated_at"):
+        filters["updated_at"] = f"eq.{assignment['updated_at']}"
     candidates = _sb_get(
         "agency_vk_candidates",
         {
@@ -4103,7 +4133,15 @@ def prepare_vk_invitation(
             "ДОСТУПНЫЙ КОНТЕКСТ VK:\n"
             + json.dumps(semantic_context, ensure_ascii=False, indent=2)
         )
+        if direction:
+            request += "\n\n" + json.dumps({
+                "previous_draft": re.split(r"\n\n(?:💬|🎁)", str(assignment.get("invitation_text") or ""), maxsplit=1)[0],
+                "owner_direction": direction[:3000],
+            }, ensure_ascii=False)
+            system += "\nПереработай текст по пожеланию владельца в owner_direction, соблюдая правила выше."
         message = str(ask_openai_fn(system, request) or "").strip()
+        if direction and (_vk_first_touch_requires_fallback(message) or re.search(r"https?://", message, re.I)):
+            raise VKScoutError("Неона не подготовила подходящий вариант. Черновик сохранён.")
         if _vk_first_touch_requires_fallback(message):
             message = _vk_safe_first_touch(first_name)
     else:
@@ -4117,9 +4155,12 @@ def prepare_vk_invitation(
     bridge_line = f"💬 Чтобы я сразу увидела ваш ответ: {invitation_link}"
     if invitation_link not in message:
         message = message.rstrip() + "\n\n" + bridge_line
+    code = str(member_code or "").strip()
+    if re.fullmatch(r"W[0-9]+", code):
+        message += f"\n🎁 Калькулятор времени: https://agency-w-time.onrender.com/?ref={code}"
 
     now = datetime.now(UTC).isoformat()
-    _sb_patch(
+    changed = _sb_patch(
         "agency_vk_assignments",
         filters,
         {
@@ -4129,7 +4170,10 @@ def prepare_vk_invitation(
             "prepared_at": now,
             "updated_at": now,
         },
+        return_rows=True,
     )
+    if not changed:
+        raise VKScoutError("Карточка обновилась одновременно. Повторите действие.")
     return {
         "assignment_id": int(assignment_id),
         "vk_user_id": int(candidate["vk_user_id"]),
@@ -4209,6 +4253,93 @@ def _vk_desk_state(owner_id: int, contact_id: int) -> dict:
         "select": "*", "limit": 1,
     })
     return rows[0] if rows else {}
+
+
+def delete_vk_invitation_draft(assignment_id: int, owner_id: int, previous_text: str) -> None:
+    assignment, _ = _vk_assignment_dialog_context(assignment_id, owner_id=owner_id)
+    if assignment.get("invitation_text") != previous_text or not assignment.get("updated_at"):
+        raise VKScoutError("Черновик изменился. Откройте карточку заново.")
+    changed = _sb_patch("agency_vk_assignments", {
+        "id": f"eq.{assignment_id}", "owner_telegram_id": f"eq.{owner_id}",
+        "status": "in.(reserved,prepared)", "invited_at": "is.null",
+        "updated_at": f"eq.{assignment['updated_at']}",
+    }, {
+        "status": "reserved", "invitation_text": None, "invitation_link": None,
+        "prepared_at": None, "updated_at": datetime.now(UTC).isoformat(),
+    }, return_rows=True)
+    if not changed:
+        raise VKScoutError("Черновик уже изменился или был отправлен.")
+
+
+def update_vk_followup_draft(
+    assignment_id: int,
+    owner_id: int,
+    member_code: str,
+    *,
+    action: str,
+    expected_draft: str = "",
+    direction: str = "",
+    ask_openai_fn: Callable[..., Any] | None = None,
+) -> str:
+    assignment, candidate = _vk_assignment_dialog_context(assignment_id, owner_id=owner_id)
+    if not assignment.get("invited_at") or assignment.get("status") not in {"invited", "entered", "lead", "dialogue"}:
+        raise VKScoutError("Для этого кандидата повторное сообщение недоступно.")
+    uid = int(assignment["vk_user_id"])
+    contact_id = _vk_dialog_contact_id(uid, personal=True)
+    state = _vk_desk_state(owner_id, contact_id)
+    context = dict(state.get("context") or {})
+    if context.get("vk_desk_refused_at"):
+        raise VKScoutError("Контакт находится в папке «Отказ».")
+    key = "vk_owner_followup_draft"
+    now = datetime.now(UTC).isoformat()
+    if (context.get(key) or "") != expected_draft:
+        raise VKScoutError("Черновик изменился. Откройте карточку заново.")
+    if action == "draft":
+        if not direction.strip() or ask_openai_fn is None:
+            raise VKScoutError("Нужно задание для Неоны и доступ к модели.")
+        if context.get("vk_owner_followup_sent"):
+            raise VKScoutError("Повторное сообщение уже было отправлено.")
+        body = str(ask_openai_fn(
+            "Ты Неона из Агентства W. Подготовь короткое второе сообщение в личный VK. "
+            "Не утверждай, что человек прочитал или ответил. Не дави, не придумывай факты. "
+            "Верни только текст сообщения без ссылок. При уместности предложи бесплатный калькулятор времени.",
+            json.dumps({
+                "name": candidate.get("first_name"),
+                "first_message": assignment.get("invitation_text"),
+                "previous_draft": context.get(key),
+                "owner_direction": direction[:3000],
+            }, ensure_ascii=False),
+        ) or "").strip()
+        if not body or len(body) > 1000 or re.search(r"https?://", body, re.I):
+            raise VKScoutError("Неона не подготовила подходящий вариант. Черновик сохранён.")
+        code = str(member_code or "").strip()
+        if not re.fullmatch(r"W[0-9]+", code):
+            raise VKScoutError("Не найден персональный код партнёра.")
+        context[key] = (
+            body + f"\n\n🎁 Калькулятор времени: https://agency-w-time.onrender.com/?ref={code}"
+            + f"\n💬 Продолжить разговор: {personal_vk_invitation_link(code)}"
+        )
+    elif action in {"delete", "sent"} and context.get(key):
+        previous = context.pop(key)
+        if action == "sent":
+            context["vk_owner_followup_sent"] = {"text": previous, "at": now}
+    else:
+        raise VKScoutError("Актуальный черновик не найден.")
+
+    if state:
+        filters = {"owner_telegram_id": f"eq.{owner_id}", "contact_telegram_id": f"eq.{contact_id}"}
+        if state.get("updated_at"):
+            filters["updated_at"] = f"eq.{state['updated_at']}"
+        changed = _sb_patch("agency_dialog_states", filters, {"context": context, "updated_at": now}, return_rows=True)
+        if not changed:
+            raise VKScoutError("Диалог обновился одновременно. Повторите действие.")
+    else:
+        _sb_post("agency_dialog_states", {
+            "owner_telegram_id": owner_id, "contact_telegram_id": contact_id,
+            "stage": "idle", "last_incoming_message_id": 0, "greeted": False,
+            "context": context, "updated_at": now,
+        })
+    return str(context.get(key) or "")
 
 
 def _vk_comment_desk_events(owner_id: int) -> dict[int, list[dict]]:
@@ -4401,6 +4532,8 @@ def load_vk_private_desk(owner_id: int) -> list[dict[str, Any]]:
             "legacy_turns": (community.get("relationship_memory") or {}).get("turns") or []
             if legacy and legacy is not manual else [],
             "last_outbound": context.get("vk_manual_last_outbound_text"),
+            "followup_draft": markers.get("vk_owner_followup_draft"),
+            "followup_sent": markers.get("vk_owner_followup_sent"),
             "dialog": {
                 "stage": "idle" if stage == "scheduled" and not meeting else stage,
                 "pending_inbound": context.get("vk_manual_pending_inbound"),
