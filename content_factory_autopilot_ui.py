@@ -110,7 +110,7 @@ def _seed_project(target_profile=None):
         "language": "Русский",
         "tone": "Живой, понятный, профессиональный. Без давления и обещаний гарантированного результата.",
         "goal": "Познакомить целевую аудиторию с Агентством W и пригласить изучить его возможности.",
-        "website": "https://agency-w.streamlit.app/",
+        "website": "https://agency-w-web.onrender.com/",
         "cta": "Узнайте больше об Агентстве W на сайте.",
         "brand_color": "#D4AF37",
         "facts": "",
@@ -606,6 +606,7 @@ def _materials(owner_id, project, jobs, store, service, *, workspace=False):
     # A click already reruns the page and reloads jobs before this function.
     # A second early rerun would discard edits before their widgets render.
     st.button("Обновить материалы", key=f"cf_auto_{owner_id}_{project['id']}_refresh_materials")
+    jobs = [job for job in jobs if not (job.get('kadrian_live_draft') or job.get('reels_live_draft_id'))]
     if not jobs:
         st.info("Готовых материалов пока нет. Опишите задачу в блоке «Что создаём?» или заполните контент-план.")
         return
@@ -827,8 +828,12 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
             if st.session_state.get(style_key) not in {"live", "cartoon"}:
                 st.session_state[style_key] = video_style if video_style in {"live", "cartoon"} else "live"
             video_style = st.radio("Какой ролик создаём?", ["live", "cartoon"],
-                                   format_func=lambda value: "Мультфильм" if value == "cartoon" else "Живое видео",
+                                   format_func=lambda value: "Мультфильм" if value == "cartoon" else "Живой ролик",
                                    horizontal=True, key=style_key)
+            if video_style == "live":
+                from kadrian_live_draft_ui import render_live_draft
+                render_live_draft(owner_id, project, store)
+                return
     if section == "project" or (section == "create" and (format_filter is None or "reel" in format_filter)):
         capabilities = _prepare_video_capabilities(owner_id, project, capabilities)
     jobs = []
