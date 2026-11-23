@@ -1491,6 +1491,7 @@ def _render_vk_candidate_details(
         st.divider()
 
         editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
+        draft_key = f"vk_first_draft_{owner_id}_{assignment_id}"
         if status in {"reserved", "prepared"} and not item.get("invited_at"):
             _render_vk_invitation_chat(
                 owner_id, member_code, assignment_id, invitation_text, ask_openai_fn
