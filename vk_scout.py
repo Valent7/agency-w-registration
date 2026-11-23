@@ -1150,6 +1150,22 @@ def scan_vk_sources(
     }
 
 
+def vk_excluded_profession(candidate: dict[str, Any], context: str = "") -> bool:
+    """Apply the owner's mandatory developer exclusion before scoring or outreach."""
+    raw = candidate.get("raw_profile") or {}
+    text = " ".join([
+        str(candidate.get("status_text") or ""),
+        json.dumps(raw, ensure_ascii=False),
+        str(context or ""),
+    ]).casefold()
+    return bool(re.search(
+        r"разработчик|разработка (?:игр|программ|по\\b|софта|приложений|сайтов|ии)|"
+        r"программист|game.?dev|game developer|software (?:developer|engineer)|"
+        r"web developer|backend developer|frontend developer|full.?stack",
+        text,
+    ))
+
+
 def _deterministic_public_work_signals(candidate: dict[str, Any]) -> dict[str, Any]:
     """Use only explicit public VK work fields as a fallback quality signal.
 
@@ -1591,7 +1607,7 @@ automation_need_signal=true означает, что из его реально�
             # objective evidence of real work processes. It does NOT imply a sale
             # or income; it only satisfies the broad Agency W routine gate.
             work_signals = _deterministic_public_work_signals(source)
-            if work_signals["ai_provider_or_expert"]:
+            if work_signals["ai_provider_or_expert"] or vk_excluded_profession(source):
                 item["ai_provider_or_expert"] = True
                 item["business_relevant"] = False
             elif work_signals["has_public_work"]:
@@ -2142,6 +2158,8 @@ def load_known_vk_contacts(owner_id: int) -> list[dict[str, Any]]:
     for assignment in rows:
         uid = int(assignment["vk_user_id"])
         candidate = by_id.get(uid, {})
+        if vk_excluded_profession(candidate, str(assignment.get("fit_summary") or "")):
+            continue
         result.append({
             **assignment,
             **candidate,
@@ -2662,6 +2680,8 @@ def prepare_vk_warmup_comment(
     if not candidates:
         raise VKScoutError("VK-кандидат не найден")
     candidate = candidates[0]
+    if vk_excluded_profession(candidate, str(assignment.get("fit_summary") or "")):
+        raise VKScoutError("Кандидат исключён из ЦА: разработчики ПО, игр и ИИ.")
     first_name = str(candidate.get("first_name") or "").strip()
 
     try:
