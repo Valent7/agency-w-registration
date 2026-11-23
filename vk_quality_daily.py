@@ -13,6 +13,7 @@ from typing import Any
 from vk_scout import (
     ACTIVE_ASSIGNMENT_STATUSES,
     vk_excluded_profession,
+    _vk_recent_activity,
     _owner_processed_vk_ids,
     _partner_vk_ids,
     _sb_get,
@@ -120,6 +121,7 @@ def ensure_quality_vk_assignments(
         uid
         for uid, candidate in candidates.items()
         if abs(_int(candidate.get("source_community_id"))) in source_ids
+        and _vk_recent_activity(candidate)["active"]
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
 
