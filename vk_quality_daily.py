@@ -143,6 +143,16 @@ def ensure_quality_vk_assignments(
         if assignment_id <= 0:
             continue
         if row.get("invited_at") or row.get("status") in {"invited", "dialogue", "meeting", "partner"}:
+            # Keep contacted people and their dialogue status in history, but
+            # never count them as fresh candidates in today's recommendation five.
+            _sb_patch(
+                "agency_vk_assignments",
+                {"id": f"eq.{assignment_id}", "owner_telegram_id": f"eq.{owner_id}"},
+                {
+                    "daily_position": None,
+                    "updated_at": now_iso,
+                },
+            )
             continue
         if uid in qualified_ids:
             _sb_patch(
