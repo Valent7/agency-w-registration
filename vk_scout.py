@@ -869,7 +869,7 @@ def _vk_recent_activity(
     candidate: dict[str, Any],
     *,
     now: datetime | None = None,
-    max_age_days: int = 3,
+    max_age_days: int = 2,
 ) -> dict[str, Any]:
     """Accept only verifiable VK activity inside the configured recent window.
 
@@ -1429,7 +1429,7 @@ def score_vk_candidates(
         {"select": "vk_user_id,analyzed_at", "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc"},
     )
     already_scored: set[int] = set()
-    recheck_after = datetime.now(UTC) - timedelta(days=3)
+    recheck_after = datetime.now(UTC) - timedelta(days=2)
     partner_vk_ids = _partner_vk_ids()
 
     # Не тратим ИИ-анализ на людей, которых финальный quality gate всё равно
