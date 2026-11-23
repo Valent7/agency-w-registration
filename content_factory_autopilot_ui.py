@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 from hashlib import sha256
+import os
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -28,6 +29,11 @@ STATES = {
 }
 _NEW = "__new_project__"
 VIDEO_MODES = {"live": "Живое видео: люди и действия", "illustrated": "Ролик из иллюстраций"}
+
+
+def _live_reels_enabled(project_id):
+    configured_projects = os.getenv("KADRIAN_LIVE_REELS_PILOT_PROJECTS", "")
+    return str(project_id) in {item.strip() for item in configured_projects.split(",") if item.strip()}
 
 
 def _runtime():
@@ -827,10 +833,12 @@ def render_content_autopilot(owner_id: int, owner_name: str, target_profile=None
             style_key = f"content_studio_{owner_id}_video_style"
             if st.session_state.get(style_key) not in {"live", "cartoon"}:
                 st.session_state[style_key] = video_style if video_style in {"live", "cartoon"} else "live"
+            pilot = _live_reels_enabled(project["id"])
+            live_label = "Живой ролик" if pilot else "Живое видео"
             video_style = st.radio("Какой ролик создаём?", ["live", "cartoon"],
-                                   format_func=lambda value: "Мультфильм" if value == "cartoon" else "Живой ролик",
+                                   format_func=lambda value: "Мультфильм" if value == "cartoon" else live_label,
                                    horizontal=True, key=style_key)
-            if video_style == "live":
+            if pilot and video_style == "live":
                 from kadrian_live_draft_ui import render_live_draft
                 render_live_draft(owner_id, project, store)
                 return

@@ -213,6 +213,10 @@ def _artistic_edit(store, owner, project, draft, key):
 
     with st.expander('Художественный монтаж Reels', expanded=True):
         st.caption('Используйте говорящий клип, уже синхронизированный с сохранённой озвучкой.')
+        speech_ready = local_speech_ready()
+        if not speech_ready:
+            st.caption('Художественный монтаж требует локального распознавания речи. '
+                       'Базовый монтаж готового клипа доступен ниже.')
         source = draft.get('live_art_source')
         with st.form(key + '_art_edit'):
             clip = st.file_uploader('Говорящий клип MP4', type=['mp4'], max_upload_size=50)
@@ -228,7 +232,7 @@ def _artistic_edit(store, owner, project, draft, key):
                 use_room = False
             palette = st.selectbox('Палитра Reels', list(PALETTES))
             music = st.checkbox('Тихая инструментальная музыка', value=True)
-            run = st.form_submit_button('Собрать художественный Reels')
+            run = st.form_submit_button('Собрать художественный Reels', disabled=not speech_ready)
         if not run:
             return
         if not (clip or source):

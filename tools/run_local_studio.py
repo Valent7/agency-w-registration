@@ -29,10 +29,13 @@ def main():
             os.environ.setdefault(setting, str(path))
     store = SQLiteStore(data / 'preview.sqlite3')
     owner = 77
-    if not store.list_projects(owner):
-        store.save_project(owner, {'name': 'Агентство W · локальная проверка'})
+    projects = store.list_projects(owner)
+    if not projects:
+        projects = [store.save_project(owner, {'name': 'Агентство W · локальная проверка'})]
+    pilot_projects = ','.join(str(project['id']) for project in projects)
     st.session_state.setdefault(f'content_studio_{owner}_tool', 'video')
-    with patch('content_factory_autopilot_ui._runtime',
+    with patch.dict(os.environ, {'KADRIAN_LIVE_REELS_PILOT_PROJECTS': pilot_projects}), \
+         patch('content_factory_autopilot_ui._runtime',
                return_value=(store, ContentFactoryService(store), {})), \
          patch('agency_access_control.is_agency_access_revoked', return_value=False):
         render_content_studio(owner, 'Локальная проверка', offline, offline, offline, offline,

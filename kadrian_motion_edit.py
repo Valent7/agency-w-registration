@@ -161,7 +161,7 @@ def _card_icon(word):
     return 'check'
 
 
-def render_frames(root, shots, total, words, palette, still, font, title_cues=()):
+def render_frames(root, shots, total, words, palette, still, font, title_cues=(), *, room=None):
     dark, middle, accent, cream = map(ImageColor.getrgb, palette)
     font_cache = {}
 
@@ -194,13 +194,28 @@ def render_frames(root, shots, total, words, palette, still, font, title_cues=()
     shade = Image.new('RGBA', SIZE)
     shade.putalpha(Image.linear_gradient('L').resize(SIZE).point(lambda x: max(0, x-124)))
     portrait = ImageOps.fit(still, SIZE, centering=(.5,.43)).convert('RGBA')
+    interiors = {}
+    if room:
+        for mode, center, strength in (('list', (.17,.20), .24), ('flow', (.85,.68), .29),
+                                      ('circle', (.8,.33), .17), ('action', (.35,.8), .22),
+                                      ('type', (.65,.14), .15)):
+            w, h = room.size
+            x, y = round(w*.27*center[0]), round(h*.27*center[1])
+            detail = room.crop((x,y,x+round(w*.73),y+round(h*.73)))
+            detail = ImageOps.fit(detail, SIZE).filter(ImageFilter.GaussianBlur(3))
+            interior = Image.blend(base, detail.convert('RGBA'), strength)
+            light = Image.new('RGBA', SIZE)
+            lx = 60 if mode in {'list','type'} else 445
+            ImageDraw.Draw(light).ellipse((lx-147,100,lx+147,490), fill=(255,159,66,75))
+            interior.alpha_composite(light.filter(ImageFilter.GaussianBlur(85)))
+            interiors[mode] = interior
     gold = (252, 189, 69) if palette[2].upper() == '#F1C77D' else accent
     routes = {
-        'circle': (((-28,695),(239,837),(470,609)), ((568,404),(480,227),(391,270))),
-        'list': (((549,670),(513,497),(470,367)),),
-        'type': (((-27,688),(208,673),(371,572)),),
-        'flow': (((-44,645),(45,475),(144,389)),),
-        'action': (((549,690),(388,735),(241,618)),),
+        'circle': (((-40,716),(238,788),(443,645)), ((574,432),(487,199),(411,236))),
+        'list': (((575,691),(510,617),(483,477)),),
+        'type': (((-45,703),(119,672),(285,566)),),
+        'flow': (((-44,683),(97,757),(296,709)),),
+        'action': (((578,683),(459,717),(304,620)),),
     }
     groups = caption_groups(words)
     group_index = shot_index = 0
@@ -213,12 +228,24 @@ def render_frames(root, shots, total, words, palette, still, font, title_cues=()
         shot = shots[shot_index]
         age = (frame - shot.start) / FPS
         mode = shot.mode
-        art = shade.copy() if mode == 'close' else portrait.copy() if mode == 'intro' else base.copy()
+        art = shade.copy() if mode == 'close' else portrait.copy() if mode == 'intro' else interiors.get(mode, base).copy()
         if mode == 'intro':
             art.alpha_composite(shade)
         draw = ImageDraw.Draw(art)
         illumination = Image.new('RGBA', SIZE)
         glows = ImageDraw.Draw(illumination)
+        def bezel(bounds, radius, *, opaque=True):
+            x0, y0, x1, y1 = bounds
+            glows.rounded_rectangle(bounds, radius, outline=(*gold,235), width=13)
+            draw.rounded_rectangle(bounds, radius, fill=dark if opaque else None,
+                                   outline=(120,67,23), width=7)
+            draw.rounded_rectangle((x0+2,y0+2,x1-2,y1-2), max(1,radius-2), outline=gold, width=3)
+            draw.arc((x0+2,y0+2,x0+radius*2,y0+radius*2),180,270,fill=(255,239,180),width=3)
+            draw.line((x0+radius,y0+2,x1-radius,y0+2),fill=(255,239,180),width=2)
+
+        if room and mode == 'close':
+            bounds = (24,42,516,900) if shot_index in (1,7) else (20,35,520,910)
+            bezel(bounds, 30, opaque=False)
         if mode in {'list', 'circle', 'flow', 'action'}:
             for x in (54, 486):
                 for y in range(168, 741, 29):
@@ -235,6 +262,7 @@ def render_frames(root, shots, total, words, palette, still, font, title_cues=()
             glows.arc((112,284,428,600), age*97, age*97+93, fill=(*gold,235), width=14)
             draw.arc((112,284,428,600), age*97, age*97+93, fill=(255,234,157), width=5)
             word = shot.words[0].text.strip('.,!?')
+            bezel((137,192,403,275), 25)
             text(draw, 'АГЕНТ' if word.lower() in {'агенту','агента','агентом'} else word.upper(),
                  CENTER, 235, 60, cream)
             for offset, icon in enumerate(('spark', 'file', 'check')):
@@ -250,8 +278,7 @@ def render_frames(root, shots, total, words, palette, still, font, title_cues=()
                     continue
                 x = 88 + 45 * (1-progress)
                 y = 365 + 111*index
-                glows.rounded_rectangle((x,y-36,540-x,y+36),17,outline=(*gold,205),width=10)
-                draw.rounded_rectangle((x,y-36,540-x,y+36), 17, fill=dark, outline=gold, width=3)
+                bezel((x,y-36,540-x,y+36), 18)
                 _icon(draw, _card_icon(word.text), x+43, y, accent)
                 text(draw, word.text.strip('.,!?').upper(), CENTER+24, y, 34, cream, 207)
         elif mode == 'flow':
@@ -261,20 +288,17 @@ def render_frames(root, shots, total, words, palette, still, font, title_cues=()
                 if not reveal:
                     continue
                 y = 333 + 233*index
-                if index:
-                    draw.line((CENTER,441,CENTER,441+reveal*63), fill=accent, width=3)
-                    if reveal > .94:
-                        draw.polygon((CENTER-6,498,CENTER+6,498,CENTER,507),fill=accent)
                 glows.ellipse((232,y-38,308,y+38),outline=(*gold,220),width=10)
                 draw.ellipse((232,y-38,308,y+38),fill=dark,outline=gold,width=3)
                 _icon(draw, 'spark' if index == 0 else 'check', CENTER, y, accent)
                 label = 'ЗАПРОС' if word.text.lower().startswith('говорит') else word.text.strip('.,!?').upper()
-                text(draw, label, CENTER, y+75, 46, cream)
+                bezel((115,y+43,425,y+107),19)
+                text(draw, label, CENTER, y+75, 46, cream, 281)
         elif mode == 'type':
             word = shot.words[0].text.strip('.,!?').upper()
             growth = _ease(age/.35)
-            text(draw, word, CENTER, 467+22*(1-growth), round(42+28*growth), cream, 430)
-            draw.line((CENTER-72*growth,519,CENTER+72*growth,519),fill=accent,width=3)
+            bezel((33,412,507,523),24)
+            text(draw, word, CENTER, 467+15*(1-growth), round(42+28*growth), cream, 428)
         elif mode == 'action':
             label = next((line.strip('→↓ ') for line in reversed(title_cues)
                           if re.search(TOPICS['action'], line.lower())), '')
@@ -283,14 +307,15 @@ def render_frames(root, shots, total, words, palette, still, font, title_cues=()
             glows.rounded_rectangle((218,y-52,322,y+52),23,outline=(*gold,230),width=13)
             draw.rounded_rectangle((218,y-52,322,y+52),23,outline=gold,width=4)
             _icon(draw, 'calculator' if 'калькулятор' in label.lower() else 'check', CENTER, y, accent)
-            text(draw, label.upper(), CENTER, 500, 64, cream, 401)
+            bezel((39,402,501,584),28)
+            text(draw, label.upper(), CENTER, 493, 60, cream, 405)
 
-        if mode in {'circle','list','flow','action'}:
+        if mode != 'intro':
             art.alpha_composite(illumination.filter(ImageFilter.GaussianBlur(11)))
             if mode == 'circle':
                 draw.ellipse((146,318,394,566), fill=(0,0,0,0))
         for index, route in enumerate(routes.get(mode, ())):
-            progress = (age - .12 - index*.84) / 1.53
+            progress = (age - .07 - index*.83) / 1.58
             if 0 < progress < 1:
                 art.alpha_composite(comet_frame(progress, route))
         if shot_index and age < .23:

@@ -89,7 +89,7 @@ def _music(root, seconds):
         out.writeframes(pcm.tobytes())
 
 
-def render_art_edit(clip, voice, still, palette_name, title_cues=(), *, with_music=True, approved_script="", room=None):
+def render_art_edit(clip, voice, still, palette_name, title_cues=(), *, with_music=True, approved_script="", room=None, matte=None):
     """Return a finished MP4 from local input bytes. The clip must already match the voice."""
     palette = PALETTES[palette_name]
     with TemporaryDirectory(prefix='kadrian-art-') as folder:
@@ -103,9 +103,13 @@ def render_art_edit(clip, voice, still, palette_name, title_cues=(), *, with_mus
         words = _transcribe_words(root, approved_script)
         total = round(min(length, duration) * 30)
         shots = direction(words, total)
+        interior = None
+        if room:
+            with Image.open(BytesIO(room)) as room_source:
+                interior = ImageOps.exif_transpose(room_source).convert('RGB')
         with Image.open(BytesIO(still)) as source:
             render_frames(root, shots, total, words, palette, ImageOps.exif_transpose(source),
-                          _font, title_cues)
+                          _font, title_cues, room=interior)
         args = ['-filter_complex_threads','2','-protocol_whitelist','file,pipe','-i','clip.mp4',
                 '-protocol_whitelist','file,pipe','-i','voice',
                 '-framerate','30','-i','motion/%05d.png']
@@ -117,12 +121,19 @@ def render_art_edit(clip, voice, still, palette_name, title_cues=(), *, with_mus
                    'crop=1080:1920,setsar=1')
         next_input = 3
         if room:
-            width, height = prepare_room_matte(root, room, vid, total)
+            if matte:
+                mask_file, width, height = matte
+                if Path(mask_file).stat().st_size != width * height * total:
+                    raise ValueError('Маска ведущей не совпала с длиной говорящего клипа.')
+                (root/'presenter.gray').symlink_to(Path(mask_file).resolve())
+                ImageOps.fit(interior, (1080,1920)).save(root/'room.jpg', quality=94)
+            else:
+                width, height = prepare_room_matte(root, room, vid, total)
             args += ['-f','rawvideo','-pixel_format','gray','-video_size',f'{width}x{height}',
                      '-framerate','30','-i','presenter.gray','-loop','1','-framerate','30','-i','room.jpg']
             room_inputs = ''.join(f'[room{i}]' for i, _ in camera)
             graph += [picture+'[live]',
-                      "[3:v]scale=1080:1920:flags=bilinear,format=gray,lut=y='clip((val-23)*255/222,0,255)'[alpha]",
+                      "[3:v]format=gray,erosion,scale=1080:1920:flags=bilinear,lut=y='clip((val-23)*255/222,0,255)'[alpha]",
                       f'[live][alpha]alphamerge{split}{inputs}',
                       f'[4:v]setsar=1{split}{room_inputs}']
             next_input = 5
@@ -140,12 +151,19 @@ def render_art_edit(clip, voice, still, palette_name, title_cues=(), *, with_mus
                     graph.append(trim+
                                  f'crop=540:540:270:0,scale=496:496,pad=1080:1920:292:636:color=0x00000000,setsar=1[{label}]')
                 if room:
-                    graph += [f'[room{i}]trim=end_frame={count},setpts=PTS-STARTPTS[plate{i}]',
+                    framing = {
+                        1: 'null',
+                        4: 'crop=948:1686:132:14,scale=1080:1920',
+                        5: 'crop=920:1636:0:188,scale=1080:1920',
+                        7: 'crop=1008:1792:0:120,scale=1080:1920',
+                        9: 'crop=980:1742:96:100,scale=1080:1920',
+                    }.get(i, 'null')
+                    graph += [f'[room{i}]trim=end_frame={count},setpts=PTS-STARTPTS,{framing},setsar=1[plate{i}]',
                               f'[plate{i}][{label}]overlay=shortest=1,format=yuv420p[v{i}]']
             else:
                 graph.append(f'color=c=black:s=1080x1920:r=30,trim=end_frame={count}[v{i}]')
-        graph += [''.join(f'[v{i}]' for i in range(len(shots))) + f'concat=n={len(shots)}:v=1:a=0[base]',
-                  '[2:v]scale=1080:1920:flags=lanczos[graphics]',
+        graph += [''.join(f'[v{i}]' for i in range(len(shots))) + f'concat=n={len(shots)}:v=1:a=0,settb=1/30,setpts=N[base]',
+                  '[2:v]scale=1080:1920:flags=lanczos,settb=1/30,setpts=N[graphics]',
                   '[base][graphics]overlay=shortest=1,format=yuv420p[out]']
         if with_music:
             _music(root, duration)
