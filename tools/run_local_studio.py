@@ -20,6 +20,13 @@ def main():
     st.set_page_config(page_title='Студия «Контент» · локальный кабинет', layout='wide')
     st.caption('Локальный кабинет на этом Mac · 127.0.0.1:8765')
     data = Path(os.environ.get('KADRIAN_LOCAL_DATA', str(Path.home() / '.agency-w-content-local')))
+    local_tools = {
+        'KADRIAN_WHISPER_CLI': data / 'tools/whisper-build/bin/whisper-cli',
+        'KADRIAN_WHISPER_MODEL': data / 'models/ggml-base.bin',
+    }
+    for setting, path in local_tools.items():
+        if path.is_file():
+            os.environ.setdefault(setting, str(path))
     store = SQLiteStore(data / 'preview.sqlite3')
     owner = 77
     if not store.list_projects(owner):
