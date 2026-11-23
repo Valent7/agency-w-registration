@@ -1487,7 +1487,11 @@ def _render_vk_candidate_details(
             )
             return
 
-        _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn, member_code=member_code)
+        with st.expander("Дополнительно: комментарий к публикации", expanded=False):
+            _render_vk_warmup(
+                owner_id, assignment_id, first_name,
+                ask_openai_fn=ask_openai_fn, member_code=member_code,
+            )
         st.divider()
 
         editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
@@ -1497,7 +1501,7 @@ def _render_vk_candidate_details(
                 owner_id, member_code, assignment_id, invitation_text, ask_openai_fn
             )
         if invitation_text:
-            st.markdown("**Сообщение Неоны:**")
+            st.markdown("**Черновик Неоны · ещё не отправлен:**")
 
             if st.session_state.get(editing_key, False):
                 edited_text = st.text_area(
@@ -1599,8 +1603,6 @@ def _render_vk_candidate_details(
                 ):
                     st.session_state[editing_key] = True
                     st.rerun()
-        elif status in {"reserved", "prepared"} and assignment_id:
-            st.caption("Откройте чат с Неоной выше, чтобы подготовить первое сообщение.")
 
         cols = st.columns(2)
         with cols[0]:
@@ -1751,7 +1753,7 @@ def _render_known_vk_contacts(
 
             editing_key = f"vk_known_editing_{owner_id}_{assignment_id}"
             if invitation_text:
-                st.markdown("**Сообщение Неоны:**")
+                st.markdown("**Черновик Неоны · ещё не отправлен:**")
                 if st.session_state.get(editing_key, False):
                     edited_text = st.text_area(
                         "Отредактируйте сообщение перед отправкой",
