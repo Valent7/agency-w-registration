@@ -125,6 +125,15 @@ def ensure_quality_vk_assignments(
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
 
+    # Within the quality threshold, prioritize people whose public activity is newest.
+    def _activity_order(uid: int) -> tuple[int, int, int]:
+        activity = _vk_recent_activity(candidates.get(uid) or {})
+        age_hours = activity.get("age_hours")
+        freshness = int(age_hours) if age_hours is not None else 10**6
+        return (freshness, -_int(score_by_id[uid].get("score")), uid)
+
+    ordered_ids.sort(key=_activity_order)
+
     # Old sequential cards are not allowed to occupy today's working slots
     # unless they have actually passed Neonia's quality gate.
     now_iso = datetime.now(UTC).isoformat()
