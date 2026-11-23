@@ -865,6 +865,64 @@ def _normalize_vk_user(row: dict[str, Any], source_community_id: int | None = No
     }
 
 
+def _vk_recent_activity(
+    candidate: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    max_age_days: int = 3,
+) -> dict[str, Any]:
+    """Accept only verifiable VK activity inside the configured recent window.
+
+    VK may hide last_seen. A recent visible public comment can confirm activity;
+    profile refresh time alone never proves that someone visited VK.
+    """
+    raw = candidate.get("raw_profile") if isinstance(candidate.get("raw_profile"), dict) else {}
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+
+    # online is a snapshot, so accept it only when fetched recently.
+    if raw.get("online") in (True, 1, "1"):
+        enriched = candidate.get("last_enriched_at")
+        try:
+            enriched_at = datetime.fromisoformat(str(enriched).replace("Z", "+00:00"))
+            if enriched_at.tzinfo is None:
+                enriched_at = enriched_at.replace(tzinfo=UTC)
+            if timedelta(0) <= current - enriched_at <= timedelta(hours=12):
+                return {"active": True, "source": "online", "age_hours": 0}
+        except (TypeError, ValueError):
+            pass
+
+    last_seen = raw.get("last_seen") if isinstance(raw.get("last_seen"), dict) else {}
+    activity_values = [
+        (last_seen.get("time"), "последний визит VK"),
+        (raw.get("public_activity_at"), "публичный комментарий"),
+    ]
+    for value, source in activity_values:
+        if value in (None, ""):
+            continue
+        try:
+            if isinstance(value, (int, float)) or str(value).strip().isdigit():
+                activity_at = datetime.fromtimestamp(float(value), UTC)
+            else:
+                activity_at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                if activity_at.tzinfo is None:
+                    activity_at = activity_at.replace(tzinfo=UTC)
+        except (OverflowError, OSError, TypeError, ValueError):
+            continue
+        age = current - activity_at
+        if age < -timedelta(minutes=10):
+            continue
+        if age <= timedelta(days=max(1, int(max_age_days))):
+            return {
+                "active": True,
+                "source": source,
+                "at": activity_at.isoformat(),
+                "age_hours": max(0, int(age.total_seconds() // 3600)),
+            }
+    return {"active": False, "source": "", "age_hours": None}
+
+
 def fetch_vk_active_commenters(
     source: dict[str, Any] | int,
     *,
@@ -889,6 +947,7 @@ def fetch_vk_active_commenters(
     user_ids: list[int] = []
     seen: set[int] = set()
     comment_samples: dict[int, list[str]] = {}
+    comment_activity_at: dict[int, int] = {}
     for post in posts:
         if not isinstance(post, dict):
             continue
@@ -936,6 +995,12 @@ def fetch_vk_active_commenters(
                 continue
             if uid <= 0:
                 continue
+            try:
+                comment_ts = int(row.get("date") or 0)
+            except (TypeError, ValueError):
+                comment_ts = 0
+            if comment_ts > comment_activity_at.get(uid, 0):
+                comment_activity_at[uid] = comment_ts
             comment_text = " ".join(str(row.get("text") or "").split()).strip()
             if comment_text:
                 bucket = comment_samples.setdefault(uid, [])
@@ -964,7 +1029,11 @@ def fetch_vk_active_commenters(
                 if isinstance(enriched.get("raw_profile"), dict)
                 else {}
             )
-            samples = comment_samples.get(int(enriched.get("vk_user_id") or 0)) or []
+            profile_uid = int(enriched.get("vk_user_id") or 0)
+            activity_ts = comment_activity_at.get(profile_uid)
+            if activity_ts:
+                raw_profile["public_activity_at"] = activity_ts
+            samples = comment_samples.get(profile_uid) or []
             if samples:
                 raw_profile["public_comment_samples"] = samples[:3]
             enriched["raw_profile"] = raw_profile
@@ -1409,6 +1478,7 @@ def score_vk_candidates(
                     candidate for candidate in page
                     if str(candidate.get("vk_user_id") or "").isdigit()
                     and int(candidate.get("vk_user_id")) not in unavailable_ids
+                    and _vk_recent_activity(candidate)["active"]
                 ],
                 key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
             )
@@ -1444,6 +1514,8 @@ def score_vk_candidates(
             except (TypeError, ValueError):
                 continue
             if uid in already_scored or uid in unavailable_ids or uid in selected_ids:
+                continue
+            if not _vk_recent_activity(candidate)["active"]:
                 continue
             rows.append(candidate)
             selected_ids.add(uid)
@@ -1488,6 +1560,7 @@ def score_vk_candidates(
                     for candidate in rows
                     if str(candidate.get("vk_user_id") or "").isdigit()
                     and int(candidate.get("vk_user_id")) not in unavailable_ids
+                    and _vk_recent_activity(candidate)["active"]
                 ],
                 key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
             )[:analysis_limit]
