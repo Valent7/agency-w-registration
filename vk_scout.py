@@ -1230,7 +1230,9 @@ def vk_excluded_profession(candidate: dict[str, Any], context: str = "") -> bool
     return bool(re.search(
         r"разработчик|разработка (?:игр|программ|по\\b|софта|приложений|сайтов|ии)|"
         r"программист|game.?dev|game developer|software (?:developer|engineer)|"
-        r"web developer|backend developer|frontend developer|full.?stack",
+        r"web developer|backend developer|frontend developer|full.?stack|"
+        r"ai (?:developer|engineer)|artificial intelligence engineer|"
+        r"machine learning engineer|\\bml engineer\\b|prompt engineer",
         text,
     ))
 
