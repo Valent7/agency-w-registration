@@ -14,6 +14,7 @@ from vk_scout import (
     ACTIVE_ASSIGNMENT_STATUSES,
     vk_excluded_profession,
     _vk_recent_activity,
+    _deterministic_public_work_signals,
     _owner_processed_vk_ids,
     _partner_vk_ids,
     _sb_get,
@@ -125,19 +126,54 @@ def ensure_quality_vk_assignments(
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
 
-    # Within the quality threshold, prioritize people whose public activity is newest.
-    def _activity_order(uid: int) -> tuple[int, int, int]:
+    def _has_network_evidence(uid: int) -> bool:
+        candidate = candidates.get(uid) or {}
+        score_row = score_by_id.get(uid) or {}
+        if _deterministic_public_work_signals(candidate).get("network_business_signal"):
+            return True
+        signals = score_row.get("positive_signals")
+        if not isinstance(signals, list):
+            signals = []
+        evidence = " ".join(str(item) for item in signals).casefold()
+        return "основной сегмент: подтверждён сетевой бизнес" in evidence
+
+    # Normalize legacy scores to the current audience segments before ranking.
+    for uid in ordered_ids:
+        old_score = _int(score_by_id[uid].get("score"))
+        score_by_id[uid]["score"] = max(60, old_score) if _has_network_evidence(uid) else min(59, old_score)
+
+    # Network marketers come first; freshness and score order candidates within each segment.
+    def _activity_order(uid: int) -> tuple[int, int, int, int]:
         activity = _vk_recent_activity(candidates.get(uid) or {})
         age_hours = activity.get("age_hours")
         freshness = int(age_hours) if age_hours is not None else 10**6
-        return (freshness, -_int(score_by_id[uid].get("score")), uid)
+        segment = 0 if _has_network_evidence(uid) else 1
+        return (segment, freshness, -_int(score_by_id[uid].get("score")), uid)
 
     ordered_ids.sort(key=_activity_order)
+
+    # Keep the daily queue aligned with the primary audience. If fresh,
+    # eligible network marketers are waiting, secondary cards yield the slot.
+    # Their assignment history and any prepared draft remain intact.
+    today_rows = _today_raw(owner_id)
+    today_ids = {_int(row.get("vk_user_id")) for row in today_rows}
+    processed = _owner_processed_vk_ids(owner_id)
+    global_used = _used_vk_ids()
+    partner_ids = _partner_vk_ids()
+    network_waitlist = [
+        uid for uid in ordered_ids
+        if _has_network_evidence(uid)
+        and uid in qualified_ids
+        and uid not in today_ids
+        and uid not in processed
+        and uid not in global_used
+        and uid not in partner_ids
+    ]
 
     # Old sequential cards are not allowed to occupy today's working slots
     # unless they have actually passed Neonia's quality gate.
     now_iso = datetime.now(UTC).isoformat()
-    for row in _today_raw(owner_id):
+    for row in today_rows:
         assignment_id = _int(row.get("id"))
         uid = _int(row.get("vk_user_id"))
         if assignment_id <= 0:
@@ -155,6 +191,17 @@ def ensure_quality_vk_assignments(
             )
             continue
         if uid in qualified_ids:
+            if not _has_network_evidence(uid) and network_waitlist:
+                # Remove only the current-day slot. Keep status, draft text and
+                # history so the secondary profile can be reviewed later.
+                _sb_patch(
+                    "agency_vk_assignments",
+                    {"id": f"eq.{assignment_id}", "owner_telegram_id": f"eq.{owner_id}"},
+                    {"daily_position": None, "updated_at": now_iso},
+                )
+                today_ids.discard(uid)
+                network_waitlist.pop(0)
+                continue
             _sb_patch(
                 "agency_vk_assignments",
                 {"id": f"eq.{assignment_id}", "owner_telegram_id": f"eq.{owner_id}"},
@@ -184,9 +231,6 @@ def ensure_quality_vk_assignments(
     }
     free_positions = [p for p in range(1, limit + 1) if p not in used_positions]
 
-    processed = _owner_processed_vk_ids(owner_id)
-    global_used = _used_vk_ids()
-    partner_ids = _partner_vk_ids()
     created = 0
     skipped_not_qualified = 0
     skipped_active = 0
@@ -281,6 +325,7 @@ def ensure_quality_vk_assignments(
     final_rows = load_today_vk_assignments(owner_id)
     count = min(len(final_rows), limit)
     final_ids = [_int(row.get("vk_user_id")) for row in final_rows]
+    network_count = sum(1 for uid in final_ids if _has_network_evidence(uid))
     return {
         "ok": True,
         "assignments": final_rows[:limit],
@@ -288,6 +333,9 @@ def ensure_quality_vk_assignments(
         "created": created,
         "complete": count >= limit,
         "qualified_pool": len(qualified_ids),
+        "network_qualified_pool": sum(1 for uid in qualified_ids if _has_network_evidence(uid)),
+        "network_count": network_count,
+        "secondary_count": count - network_count,
         "diagnostics": {
             "scores_gte_min": len(ordered_ids),
             "qualified_source_pool": len(qualified_ids),
