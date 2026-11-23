@@ -102,18 +102,27 @@ class VKWorkDeskTests(unittest.TestCase):
 
     def test_fresh_profile_after_old_5000_row_cutoff_is_evaluated(self):
         target_id = 5001
+        active_timestamp = int(datetime.now(timezone.utc).timestamp())
+
         def database(table, filters):
             self.assertEqual(table, "agency_vk_candidates")
             i = filters["offset"]
             return [
-                {"vk_user_id": uid, "source_community_id": 22}
+                {
+                    "vk_user_id": uid,
+                    "source_community_id": 22,
+                    "raw_profile": {"last_seen": {"time": active_timestamp}},
+                }
                 for uid in range(i + 1, min(i + 201, target_id + 1))
             ]
 
         with patch.multiple(
             vk_scout,
             load_vk_sources=lambda owner: [{"community_id": 22}],
-            _vk_owner_pages=lambda *args: [{"vk_user_id": uid} for uid in range(1, target_id)],
+            _vk_owner_pages=lambda *args: [
+                {"vk_user_id": uid, "analyzed_at": datetime.now(timezone.utc).isoformat()}
+                for uid in range(1, target_id)
+            ],
             _owner_processed_vk_ids=lambda owner: set(),
             _used_vk_ids=lambda: set(),
             _partner_vk_ids=lambda: set(),
