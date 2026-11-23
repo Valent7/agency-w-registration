@@ -228,6 +228,7 @@ def _library(owner_id, owner_name, target_profile, render_manual, *, store, serv
             jobs = store.list_jobs(owner_id, project["id"], limit=100)
         except Exception:
             pass
+    jobs = [job for job in jobs if not (job.get('kadrian_live_draft') or job.get('reels_live_draft_id'))]
     detail = st.session_state.get(f"content_studio_{owner_id}_detail")
     if detail:
         selected = next((item for item in jobs if item["id"] == detail), None)
@@ -425,7 +426,7 @@ def render_content_studio(owner_id, owner_name, ask_ai_fn, generate_illustration
             if tool == "video":
                 if st.button("Создать своё по видео-образцу", key=f"studio_video_{owner_id}_reference", type="primary"):
                     _navigate(owner_id, "reference")
-                st.caption("Или опишите собственную идею ниже. Создание запускается только по вашей кнопке.")
+                st.caption("Или подготовьте собственный ролик ниже.")
             render_content_autopilot(
                 owner_id,
                 owner_name,

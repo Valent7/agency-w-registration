@@ -244,7 +244,7 @@ def _secure_response(response):
 def create_app(store, config: dict) -> Starlette:
     """Create an OAuth service over the same encrypted store as the UI/worker."""
     config = dict(config)
-    return_url = _https_url(config.get("CONTENT_FACTORY_RETURN_URL") or "https://agency-w.streamlit.app/")
+    return_url = _https_url(config.get("CONTENT_FACTORY_RETURN_URL") or "https://agency-w-web.onrender.com/")
     used_nonces = {}
     nonce_lock = threading.Lock()
 

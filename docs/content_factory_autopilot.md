@@ -145,7 +145,7 @@ Health Check Path — `/health`; ожидается HTTP 200 с `{"status":"ok"}
 Введите **этот адрес без пути и query string** в `CONTENT_FACTORY_SERVICE_URL`
 на Web Service и в Secrets Streamlit. Не выводите адрес из желаемого имени сервиса:
 имя на Render может получить суффикс. `CONTENT_FACTORY_RETURN_URL` по умолчанию —
-`https://agency-w.streamlit.app/`; при другом адресе кабинета обновите его.
+`https://agency-w-web.onrender.com/`; при другом адресе кабинета обновите его.
 После изменения переменных перезапустите соответствующие сервисы.
 
 Оставьте одинаковые ключи Supabase и шифрования в обоих Render-сервисах и Streamlit.

@@ -378,7 +378,7 @@ def quote_music(duration_ms: int, *, api_key: str | None = None) -> dict:
 
 
 def _return_url(base_url: str, status: str) -> str:
-    parts = urlsplit(str(base_url or "https://agency-w.streamlit.app/"))
+    parts = urlsplit(str(base_url or "https://agency-w-web.onrender.com/"))
     query = urlencode({"wallet_payment": status})
     return urlunsplit((parts.scheme or "https", parts.netloc, parts.path or "/", query, ""))
 
@@ -390,7 +390,7 @@ def create_stripe_checkout(owner_id: int, project_id: str, amount_cents: int, *,
     secret = str(secret_key or os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not secret:
         raise BillingError("Онлайн-пополнение ещё не подключено владельцем Агентства.")
-    base = str(return_url or os.getenv("AGENCY_W_APP_URL") or "https://agency-w.streamlit.app/").strip()
+    base = str(return_url or os.getenv("AGENCY_W_APP_URL") or "https://agency-w-web.onrender.com/").strip()
     data = {
         "mode": "payment",
         "success_url": _return_url(base, "success"),
