@@ -14,6 +14,7 @@ from vk_scout import (
     ACTIVE_ASSIGNMENT_STATUSES,
     vk_excluded_profession,
     _vk_recent_activity,
+    _deterministic_public_work_signals,
     _owner_processed_vk_ids,
     _partner_vk_ids,
     _sb_get,
@@ -125,12 +126,29 @@ def ensure_quality_vk_assignments(
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
 
-    # Within the quality threshold, prioritize people whose public activity is newest.
-    def _activity_order(uid: int) -> tuple[int, int, int]:
+    def _has_network_evidence(uid: int) -> bool:
+        candidate = candidates.get(uid) or {}
+        score_row = score_by_id.get(uid) or {}
+        if _deterministic_public_work_signals(candidate).get("network_business_signal"):
+            return True
+        signals = score_row.get("positive_signals")
+        if not isinstance(signals, list):
+            signals = []
+        evidence = " ".join(str(item) for item in signals).casefold()
+        return "основной сегмент: подтверждён сетевой бизнес" in evidence
+
+    # Normalize legacy scores to the current audience segments before ranking.
+    for uid in ordered_ids:
+        old_score = _int(score_by_id[uid].get("score"))
+        score_by_id[uid]["score"] = max(60, old_score) if _has_network_evidence(uid) else min(59, old_score)
+
+    # Network marketers come first; freshness and score order candidates within each segment.
+    def _activity_order(uid: int) -> tuple[int, int, int, int]:
         activity = _vk_recent_activity(candidates.get(uid) or {})
         age_hours = activity.get("age_hours")
         freshness = int(age_hours) if age_hours is not None else 10**6
-        return (freshness, -_int(score_by_id[uid].get("score")), uid)
+        segment = 0 if _has_network_evidence(uid) else 1
+        return (segment, freshness, -_int(score_by_id[uid].get("score")), uid)
 
     ordered_ids.sort(key=_activity_order)
 
