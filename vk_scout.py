@@ -1429,6 +1429,7 @@ def score_vk_candidates(
         {"select": "vk_user_id,analyzed_at", "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc"},
     )
     already_scored: set[int] = set()
+    recheck_after = datetime.now(UTC) - timedelta(days=3)
     partner_vk_ids = _partner_vk_ids()
 
     # Не тратим ИИ-анализ на людей, которых финальный quality gate всё равно
@@ -1442,9 +1443,20 @@ def score_vk_candidates(
 
     for item in scored_rows:
         try:
-            already_scored.add(int(item.get("vk_user_id")))
+            uid = int(item.get("vk_user_id"))
         except (TypeError, ValueError):
-            pass
+            continue
+        analyzed_at = item.get("analyzed_at")
+        try:
+            analyzed_time = datetime.fromisoformat(str(analyzed_at).replace("Z", "+00:00"))
+            if analyzed_time.tzinfo is None:
+                analyzed_time = analyzed_time.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            analyzed_time = None
+        # Refresh old scores periodically so someone who has become active again
+        # can return to the queue based on new VK activity evidence.
+        if analyzed_time is not None and analyzed_time >= recheck_after:
+            already_scored.add(uid)
 
     rows: list[dict[str, Any]] = []
 
