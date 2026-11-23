@@ -306,7 +306,7 @@ def _score_until_daily_five(
     daily_limit: int,
     min_score: int,
     analysis_limit: int,
-    max_rounds: int = 25,
+    max_rounds: int = 100,
     priority_ids: list[int] | None = None,
 ) -> tuple[dict[str, Any], int, int | None]:
     """Keep scoring fresh VK profiles until today's 5/5 is complete or pool is exhausted."""
@@ -420,14 +420,14 @@ def top_up_vk_owner_now(
         daily_limit=max(1, min(5, int(daily_limit))),
         min_score=max(0, min(100, int(min_score))),
         analysis_limit=max(5, min(100, int(analysis_limit))),
-        max_rounds=2,
+        max_rounds=100,
     )
     scan_result = {"candidates_found": 0}
     if not prepared.get("complete"):
         try:
             scan_result = scan_vk_sources(
                 owner_id,
-                per_source=200,
+                per_source=1000,
                 max_sources=min(5, len(sources)),
                 include_active_context=True,
             )
@@ -442,7 +442,7 @@ def top_up_vk_owner_now(
                 daily_limit=max(1, min(5, int(daily_limit))),
                 min_score=max(0, min(100, int(min_score))),
                 analysis_limit=max(5, min(100, int(analysis_limit))),
-                max_rounds=3,
+                max_rounds=100,
                 priority_ids=[
                     int(x) for x in (scan_result.get("active_context_ids") or [])
                     if str(x).isdigit()
@@ -615,7 +615,7 @@ def run_once() -> dict[str, int]:
                 daily_limit=daily_limit,
                 min_score=min_score,
                 analysis_limit=analysis_limit,
-                max_rounds=2,
+                max_rounds=100,
             )
             stats["analyzed"] += analyzed_total
             scan_result = {"candidates_found": 0, "errors": []}
@@ -624,7 +624,7 @@ def run_once() -> dict[str, int]:
                 try:
                     scan_result = scan_vk_sources(
                         owner_id,
-                        per_source=200,
+                        per_source=1000,
                         max_sources=min(5, len(sources)),
                         include_active_context=True,
                     )
@@ -645,7 +645,7 @@ def run_once() -> dict[str, int]:
                         daily_limit=daily_limit,
                         min_score=min_score,
                         analysis_limit=analysis_limit,
-                        max_rounds=17,
+                        max_rounds=100,
                         priority_ids=[
                             int(x) for x in (scan_result.get("active_context_ids") or [])
                             if str(x).isdigit()
@@ -677,7 +677,7 @@ def run_once() -> dict[str, int]:
                     os.environ["VK_SCOUT_ACCESS_TOKEN"] = scout_access_token
                     scan_result = scan_vk_sources(
                         owner_id,
-                        per_source=200,
+                        per_source=1000,
                         max_sources=min(5, len(sources)),
                         include_active_context=True,
                     )
@@ -697,7 +697,7 @@ def run_once() -> dict[str, int]:
                             os.environ["VK_SCOUT_ACCESS_TOKEN"] = fallback_access_token
                             scan_result = scan_vk_sources(
                                 owner_id,
-                                per_source=200,
+                                per_source=1000,
                                 max_sources=min(5, len(sources)),
                                 include_active_context=True,
                             )
