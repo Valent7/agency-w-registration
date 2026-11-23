@@ -13,6 +13,7 @@ from typing import Any
 from vk_scout import (
     ACTIVE_ASSIGNMENT_STATUSES,
     vk_excluded_profession,
+    _vk_recent_activity,
     _owner_processed_vk_ids,
     _partner_vk_ids,
     _sb_get,
@@ -120,8 +121,18 @@ def ensure_quality_vk_assignments(
         uid
         for uid, candidate in candidates.items()
         if abs(_int(candidate.get("source_community_id"))) in source_ids
+        and _vk_recent_activity(candidate)["active"]
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
+
+    # Within the quality threshold, prioritize people whose public activity is newest.
+    def _activity_order(uid: int) -> tuple[int, int, int]:
+        activity = _vk_recent_activity(candidates.get(uid) or {})
+        age_hours = activity.get("age_hours")
+        freshness = int(age_hours) if age_hours is not None else 10**6
+        return (freshness, -_int(score_by_id[uid].get("score")), uid)
+
+    ordered_ids.sort(key=_activity_order)
 
     # Old sequential cards are not allowed to occupy today's working slots
     # unless they have actually passed Neonia's quality gate.

@@ -208,8 +208,8 @@ def _vk_record_discussion(key: str, direction: str, draft: str) -> None:
 def _vk_draft_direction(key: str, label: str) -> str | None:
     _vk_show_discussion(key)
     with st.form(key, clear_on_submit=True):
-        direction = st.text_area("Сообщение Неоне", max_chars=3000)
-        voice = st.audio_input("Или надиктуйте задание Неоне")
+        direction = st.text_area("Ваше задание Неоне", max_chars=3000)
+        voice = st.audio_input("Или надиктуйте задание")
         submitted = st.form_submit_button(label)
     if not submitted:
         return None
@@ -1217,6 +1217,9 @@ def _render_today_vk_candidates(
 ) -> None:
     """Показывает владельцу его сегодняшнюю VK-пятёрку и действия Неоны."""
     st.markdown("### 💙 VK 5 на сегодня · отбор Неонии")
+    st.caption("Неония ищет и отбирает по ЦА и активности за 48 часов. "
+               "Неона изучает доступный профиль выбранного человека и готовит персональный черновик. "
+               "Владелец проверяет текст и отправляет его вручную.")
 
     try:
         assignments = load_today_vk_assignments(owner_id)
@@ -1256,7 +1259,7 @@ def _render_today_vk_candidates(
             c5.metric("Сегодня", int(progress.get("today") or 0))
             st.caption(
                 "«Доступно Неонии» — реальные профили этого сообщества, которые "
-                "можно передать в работу после технических исключений. "
+                "можно передать на оценку. Это ещё не означает, что профиль прошёл отбор по активности за последние 48 часов и соответствию Вашей ЦА. "
                 "Показан один раз = больше не возвращается в ежедневную пятёрку."
             )
             capacity_error = str(
@@ -1292,7 +1295,7 @@ def _render_today_vk_candidates(
             st.info(message)
     if today_count < 5:
         st.caption(
-            "Если текущих кандидатов мало или прошлые не отвечают, можно не ждать "
+            "Если качественных кандидатов меньше пяти, Неония не снижает критерии: можно не ждать "
             "фонового цикла — Неония сразу продолжит поиск по Вашим VK-источникам."
         )
         if st.button(
@@ -1302,7 +1305,7 @@ def _render_today_vk_candidates(
             use_container_width=True,
         ):
             try:
-                with st.spinner("Неония проверяет следующие VK-профили и добирает пятёрку…"):
+                with st.spinner("Неония проверяет расширенный пул VK-профилей и добирает пятёрку…"):
                     result = top_up_vk_owner_now(
                         int(owner_id),
                         str(member_code or "").strip(),
@@ -1331,7 +1334,7 @@ def _render_today_vk_candidates(
     if not assignments:
         st.info(
             "Сегодня качественных VK-кандидатов пока нет. Неония продолжает "
-            "проверять людей из Ваших настроенных VK-сообществ по портрету ЦА."
+            "проверять людей из Ваших настроенных VK-сообществ: до 1000 профилей на источник, с отбором по активности за 48 часов и портрету ЦА."
         )
         return
 
@@ -1358,7 +1361,7 @@ def _render_vk_new_candidates(owner_id: int, member_code: str, ask_openai_fn=Non
             if row.get("score") is not None:
                 st.caption(f"Оценка {row['score']}/100")
             _render_vk_profile_link(row)
-            label = "Открыть черновик" if row.get("invitation_text") else "Подготовить сообщение"
+            label = "Продолжить чат с Неоной" if row.get("invitation_text") else "Открыть чат с Неоной"
             with st.expander(label, key=f"vk_fresh_{owner_id}_{row['id']}", on_change="rerun") as details:
                 if details.open:
                     _render_vk_candidate_details(
@@ -1374,6 +1377,52 @@ def _render_vk_profile_link(item: dict) -> None:
         profile_url = f"https://vk.com/id{vk_user_id}"
     if profile_url:
         st.link_button("Перейти в профиль", profile_url)
+
+
+
+def _render_vk_invitation_chat(
+    owner_id: int,
+    member_code: str,
+    assignment_id: int,
+    invitation_text: str,
+    ask_openai_fn=None,
+) -> None:
+    """Keep candidate-specific drafting in one visible, iterative chat panel."""
+    if not assignment_id:
+        return
+    draft_key = f"vk_first_draft_{owner_id}_{assignment_id}"
+    st.markdown("#### 💬 Чат с Неоной")
+    st.caption(
+        "Напишите, каким должно быть первое сообщение или что изменить в черновике. "
+        "Неона подготовит текст; отправить его собеседнику можно только вручную."
+    )
+    try:
+        label = "Подготовить черновик" if not invitation_text else "Изменить черновик"
+        direction = _vk_draft_direction(f"{draft_key}_form", label)
+        if direction is not None:
+            instruction = direction.strip()
+            if not instruction:
+                instruction = (
+                    "Подготовь первое короткое и доброжелательное сообщение по публичным "
+                    "данным профиля. Не предлагай бизнес, регистрацию или покупку."
+                    if not invitation_text
+                    else "Перепиши черновик яснее и естественнее, сохранив его смысл."
+                )
+            revised = prepare_vk_invitation(
+                assignment_id,
+                member_code,
+                owner_id=owner_id,
+                ask_openai_fn=ask_openai_fn,
+                direction=instruction,
+            )
+            _vk_record_discussion(
+                f"{draft_key}_form",
+                instruction,
+                revised.get("invitation_text") or "",
+            )
+            st.rerun()
+    except Exception as exc:
+        st.error(f"Не удалось подготовить или изменить черновик: {exc}")
 
 
 def _render_vk_candidate_details(
@@ -1424,6 +1473,16 @@ def _render_vk_candidate_details(
         if show_card_header:
             _render_vk_profile_link(item)
 
+        activity = _vk_scout._vk_recent_activity(item)
+        if activity.get("active"):
+            age_hours = activity.get("age_hours")
+            activity_label = "сейчас" if activity.get("source") == "online" else (
+                f"{age_hours} ч. назад" if age_hours is not None else "за последние 3 дня"
+            )
+            st.caption(f"🟢 Активность подтверждена: {activity_label}.")
+        elif status in {"reserved", "prepared"}:
+            st.caption("⚪ Свежая активность VK не подтверждена; кандидат может быть заменён при обновлении очереди.")
+
         if status == "skipped":
             st.info(
                 "⏭ Кандидат пропущен. Он уже считается отработанным "
@@ -1431,12 +1490,21 @@ def _render_vk_candidate_details(
             )
             return
 
-        _render_vk_warmup(owner_id, assignment_id, first_name, ask_openai_fn=ask_openai_fn, member_code=member_code)
+        with st.expander("Дополнительно: комментарий к публикации", expanded=False):
+            _render_vk_warmup(
+                owner_id, assignment_id, first_name,
+                ask_openai_fn=ask_openai_fn, member_code=member_code,
+            )
         st.divider()
 
         editing_key = f"vk_editing_message_{owner_id}_{assignment_id}"
+        draft_key = f"vk_first_draft_{owner_id}_{assignment_id}"
+        if status in {"reserved", "prepared"} and not item.get("invited_at"):
+            _render_vk_invitation_chat(
+                owner_id, member_code, assignment_id, invitation_text, ask_openai_fn
+            )
         if invitation_text:
-            st.markdown("**Сообщение Неоны:**")
+            st.markdown("**Черновик Неоны · ещё не отправлен:**")
 
             if st.session_state.get(editing_key, False):
                 edited_text = st.text_area(
@@ -1524,20 +1592,6 @@ def _render_vk_candidate_details(
                     "Для него ниже остаётся резервный ручной режим."
                 )
             if status in {"reserved", "prepared"} and not item.get("invited_at") and assignment_id:
-                draft_key = f"vk_first_draft_{owner_id}_{assignment_id}"
-                with st.expander("Обсудить текст с Неоной"):
-                    try:
-                        direction = _vk_draft_direction(f"{draft_key}_form", "Отправить")
-                        if direction is not None:
-                            direction = direction or "Предложи другую формулировку."
-                            revised = prepare_vk_invitation(
-                                assignment_id, member_code, owner_id=owner_id,
-                                ask_openai_fn=ask_openai_fn, direction=direction,
-                            )
-                            _vk_record_discussion(f"{draft_key}_form", direction, revised["invitation_text"])
-                            st.rerun()
-                    except Exception:
-                        st.error("Не удалось переписать сообщение. Прежний черновик сохранён.")
                 if st.checkbox("Подтверждаю удаление черновика", key=f"{draft_key}_confirm"):
                     if st.button("Удалить черновик", key=f"{draft_key}_delete"):
                         try:
@@ -1552,27 +1606,6 @@ def _render_vk_candidate_details(
                 ):
                     st.session_state[editing_key] = True
                     st.rerun()
-        elif status in {"reserved", "prepared"} and assignment_id:
-            if st.button(
-                "✍️ Подготовить сообщение Неоны",
-                key=f"vk_prepare_{owner_id}_{assignment_id}",
-                type="primary",
-                use_container_width=True,
-            ):
-                try:
-                    prepared = prepare_vk_invitation(
-                        assignment_id,
-                        member_code,
-                        owner_id=owner_id,
-                        ask_openai_fn=ask_openai_fn,
-                    )
-                    st.success("Сообщение Неоны готово.")
-                    st.session_state[
-                        f"vk_prepared_message_{assignment_id}"
-                    ] = prepared.get("invitation_text") or ""
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Не удалось подготовить сообщение: {exc}")
 
         cols = st.columns(2)
         with cols[0]:
@@ -1723,7 +1756,7 @@ def _render_known_vk_contacts(
 
             editing_key = f"vk_known_editing_{owner_id}_{assignment_id}"
             if invitation_text:
-                st.markdown("**Сообщение Неоны:**")
+                st.markdown("**Черновик Неоны · ещё не отправлен:**")
                 if st.session_state.get(editing_key, False):
                     edited_text = st.text_area(
                         "Отредактируйте сообщение перед отправкой",
