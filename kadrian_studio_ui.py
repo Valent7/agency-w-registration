@@ -116,6 +116,14 @@ def render_kadrian(owner_id, ask_ai):
     project = st.selectbox("Проект", projects, format_func=lambda item: item["name"])
     project_id = project["id"]
     key = f"kadrian_{owner_id}_{project_id}"
+    from content_factory_autopilot_ui import _live_reels_enabled
+    if _live_reels_enabled(project_id):
+        mode = st.radio("Режим студии", ("Чат Кадриана", "Живой ролик"),
+                        horizontal=True, key=key + "_studio_mode")
+        if mode == "Живой ролик":
+            from kadrian_live_draft_ui import render_live_draft
+            render_live_draft(owner_id, project, store)
+            return
     chat = st.session_state.setdefault(key, restore_chat(project))
     if chat.get("pending_save"):
         try:
