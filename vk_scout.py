@@ -5033,6 +5033,8 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
             "city_name": candidate.get("city_name"),
             "country_name": candidate.get("country_name"),
             "status_text": candidate.get("status_text"),
+            "raw_profile": candidate.get("raw_profile") or {},
+            "last_enriched_at": candidate.get("last_enriched_at"),
             "profile_url": vk_profile_url(candidate) if candidate else f"https://vk.com/id{uid}",
         })
     return result
