@@ -9,7 +9,7 @@ PRODUCT = re.compile(r"\b(?:продвигаю|продаю|рекомендую
 DEVELOP = re.compile(r"\b(?:развиваю|строю|набираю|собираю|ищу|привлекаю|приглашаю)\b.{0,55}\b(?:команд\w*|клиент\w*|партн[её]р\w*)", re.I)
 PAST = re.compile(r"\b(?:раньше|бывш\w*|перестал\w*|уш[её]л\w*|ушла|больше не|не занимаюсь|не работаю|никогда)\b", re.I)
 NETWORK_TOPIC = re.compile(r"\b(?:mlm|млм|сетев\w+\s+(?:маркетинг\w*|бизнес\w*|компани\w*))\b", re.I)
-LINK = re.compile(r"https://(?:vk\.com/wall-\d+_\d+\?reply=\d+|t\.me/[a-zA-Z0-9_]+/\d+)")
+LINK = re.compile(r"https://(?:vk\.com/wall(?:-\d+_\d+\?reply=\d+|[1-9]\d*_\d+)|t\.me/[a-zA-Z0-9_]+/\d+)")
 
 
 def network_only(owner_id):
@@ -43,4 +43,10 @@ def vk_network_proof(candidate):
     raw = candidate.get("raw_profile")
     if not isinstance(raw, dict):
         return None
-    return current_network_proof(raw.get("public_professional_comments"))
+    uid = str(candidate.get("vk_user_id") or "")
+    posts = [
+        post for post in (raw.get("public_professional_posts") or [])
+        if isinstance(post, dict) and uid.isdecimal()
+        and re.fullmatch(rf"https://vk\.com/wall{uid}_[1-9]\d*", str(post.get("url") or ""))
+    ]
+    return current_network_proof([*(raw.get("public_professional_comments") or []), *posts])

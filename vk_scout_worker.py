@@ -440,8 +440,9 @@ def top_up_vk_owner_now(
             scan_result = scan_vk_sources(
                 owner_id,
                 per_source=1000,
-                max_sources=min(5, len(sources)),
+                max_sources=min(10 if control_search else 5, len(sources)),
                 include_active_context=True,
+                **({"include_author_posts": True} if control_search else {}),
             )
         except Exception as exc:
             _log(f"{owner_id}: обновление VK отложено; работаю из сохранённого пула: {exc}")
@@ -485,6 +486,7 @@ def top_up_vk_owner_now(
             owner_id, target_profile,
             ask_openai_fn=lambda instructions, prompt: _extract_response_text(assessor(instructions, prompt)),
             limit=30, batch_size=30, reanalyze_exhausted=False, min_score=min_score,
+            priority_ids=scan_result.get("active_context_ids"),
         )
         analyzed_total += int(scored.get("analyzed") or 0)
         first_created = int(prepared.get("created") or 0)

@@ -39,3 +39,23 @@ class NetworkProofTests(TestCase):
             "url": "https://vk.com/wall-20_30?reply=41", "text": "Ушла из MLM.",
         }]
         self.assertIsNone(current_network_proof(rows, now))
+
+    def test_wall_reader_accepts_only_original_posts_by_profile_owner(self):
+        from unittest.mock import patch
+        import vk_scout
+
+        now = int(datetime.now(timezone.utc).timestamp())
+        record = {"id": 3, "from_id": 7, "owner_id": 7, "date": now,
+                  "text": "Работаю в MLM, продаю продукты и развиваю команду"}
+        with patch.object(vk_scout, "_vk_api", return_value={"items": [
+            {**record, "id": 1, "from_id": 8},
+            {**record, "id": 2, "copy_history": [{"id": 99}]},
+            {**record, "id": 4, "date": now - 31 * 86400},
+            record,
+        ]}):
+            rows = vk_scout._read_vk_professional_posts(7)
+        self.assertEqual([row["url"] for row in rows], ["https://vk.com/wall7_3"])
+        from neonia_network_proof import vk_network_proof
+        raw = {"public_professional_posts": rows}
+        self.assertIsNotNone(vk_network_proof({"vk_user_id": 7, "raw_profile": raw}))
+        self.assertIsNone(vk_network_proof({"vk_user_id": 8, "raw_profile": raw}))
