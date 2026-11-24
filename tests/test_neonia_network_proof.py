@@ -80,3 +80,32 @@ class NetworkProofTests(TestCase):
         self.assertTrue(_vk_recent_activity(candidate, now=now)["active"])
         candidate["raw_profile"].pop("public_professional_posts")
         self.assertIsNone(vk_network_proof(candidate))
+
+    def test_denied_walls_do_not_prevent_scanning_next_source(self):
+        from unittest.mock import patch
+        import vk_scout
+
+        now = int(datetime.now(timezone.utc).timestamp())
+        sources = [{"community_id": uid} for uid in range(1, 5)]
+        def members(source, **kwargs):
+            uid = source["community_id"]
+            return {"members": [{
+                "vk_user_id": uid, "source_community_id": uid,
+                "can_write_private_message": True, "status_text": "MLM",
+            }]}
+        def wall(uid):
+            if uid < 4:
+                raise vk_scout.VKScoutError("VK API wall.get: 15 — Access denied")
+            return [{"url": "https://vk.com/wall4_1", "timestamp": now,
+                     "text": "Работаю в MLM, продаю продукты и развиваю команду"}]
+        with (
+            patch.object(vk_scout, "load_vk_sources", return_value=sources),
+            patch.object(vk_scout, "fetch_vk_members", side_effect=members),
+            patch.object(vk_scout, "network_only", return_value=True),
+            patch.object(vk_scout, "save_vk_candidates", return_value=4),
+            patch.object(vk_scout, "_read_vk_professional_posts", side_effect=wall),
+        ):
+            result = vk_scout.scan_vk_sources(77, include_author_posts=True)
+        self.assertEqual(result["author_walls_failed"], 3)
+        self.assertEqual(result["author_walls_read"], 1)
+        self.assertEqual(result["active_context_ids"], [4])

@@ -1170,7 +1170,7 @@ def _read_vk_professional_posts(user_id: int) -> list[dict[str, Any]]:
     response = _vk_api("wall.get", owner_id=user_id, count=12, filter="owner")
     now_ts = int(datetime.now(UTC).timestamp())
     evidence = []
-    for post in (response or {}).get("items", []):
+    for post in (response.get("items") or []) if isinstance(response, dict) else []:
         if not isinstance(post, dict) or post.get("copy_history"):
             continue
         if post.get("from_id") != user_id or post.get("owner_id") != user_id:
@@ -1260,22 +1260,46 @@ def scan_vk_sources(
     author_walls_read = 0
     author_walls_failed = 0
     if include_author_posts and network_only(owner_id):
-        active = [
-            item for item in unique.values()
-            if _vk_recent_activity(item)["active"] and not vk_excluded_profession(item)
-        ]
-        active.sort(key=lambda item: (not bool(NETWORK_TOPIC.search(
-            str(item.get("status_text") or "") + " " + str(item.get("activity") or "")
-        )), not bool(item.get("vk_user_id") in active_context_ids)))
-        for item in active[:20]:
+        by_source: dict[int, list[dict[str, Any]]] = {}
+        for item in unique.values():
+            raw = item.get("raw_profile") or {}
+            if raw.get("is_closed") and not raw.get("can_access_closed"):
+                continue
+            topical = bool(NETWORK_TOPIC.search(
+                str(item.get("status_text") or "") + " " + str(item.get("activity") or "")
+            ))
+            if not (_vk_recent_activity(item)["active"] or topical) or vk_excluded_profession(item):
+                continue
+            by_source.setdefault(int(item.get("source_community_id") or 0), []).append(item)
+        # Give every source a turn. Rotate the starting profile daily so the
+        # same first page cannot monopolize the bounded read allowance.
+        day = datetime.now(UTC).date().toordinal()
+        for source_id, items in by_source.items():
+            items.sort(key=lambda item: int(item["vk_user_id"]))
+            offset = day * 20 % len(items)
+            by_source[source_id] = items[offset:] + items[:offset]
+        selected = []
+        for index in range(20):
+            selected.extend(items[index] for items in by_source.values() if index < len(items))
+            if len(selected) >= 20:
+                break
+        consecutive_failures = 0
+        for item in selected[:20]:
             uid = int(item["vk_user_id"])
             try:
                 posts = _read_vk_professional_posts(uid)
-            except (VKScoutError, requests.RequestException):
+            except (VKScoutError, requests.RequestException) as exc:
                 author_walls_failed += 1
-                if author_walls_failed >= 3:
+                message = str(exc)
+                if re.search(r"wall\.get: (?:5|6|9|29)\s|HTTP 429\b", message):
+                    break
+                if re.search(r"wall\.get: (?:15|18|30|200|201|203)\s", message):
+                    continue
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
                     break
                 continue
+            consecutive_failures = 0
             author_walls_read += 1
             if posts:
                 item["raw_profile"] = {**(item.get("raw_profile") or {}), "public_professional_posts": posts}
