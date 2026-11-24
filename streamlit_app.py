@@ -10696,7 +10696,10 @@ if telegram_login_valid or remembered_data:
                     passport_key = (
                         f"neonia_target_audience_passport_{telegram_id}"
                     )
+                    from marketing_interview_ui import render_marketing_interview
+
                     saved_passport = st.session_state.get(passport_key)
+                    render_marketing_interview(telegram_id, saved_passport)
                     saved_profile = (
                         saved_passport.get("profile")
                         if isinstance(saved_passport, dict)

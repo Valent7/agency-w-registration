@@ -226,6 +226,42 @@ def nightly_task(storage, owner_id, night_date) -> dict | None:
     return None
 
 
+def journal_issues(owner_id, storage, now):
+    from marketing_interview import pilot_project
+
+    project = pilot_project(owner_id, os.getenv("AGENCY_MARKETING_PILOT_OWNER"),
+                            os.getenv("AGENCY_MARKETING_PILOT_PROJECT"))
+    if not project:
+        return []
+    from marketing_journal import latest_editorial_run
+    from vk_scout_worker import _decrypt_workspace_state
+
+    issues = []
+    try:
+        rows = storage._sb_get("marketing_interviews", {
+            "owner_id": f"eq.{int(owner_id)}", "project_id": f"eq.{project}",
+            "select": "encrypted_state", "limit": 1,
+        })
+        if rows:
+            state = _decrypt_workspace_state(rows[0]["encrypted_state"])
+            if state.get("schema") != 1:
+                raise ValueError("Unreadable marketing pilot state")
+            today = now.astimezone(BERLIN).date().isoformat()
+            overdue = sum(task.get("status") == "assigned" and task["brief"]["date"] < today
+                          for task in state.get("journal_assignments", {}).values())
+            if overdue:
+                issues.append({"code": "journal_video_overdue", "severity": "attention", "count": overdue})
+    except Exception:
+        issues.append({"code": "journal_assignment_status_unavailable", "severity": "attention"})
+    try:
+        run = latest_editorial_run()
+        if run and run["conclusion"] in {"failure", "cancelled", "timed_out", "action_required"}:
+            issues.append({"code": "journal_release_failed", "severity": "attention", "url": run["url"]})
+    except Exception:
+        issues.append({"code": "journal_workflow_status_unavailable", "severity": "attention"})
+    return issues
+
+
 def report_owner(owner_id, storage, now, agent_checks) -> dict:
     """One per-owner report per night, revised at fixed night checkpoints."""
     slot, night_date = schedule_slot(now)
@@ -238,6 +274,11 @@ def report_owner(owner_id, storage, now, agent_checks) -> dict:
     day=night_date-timedelta(days=1)
     tasks=storage._load_tasks(owner_id)
     report=evaluate_owner(state,tasks,day)
+    editorial_issues = journal_issues(owner_id, storage, now)
+    if editorial_issues:
+        report["issues"].extend(editorial_issues)
+        if report["status"] == "ok":
+            report["status"] = "needs_attention"
     candidate_state, patches=safe_repair_metadata(state,report)
     repaired=[]
     if patches and persist_repair(owner_id,candidate_state,patches,storage):

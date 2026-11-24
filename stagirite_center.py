@@ -9099,6 +9099,9 @@ def render_stagirite_center(
         "Контент: Мастер текста → Художник → правка → утверждение → публикация."
     )
 
+    from marketing_interview_ui import render_stagirite_marketing_signals
+
+    render_stagirite_marketing_signals(owner_id)
     settings = _load_stagirite_settings(owner_id)
     with st.expander("🔗 Zoom для встреч и анонсов"):
         st.caption(

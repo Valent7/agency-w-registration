@@ -4,6 +4,9 @@ on:
     paths:
       - 'agent_memory*.py'
       - 'agent_memory_setup.sql'
+      - 'marketing_*.py'
+      - 'marketing_*_setup.sql'
+      - 'tests/*marketing*'
       - 'tests/test_agent_memory*.py'
       - 'kadrian_*.py'
       - 'content_factory_worker.py'
@@ -40,3 +43,20 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_agent_memory*.py' -v
       - name: Existing Kadrian regression
         run: python -m unittest discover -s tests -p 'test_kadrian*.py' -v
+      - name: Marketing interview, passport and budget
+        run: |
+          python -m unittest discover -s tests -p 'test_marketing*.py' -v
+          psql "$AGENCY_MEMORY_TEST_DSN" -v ON_ERROR_STOP=1 -c "CREATE DATABASE marketing_tests"
+          marketing_dsn="${AGENCY_MEMORY_TEST_DSN%/*}/marketing_tests"
+          psql "$marketing_dsn" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='anon') THEN CREATE ROLE anon; END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='authenticated') THEN CREATE ROLE authenticated; END IF;
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='service_role') THEN CREATE ROLE service_role BYPASSRLS; END IF;
+          END $$;
+          SQL
+          sed -n '/^CREATE TABLE IF NOT EXISTS public.content_factory_projects (/,/^);/p' content_factory_setup.sql |
+            psql "$marketing_dsn" -v ON_ERROR_STOP=1
+          psql "$marketing_dsn" -v ON_ERROR_STOP=1 \
+            -f marketing_interview_setup.sql -f marketing_interview_setup.sql \
+            -f marketing_budget_setup.sql -f marketing_budget_setup.sql -f tests/marketing_postgres_checks.sql

@@ -1,0 +1,222 @@
+--- a/journal_editor/editor.py
++++ b/journal_editor/editor.py
+@@ -4,7 +4,7 @@
+ Run from the repository root:
+   python journal_editor/editor.py --check
+   OPENAI_API_KEY=... python journal_editor/editor.py --draft
+-  JOURNAL_AUTOPUBLISH=1 OPENAI_API_KEY=... python journal_editor/editor.py --publish
++  JOURNAL_AUTOPUBLISH=1 python journal_editor/editor.py --publish SLUG --review-sha256 SHA256
+
+ This script does NOT schedule itself, deploy, or send messages to readers.
+ """
+@@ -13,6 +13,7 @@
+ import argparse
+ import datetime as dt
+ import html
++from hashlib import sha256
+ import json
+ import os
+ import re
+@@ -142,11 +143,45 @@
+         raise EditorialError("В статье есть повторяющиеся абзацы.")
+
+
++def approved_media(article: dict) -> str:
++    media = article.get("media")
++    if media is None:
++        return ""
++    kind = media.get("kind")
++    if kind in {"video", "reels", "infographic"}:
++        src = media.get("path", "")
++        pattern = r"assets/(?:[a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+\.(?:png|webp|jpg)" if kind == "infographic" else r"assets/(?:[a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+\.mp4"
++        target = SITE / src
++        if not re.fullmatch(pattern, src) or not target.is_file() or SITE.resolve() not in target.resolve().parents:
++            raise EditorialError("Медиафайл не найден в каталоге журнала.")
++        digest = sha256()
++        with target.open("rb") as stream:
++            for chunk in iter(lambda: stream.read(65536), b""):
++                digest.update(chunk)
++        if digest.hexdigest() != media.get("sha256"):
++            raise EditorialError("Медиафайл отличается от утверждённой версии.")
++        label = media.get("label", "").strip()
++        if not label:
++            raise EditorialError("Нужно текстовое описание материала.")
++        if kind == "infographic":
++            return f'<figure><img src="../{src}" alt="{html.escape(label)}"></figure>'
++        return f'<figure><video controls playsinline preload="metadata" src="../{src}" aria-label="{html.escape(label)}"></video><figcaption>{html.escape(label)}</figcaption></figure>'
++    if kind == "carousel":
++        slides = media.get("slides")
++        if not isinstance(slides, list) or not 2 <= len(slides) <= 12 or not all(
++            isinstance(slide, str) and 1 <= len(slide.strip()) <= 500 for slide in slides
++        ):
++            raise EditorialError("Нужно от двух до двенадцати текстовых карточек.")
++        return '<ol class="slides">' + "".join(f"<li>{html.escape(slide)}</li>" for slide in slides) + "</ol>"
++    raise EditorialError("Неизвестный формат медиа.")
++
++
+ def page_html(article: dict, topic: dict, date: str) -> str:
+     title = html.escape(article["title"])
+     summary = html.escape(article["summary"])
+     category = html.escape(topic["category"])
+     body = "\n".join("<p>" + html.escape(p) + "</p>" for p in article["paragraphs"])
++    media = approved_media(article)
+     slug = topic["slug"]
+     canonical = f"{SITE_URL}/editorial/{slug}.html"
+     return f"""<!doctype html>
+@@ -169,15 +204,18 @@
+ .lead{{font-size:20px;color:var(--muted)}}
+ .meta{{color:var(--gold);font-size:13px;letter-spacing:.08em}}
+ .article-body p{{margin:26px 0}}
++figure{{margin:24px 0}}video,img{{max-width:100%;height:auto}}
++.slides{{display:flex;overflow:auto;gap:16px;scroll-snap-type:x mandatory;padding:12px 20px}}
++.slides li{{flex:0 0 min(70vw,320px);scroll-snap-align:center;padding:12px;background:#0b2337}}
+ .cta{{margin-top:48px;padding:24px;border:1px solid #796034;background:#0b2337}}
+ </style></head>
+ <body>
+ <header><a href="/">← Журнал «Время жить»</a></header>
+ <main><div class="meta">{category} · <time datetime="{date}">{date}</time></div>
+ <h1>{title}</h1><p class="lead">{summary}</p>
+-<div class="article-body">{body}</div>
++<div class="article-body">{body}</div>{media}
+ <div class="cta"><strong>А куда уходит ваше время?</strong><p>Выпишите три повторяющиеся задачи, которые вы хотели бы делегировать.</p>
+-<a href="{TIME_URL}">Посчитать время, которое забирает рутина →</a></div>
++<a href="{TIME_URL}?utm_source=journal&amp;utm_content={slug}">Посчитать время, которое забирает рутина →</a></div>
+ </main><footer>Агентство W · Мы возвращаем человеку время · <a href="/privacy.html">Статистика и конфиденциальность</a> · <button type="button" data-analytics-settings>Настройки аналитики</button></footer>
+ <script src="../assets/reader-contact.js" defer></script>
+ <script src="../assets/metrika-consent.js" defer></script>
+@@ -210,7 +248,10 @@
+         raise EditorialError("Публикация отключена: JOURNAL_AUTOPUBLISH должен быть 1.")
+     feed = load_json(FEED)
+     slug = topic["slug"]
+-    if any(x["slug"] == slug for x in feed["articles"]):
++    readable_title = " ".join(re.findall(r"\w+", article["title"].casefold()))
++    if any(x["slug"] == slug or
++           " ".join(re.findall(r"\w+", x.get("title", "").casefold())) == readable_title
++           for x in feed["articles"]):
+         raise EditorialError("Такая статья уже опубликована.")
+     stamp = dt.datetime.now(dt.timezone.utc).date().isoformat()
+     directory = SITE / "editorial"
+@@ -218,7 +259,8 @@
+     path = directory / (slug + ".html")
+     if path.exists():
+         raise EditorialError("Файл статьи уже существует, перезапись запрещена.")
+-    path.write_text(page_html(article, topic, stamp), encoding="utf-8")
++    page = page_html(article, topic, stamp)
++    path.write_text(page, encoding="utf-8")
+     item = {"slug": slug, "title": article["title"], "summary": article["summary"],
+             "category": topic["category"], "date": stamp,
+             "url": f"editorial/{slug}.html", "origin": "editorial_plan"}
+@@ -233,23 +275,35 @@
+     mode = p.add_mutually_exclusive_group(required=True)
+     mode.add_argument("--check", action="store_true", help="Проверить план без затрат")
+     mode.add_argument("--draft", action="store_true", help="Сохранить материал на проверку")
+-    mode.add_argument("--publish", action="store_true", help="Автопубликация при включённом флаге")
++    mode.add_argument("--publish", metavar="SLUG", help="Подготовить утверждённый черновик к выпуску")
++    p.add_argument("--review-sha256", help="Хеш точных байтов проверенного и утверждённого черновика")
+     mode.add_argument("--approve", metavar="SLUG", help="Утвердить существующий черновик")
+     args = p.parse_args()
+     try:
+-        if args.approve:
+-            slug = args.approve
++        if args.publish or args.approve:
++            slug = args.publish or args.approve
+             if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+                 raise EditorialError("Некорректное имя черновика.")
+             draft_path = DRAFTS / (slug + ".json")
+-            draft = load_json(draft_path)
++            if args.publish:
++                if os.getenv("JOURNAL_AUTOPUBLISH") != "1":
++                    raise EditorialError("Автоматическая подготовка выпуска выключена.")
++                if not re.fullmatch(r"[0-9a-f]{64}", args.review_sha256 or ""):
++                    raise EditorialError("Нужен SHA-256 проверенного и утверждённого черновика.")
++                reviewed_draft = draft_path.read_bytes()
++                if sha256(reviewed_draft).hexdigest() != args.review_sha256:
++                    raise EditorialError("Черновик изменился после проверки.")
++                draft = json.loads(reviewed_draft)
++            else:
++                draft = load_json(draft_path)
+             topic, article = draft["topic"], draft["article"]
+             if topic.get("slug") != slug:
+                 raise EditorialError("Имя черновика не совпадает с темой.")
+             validate(article)
+-            path = publish(article, topic, automatic=False)
+-            draft_path.unlink()
+-            print("Утверждённый материал опубликован:", path.relative_to(ROOT))
++            path = publish(article, topic, automatic=bool(args.publish))
++            if args.approve:
++                draft_path.unlink()
++            print("Файлы выпуска подготовлены; проверьте доступность после развёртывания:", path.relative_to(ROOT))
+             return 0
+         topic = choose_topic()
+         if args.check:
+@@ -260,13 +314,10 @@
+             raise EditorialError("Не задан OPENAI_API_KEY; платные запросы не выполнялись.")
+         article = ask_editor(topic, key)
+         validate(article)
+-        if args.publish:
+-            path = publish(article, topic)
+-        else:
+-            DRAFTS.mkdir(parents=True, exist_ok=True)
+-            path = DRAFTS / (topic["slug"] + ".json")
+-            path.write_text(json.dumps({"topic": topic, "article": article},
+-                ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++        DRAFTS.mkdir(parents=True, exist_ok=True)
++        path = DRAFTS / (topic["slug"] + ".json")
++        path.write_text(json.dumps({"topic": topic, "article": article},
++            ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+         print("Материал сохранён:", path.relative_to(ROOT))
+         return 0
+     except (EditorialError, OSError, ValueError, KeyError) as exc:
+--- a/journal_editor/README.md
++++ b/journal_editor/README.md
+@@ -19,8 +19,10 @@
+ OPENAI_API_KEY=... python journal_editor/editor.py --draft
+ python journal_editor/editor.py --approve kak-ponyat-kuda-uhodit-vremya
+ # Только после 5 проверенных материалов и отдельного включения:
+-JOURNAL_AUTOPUBLISH=1 OPENAI_API_KEY=... python journal_editor/editor.py --publish
++JOURNAL_AUTOPUBLISH=1 python journal_editor/editor.py --publish SLUG --review-sha256 SHA256
+ ```
++
++Перед автоматическим выпуском редактор проверяет факты, Директор утверждает материал, после чего оператор фиксирует SHA-256 точного файла черновика. Автоматический режим принимает только этот файл и создаёт файлы выпуска локально. Факт размещения подтверждается отдельно по публичному журналу.
+
+ Ключи нельзя вставлять в код, переписку и GitHub-файлы. Для автоматического задания хранить их только в Secrets/Environment Variables.
+
+--- a/journal_editor/tests/test_editor.py
++++ b/journal_editor/tests/test_editor.py
+@@ -61,6 +61,36 @@
+                     with self.assertRaises(editor.EditorialError):
+                         editor.publish(article, topic)
+
++    def test_scheduled_release_requires_exact_reviewed_draft_and_never_generates(self):
++        import hashlib
++        import sys
++
++        topic = {"slug": "approved", "category": "Практика"}
++        raw = json.dumps({"topic": topic, "article": sample_article()}).encode()
++        digest = hashlib.sha256(raw).hexdigest()
++        with tempfile.TemporaryDirectory() as tmp:
++            drafts = Path(tmp)
++            draft = drafts / "approved.json"
++            draft.write_bytes(raw)
++            command = ["editor.py", "--publish", "approved", "--review-sha256", digest]
++            with (
++                mock.patch.object(sys, "argv", command),
++                mock.patch.object(editor, "DRAFTS", drafts),
++                mock.patch.object(editor, "ask_editor") as generate,
++                mock.patch.object(editor, "publish", return_value=editor.ROOT / "article.html") as publish,
++                mock.patch.dict(os.environ, {"JOURNAL_AUTOPUBLISH": ""}),
++            ):
++                self.assertEqual(editor.main(), 1)
++                publish.assert_not_called()
++                os.environ["JOURNAL_AUTOPUBLISH"] = "1"
++                draft.write_bytes(raw + b" ")
++                self.assertEqual(editor.main(), 1)
++                publish.assert_not_called()
++                draft.write_bytes(raw)
++                self.assertEqual(editor.main(), 0)
++                publish.assert_called_once_with(sample_article(), topic, automatic=True)
++                generate.assert_not_called()
++
+     def test_review_topic_selection(self):
+         with tempfile.TemporaryDirectory() as tmp:
+             base = Path(tmp)

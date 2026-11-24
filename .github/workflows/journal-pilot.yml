@@ -1,0 +1,114 @@
+name: Journal pilot preparation
+
+on:
+  workflow_dispatch:
+  schedule:
+    # At 10:20 in Berlin winter time and 11:20 in summer time.
+    - cron: '20 9 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: journal-pilot-preparation
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: vars.JOURNAL_PILOT_PREPARE == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      ready: ${{ steps.release.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: agency-w-journal-public
+          path: journal-source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check existing editor and prepare approved files
+        id: release
+        env:
+          JOURNAL_QUEUE_JSON: ${{ vars.JOURNAL_PILOT_QUEUE_JSON }}
+        run: |
+          git -C journal-source apply --check ../docs/journal-reviewed-release.patch
+          git -C journal-source apply ../docs/journal-reviewed-release.patch
+          printf '%s\n' "${JOURNAL_QUEUE_JSON:-[]}" > "$RUNNER_TEMP/journal-queue.json"
+          python journal_release.py --journal-root journal-source --manifest "$RUNNER_TEMP/journal-queue.json"
+          mkdir "$RUNNER_TEMP/journal-pilot"
+          git -C journal-source add --intent-to-add journal-public
+          git -C journal-source diff --binary -- journal-public > "$RUNNER_TEMP/journal-pilot/publication.patch"
+          if test -s "$RUNNER_TEMP/journal-pilot/publication.patch"; then
+            git -C journal-source rev-parse HEAD > "$RUNNER_TEMP/journal-pilot/journal-base.txt"
+            echo "ready=1" >> "$GITHUB_OUTPUT"
+          else
+            rm "$RUNNER_TEMP/journal-pilot/publication.patch"
+          fi
+      - name: Collect public leads for editorial verification
+        env:
+          JOURNAL_TOPICS: ${{ vars.JOURNAL_PILOT_NEWS_TERMS }}
+        run: |
+          curl --fail --silent --show-error --proto '=https' --max-time 20 --max-filesize 4000000 \
+            https://openai.com/news/rss.xml -o "$RUNNER_TEMP/journal-news.xml"
+          IFS=',' read -ra terms <<< "$JOURNAL_TOPICS"
+          python journal_research.py "$RUNNER_TEMP/journal-news.xml" "${terms[@]}" > "$RUNNER_TEMP/journal-pilot/news-candidates.json"
+          python journal_drafting.py "$RUNNER_TEMP/journal-news.xml" "${terms[@]}" > "$RUNNER_TEMP/journal-pilot/news-draft.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: journal-pilot-release
+          path: ${{ runner.temp }}/journal-pilot
+          if-no-files-found: ignore
+          retention-days: 7
+  publish:
+    needs: prepare
+    if: |
+      github.ref == 'refs/heads/main' &&
+      needs.prepare.outputs.ready == '1' &&
+      vars.JOURNAL_PILOT_PUBLISH == '1'
+    environment: journal-production
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v4
+        with:
+          ref: agency-w-journal-public
+          path: journal-source
+      - uses: actions/download-artifact@v4
+        with:
+          name: journal-pilot-release
+          path: ${{ runner.temp }}/journal-pilot
+      - name: Install verification dependency before writing
+        run: python -m pip install 'requests==2.32.5'
+      - name: Release approved files
+        run: |
+          draft="$RUNNER_TEMP/journal-pilot"
+          test "$(git -C journal-source rev-parse HEAD)" = "$(cat "$draft/journal-base.txt")"
+          cp journal-source/journal-public/editorial/feed.json "$RUNNER_TEMP/feed-before.json"
+          git -C journal-source apply --check --include='journal-public/**' "$draft/publication.patch"
+          git -C journal-source apply --include='journal-public/**' "$draft/publication.patch"
+          git -C journal-source add journal-public
+          git -C journal-source -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Release approved journal issue'
+          git -C journal-source push origin HEAD:refs/heads/agency-w-journal-public
+      - name: Confirm publication on the public site
+        run: |
+          python journal_delivery.py "$RUNNER_TEMP/feed-before.json" \
+            journal-source/journal-public/editorial/feed.json "$RUNNER_TEMP/journal-receipts.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: journal-public-receipts
+          path: ${{ runner.temp }}/journal-receipts.json
+          if-no-files-found: ignore
