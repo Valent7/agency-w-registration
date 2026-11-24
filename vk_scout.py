@@ -4226,7 +4226,9 @@ def prepare_vk_invitation(
 
     candidate = candidates[0]
     scoped_owner = owner_id or assignment.get("owner_telegram_id")
-    if assignment.get("daily_position") and network_only(scoped_owner) and not vk_network_proof(candidate):
+    if assignment.get("daily_position") and network_only(scoped_owner) and (
+        not _vk_recent_activity(candidate)["active"] or not vk_network_proof(candidate)
+    ):
         raise VKScoutError("Нет актуального публичного подтверждения работы в сетевом бизнесе.")
     first_name = str(candidate.get("first_name") or "").strip()
     fit = str(assignment.get("fit_summary") or "").strip()
@@ -5091,7 +5093,9 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
     for assignment in rows:
         uid = int(assignment["vk_user_id"])
         candidate = by_id.get(uid, {})
-        if network_only(owner_id) and not vk_network_proof(candidate):
+        if network_only(owner_id) and (
+            not _vk_recent_activity(candidate)["active"] or not vk_network_proof(candidate)
+        ):
             continue
         result.append({
             **assignment,
