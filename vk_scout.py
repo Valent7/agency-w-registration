@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 
+from neonia_network_proof import network_only, vk_network_proof
 import requests
 
 try:
@@ -953,6 +954,7 @@ def fetch_vk_active_commenters(
     seen: set[int] = set()
     comment_samples: dict[int, list[str]] = {}
     comment_activity_at: dict[int, int] = {}
+    dated_comments: dict[int, list[dict]] = {}
     for post in posts:
         if not isinstance(post, dict):
             continue
@@ -1007,6 +1009,12 @@ def fetch_vk_active_commenters(
             if comment_ts > comment_activity_at.get(uid, 0):
                 comment_activity_at[uid] = comment_ts
             comment_text = " ".join(str(row.get("text") or "").split()).strip()
+            reply = str(row.get("id") or "")
+            if comment_text and comment_ts and reply.isdecimal():
+                dated_comments.setdefault(uid, []).append({
+                    "text": comment_text[:700], "timestamp": comment_ts,
+                    "url": f"https://vk.com/wall-{abs(cid)}_{post_id}?reply={reply}",
+                })
             if comment_text:
                 bucket = comment_samples.setdefault(uid, [])
                 if len(bucket) < 3 and comment_text not in bucket:
@@ -1041,6 +1049,10 @@ def fetch_vk_active_commenters(
             samples = comment_samples.get(profile_uid) or []
             if samples:
                 raw_profile["public_comment_samples"] = samples[:3]
+            if dated_comments.get(profile_uid):
+                raw_profile["public_professional_comments"] = sorted(
+                    dated_comments[profile_uid], key=lambda entry: entry["timestamp"], reverse=True,
+                )[:8]
             enriched["raw_profile"] = raw_profile
             members.append(enriched)
 
@@ -1500,6 +1512,7 @@ def score_vk_candidates(
                     if str(candidate.get("vk_user_id") or "").isdigit()
                     and int(candidate.get("vk_user_id")) not in unavailable_ids
                     and _vk_recent_activity(candidate)["active"]
+                    and (not network_only(owner_id) or vk_network_proof(candidate))
                 ],
                 key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
             )
@@ -1536,7 +1549,7 @@ def score_vk_candidates(
                 continue
             if uid in already_scored or uid in unavailable_ids or uid in selected_ids:
                 continue
-            if not _vk_recent_activity(candidate)["active"]:
+            if not _vk_recent_activity(candidate)["active"] or (network_only(owner_id) and not vk_network_proof(candidate)):
                 continue
             rows.append(candidate)
             selected_ids.add(uid)
@@ -1582,6 +1595,7 @@ def score_vk_candidates(
                     if str(candidate.get("vk_user_id") or "").isdigit()
                     and int(candidate.get("vk_user_id")) not in unavailable_ids
                     and _vk_recent_activity(candidate)["active"]
+                    and (not network_only(owner_id) or vk_network_proof(candidate))
                 ],
                 key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
             )[:analysis_limit]
@@ -1630,6 +1644,8 @@ def score_vk_candidates(
             # сам отбор — используем уже сохранённые публичные данные.
             pass
 
+    if network_only(owner_id):
+        rows = [candidate for candidate in rows if vk_network_proof(candidate)]
     profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
     system_prompt = f"""
 Ты — Неония, аналитик и селектор целевой аудитории Агентства W.
@@ -4209,6 +4225,9 @@ def prepare_vk_invitation(
         raise VKScoutError("VK-кандидат не найден")
 
     candidate = candidates[0]
+    scoped_owner = owner_id or assignment.get("owner_telegram_id")
+    if assignment.get("daily_position") and network_only(scoped_owner) and not vk_network_proof(candidate):
+        raise VKScoutError("Нет актуального публичного подтверждения работы в сетевом бизнесе.")
     first_name = str(candidate.get("first_name") or "").strip()
     fit = str(assignment.get("fit_summary") or "").strip()
     known_contact = assignment.get("daily_position") is None or fit.startswith(KNOWN_CONTACT_LABEL)
@@ -5072,6 +5091,8 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
     for assignment in rows:
         uid = int(assignment["vk_user_id"])
         candidate = by_id.get(uid, {})
+        if network_only(owner_id) and not vk_network_proof(candidate):
+            continue
         result.append({
             **assignment,
             "first_name": candidate.get("first_name"),

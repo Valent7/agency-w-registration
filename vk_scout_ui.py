@@ -1465,10 +1465,20 @@ def _render_vk_candidate_details(
             meta.append(place)
         st.caption(" · ".join(meta))
         score = int(item.get("score") or 0)
-        st.write(
-            "**Почему сегодня:** профиль прошёл отбор Неонии по Вашей ЦА"
-            + (f" · оценка {score}/100." if score else ".")
-        )
+        from neonia_network_proof import vk_network_proof
+
+        proof = vk_network_proof(item)
+        if proof:
+            from datetime import datetime, timezone
+            day = datetime.fromtimestamp(proof["timestamp"], timezone.utc).strftime("%d.%m.%Y")
+            st.text(f"{day} · {proof['text']}")
+            st.link_button("Публичное подтверждение работы в сетевом бизнесе", proof["url"])
+        else:
+            explanation = str(item.get("fit_summary") or "").strip()
+            if explanation:
+                st.text(explanation)
+        if score:
+            st.caption(f"Оценка перспективности · {score}/100")
 
         if show_card_header:
             _render_vk_profile_link(item)

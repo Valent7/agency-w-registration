@@ -26,6 +26,8 @@ from vk_scout import (
     load_vk_sources,
 )
 
+from neonia_network_proof import network_only, vk_network_proof
+
 UTC = timezone.utc
 
 
@@ -123,12 +125,15 @@ def ensure_quality_vk_assignments(
         for uid, candidate in candidates.items()
         if abs(_int(candidate.get("source_community_id"))) in source_ids
         and _vk_recent_activity(candidate)["active"]
+        and (not network_only(owner_id) or vk_network_proof(candidate))
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
 
     def _has_network_evidence(uid: int) -> bool:
         candidate = candidates.get(uid) or {}
         score_row = score_by_id.get(uid) or {}
+        if network_only(owner_id):
+            return bool(vk_network_proof(candidate))
         if _deterministic_public_work_signals(candidate).get("network_business_signal"):
             return True
         signals = score_row.get("positive_signals")
