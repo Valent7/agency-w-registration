@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 
-from neonia_network_proof import network_only, vk_network_proof
+from neonia_network_proof import NETWORK_TOPIC, network_only, vk_network_proof
 import requests
 
 try:
@@ -1158,12 +1158,36 @@ def save_vk_candidates(candidates: Iterable[dict[str, Any]]) -> int:
     return saved
 
 
+def _read_vk_professional_posts(user_id: int) -> list[dict[str, Any]]:
+    response = _vk_api("wall.get", owner_id=user_id, count=12, filter="owner")
+    now_ts = int(datetime.now(UTC).timestamp())
+    evidence = []
+    for post in (response or {}).get("items", []):
+        if not isinstance(post, dict) or post.get("copy_history"):
+            continue
+        if post.get("from_id") != user_id or post.get("owner_id") != user_id:
+            continue
+        text = str(post.get("text") or "").strip()
+        post_id, timestamp = post.get("id"), post.get("date")
+        if (
+            type(post_id) is int and post_id > 0
+            and type(timestamp) is int and 0 <= now_ts - timestamp <= 30 * 86400
+            and NETWORK_TOPIC.search(text[:1200])
+        ):
+            evidence.append({
+                "text": text[:1200], "timestamp": timestamp,
+                "url": f"https://vk.com/wall{user_id}_{post_id}",
+            })
+    return sorted(evidence, key=lambda entry: entry["timestamp"], reverse=True)[:8]
+
+
 def scan_vk_sources(
     owner_id: int,
     *,
     per_source: int = 200,
     max_sources: int = 10,
     include_active_context: bool = False,
+    include_author_posts: bool = False,
 ) -> dict[str, Any]:
     sources = load_vk_sources(owner_id)[:max(1, min(50, int(max_sources)))]
     unique: dict[int, dict[str, Any]] = {}
@@ -1225,6 +1249,30 @@ def scan_vk_sources(
                 or "access token" in lowered
             ):
                 break
+    author_walls_read = 0
+    author_walls_failed = 0
+    if include_author_posts and network_only(owner_id):
+        active = [
+            item for item in unique.values()
+            if _vk_recent_activity(item)["active"] and not vk_excluded_profession(item)
+        ]
+        active.sort(key=lambda item: (not bool(NETWORK_TOPIC.search(
+            str(item.get("status_text") or "") + " " + str(item.get("activity") or "")
+        )), not bool(item.get("vk_user_id") in active_context_ids)))
+        for item in active[:20]:
+            uid = int(item["vk_user_id"])
+            try:
+                posts = _read_vk_professional_posts(uid)
+            except (VKScoutError, requests.RequestException):
+                author_walls_failed += 1
+                if author_walls_failed >= 3:
+                    break
+                continue
+            author_walls_read += 1
+            if posts:
+                item["raw_profile"] = {**(item.get("raw_profile") or {}), "public_professional_posts": posts}
+                if vk_network_proof(item):
+                    active_context_ids.add(uid)
     saved = save_vk_candidates(unique.values())
     return {
         "sources_checked": len(sources),
@@ -1232,6 +1280,8 @@ def scan_vk_sources(
         "candidates_saved": saved,
         "active_context_count": len(active_context_ids),
         "active_context_ids": sorted(active_context_ids),
+        "author_walls_read": author_walls_read,
+        "author_walls_failed": author_walls_failed,
         "errors": errors,
     }
 

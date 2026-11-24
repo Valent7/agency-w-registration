@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from neonia_network_proof import network_only
+
 from vk_scout_oauth import (
     begin_vk_scout_authorization,
     get_vk_scout_connection,
@@ -1272,6 +1274,8 @@ def _render_today_vk_candidates(
                 )
 
     today_count = int(progress.get("today") or len(assignments)) if isinstance(progress, dict) else len(assignments)
+    if network_only(owner_id):
+        today_count = len(assignments)
     st.caption(
         f"Сегодня выдано: {today_count}/5"
         + (
