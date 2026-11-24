@@ -31,6 +31,7 @@ from vk_scout_oauth import (
     get_valid_vk_scout_access_token,
 )
 
+from neonia_network_proof import network_only
 from vk_quality_daily import ensure_quality_vk_assignments
 
 from vk_scout import (
@@ -324,6 +325,9 @@ def _score_until_daily_five(
     total_created += int(prepared.get("created") or 0)
     if prepared.get("complete"):
         return prepared, total_analyzed, best_score
+
+    if network_only(owner_id):
+        return {**prepared, "paid_search_blocked": True}, total_analyzed, best_score
 
     # score_vk_candidates excludes profiles already scored for this owner, so
     # every round advances through the fresh pool instead of repeating the same 30.

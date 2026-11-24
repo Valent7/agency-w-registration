@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import requests
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 import neonia_chat_daily_worker
+from neonia_network_proof import network_only
 from neonia_daily_source import owner_source, CANDIDATE_POLICY_VERSION
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
@@ -1553,6 +1554,8 @@ def _topup_from_other_telegram_groups(
 
 def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     owner_id = int(owner_id)
+    if network_only(owner_id):
+        return {"owner_id": owner_id, "status": "skip", "reason": "pilot paid search blocked"}
     state, _ = _workspace_state(owner_id)
 
     # v7+ supports *both* selected groups and personal Telegram contacts.
