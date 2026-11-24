@@ -55,6 +55,8 @@ jobs:
               IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='service_role') THEN CREATE ROLE service_role BYPASSRLS; END IF;
           END $$;
           SQL
-          psql "$marketing_dsn" -v ON_ERROR_STOP=1 -f content_factory_setup.sql \
+          sed -n '/^CREATE TABLE IF NOT EXISTS public.content_factory_projects (/,/^);/p' content_factory_setup.sql |
+            psql "$marketing_dsn" -v ON_ERROR_STOP=1
+          psql "$marketing_dsn" -v ON_ERROR_STOP=1 \
             -f marketing_interview_setup.sql -f marketing_interview_setup.sql \
             -f marketing_budget_setup.sql -f marketing_budget_setup.sql -f tests/marketing_postgres_checks.sql
