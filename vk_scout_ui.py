@@ -1289,6 +1289,8 @@ def _render_today_vk_candidates(
             f"выдано {int(result.get('created') or 0)}. "
             f"Сегодня {int(result.get('count') or 0)}/5. " + str(result.get("reason") or "")
         )
+        if result.get("estimated_usd_from_usage") is not None:
+            message += f" Расчёт по токенам OpenAI: ${result['estimated_usd_from_usage']:.6f}."
         if result.get("complete"):
             st.success(message)
         else:
@@ -1312,6 +1314,7 @@ def _render_today_vk_candidates(
                         daily_limit=5,
                         min_score=50,
                         analysis_limit=30,
+                        control_search=(os.getenv("NEONIA_VK_CONTROL_OWNER", "").strip() == str(owner_id)),
                     )
                 st.session_state[f"vk_top_up_result_{owner_id}"] = result
                 st.rerun()

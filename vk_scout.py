@@ -1399,6 +1399,7 @@ def score_vk_candidates(
     priority_ids: Iterable[int] | None = None,
     reanalyze_exhausted: bool = True,
     min_score: int = 50,
+    batch_size: int = 10,
 ) -> dict[str, Any]:
     if ask_openai_fn is None:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
@@ -1685,8 +1686,9 @@ automation_need_signal=true означает, что из его реально�
 
     analyzed = 0
     scores_this_cycle: list[int] = []
-    for start in range(0, len(rows), 10):
-        batch = rows[start:start + 10]
+    batch_size = max(1, min(30, int(batch_size)))
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start:start + batch_size]
         public_batch = []
         for candidate in batch:
             view = _candidate_public_view(candidate)
