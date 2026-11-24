@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -563,16 +564,52 @@ class Worker:
         return "generated"
 
 
+def _pilot_preflight(parser, options):
+    from marketing_interview import pilot_project
+
+    owner = os.getenv("AGENCY_MARKETING_PILOT_OWNER", "")
+    configured = os.getenv("AGENCY_MARKETING_PILOT_PROJECT", "")
+    if not (owner or configured or options.pilot_check):
+        return None
+    try:
+        project = pilot_project(int(owner), owner, configured)
+    except ValueError:
+        project = None
+    if not project:
+        parser.error("Нужна точная пара владельца и проекта пилота.")
+    if not options.pilot_check:
+        parser.error("Пилот поддерживает проверку очереди без запуска. Платная обработка выключена.")
+    return int(owner), project
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Контент-завод W: генерация и публикации по расписанию")
     parser.add_argument("--once", action="store_true", help="Один проход очереди")
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--max-jobs", type=int, default=2)
+    parser.add_argument("--pilot-check", action="store_true", help="Проверить только очередь проекта пилота")
     options = parser.parse_args(argv)
     if options.interval < 30 or not 1 <= options.max_jobs <= 20:
         parser.error("interval должен быть >=30 секунд, max-jobs — от 1 до 20")
-    from content_factory_runtime import build_store, get_generator
+    scope = _pilot_preflight(parser, options)
+    from content_factory_runtime import _configuration, build_store, get_generator
+    if scope:
+        config = _configuration()
+        if not config.get("SUPABASE_URL") or not config.get("SUPABASE_SECRET_KEY"):
+            parser.error("Для проверки очереди нужно существующее хранилище Supabase.")
     store = build_store()
+    if scope:
+        owner, project = scope
+        if is_agency_access_revoked(owner) or not store.get_project(owner, project):
+            parser.error("Проект основателя недоступен.")
+        jobs = store.list_jobs(owner, project, limit=1000)
+        counts = {}
+        for job in jobs:
+            state = job["state"]
+            counts[state] = counts.get(state, 0) + 1
+        print(json.dumps({"mode": "read_only", "job_states": counts,
+                          "potentially_truncated": len(jobs) == 1000}, ensure_ascii=False))
+        return 0
     try:
         generator = get_generator()
     except ValueError:

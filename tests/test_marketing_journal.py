@@ -83,10 +83,13 @@ render_journal(store, "owner_101_project", 1, state, 2, {})
         raw = b"reviewed draft"
         entry = {"date": "2026-11-24", "sha256": sha256(raw).hexdigest(), "goal": "Знакомство",
                  "review_reference": "editor", "approval_reference": "owner", "kind": "news",
-                 "cost_cents": 0, "sources": [{"url": "https://example.com/news", "date": "2026-11-17"}]}
+                 "cost_cents": 0, "factcheck_reference": "separate-editor",
+                 "factcheck_sha256": sha256(raw).hexdigest(),
+                 "sources": [{"url": "https://example.com/news", "date": "2026-11-17"},
+                             {"url": "https://example.org/report", "date": "2026-11-18"}]}
         today = date(2026, 11, 24)
         reviewed_release(entry, raw, today)
-        for invalid in ({**entry, "sources": []}, {**entry, "cost_cents": 1},
+        for invalid in ({**entry, "sources": []}, {**entry, "factcheck_sha256": "changed"}, {**entry, "cost_cents": 1},
                         {**entry, "approval_reference": ""}, {**entry, "date": "2026-11-23"}):
             with self.assertRaises(ValueError):
                 reviewed_release(invalid, raw, today)

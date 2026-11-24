@@ -40,10 +40,16 @@ def reviewed_release(entry, raw, today):
         raise ValueError("Тестовый выпуск поддерживает только нулевую стоимость.")
     if entry.get("kind") in {"news", "success", "commercial"} and not entry.get("sources"):
         raise ValueError("Нужны источники для проверки утверждений.")
+    domains = set()
     for source in entry.get("sources", []):
         url = urlsplit(source["url"])
         if url.scheme != "https" or not url.hostname or url.username or url.password:
             raise ValueError("Укажите публичный HTTPS-источник.")
+        domains.add(url.hostname.removeprefix("www."))
         source_date = date.fromisoformat(source["date"])
         if source_date > today or entry.get("kind") == "news" and (today - source_date).days > 14:
             raise ValueError("Дата источника не подходит для выпуска.")
+    if entry.get("kind") == "news":
+        if (len(domains) < 2 or not str(entry.get("factcheck_reference") or "").strip()
+                or entry.get("factcheck_sha256") != entry.get("sha256")):
+            raise ValueError("Для новости нужны два источника и отдельная проверка утверждённой версии.")

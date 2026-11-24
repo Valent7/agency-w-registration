@@ -102,3 +102,31 @@ class PilotCompletionTests(TestCase):
             issues = journal_issues(11, storage, now)
         self.assertEqual({item["code"] for item in issues},
                          {"journal_video_overdue", "journal_release_failed"})
+
+    def test_worker_pilot_check_reads_only_one_project_and_does_not_initialize_provider(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from io import StringIO
+        from content_factory_worker import main
+
+        project = "a6c046ac-6616-4fd8-a840-f9c260200a2b"
+        store = Mock()
+        store.list_jobs.return_value = [{"state": "ready"}]
+        with (
+            patch.dict("os.environ", {"AGENCY_MARKETING_PILOT_OWNER": "11",
+                                      "AGENCY_MARKETING_PILOT_PROJECT": project}),
+            patch("content_factory_runtime.build_store", return_value=store),
+            patch("content_factory_runtime._configuration", return_value={
+                "SUPABASE_URL": "fixture", "SUPABASE_SECRET_KEY": "fixture",
+            }),
+            patch("content_factory_runtime.get_generator") as generator,
+            patch("content_factory_worker.is_agency_access_revoked", return_value=False),
+            redirect_stdout(StringIO()) as output,
+            redirect_stderr(StringIO()),
+        ):
+            self.assertEqual(main(["--pilot-check"]), 0)
+            self.assertIn('"mode": "read_only"', output.getvalue())
+            store.list_jobs.assert_called_once_with(11, project, limit=1000)
+            with self.assertRaises(SystemExit):
+                main(["--once"])
+        generator.assert_not_called()
+        store.claim_job.assert_not_called()
