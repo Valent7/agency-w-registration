@@ -36,12 +36,21 @@ def _int(value: Any) -> int:
         return 0
 
 
-def _qualified_scores(owner_id: int, min_score: int) -> list[dict[str, Any]]:
-    return _vk_owner_pages("agency_vk_candidate_scores", owner_id, {
+def _qualified_scores(
+    owner_id: int, min_score: int, passport_version=None, marketing_project_id=None,
+) -> list[dict[str, Any]]:
+    filters = {
         "score": f"gte.{int(min_score)}",
         "select": "vk_user_id,score,fit_summary,positive_signals,weak_fit_signals,analyzed_at",
         "order": "score.desc,analyzed_at.desc,vk_user_id.asc",
-    })
+    }
+    if passport_version is not None:
+        if not marketing_project_id:
+            raise ValueError("Marketing project is required for versioned VK scores")
+        filters["target_profile_snapshot->>marketing_project_id"] = f"eq.{marketing_project_id}"
+        filters["target_profile_snapshot->>marketing_passport_version"] = f"eq.{passport_version}"
+        filters["target_profile_snapshot->>marketing_segment_matched"] = "eq.true"
+    return _vk_owner_pages("agency_vk_candidate_scores", owner_id, filters)
 
 
 def _candidate_rows(ids: list[int]) -> dict[int, dict[str, Any]]:
@@ -86,6 +95,8 @@ def ensure_quality_vk_assignments(
     *,
     limit: int = 5,
     min_score: int = 50,
+    passport_version: int | None = None,
+    marketing_project_id: str | None = None,
 ) -> dict[str, Any]:
     """Keep up to five daily VK cards, all with Neonia score >= min_score."""
     owner_id = int(owner_id)
@@ -107,7 +118,10 @@ def ensure_quality_vk_assignments(
             "message": "Нет активных VK-источников для качественного отбора.",
         }
 
-    score_rows = _qualified_scores(owner_id, min_score)
+    score_rows = (
+        _qualified_scores(owner_id, min_score) if passport_version is None
+        else _qualified_scores(owner_id, min_score, passport_version, marketing_project_id)
+    )
     score_by_id: dict[int, dict[str, Any]] = {}
     ordered_ids: list[int] = []
     for row in score_rows:

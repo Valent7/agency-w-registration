@@ -206,6 +206,28 @@ def _load_target_profiles(member_ids: list[int]) -> dict[int, dict[str, Any]]:
                 analysis if isinstance(analysis, dict) and analysis else profile
             )
 
+    from marketing_interview import pilot_project
+    from marketing_passport import current_passport, scout_audience
+
+    for owner_id in member_ids:
+        project_id = pilot_project(owner_id, os.getenv("AGENCY_MARKETING_PILOT_OWNER"),
+                                   os.getenv("AGENCY_MARKETING_PILOT_PROJECT"))
+        if project_id is None:
+            continue
+        try:
+            approved = current_passport(_sb_get, _decrypt_workspace_state, owner_id, project_id)
+        except (requests.RequestException, ValueError, RuntimeError):
+            _log(f"{owner_id}: утверждённый маркетинговый паспорт временно недоступен")
+            result.pop(owner_id, None)
+            continue
+        if approved:
+            version, passport = approved
+            profile = scout_audience(passport, version)
+            if profile:
+                result[owner_id] = {**profile, "marketing_project_id": project_id}
+            else:
+                result.pop(owner_id, None)
+
     return result
 
 
@@ -222,7 +244,7 @@ def _extract_response_text(data: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _ask_openai(system_prompt: str, user_message: str) -> str:
+def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
     api_key = _required_env("OPENAI_API_KEY")
     model = _env("VK_SCOUT_OPENAI_MODEL", "gpt-5-mini") or "gpt-5-mini"
     url = "https://api.openai.com/v1/responses"
@@ -247,8 +269,10 @@ def _ask_openai(system_prompt: str, user_message: str) -> str:
         "Content-Type": "application/json",
     }
 
+    if bounded:
+        payload["max_output_tokens"] = 5000
     retryable = {429, 500, 502, 503, 504}
-    delays = (0, 2, 5, 10)
+    delays = (0,) if bounded else (0, 2, 5, 10)
     last_error: Exception | None = None
 
     for attempt, delay in enumerate(delays, start=1):
@@ -298,6 +322,41 @@ def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+def _reserve_marketing_spend(payload):
+    url, _ = _supabase_config()
+    response = requests.post(f"{url}/rest/v1/rpc/marketing_reserve_spend",
+                             headers=_sb_headers(), json=payload, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def _marketing_vk_analysis(owner_id, version):
+    if version is None:
+        return _ask_openai
+    from marketing_budget import guarded_request
+    from marketing_interview import pilot_project
+
+    project_id = pilot_project(owner_id, os.getenv("AGENCY_MARKETING_PILOT_OWNER"),
+                               os.getenv("AGENCY_MARKETING_PILOT_PROJECT"))
+    if not project_id:
+        raise RuntimeError("Проект пилота не подтверждён.")
+    return guarded_request(
+        _reserve_marketing_spend, lambda system, prompt: _ask_openai(system, prompt, bounded=True),
+        owner_id=owner_id, project_id=project_id, agent="neonia",
+        ceiling_cents=_int_env("AGENCY_MARKETING_VK_MAX_REQUEST_CENTS", 0, 0, 100000000),
+        model=_env("VK_SCOUT_OPENAI_MODEL", "gpt-5-mini") or "gpt-5-mini",
+    )
+
+
+def _needs_more_candidates(prepared, target_profile, daily_limit):
+    if not prepared.get("complete"):
+        return True
+    return (
+        target_profile.get("marketing_passport_version") is not None
+        and int(prepared.get("network_count") or 0) < daily_limit
+    )
+
+
 def _score_until_daily_five(
     owner_id: int,
     member_code: str,
@@ -310,6 +369,12 @@ def _score_until_daily_five(
     priority_ids: list[int] | None = None,
 ) -> tuple[dict[str, Any], int, int | None]:
     """Keep scoring fresh VK profiles until today's 5/5 is complete or pool is exhausted."""
+    passport_version = target_profile.get("marketing_passport_version")
+    version_filter = {
+        "passport_version": passport_version,
+        "marketing_project_id": target_profile["marketing_project_id"],
+    } if passport_version is not None else {}
+    ask_openai = _marketing_vk_analysis(owner_id, passport_version)
     total_analyzed = 0
     total_passed = 0
     total_created = 0
@@ -320,9 +385,10 @@ def _score_until_daily_five(
         member_code,
         limit=daily_limit,
         min_score=min_score,
+        **version_filter,
     )
     total_created += int(prepared.get("created") or 0)
-    if prepared.get("complete"):
+    if not _needs_more_candidates(prepared, target_profile, daily_limit):
         return prepared, total_analyzed, best_score
 
     # score_vk_candidates excludes profiles already scored for this owner, so
@@ -331,7 +397,7 @@ def _score_until_daily_five(
         score_result = score_vk_candidates(
             owner_id,
             target_profile,
-            ask_openai_fn=_ask_openai,
+            ask_openai_fn=ask_openai,
             limit=analysis_limit,
             priority_ids=(priority_ids if round_no == 1 else None),
             reanalyze_exhausted=False,
@@ -354,6 +420,7 @@ def _score_until_daily_five(
             member_code,
             limit=daily_limit,
             min_score=min_score,
+            **version_filter,
         )
         total_created += int(prepared.get("created") or 0)
         _log(
@@ -364,7 +431,7 @@ def _score_until_daily_five(
             f"лучший_балл={round_best}; "
             f"диагностика={prepared.get('diagnostics') or {}}"
         )
-        if prepared.get("complete"):
+        if not _needs_more_candidates(prepared, target_profile, daily_limit):
             break
 
         # No fresh rows left: score_vk_candidates switched to reanalysis.
@@ -423,7 +490,7 @@ def top_up_vk_owner_now(
         max_rounds=200,
     )
     scan_result = {"candidates_found": 0}
-    if not prepared.get("complete"):
+    if _needs_more_candidates(prepared, target_profile, max(1, min(5, int(daily_limit)))):
         try:
             scan_result = scan_vk_sources(
                 owner_id,
@@ -620,7 +687,7 @@ def run_once() -> dict[str, int]:
             stats["analyzed"] += analyzed_total
             scan_result = {"candidates_found": 0, "errors": []}
 
-            if not prepared.get("complete"):
+            if _needs_more_candidates(prepared, target_profile, daily_limit):
                 try:
                     scan_result = scan_vk_sources(
                         owner_id,
@@ -740,6 +807,13 @@ def run_once() -> dict[str, int]:
 
         if prepared.get("complete"):
             stats["assignments_ready"] += 1
+        elif target_profile.get("marketing_passport_version") is not None:
+            _log(
+                f"{owner_id}: отклонение от цели {prepared.get('count') or 0}/{daily_limit}. "
+                f"Проверено профилей: {analyzed_total}. Диагностика: {prepared.get('diagnostics') or {}}. "
+                "Сверьте доступность и тематику источников. При исчерпании пула расширьте список "
+                "профильных источников в пределах разрешённых лимитов."
+            )
 
         name = str(member.get("first_name") or owner_id).strip()
         _log(

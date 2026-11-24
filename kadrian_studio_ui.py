@@ -116,6 +116,7 @@ def render_kadrian(owner_id, ask_ai):
     project = st.selectbox("Проект", projects, format_func=lambda item: item["name"])
     project_id = project["id"]
     key = f"kadrian_{owner_id}_{project_id}"
+    _render_marketing_plan(owner_id, project_id, key)
     from content_factory_autopilot_ui import _live_reels_enabled
     if _live_reels_enabled(project_id):
         mode = st.radio("Режим студии", ("Чат Кадриана", "Живой ролик"),
@@ -411,3 +412,68 @@ def render_kadrian(owner_id, ask_ai):
     if route != "runway":
         render_production(owner_id, project, store, ask_ai, chat, route, style, key + "_" + route)
         return
+
+
+def _render_marketing_plan(owner_id, project_id, key):
+    from datetime import date
+    from requests import RequestException
+    from marketing_content_plan import create_content_plan
+    from marketing_interview_ui import pilot_interview_store, read_approved_passport
+
+    try:
+        approved = read_approved_passport(owner_id, project_id)
+        if not approved:
+            return
+        interview = pilot_interview_store(owner_id, project_id)
+        if interview is None:
+            return
+        revision, state = interview.load()
+    except (RequestException, ValueError, LookupError, RuntimeError):
+        st.warning("Кадриану временно недоступен утверждённый маркетинговый паспорт.")
+        return
+    version, passport = approved
+    _render_journal_briefs(state, version, key)
+    with st.expander(f"Контент-план · версия паспорта {version}"):
+        start = st.date_input("Дата начала", date.today(), key=key + "_plan_start")
+        days = st.radio("Период в днях", (7, 30), horizontal=True, key=key + "_plan_days")
+        plan_key = f"{version}/{start.isoformat()}/{days}"
+        plans = state.get("content_plans", {})
+        plan = plans.get(plan_key)
+        if st.button("Создать контент-план", key=key + "_plan_create"):
+            try:
+                plan = create_content_plan(passport, version, start, days)
+                interview.save(revision, {**state, "content_plans": {**plans, plan_key: plan}})
+            except ValueError as error:
+                st.warning(str(error))
+                return
+            except (RequestException, RuntimeError):
+                st.warning("Сохранение плана не подтверждено. Обновите страницу.")
+                return
+        if plan:
+            st.dataframe([{
+                "Дата": item["date"], "Сегмент": item["segment"], "Формат": item["format"],
+                "Заголовок": item["title"], "Целевое действие": item["call_to_action"],
+            } for item in plan], hide_index=True)
+
+def _render_journal_briefs(state, version, key):
+    import json
+
+    video_formats = {"Видеообзор", "Reels"}
+    briefs = {}
+    for plan_key, plan in state.get("content_plans", {}).items():
+        if not plan_key.startswith(f"journal/{version}/"):
+            continue
+        for entry in plan:
+            if entry["format"] in video_formats:
+                label = f"{entry['date']} · {entry['format']} · {entry['topic']}"
+                briefs[label] = entry
+    if not briefs:
+        return
+    with st.expander("Видеозадания журнала «Время жить»"):
+        label = st.selectbox("Выбрать задание", sorted(briefs), key=key + "_journal_brief")
+        brief = briefs[label]
+        st.text(brief.get("goal") or brief["call_to_action"])
+        st.download_button("Скачать черновик задания",
+                           json.dumps(brief, ensure_ascii=False, indent=2),
+                           file_name="journal-video-brief.json", mime="application/json",
+                           key=key + "_journal_brief_download")
