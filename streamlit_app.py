@@ -10806,6 +10806,29 @@ if telegram_login_valid or remembered_data:
                                     )
 
                 elif selected_agent == "Неона":
+                    st.markdown("### 💬 Чат с Неоной")
+                    st.caption("Рабочие поручения владельца доступны независимо от дневной выдачи.")
+                    secretary_key = f"neona_owner_secretary_{telegram_id}"
+                    secretary_history = st.session_state.get(secretary_key, [])
+                    for role, text in secretary_history:
+                        with st.chat_message(role):
+                            st.markdown(text)
+                    with st.form(f"{secretary_key}_form", clear_on_submit=True):
+                        secretary_request = st.text_area("Задание Неоне", max_chars=4000)
+                        secretary_submit = st.form_submit_button("Подготовить ответ")
+                    if secretary_submit and secretary_request.strip():
+                        transcript = secretary_history[-10:] + [("user", secretary_request.strip())]
+                        secretary_answer = ask_openai(
+                            "Ты Неона, секретарь-референт Агентства W. Отвечай владельцу по существу. "
+                            "Готовь черновики и помогай организовать работу. Не обещай внешних действий "
+                            "и не утверждай, что сообщение отправлено или встреча назначена.",
+                            json.dumps(transcript, ensure_ascii=False),
+                        )
+                        st.session_state[secretary_key] = (
+                            transcript + [("assistant", secretary_answer)]
+                        )[-12:]
+                        st.rerun()
+
                     st.caption(
                         "Неона получает только людей, которых выбрал владелец. "
                         "Она готовит короткое персональное первое сообщение, "

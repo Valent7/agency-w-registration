@@ -519,6 +519,8 @@ def top_up_vk_owner_now(
         "best_score": best_score,
         "message": str(prepared.get("message") or "").strip(),
         "scan_found": int(scan_result.get("candidates_found") or 0),
+        "author_walls_read": int(scan_result.get("author_walls_read") or 0),
+        "scan_exclusions": scan_result.get("scan_exclusions") or {},
         **control_stats,
     }
 

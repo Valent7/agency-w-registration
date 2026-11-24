@@ -1293,6 +1293,15 @@ def _render_today_vk_candidates(
             f"выдано {int(result.get('created') or 0)}. "
             f"Сегодня {int(result.get('count') or 0)}/5. " + str(result.get("reason") or "")
         )
+        if network_only(owner_id):
+            reasons = result.get("scan_exclusions") or {}
+            st.caption(
+                f"В последнем проходе VK получено профилей: {result.get('scan_found', 0)}. "
+                f"Открыто стен авторов: {result.get('author_walls_read', 0)}. "
+                f"Исключено при проверке собранного пула: {sum(reasons.values())}."
+            )
+            for reason, count in reasons.items():
+                st.caption(f"{reason} — {count}")
         if result.get("estimated_usd_from_usage") is not None:
             message += f" Расчёт по токенам OpenAI: ${result['estimated_usd_from_usage']:.6f}."
         if result.get("complete"):
@@ -1990,9 +1999,9 @@ def _render_vk_source_settings(owner_id: int) -> None:
     auth_key = f"vk_scout_auth_url_{owner_id}"
 
     if service_mode:
-        st.success("🟢 Поиск кандидатов VK подключён через сервисный ключ")
+        st.success("🟢 Настроен сервисный доступ VK")
         st.caption(
-            "VK 5/5 работает через сервисный доступ. Заблокированное приложение VK ID "
+            "Подключение VK использует сервисный доступ. Результат поиска показан отдельно. VK ID "
             "больше не используется и повторная авторизация не требуется."
         )
         st.info(
