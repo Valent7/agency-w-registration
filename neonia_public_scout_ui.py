@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
+from neonia_network_proof import network_only
 from neonia_public_scout import (
     discover_public_candidates,
     draft_engagement_comment,
@@ -214,6 +215,9 @@ def _render_candidate(
 
 
 def render_neonia_public_scout(target_profile: dict, owner_id: int) -> None:
+    if network_only(owner_id):
+        st.info("Платный поиск пилота доступен только через контрольный маршрут с лимитом.")
+        return
     owner_id = int(owner_id)
 
     st.markdown("### 🌐 Неония-разведчик")

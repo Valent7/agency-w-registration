@@ -31,9 +31,12 @@ from vk_scout_oauth import (
     get_valid_vk_scout_access_token,
 )
 
+from neonia_control_budget import CONTROL_RUN_ID, cloud_vk_assessor
+from neonia_network_proof import network_only
 from vk_quality_daily import ensure_quality_vk_assignments
 
 from vk_scout import (
+    _sb_post as _insert_vk_row,
     VKScoutError,
     ensure_daily_vk_assignments,
     load_today_vk_assignments,
@@ -391,6 +394,9 @@ def _score_until_daily_five(
     if not _needs_more_candidates(prepared, target_profile, daily_limit):
         return prepared, total_analyzed, best_score
 
+    if network_only(owner_id):
+        return {**prepared, "paid_search_blocked": True}, total_analyzed, best_score
+
     # score_vk_candidates excludes profiles already scored for this owner, so
     # every round advances through the fresh pool instead of repeating the same 30.
     for round_no in range(1, max(1, int(max_rounds)) + 1):
@@ -449,10 +455,16 @@ def top_up_vk_owner_now(
     daily_limit: int = 5,
     min_score: int = 50,
     analysis_limit: int = 30,
+    control_search: bool = False,
 ) -> dict[str, Any]:
     """Immediate manual top-up for one owner's VK daily five."""
     owner_id = int(owner_id)
     member_code = str(member_code or "").strip()
+
+    if control_search and (
+        not network_only(owner_id) or _env("NEONIA_VK_CONTROL_OWNER") != str(owner_id)
+    ):
+        raise VKScoutError("Контрольный поиск доступен только владельцу пилота.")
 
     profiles = _load_target_profiles([owner_id])
     target_profile = profiles.get(owner_id)
@@ -495,13 +507,14 @@ def top_up_vk_owner_now(
             scan_result = scan_vk_sources(
                 owner_id,
                 per_source=1000,
-                max_sources=min(5, len(sources)),
+                max_sources=min(10 if control_search else 5, len(sources)),
                 include_active_context=True,
+                **({"include_author_posts": True} if control_search else {}),
             )
         except Exception as exc:
             _log(f"{owner_id}: обновление VK отложено; работаю из сохранённого пула: {exc}")
             scan_result = {"candidates_found": 0, "errors": [str(exc)]}
-        if int(scan_result.get("candidates_found") or 0) > 0:
+        if int(scan_result.get("candidates_found") or 0) > 0 and not control_search:
             prepared2, analyzed2, best2 = _score_until_daily_five(
                 owner_id,
                 member_code,
@@ -524,6 +537,31 @@ def top_up_vk_owner_now(
             analyzed_total += analyzed2
             if best2 is not None:
                 best_score = best2 if best_score is None else max(best_score, best2)
+    control_stats = {}
+    if control_search and not prepared.get("complete"):
+        reservations = _sb_get("neonia_vk_control_reservations", {
+            "select": "run_id", "run_id": f"eq.{CONTROL_RUN_ID}", "limit": 1,
+        })
+        if reservations:
+            raise VKScoutError("Разрешённый контрольный запрос уже зарезервирован.")
+        assessor = cloud_vk_assessor(
+            requests, owner_id, _required_env("OPENAI_API_KEY"),
+            lambda claim: _insert_vk_row("neonia_vk_control_reservations", claim),
+            control_stats,
+        )
+        scored = score_vk_candidates(
+            owner_id, target_profile,
+            ask_openai_fn=lambda instructions, prompt: _extract_response_text(assessor(instructions, prompt)),
+            limit=30, batch_size=30, reanalyze_exhausted=False, min_score=min_score,
+            priority_ids=scan_result.get("active_context_ids"),
+        )
+        analyzed_total += int(scored.get("analyzed") or 0)
+        first_created = int(prepared.get("created") or 0)
+        prepared = ensure_quality_vk_assignments(owner_id, member_code, limit=5, min_score=min_score)
+        prepared["created"] = first_created + int(prepared.get("created") or 0)
+        prepared["passed_threshold"] = int(scored.get("passed_threshold") or 0)
+        best_score = scored.get("best_score")
+
     diagnostics = prepared.get("diagnostics") or {}
     if prepared.get("complete"):
         reason = ""
@@ -548,6 +586,7 @@ def top_up_vk_owner_now(
         "best_score": best_score,
         "message": str(prepared.get("message") or "").strip(),
         "scan_found": int(scan_result.get("candidates_found") or 0),
+        **control_stats,
     }
 
 

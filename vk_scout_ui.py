@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from neonia_network_proof import network_only
+
 from vk_scout_oauth import (
     begin_vk_scout_authorization,
     get_vk_scout_connection,
@@ -1272,6 +1274,8 @@ def _render_today_vk_candidates(
                 )
 
     today_count = int(progress.get("today") or len(assignments)) if isinstance(progress, dict) else len(assignments)
+    if network_only(owner_id):
+        today_count = len(assignments)
     st.caption(
         f"Сегодня выдано: {today_count}/5"
         + (
@@ -1289,6 +1293,8 @@ def _render_today_vk_candidates(
             f"выдано {int(result.get('created') or 0)}. "
             f"Сегодня {int(result.get('count') or 0)}/5. " + str(result.get("reason") or "")
         )
+        if result.get("estimated_usd_from_usage") is not None:
+            message += f" Расчёт по токенам OpenAI: ${result['estimated_usd_from_usage']:.6f}."
         if result.get("complete"):
             st.success(message)
         else:
@@ -1312,6 +1318,7 @@ def _render_today_vk_candidates(
                         daily_limit=5,
                         min_score=50,
                         analysis_limit=30,
+                        control_search=(os.getenv("NEONIA_VK_CONTROL_OWNER", "").strip() == str(owner_id)),
                     )
                 st.session_state[f"vk_top_up_result_{owner_id}"] = result
                 st.rerun()
@@ -1465,10 +1472,20 @@ def _render_vk_candidate_details(
             meta.append(place)
         st.caption(" · ".join(meta))
         score = int(item.get("score") or 0)
-        st.write(
-            "**Почему сегодня:** профиль прошёл отбор Неонии по Вашей ЦА"
-            + (f" · оценка {score}/100." if score else ".")
-        )
+        from neonia_network_proof import vk_network_proof
+
+        proof = vk_network_proof(item)
+        if proof:
+            from datetime import datetime, timezone
+            day = datetime.fromtimestamp(proof["timestamp"], timezone.utc).strftime("%d.%m.%Y")
+            st.text(f"{day} · {proof['text']}")
+            st.link_button("Публичное подтверждение работы в сетевом бизнесе", proof["url"])
+        else:
+            explanation = str(item.get("fit_summary") or "").strip()
+            if explanation:
+                st.text(explanation)
+        if score:
+            st.caption(f"Оценка перспективности · {score}/100")
 
         if show_card_header:
             _render_vk_profile_link(item)
