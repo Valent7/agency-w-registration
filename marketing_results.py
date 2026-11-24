@@ -63,3 +63,27 @@ def commercial_proposals(counts, amounts):
     if results["marketing_roi_pct"] is not None and results["marketing_roi_pct"] < 0:
         proposals.append("Проверить расходы и подтверждённую выручку по источникам до расширения бюджета.")
     return proposals
+
+
+def recorded_agent_spending(store, start, end):
+    """Report confirmed costs separately from reservations awaiting settlement."""
+    if end < start:
+        raise ValueError("Конец периода раньше начала.")
+    totals = {}
+    offset = 0
+    while True:
+        rows = store.request("GET", "marketing_spend", params={
+            **store.filters, "select": "agent_id,actual_cents,estimate_cents",
+            "and": f"(budget_day.gte.{start.isoformat()},budget_day.lte.{end.isoformat()})",
+            "order": "budget_day,agent_id,operation_id", "limit": 500, "offset": offset,
+        })
+        for row in rows:
+            entry = totals.setdefault(row["agent_id"], {"actual": 0, "reserved": 0, "unsettled": 0})
+            if row["actual_cents"] is None:
+                entry["reserved"] += int(row["estimate_cents"])
+                entry["unsettled"] += 1
+            else:
+                entry["actual"] += int(row["actual_cents"])
+        if len(rows) < 500:
+            return totals
+        offset += len(rows)

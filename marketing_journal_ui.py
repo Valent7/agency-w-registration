@@ -54,6 +54,30 @@ def render_journal(store, prefix, revision, state, passport_version, passport):
                 "Рабочая тема": item["topic"], "Следующее действие": item["call_to_action"],
             } for item in plan], hide_index=True)
 
+        if plan:
+            from journal_assignments import VIDEO_FORMATS, assign_video, assignment_key
+
+            options = {f"{entry['date']} · {entry['format']} · {entry['topic']}": entry
+                       for entry in plan if entry["format"] in VIDEO_FORMATS}
+            if options:
+                label = st.selectbox("Видеозадание для Кадриана", list(options), key=prefix + "_video_task")
+                brief = options[label]
+                task = state.get("journal_assignments", {}).get(assignment_key(brief))
+                if task:
+                    if task["status"] == "media_received":
+                        st.success(f"Кадриан передал проверенный MP4 · {task['filename']}")
+                        if st.button("Открыть итоговый MP4", key=prefix + "_open_video"):
+                            _render_received_video(store, task, prefix)
+                    else:
+                        st.caption("Задание передано Кадриану и ожидает итоговый MP4.")
+                elif st.button("Передать задание Кадриану", key=prefix + "_assign_video"):
+                    try:
+                        store.save(revision, assign_video(state, brief))
+                    except (requests.RequestException, ValueError, RuntimeError):
+                        st.warning("Передача задания не подтверждена.")
+                    else:
+                        st.rerun()
+
         slug = st.text_input("Идентификатор статьи из адреса страницы", key=prefix + "_journal_slug").strip()
         ledger = state.get("journal_publications", {})
         if st.button("Проверить размещение", disabled=not slug, key=prefix + "_journal_verify"):
@@ -86,3 +110,19 @@ def render_editorial_run_status():
     if run["conclusion"] in {"failure", "cancelled", "timed_out", "action_required"}:
         st.error("Последний редакционный цикл не завершился успешно. Проверьте журнал выполнения.")
     st.link_button("Открыть последний запуск редакции", run["url"])
+
+def _render_received_video(interview, task, prefix):
+    from content_factory_runtime import build_store
+    from journal_assignments import read_job_video
+
+    try:
+        content_store = build_store()
+        asset, data = read_job_video(interview.identity["owner_id"], interview.identity["project_id"],
+                                     task["job_id"], content_store)
+        if asset["sha256"] != task["sha256"]:
+            raise ValueError("Результат изменился после передачи.")
+    except (requests.RequestException, ValueError, RuntimeError):
+        st.warning("Не удалось повторно подтвердить сохранённый MP4.")
+    else:
+        st.download_button("Скачать MP4", data, file_name=task["filename"],
+                           mime="video/mp4", key=prefix + "_video_download")

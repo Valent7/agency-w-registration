@@ -336,13 +336,13 @@ def ensure_quality_vk_assignments(
         global_used.add(uid)
         free_positions.pop(0)
 
-    final_rows = load_today_vk_assignments(owner_id)
-    count = min(len(final_rows), limit)
+    final_rows = load_today_vk_assignments(owner_id)[:limit]
+    count = len(final_rows)
     final_ids = [_int(row.get("vk_user_id")) for row in final_rows]
     network_count = sum(1 for uid in final_ids if _has_network_evidence(uid))
     return {
         "ok": True,
-        "assignments": final_rows[:limit],
+        "assignments": final_rows,
         "count": count,
         "created": created,
         "complete": count >= limit,

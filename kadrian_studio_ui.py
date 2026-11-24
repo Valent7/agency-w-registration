@@ -116,7 +116,7 @@ def render_kadrian(owner_id, ask_ai):
     project = st.selectbox("Проект", projects, format_func=lambda item: item["name"])
     project_id = project["id"]
     key = f"kadrian_{owner_id}_{project_id}"
-    _render_marketing_plan(owner_id, project_id, key)
+    _render_marketing_plan(owner_id, project_id, key, store)
     from content_factory_autopilot_ui import _live_reels_enabled
     if _live_reels_enabled(project_id):
         mode = st.radio("Режим студии", ("Чат Кадриана", "Живой ролик"),
@@ -414,7 +414,7 @@ def render_kadrian(owner_id, ask_ai):
         return
 
 
-def _render_marketing_plan(owner_id, project_id, key):
+def _render_marketing_plan(owner_id, project_id, key, store):
     from datetime import date
     from requests import RequestException
     from marketing_content_plan import create_content_plan
@@ -432,7 +432,7 @@ def _render_marketing_plan(owner_id, project_id, key):
         st.warning("Кадриану временно недоступен утверждённый маркетинговый паспорт.")
         return
     version, passport = approved
-    _render_journal_briefs(state, version, key)
+    _render_journal_briefs(state, version, key, interview, revision, store, owner_id, project_id)
     with st.expander(f"Контент-план · версия паспорта {version}"):
         start = st.date_input("Дата начала", date.today(), key=key + "_plan_start")
         days = st.radio("Период в днях", (7, 30), horizontal=True, key=key + "_plan_days")
@@ -455,25 +455,46 @@ def _render_marketing_plan(owner_id, project_id, key):
                 "Заголовок": item["title"], "Целевое действие": item["call_to_action"],
             } for item in plan], hide_index=True)
 
-def _render_journal_briefs(state, version, key):
+def _render_journal_briefs(state, version, key, interview, revision, store, owner_id, project_id):
     import json
 
-    video_formats = {"Видеообзор", "Reels"}
-    briefs = {}
-    for plan_key, plan in state.get("content_plans", {}).items():
-        if not plan_key.startswith(f"journal/{version}/"):
-            continue
-        for entry in plan:
-            if entry["format"] in video_formats:
-                label = f"{entry['date']} · {entry['format']} · {entry['topic']}"
-                briefs[label] = entry
+    from journal_assignments import receive_video
+    from requests import RequestException
+
+    briefs = {
+        task_id: entry for task_id, entry in state.get("journal_assignments", {}).items()
+        if entry["brief"]["passport_version"] == version
+    }
     if not briefs:
         return
     with st.expander("Видеозадания журнала «Время жить»"):
-        label = st.selectbox("Выбрать задание", sorted(briefs), key=key + "_journal_brief")
-        brief = briefs[label]
+        task_id = st.selectbox("Выбрать задание", list(briefs),
+                               format_func=lambda item: briefs[item]["brief"]["title"],
+                               key=key + "_journal_brief")
+        task = briefs[task_id]
+        brief = task["brief"]
         st.text(brief.get("goal") or brief["call_to_action"])
-        st.download_button("Скачать черновик задания",
-                           json.dumps(brief, ensure_ascii=False, indent=2),
+        st.download_button("Скачать задание", json.dumps(brief, ensure_ascii=False, indent=2),
                            file_name="journal-video-brief.json", mime="application/json",
                            key=key + "_journal_brief_download")
+        if task["status"] == "media_received":
+            st.caption(f"Редакция получила проверенный MP4 · {task['filename']}")
+            return
+        try:
+            jobs = {
+                job["id"]: job for job in store.list_jobs(owner_id, project_id)
+                if job["state"] in {"ready", "scheduled", "published"}
+                and any(asset.get("mime_type") == "video/mp4" for asset in job.get("assets", []))
+            }
+            if not jobs:
+                st.caption("Готовых видео в этом проекте пока нет.")
+                return
+            job_id = st.selectbox("Итоговое видео", list(jobs),
+                                  format_func=lambda item: jobs[item].get("topic") or item,
+                                  key=key + "_journal_result")
+            if st.button("Передать проверенное видео редакции", key=key + "_journal_send_result"):
+                result = receive_video(state, task_id, owner_id, project_id, job_id, store)
+                interview.save(revision, result)
+                st.rerun()
+        except (RequestException, ValueError, RuntimeError) as error:
+            st.warning(str(error) if isinstance(error, ValueError) else "Передача видео не подтверждена.")

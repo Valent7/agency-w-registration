@@ -231,6 +231,23 @@ def _render_results(store, prefix, revision, state):
                 st.error("Сохранение итогов не подтверждено. Обновите страницу.")
             else:
                 st.rerun()
+        if st.button("Сверить журнал расходов", key=prefix + "_spend_report"):
+            from marketing_results import recorded_agent_spending
+
+            try:
+                spending = recorded_agent_spending(store, start, end)
+            except (requests.RequestException, ValueError, RuntimeError):
+                st.warning("Журнал расходов недоступен. Проверьте период и настройки пилота.")
+            else:
+                if spending:
+                    st.dataframe([
+                        {"ИИ-сотрудник": agent, "Подтверждено, €": values["actual"] / 100,
+                         "Зарезервировано, €": values["reserved"] / 100,
+                         "Операций без сверки": values["unsettled"]}
+                        for agent, values in sorted(spending.items())
+                    ], hide_index=True)
+                else:
+                    st.info("В журнале нет операций за выбранный период.")
         if report:
             results = commercial_results(report["counts"], report["amounts"])
             for key, label in (
@@ -342,6 +359,17 @@ def render_stagirite_marketing_signals(owner_id):
     from marketing_journal_ui import render_editorial_run_status
 
     render_editorial_run_status()
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("Europe/Berlin")).date().isoformat()
+    overdue = [task["brief"] for task in state.get("journal_assignments", {}).values()
+               if task["status"] == "assigned" and task["brief"]["date"] < today]
+    if overdue:
+        with st.expander("Просроченные задачи редакции", expanded=True):
+            st.warning(f"Ожидают итогового видео: {len(overdue)}")
+            for brief in sorted(overdue, key=lambda item: item["date"]):
+                st.text(f"{brief['date']} · {brief['title']}")
     publications = state.get("journal_publications", {})
     if publications:
         last = max(publications.values(), key=lambda item: item["verified_at"])
