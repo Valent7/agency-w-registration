@@ -59,3 +59,24 @@ class NetworkProofTests(TestCase):
         raw = {"public_professional_posts": rows}
         self.assertIsNotNone(vk_network_proof({"vk_user_id": 7, "raw_profile": raw}))
         self.assertIsNone(vk_network_proof({"vk_user_id": 8, "raw_profile": raw}))
+
+    def test_vanity_activity_does_not_replace_profession_and_own_post_can_prove_recent_use(self):
+        from vk_scout import _vk_recent_activity
+        from neonia_network_proof import vk_network_proof
+
+        now = datetime.now(timezone.utc)
+        text = "Работаю в MLM, продаю продукты и развиваю команду"
+        own_posts = [{"url": "https://vk.com/wall7_3", "text": text,
+                      "timestamp": int((now - timedelta(days=10)).timestamp())}]
+        candidate = {"vk_user_id": 7, "raw_profile": {
+            "last_seen": {"time": int((now - timedelta(hours=10)).timestamp())},
+            "public_professional_posts": own_posts,
+        }}
+        self.assertTrue(_vk_recent_activity(candidate, now=now)["active"])
+        self.assertIsNotNone(vk_network_proof(candidate))
+        candidate["raw_profile"].pop("last_seen")
+        self.assertFalse(_vk_recent_activity(candidate, now=now)["active"])
+        own_posts[0]["timestamp"] = int(now.timestamp())
+        self.assertTrue(_vk_recent_activity(candidate, now=now)["active"])
+        candidate["raw_profile"].pop("public_professional_posts")
+        self.assertIsNone(vk_network_proof(candidate))

@@ -904,6 +904,14 @@ def _vk_recent_activity(
         (last_seen.get("time"), "последний визит VK"),
         (raw.get("public_activity_at"), "публичный комментарий"),
     ]
+    uid = str(candidate.get("vk_user_id") or "")
+    if uid.isdecimal():
+        activity_values.extend(
+            (post.get("timestamp"), "собственная публичная запись VK")
+            for post in (raw.get("public_professional_posts") or [])
+            if isinstance(post, dict)
+            and re.fullmatch(rf"https://vk\.com/wall{uid}_[1-9]\d*", str(post.get("url") or ""))
+        )
     for value, source in activity_values:
         if value in (None, ""):
             continue
@@ -1273,6 +1281,20 @@ def scan_vk_sources(
                 item["raw_profile"] = {**(item.get("raw_profile") or {}), "public_professional_posts": posts}
                 if vk_network_proof(item):
                     active_context_ids.add(uid)
+    exclusions = {}
+    if include_author_posts and network_only(owner_id):
+        for item in unique.values():
+            if not vk_network_proof(item):
+                reason = "Нет доказательств текущей профессии"
+            elif not _vk_recent_activity(item)["active"]:
+                reason = "Активность VK за 48 часов не подтверждена"
+            elif vk_excluded_profession(item):
+                reason = "Профессия исключена из ЦА"
+            elif not item.get("can_write_private_message"):
+                reason = "Личные сообщения закрыты"
+            else:
+                continue
+            exclusions[reason] = exclusions.get(reason, 0) + 1
     saved = save_vk_candidates(unique.values())
     return {
         "sources_checked": len(sources),
@@ -1282,6 +1304,7 @@ def scan_vk_sources(
         "active_context_ids": sorted(active_context_ids),
         "author_walls_read": author_walls_read,
         "author_walls_failed": author_walls_failed,
+        "scan_exclusions": exclusions,
         "errors": errors,
     }
 
