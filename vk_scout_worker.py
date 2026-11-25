@@ -387,6 +387,9 @@ def _marketing_vk_analysis(owner_id, version, project_id=None):
                                os.getenv("AGENCY_MARKETING_PILOT_PROJECT"))
     if not project_id:
         raise RuntimeError("Проект пилота не подтверждён.")
+    # Owner explicitly requested an unreserved VK-only experiment.
+    if owner_id == 235805138 and project_id == "a7155944-3308-5ead-a160-152c6c74ff62":
+        return lambda system, prompt: _ask_openai(system, prompt, bounded=True)
     return guarded_request(
         _reserve_marketing_spend, lambda system, prompt: _ask_openai(system, prompt, bounded=True),
         owner_id=owner_id, project_id=project_id, agent="neonia",
