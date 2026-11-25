@@ -64,12 +64,16 @@ def render_audience_chat(store, prefix, ask_openai):
     chat = state.get("audience_chat_v2", {})
     answers = list(chat.get("answers", []))
     st.subheader("Моя целевая аудитория")
-    st.caption(f"Маркетинговая распаковка · {len(answers)} из {len(QUESTIONS)}")
+    total = len(QUESTIONS)
+    answered = len(answers)
+    progress_label = f"Отвечено: {answered} из {total} · Осталось: {total - answered} · Пройдено: {answered / total:.0%}"
+    st.progress(answered / total, text=progress_label)
     st.caption("Микрофон: запись передаётся OpenAI для распознавания (платная операция API). Личные ответы не передаются другим агентам; им доступен только утверждённый портрет.")
     edit_key = prefix + "_edit_index"
     editing = st.session_state.get(edit_key)
     for index, answer in enumerate(answers):
         with st.chat_message("assistant"):
+            st.markdown(f"**Вопрос №{index + 1} из {total}**")
             st.write(QUESTIONS[index])
         with st.chat_message("user"):
             st.text(answer)
@@ -99,10 +103,12 @@ def render_audience_chat(store, prefix, ask_openai):
             st.write(f"Редактирование ответа №{editing + 1}. Отправьте новый текст или голосовую запись, чтобы заменить только этот ответ.")
     elif len(answers) < len(QUESTIONS):
         with st.chat_message("assistant"):
+            st.markdown(f"**Вопрос №{answered + 1} из {total}**")
             st.write(QUESTIONS[len(answers)])
     else:
         with st.chat_message("assistant"):
             st.text(chat.get("summary") or "Распаковка завершена. Напишите «Сформировать портрет», чтобы получить проект маркетингового ядра.")
+    st.progress(answered / total, text=progress_label)
     message = st.chat_input("Напишите ответ или нажмите микрофон", accept_audio=True, key=f"{prefix}_v2_{revision}")
     if not message:
         return
