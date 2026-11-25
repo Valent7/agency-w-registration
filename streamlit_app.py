@@ -10696,117 +10696,13 @@ if telegram_login_valid or remembered_data:
                     passport_key = (
                         f"neonia_target_audience_passport_{telegram_id}"
                     )
-                    from marketing_interview_ui import render_marketing_interview
+                    from marketing_audience_chat import open_marketing_store, render_audience_chat
 
-                    saved_passport = st.session_state.get(passport_key)
-                    render_marketing_interview(telegram_id, saved_passport)
-                    saved_profile = (
-                        saved_passport.get("profile")
-                        if isinstance(saved_passport, dict)
-                        else None
-                    )
-                    is_live_profile = bool(
-                        isinstance(saved_profile, dict)
-                        and saved_profile.get("portrait")
-                        and (
-                            saved_profile.get("who_is_this")
-                            or saved_profile.get("current_situation")
-                        )
-                    )
-
-                    if is_live_profile:
-                        st.markdown("### ✅ Сохранённый портрет ЦА")
-                        render_target_profile(saved_profile)
-                        st.caption(
-                            "Неония использует именно этот живой портрет "
-                            "при следующем анализе Telegram-контактов."
-                        )
-                        st.divider()
-                    elif isinstance(saved_profile, dict):
-                        st.warning(
-                            "Сохранён старый вариант ЦА. Он больше не используется: "
-                            "в нём смешивались сведения о проекте и портрет человека. "
-                            "Создайте новый живой портрет ниже."
-                        )
-
-                    st.markdown("### 🎯 Определить мою целевую аудиторию")
-                    st.write(
-                        "Добавьте материалы проекта. Неония изучит их внутри, "
-                        "но на экран выведет только живой портрет человека, "
-                        "которому этот проект действительно может быть нужен."
-                    )
-
-                    with st.form("neonia_source_form"):
-                        project_links = st.text_area(
-                            "🔗 Ссылки на проект",
-                            placeholder=(
-                                "Официальный сайт, страница продукта, "
-                                "презентация или ролик — каждая ссылка с новой строки."
-                            ),
-                            height=110,
-                        )
-
-                        project_files = st.file_uploader(
-                            "📄 Материалы проекта",
-                            type=["pdf", "docx", "pptx", "txt", "csv", "xlsx"],
-                            accept_multiple_files=True,
-                        )
-
-                        owner_note = st.text_area(
-                            "📝 Что особенно важно учесть — необязательно",
-                            placeholder=(
-                                "Например: нам нужны партнёры, которые работают с людьми "
-                                "и открыты дополнительному направлению."
-                            ),
-                            height=90,
-                        )
-
-                        neonia_submitted = st.form_submit_button(
-                            "🎯 Определить мою ЦА"
-                        )
-
-                    if neonia_submitted:
-                        if not project_links.strip() and not project_files:
-                            st.warning(
-                                "Добавьте хотя бы одну ссылку или материал проекта."
-                            )
-                        else:
-                            with st.spinner(
-                                "Неония изучает проект и формирует портрет ЦА..."
-                            ):
-                                try:
-                                    profile = analyze_owner_project_target_profile(
-                                        ask_openai,
-                                        project_links,
-                                        project_files,
-                                        owner_note,
-                                    )
-                                except Exception as exc:
-                                    st.error(f"Не удалось определить ЦА: {exc}")
-                                else:
-                                    file_names = ", ".join(
-                                        file.name for file in project_files
-                                    ) if project_files else "Файлы не загружены."
-
-                                    st.session_state[passport_key] = {
-                                        "schema_version": 2,
-                                        "profile": profile,
-                                        "analysis": target_profile_for_analysis(profile),
-                                        "project_links": project_links.strip(),
-                                        "file_names": file_names,
-                                        "owner_note": owner_note.strip(),
-                                        "saved_at": profile.get("saved_at"),
-                                    }
-                                    persist_workspace_if_changed(
-                                        telegram_id,
-                                        force=True,
-                                    )
-                                    st.success("✅ Портрет ЦА сохранён")
-                                    render_target_profile(profile)
-                                    st.info(
-                                        "Следующий шаг: открыть поиск контактов. "
-                                        "Неония будет сравнивать людей именно с этим портретом."
-                                    )
+                    try:
+                        marketing_store = open_marketing_store(telegram_id, create=True)
+                        render_audience_chat(marketing_store, f"marketing_chat_{telegram_id}", ask_openai)
+                    except Exception:
+                        st.error("Маркетинговый чат временно недоступен. Ваши прежние данные сохранены.")
 
                 elif selected_agent == "Неона":
                     st.markdown("### 💬 Чат с Неоной")
@@ -10821,11 +10717,16 @@ if telegram_login_valid or remembered_data:
                         secretary_submit = st.form_submit_button("Подготовить ответ")
                     if secretary_submit and secretary_request.strip():
                         transcript = secretary_history[-10:] + [("user", secretary_request.strip())]
+                        from marketing_audience_chat import knowledge_for_owner
+                        try:
+                            marketing_knowledge = knowledge_for_owner(telegram_id, "neona")
+                        except Exception:
+                            marketing_knowledge = None
                         secretary_answer = ask_openai(
                             "Ты Неона, секретарь-референт Агентства W. Отвечай владельцу по существу. "
                             "Готовь черновики и помогай организовать работу. Не обещай внешних действий "
                             "и не утверждай, что сообщение отправлено или встреча назначена.",
-                            json.dumps(transcript, ensure_ascii=False),
+                            json.dumps({"dialogue": transcript, "approved_marketing_context": marketing_knowledge}, ensure_ascii=False),
                         )
                         st.session_state[secretary_key] = (
                             transcript + [("assistant", secretary_answer)]
