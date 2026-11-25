@@ -1516,28 +1516,9 @@ def score_vk_candidates(
     )
 
     def preliminary_network_fit(candidate):
-        if not network_only(owner_id):
-            return True
-        if vk_network_proof(candidate):
-            return True
-        if not relaxed_pilot or vk_excluded_profession(candidate):
-            return False
-        raw = candidate.get("raw_profile") or {}
-        public_text = " ".join(str(x or "") for x in (
-            candidate.get("status_text"), candidate.get("activity"),
-            raw.get("occupation"), raw.get("career"),
-            raw.get("public_comment_samples"),
-            raw.get("public_professional_comments"),
-            raw.get("public_professional_posts"),
-        )).casefold()
-        return bool(NETWORK_TOPIC.search(public_text) or any(
-            marker in public_text for marker in (
-                "дистрибьют", "сетев", "mlm", "прямые продажи",
-                "партнёр", "партнер", "команд", "продаж",
-                "network marketing", "direct sales"
-            )
-        ))
-
+        if relaxed_pilot:
+            return not vk_excluded_profession(candidate)
+        return not network_only(owner_id) or bool(vk_network_proof(candidate))
 
     # Анализируем только людей из VK-источников именно этого владельца.
     # agency_vk_candidates — общий пул Агентства, поэтому без этого фильтра
@@ -5281,7 +5262,7 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
     for assignment in rows:
         uid = int(assignment["vk_user_id"])
         candidate = by_id.get(uid, {})
-        if network_only(owner_id) and (
+        if network_only(owner_id) and owner_id != 235805138 and (
             not _vk_recent_activity(candidate)["active"] or not vk_network_proof(candidate)
         ):
             continue
