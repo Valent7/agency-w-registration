@@ -390,7 +390,8 @@ def _marketing_vk_analysis(owner_id, version, project_id=None):
     return guarded_request(
         _reserve_marketing_spend, lambda system, prompt: _ask_openai(system, prompt, bounded=True),
         owner_id=owner_id, project_id=project_id, agent="neonia",
-        ceiling_cents=_int_env("AGENCY_MARKETING_VK_MAX_REQUEST_CENTS", 0, 0, 100000000),
+        ceiling_cents=(5 if owner_id == 235805138 and project_id == "a7155944-3308-5ead-a160-152c6c74ff62"
+                       else _int_env("AGENCY_MARKETING_VK_MAX_REQUEST_CENTS", 0, 0, 100000000)),
         model=_env("VK_SCOUT_OPENAI_MODEL", "gpt-5-mini") or "gpt-5-mini",
     )
 
@@ -439,7 +440,10 @@ def _score_until_daily_five(
     if not _needs_more_candidates(prepared, target_profile, daily_limit):
         return prepared, total_analyzed, best_score
 
-    if network_only(owner_id):
+    budgeted_pilot = (owner_id == 235805138 and bool(target_profile.get("approved_marketing_core"))
+                      and target_profile.get("marketing_project_id") == "a7155944-3308-5ead-a160-152c6c74ff62"
+                      and passport_version is not None)
+    if network_only(owner_id) and not budgeted_pilot:
         return {**prepared, "paid_search_blocked": True}, total_analyzed, best_score
 
     # score_vk_candidates excludes profiles already scored for this owner, so
@@ -554,7 +558,7 @@ def top_up_vk_owner_now(
                 per_source=1000,
                 max_sources=min(10 if control_search else 5, len(sources)),
                 include_active_context=True,
-                **({"include_author_posts": True} if control_search else {}),
+                **({"include_author_posts": True} if control_search or (owner_id == 235805138 and target_profile.get("approved_marketing_core")) else {}),
             )
         except Exception as exc:
             _log(f"{owner_id}: обновление VK отложено; работаю из сохранённого пула: {exc}")
@@ -784,6 +788,7 @@ def run_once() -> dict[str, int]:
                         per_source=1000,
                         max_sources=min(5, len(sources)),
                         include_active_context=True,
+                        **({"include_author_posts": True} if owner_id == 235805138 and target_profile.get("approved_marketing_core") else {}),
                     )
                     for scan_error in scan_result.get("errors") or []:
                         _log(f"{owner_id}: VK источник: {scan_error}")
