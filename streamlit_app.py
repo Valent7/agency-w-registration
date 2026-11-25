@@ -10696,24 +10696,10 @@ if telegram_login_valid or remembered_data:
                     passport_key = (
                         f"neonia_target_audience_passport_{telegram_id}"
                     )
-                    from marketing_interview_ui import pilot_interview_store, _request
-                    from marketing_interview import InterviewStore
-                    from marketing_audience_chat import render_audience_chat
-                    from workspace_persistence import _encrypt_state, _decrypt_state
-                    from uuid import uuid5, NAMESPACE_URL
+                    from marketing_audience_chat import open_marketing_store, render_audience_chat
 
-                    # Stable owner-specific project, never reuse another owner's project.
                     try:
-                        project_id = str(uuid5(NAMESPACE_URL, f"agency-w:marketing:{telegram_id}"))
-                        existing = _request("GET", "content_factory_projects", params={
-                            "id": f"eq.{project_id}", "owner_id": f"eq.{int(telegram_id)}", "select": "id",
-                        })
-                        if not existing:
-                            _request("POST", "content_factory_projects", json={
-                                "id": project_id, "owner_id": int(telegram_id),
-                                "data": {"name": "Маркетинговое ядро"}, "automation_enabled": False,
-                            })
-                        marketing_store = InterviewStore(_request, telegram_id, project_id, _encrypt_state, _decrypt_state)
+                        marketing_store = open_marketing_store(telegram_id, create=True)
                         render_audience_chat(marketing_store, f"marketing_chat_{telegram_id}", ask_openai)
                     except Exception:
                         st.error("Маркетинговый чат временно недоступен. Ваши прежние данные сохранены.")
@@ -10731,11 +10717,16 @@ if telegram_login_valid or remembered_data:
                         secretary_submit = st.form_submit_button("Подготовить ответ")
                     if secretary_submit and secretary_request.strip():
                         transcript = secretary_history[-10:] + [("user", secretary_request.strip())]
+                        from marketing_audience_chat import knowledge_for_owner
+                        try:
+                            marketing_knowledge = knowledge_for_owner(telegram_id, "neona")
+                        except Exception:
+                            marketing_knowledge = None
                         secretary_answer = ask_openai(
                             "Ты Неона, секретарь-референт Агентства W. Отвечай владельцу по существу. "
                             "Готовь черновики и помогай организовать работу. Не обещай внешних действий "
                             "и не утверждай, что сообщение отправлено или встреча назначена.",
-                            json.dumps(transcript, ensure_ascii=False),
+                            json.dumps({"dialogue": transcript, "approved_marketing_context": marketing_knowledge}, ensure_ascii=False),
                         )
                         st.session_state[secretary_key] = (
                             transcript + [("assistant", secretary_answer)]
