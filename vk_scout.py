@@ -1462,6 +1462,8 @@ def _candidate_public_view(item: dict[str, Any]) -> dict[str, Any]:
         "occupation": raw.get("occupation"),
         "career": raw.get("career"),
         "public_comment_samples": raw.get("public_comment_samples"),
+        "public_professional_posts": raw.get("public_professional_posts"),
+        "public_professional_comments": raw.get("public_professional_comments"),
         "can_write_private_message": item.get("can_write_private_message"),
         "source_community_id": item.get("source_community_id"),
     }
@@ -1503,6 +1505,39 @@ def score_vk_candidates(
 
     owner_id = int(owner_id)
     analysis_limit = max(1, min(100, int(limit)))
+
+    # Pilot: admit plausible public professional signals to paid analysis,
+    # not only the exact final network-proof pattern. Final daily gate is unchanged.
+    relaxed_pilot = (
+        owner_id == 235805138
+        and isinstance(target_profile, dict)
+        and target_profile.get("marketing_project_id") == "a7155944-3308-5ead-a160-152c6c74ff62"
+        and bool(target_profile.get("approved_marketing_core"))
+    )
+
+    def preliminary_network_fit(candidate):
+        if not network_only(owner_id):
+            return True
+        if vk_network_proof(candidate):
+            return True
+        if not relaxed_pilot or vk_excluded_profession(candidate):
+            return False
+        raw = candidate.get("raw_profile") or {}
+        public_text = " ".join(str(x or "") for x in (
+            candidate.get("status_text"), candidate.get("activity"),
+            raw.get("occupation"), raw.get("career"),
+            raw.get("public_comment_samples"),
+            raw.get("public_professional_comments"),
+            raw.get("public_professional_posts"),
+        )).casefold()
+        return bool(NETWORK_TOPIC.search(public_text) or any(
+            marker in public_text for marker in (
+                "дистрибьют", "сетев", "mlm", "прямые продажи",
+                "партнёр", "партнер", "команд", "продаж",
+                "network marketing", "direct sales"
+            )
+        ))
+
 
     # Анализируем только людей из VK-источников именно этого владельца.
     # agency_vk_candidates — общий пул Агентства, поэтому без этого фильтра
@@ -1613,7 +1648,7 @@ def score_vk_candidates(
                     if str(candidate.get("vk_user_id") or "").isdigit()
                     and int(candidate.get("vk_user_id")) not in unavailable_ids
                     and _vk_recent_activity(candidate)["active"]
-                    and (not network_only(owner_id) or vk_network_proof(candidate))
+                    and preliminary_network_fit(candidate)
                 ],
                 key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
             )
@@ -1650,7 +1685,7 @@ def score_vk_candidates(
                 continue
             if uid in already_scored or uid in unavailable_ids or uid in selected_ids:
                 continue
-            if not _vk_recent_activity(candidate)["active"] or (network_only(owner_id) and not vk_network_proof(candidate)):
+            if not _vk_recent_activity(candidate)["active"] or not preliminary_network_fit(candidate):
                 continue
             rows.append(candidate)
             selected_ids.add(uid)
@@ -1696,7 +1731,7 @@ def score_vk_candidates(
                     if str(candidate.get("vk_user_id") or "").isdigit()
                     and int(candidate.get("vk_user_id")) not in unavailable_ids
                     and _vk_recent_activity(candidate)["active"]
-                    and (not network_only(owner_id) or vk_network_proof(candidate))
+                    and preliminary_network_fit(candidate)
                 ],
                 key=lambda candidate: rank.get(int(candidate.get("vk_user_id") or 0), 10**9),
             )[:analysis_limit]
@@ -1746,7 +1781,7 @@ def score_vk_candidates(
             pass
 
     if network_only(owner_id):
-        rows = [candidate for candidate in rows if vk_network_proof(candidate)]
+        rows = [candidate for candidate in rows if preliminary_network_fit(candidate)]
     profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
     system_prompt = f"""
 Ты — Неония, аналитик и селектор целевой аудитории Агентства W.
