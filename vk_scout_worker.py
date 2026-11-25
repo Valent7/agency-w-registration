@@ -231,6 +231,50 @@ def _load_target_profiles(member_ids: list[int]) -> dict[int, dict[str, Any]]:
             else:
                 result.pop(owner_id, None)
 
+    # The owner-approved 50-question core supersedes the legacy passport.
+    from uuid import NAMESPACE_URL, uuid5
+    for owner_id in member_ids:
+        core_project = str(uuid5(NAMESPACE_URL, f"agency-w:marketing:{int(owner_id)}"))
+        try:
+            rows = _sb_get("marketing_interviews", {
+                "owner_id": f"eq.{int(owner_id)}", "project_id": f"eq.{core_project}",
+                "select": "revision,encrypted_state", "limit": 2,
+            })
+            if not rows:
+                continue
+            if len(rows) != 1:
+                raise ValueError("Unexpected marketing core row count")
+            state = _decrypt_workspace_state(rows[0]["encrypted_state"])
+            if state.get("schema") != 1:
+                raise ValueError("Cannot decrypt marketing core")
+            chat = state.get("audience_chat_v2", {})
+            approved = chat.get("approved")
+            if not approved:
+                result.pop(owner_id, None)
+                _log(f"{owner_id}: новое маркетинговое ядро ещё не утверждено")
+                continue
+            summary = approved.get("summary")
+            version = approved.get("version")
+            if not isinstance(summary, str) or not summary.strip() or type(version) is not int or version < 1:
+                raise ValueError("Invalid approved marketing core")
+            result[owner_id] = {
+                "marketing_project_id": core_project,
+                "marketing_passport_version": version,
+                "approved_marketing_core": summary,
+                "segments": [
+                    {"role": "client", "title": "Клиент по утверждённому ядру",
+                     "required_public_evidence": ["Публичное подтверждение профессиональной деятельности, соответствующей портрету клиента в утверждённом ядре"],
+                     "exclusions": []},
+                    {"role": "partner", "title": "Потенциальный партнёр по утверждённому ядру",
+                     "required_public_evidence": ["Публичное подтверждение деловой деятельности, соответствующей портрету партнёра в утверждённом ядре"],
+                     "exclusions": []},
+                ],
+                "instructions": "Применяй весь утверждённый текст, включая критерии и исключения. Не предполагай готовность купить или стать партнёром. Приоритет сетевикам. Незнание ИИ не исключает человека.",
+            }
+            _log(f"{owner_id}: используется утверждённое маркетинговое ядро версии {version}")
+        except (requests.RequestException, KeyError, TypeError, ValueError, RuntimeError):
+            result.pop(owner_id, None)
+            _log(f"{owner_id}: чтение маркетингового ядра не подтверждено; старый портрет не используется")
     return result
 
 
@@ -333,13 +377,13 @@ def _reserve_marketing_spend(payload):
     return response.json()
 
 
-def _marketing_vk_analysis(owner_id, version):
+def _marketing_vk_analysis(owner_id, version, project_id=None):
     if version is None:
         return _ask_openai
     from marketing_budget import guarded_request
     from marketing_interview import pilot_project
 
-    project_id = pilot_project(owner_id, os.getenv("AGENCY_MARKETING_PILOT_OWNER"),
+    project_id = project_id or pilot_project(owner_id, os.getenv("AGENCY_MARKETING_PILOT_OWNER"),
                                os.getenv("AGENCY_MARKETING_PILOT_PROJECT"))
     if not project_id:
         raise RuntimeError("Проект пилота не подтверждён.")
@@ -377,7 +421,8 @@ def _score_until_daily_five(
         "passport_version": passport_version,
         "marketing_project_id": target_profile["marketing_project_id"],
     } if passport_version is not None else {}
-    ask_openai = _marketing_vk_analysis(owner_id, passport_version)
+    ask_openai = (_marketing_vk_analysis(owner_id, passport_version, target_profile["marketing_project_id"])
+                  if target_profile.get("approved_marketing_core") else _marketing_vk_analysis(owner_id, passport_version))
     total_analyzed = 0
     total_passed = 0
     total_created = 0
@@ -557,7 +602,9 @@ def top_up_vk_owner_now(
         )
         analyzed_total += int(scored.get("analyzed") or 0)
         first_created = int(prepared.get("created") or 0)
-        prepared = ensure_quality_vk_assignments(owner_id, member_code, limit=5, min_score=min_score)
+        version = target_profile.get("marketing_passport_version")
+        version_filter = {"passport_version": version, "marketing_project_id": target_profile["marketing_project_id"]} if version is not None else {}
+        prepared = ensure_quality_vk_assignments(owner_id, member_code, limit=5, min_score=min_score, **version_filter)
         prepared["created"] = first_created + int(prepared.get("created") or 0)
         prepared["passed_threshold"] = int(scored.get("passed_threshold") or 0)
         best_score = scored.get("best_score")
@@ -569,6 +616,8 @@ def top_up_vk_owner_now(
         reason = "Обновление источников VK завершилось с ошибкой."
     elif diagnostics.get("insert_errors"):
         reason = "При сохранении карточек произошла ошибка. Подробности в журнале worker."
+    elif prepared.get("paid_search_blocked"):
+        reason = "Платный анализ остановлен действующим ограничением расходов. Новая пятёрка не подтверждена."
     elif analyzed_total == 0:
         reason = "За этот запуск не найдено новых профилей, доступных для оценки."
     elif diagnostics.get("eligible_attempts"):
