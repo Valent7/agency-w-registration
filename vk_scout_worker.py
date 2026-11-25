@@ -458,8 +458,9 @@ def _score_until_daily_five(
             ask_openai_fn=ask_openai,
             limit=analysis_limit,
             priority_ids=(priority_ids if round_no == 1 else None),
-            reanalyze_exhausted=False,
+            reanalyze_exhausted=budgeted_pilot and round_no == 1,
             min_score=min_score,
+            **({"batch_size": 3} if budgeted_pilot else {}),
         )
         analyzed_now = int(score_result.get("analyzed") or 0)
         total_analyzed += analyzed_now
