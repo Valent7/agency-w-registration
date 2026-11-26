@@ -417,14 +417,16 @@ def _marketing_vk_analysis(owner_id, version, project_id=None):
                                os.getenv("AGENCY_MARKETING_PILOT_PROJECT"))
     if not project_id:
         raise RuntimeError("Проект пилота не подтверждён.")
-    # Owner explicitly requested an unreserved VK-only experiment.
+    # The recovery pilot has permission for the separately reserved control
+    # request. Keep ordinary scoring off for this owner/project.
     if owner_id == 235805138 and project_id == "a7155944-3308-5ead-a160-152c6c74ff62":
-        return lambda system, prompt: _ask_openai(system, prompt, bounded=True)
+        def require_control_search(system, prompt):
+            raise RuntimeError("Пилот VK доступен только через контрольный поиск с резервом.")
+        return require_control_search
     return guarded_request(
         _reserve_marketing_spend, lambda system, prompt: _ask_openai(system, prompt, bounded=True),
         owner_id=owner_id, project_id=project_id, agent="neonia",
-        ceiling_cents=(5 if owner_id == 235805138 and project_id == "a7155944-3308-5ead-a160-152c6c74ff62"
-                       else _int_env("AGENCY_MARKETING_VK_MAX_REQUEST_CENTS", 0, 0, 100000000)),
+        ceiling_cents=_int_env("AGENCY_MARKETING_VK_MAX_REQUEST_CENTS", 0, 0, 100000000),
         model=_env("VK_SCOUT_OPENAI_MODEL", "gpt-5-mini") or "gpt-5-mini",
     )
 

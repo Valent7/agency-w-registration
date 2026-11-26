@@ -1270,15 +1270,18 @@ def scan_vk_sources(
     author_walls_failed = 0
     if include_author_posts and network_only(owner_id):
         by_source: dict[int, list[dict[str, Any]]] = {}
+        priority_ids: set[int] = set()
         for item in unique.values():
             raw = item.get("raw_profile") or {}
             if raw.get("is_closed") and not raw.get("can_access_closed"):
                 continue
-            topical = bool(NETWORK_TOPIC.search(
+            topical = bool(raw.get("public_professional_comments") or NETWORK_TOPIC.search(
                 str(item.get("status_text") or "") + " " + str(item.get("activity") or "")
             ))
             if not (_vk_recent_activity(item)["active"] or topical) or vk_excluded_profession(item):
                 continue
+            if topical:
+                priority_ids.add(int(item["vk_user_id"]))
             by_source.setdefault(int(item.get("source_community_id") or 0), []).append(item)
         # Give every source a turn. Rotate the starting profile daily so the
         # same first page cannot monopolize the bounded read allowance.
@@ -1286,12 +1289,14 @@ def scan_vk_sources(
         for source_id, items in by_source.items():
             items.sort(key=lambda item: int(item["vk_user_id"]))
             offset = day * 20 % len(items)
-            by_source[source_id] = items[offset:] + items[:offset]
+            rotated = items[offset:] + items[:offset]
+            by_source[source_id] = sorted(
+                rotated, key=lambda item: int(item["vk_user_id"]) not in priority_ids
+            )
         selected = []
         for index in range(20):
             selected.extend(items[index] for items in by_source.values() if index < len(items))
-            if len(selected) >= 20:
-                break
+        selected.sort(key=lambda item: int(item["vk_user_id"]) not in priority_ids)
         consecutive_failures = 0
         for item in selected[:20]:
             uid = int(item["vk_user_id"])

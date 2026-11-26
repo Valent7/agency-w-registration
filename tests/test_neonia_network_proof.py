@@ -109,3 +109,26 @@ class NetworkProofTests(TestCase):
         self.assertEqual(result["author_walls_failed"], 3)
         self.assertEqual(result["author_walls_read"], 1)
         self.assertEqual(result["active_context_ids"], [4])
+
+    def test_wall_budget_prioritizes_public_professional_context(self):
+        from unittest.mock import patch
+        import vk_scout
+
+        now = int(datetime.now(timezone.utc).timestamp())
+        ordinary = [
+            {"vk_user_id": uid, "source_community_id": 1,
+             "raw_profile": {"last_seen": {"time": now}}}
+            for uid in range(1, 41)
+        ]
+        topical = {"vk_user_id": 71, "source_community_id": 1, "status_text": "Работаю в MLM"}
+        with (
+            patch.object(vk_scout, "load_vk_sources", return_value=[{"community_id": 1}]),
+            patch.object(vk_scout, "fetch_vk_members", return_value={"members": ordinary + [topical]}),
+            patch.object(vk_scout, "network_only", return_value=True),
+            patch.object(vk_scout, "save_vk_candidates", return_value=41),
+            patch.object(vk_scout, "_read_vk_professional_posts", return_value=[]) as read_wall,
+        ):
+            result = vk_scout.scan_vk_sources(77, include_author_posts=True)
+
+        self.assertEqual(read_wall.call_args_list[0].args, (71,))
+        self.assertEqual(result["author_walls_read"], 20)

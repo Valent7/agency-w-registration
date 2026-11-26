@@ -134,3 +134,17 @@ def test_vk_control_preparation_skips_ordinary_paid_route():
     assert analyzed == 0
     factory.assert_not_called()
     score.assert_not_called()
+
+
+def test_regular_vk_scoring_cannot_spend_the_control_pilot_budget():
+    with patch.object(vk, "_ask_openai") as provider, patch.object(
+        vk, "_reserve_marketing_spend"
+    ) as reserve:
+        ordinary = vk._marketing_vk_analysis(
+            235805138, 83, "a7155944-3308-5ead-a160-152c6c74ff62"
+        )
+        with pytest.raises(RuntimeError, match="контрольный поиск"):
+            ordinary("system", "profile")
+
+    provider.assert_not_called()
+    reserve.assert_not_called()
