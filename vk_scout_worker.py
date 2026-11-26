@@ -317,7 +317,11 @@ def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
     }
 
     if bounded:
-        payload["max_output_tokens"] = 5000
+        payload["max_output_tokens"] = 10000
+        if model.startswith("gpt-5-mini"):
+            payload["reasoning"] = {"effort": "low"}
+        payload["text"] = {"format": {"type": "json_object"}}
+        payload["instructions"] += "\nОтветь JSON-объектом с единственным ключом candidates, содержащим массив записей. Одна запись на каждый входной профиль. Краткие формулировки; цитаты доказательств дословные. Не добавляй пояснений вне JSON."
     retryable = {429, 500, 502, 503, 504}
     delays = (0,) if bounded else (0, 2, 5, 10)
     last_error: Exception | None = None
@@ -360,6 +364,12 @@ def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
                  f"cached_tokens={details.get('cached_tokens', 0)} "
                  f"output_tokens={usage.get('output_tokens', 0)} "
                  f"request_id={result.get('id', 'unknown')}")
+            status = str(result.get("status") or "")
+            reason = str((result.get("incomplete_details") or {}).get("reason") or "")
+            output_details = usage.get("output_tokens_details") or {}
+            _log(f"VK_STAGE stage=response_status status={status or 'unknown'} reason={reason or 'none'} reasoning_tokens={output_details.get('reasoning_tokens', 0)}")
+            if status and status != "completed":
+                raise RuntimeError(f"OpenAI: анализ не завершён (status={status}, reason={reason or 'unknown'}). Повтор автоматически не выполняется.")
             answer = _extract_response_text(result)
             if not answer:
                 raise RuntimeError("OpenAI не вернул текст")
