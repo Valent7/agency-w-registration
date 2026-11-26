@@ -610,7 +610,7 @@ def top_up_vk_owner_now(
             scan_result = scan_vk_sources(
                 owner_id,
                 per_source=1000,
-                max_sources=min(10 if control_search else 5, len(sources)),
+                max_sources=min(10 if control_search or approved_for_owner(owner_id, target_profile) else 5, len(sources)),
                 include_active_context=True,
                 **({"expanded": True} if approved_for_owner(owner_id, target_profile) else {}),
                 **({"include_author_posts": True} if control_search or (owner_id == 235805138 and target_profile.get("approved_marketing_core")) else {}),

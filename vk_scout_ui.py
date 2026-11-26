@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from neonia_delegation_policy import read_owner_policy
 from neonia_network_proof import network_only
 
 from vk_scout_oauth import (
@@ -1344,7 +1345,10 @@ def _render_today_vk_candidates(
                         daily_limit=5,
                         min_score=50,
                         analysis_limit=30,
-                        control_search=(os.getenv("NEONIA_VK_CONTROL_OWNER", "").strip() == str(owner_id)),
+                        control_search=(
+                            os.getenv("NEONIA_VK_CONTROL_OWNER", "").strip() == str(owner_id)
+                            and read_owner_policy(owner_id) is None
+                        ),
                     )
                 st.session_state.pop(f"vk_top_up_error_{owner_id}", None)
                 st.session_state[f"vk_top_up_result_{owner_id}"] = result
