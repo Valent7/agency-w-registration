@@ -1275,9 +1275,12 @@ def scan_vk_sources(
             raw = item.get("raw_profile") or {}
             if raw.get("is_closed") and not raw.get("can_access_closed"):
                 continue
-            topical = bool(raw.get("public_professional_comments") or NETWORK_TOPIC.search(
+            topical = bool(NETWORK_TOPIC.search(
                 str(item.get("status_text") or "") + " " + str(item.get("activity") or "")
-            ))
+            )) or any(
+                isinstance(comment, dict) and NETWORK_TOPIC.search(str(comment.get("text") or ""))
+                for comment in raw.get("public_professional_comments") or []
+            )
             if not (_vk_recent_activity(item)["active"] or topical) or vk_excluded_profession(item):
                 continue
             if topical:

@@ -120,6 +120,7 @@ class NetworkProofTests(TestCase):
              "raw_profile": {"last_seen": {"time": now}}}
             for uid in range(1, 41)
         ]
+        ordinary[0]["raw_profile"]["public_professional_comments"] = [{"text": "Спасибо за эфир"}]
         topical = {"vk_user_id": 71, "source_community_id": 1, "status_text": "Работаю в MLM"}
         with (
             patch.object(vk_scout, "load_vk_sources", return_value=[{"community_id": 1}]),
