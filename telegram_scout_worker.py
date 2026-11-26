@@ -1218,6 +1218,7 @@ def _write_daily_batch(
     *,
     replace_existing: bool = False,
     fallback_from_group_reason: str = "",
+    revalidate_network: bool = False,
 ) -> dict[str, Any]:
     today = datetime.now(BERLIN).date()
     today_key = today.isoformat()
@@ -1257,6 +1258,8 @@ def _write_daily_batch(
     # Уже утверждённые владельцем кандидаты не исчезают при фоновой перепроверке.
     if replace_existing:
         for cid in approved_ids:
+            if revalidate_network and cid not in ranked_ids:
+                continue
             if cid not in merged:
                 merged.append(int(cid))
     for cid in ranked_ids:
@@ -1289,6 +1292,8 @@ def _write_daily_batch(
     )
     if len(merged) >= daily_target:
         today_info["completed_at"] = now_iso
+    else:
+        today_info.pop("completed_at", None)
 
     batches[today_key] = today_info
     container["daily_batches"] = batches
@@ -1498,6 +1503,14 @@ def _topup_from_other_telegram_groups(
 
     # Сначала более крупные/живые доступные группы. Неония проходит несколько
     # источников, но на каждый ставит тайм-аут, чтобы один чат не блокировал день.
+    if network_only(owner_id):
+        # A group title is only a source-selection signal, never candidate evidence.
+        # For a strict network owner, do not scan unrelated groups just because
+        # they are large. The explicitly selected primary group remains unchanged.
+        network_source = re.compile(r"сетев|\bmlm\b|\bмлм\b|прямые продажи|faberlic|amway|oriflame|herbalife|golden connect|solidar club|oneshop", re.I)
+        before = len(chats)
+        chats = [item for item in chats if network_source.search(str(item.get("title") or item.get("name") or ""))]
+        print(f"[Telegram Scout] owner={owner_id} stage=source_filter eligible={len(chats)} excluded={before-len(chats)}", flush=True)
     chats.sort(
         key=lambda item: -int(item.get("participants_count") or 0)
     )
@@ -1582,6 +1595,19 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     group_fallback_reason = ""
     chat_mode = schema_version >= 7 and owner_source(state)[0] == "chats"
     if chat_mode:
+        if network_only(owner_id):
+            current = _current_batch_info(owner_id)
+            current_ids = current.get("candidate_ids") or []
+            saved_cards = {int(x["telegram_id"]): x for x in _normalize_candidate_list(state.get("candidates", []))}
+            # Remove only unqualified recommendations from today's feed.
+            # Do not delete candidate records, sent history, or dialogues.
+            valid_ids = [cid for cid in current_ids if cid in saved_cards
+                         and neonia_chat_daily_worker._recommended_group_candidate(saved_cards[cid], strict_network=True)
+                         and saved_cards[cid].get("ai_provider_or_expert") is not True]
+            if valid_ids != current_ids:
+                _write_daily_batch(owner_id, valid_ids, [], replace_existing=True,
+                                   revalidate_network=True)
+                print(f"[Telegram Scout] owner={owner_id} stage=revalidate_daily removed={len(current_ids)-len(valid_ids)} retained={len(valid_ids)}", flush=True)
         group_result = neonia_chat_daily_worker.process(
             owner_id, session_string, state, storage=__import__(__name__)
         )
