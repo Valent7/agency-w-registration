@@ -7,6 +7,7 @@ from typing import Any
 
 import requests
 import streamlit as st
+from agency_runtime_config import setting as runtime_setting
 from pypdf import PdfReader
 
 try:
@@ -18,7 +19,7 @@ except Exception:
 def _ora_api_url() -> str:
     return str(
         os.environ.get("ORA_PARTNER_API_URL")
-        or st.secrets.get("ORA_PARTNER_API_URL", "")
+        or runtime_setting("ORA_PARTNER_API_URL", "")
         or ""
     ).rstrip("/")
 
@@ -26,7 +27,7 @@ def _ora_api_url() -> str:
 def _ora_secret() -> str:
     return str(
         os.environ.get("ORA_PARTNER_API_SECRET")
-        or st.secrets.get("ORA_PARTNER_API_SECRET", "")
+        or runtime_setting("ORA_PARTNER_API_SECRET", "")
         or ""
     ).strip()
 
