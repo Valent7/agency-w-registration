@@ -1525,8 +1525,11 @@ def score_vk_candidates(
     reanalyze_exhausted: bool = True,
     min_score: int = 50,
     batch_size: int = 10,
+    local_delegation: bool = False,
 ) -> dict[str, Any]:
-    if ask_openai_fn is None:
+    if local_delegation and not approved_for_owner(owner_id, target_profile):
+        raise ValueError("Для локальной оценки нужно утверждённое ядро по задаче №126.")
+    if ask_openai_fn is None and not local_delegation:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
 
     import time
@@ -1824,7 +1827,7 @@ def score_vk_candidates(
             source_id = abs(int(candidate.get("source_community_id") or 0))
         except (TypeError, ValueError):
             source_id = 0
-        evidence = [profile_text, view, source_context_by_id.get(source_id) or {}, "vk-fit-v1"]
+        evidence = [profile_text, view, source_context_by_id.get(source_id) or {}, ("vk-fit-delegation-local-v1" if local_delegation else "vk-fit-v1")]
         return hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
     fingerprints = {str(candidate["vk_user_id"]): analysis_fingerprint(candidate) for candidate in rows}
@@ -1887,30 +1890,43 @@ automation_need_signal=true означает, что из его реально�
     batch_size = max(1, min(30, int(batch_size)))
     for start in range(0, len(rows), batch_size):
         batch = rows[start:start + batch_size]
-        public_batch = []
-        for candidate in batch:
-            view = _candidate_public_view(candidate)
+        if local_delegation:
+            parsed = []
+            for source in batch:
+                proof = vk_delegation_proof(source)
+                if proof:
+                    parsed.append({
+                        "vk_user_id": source["vk_user_id"], "score": 50,
+                        "fit_summary": "Подтверждён публичный рабочий процесс. Интерес к делегированию предстоит уточнить.",
+                        "business_relevant": True, "automation_need_signal": True,
+                        "business_evidence": [proof["text"]],
+                        "marketing_segment_index": 0, "marketing_evidence": [proof["text"]],
+                    })
+        else:
+            public_batch = []
+            for candidate in batch:
+                view = _candidate_public_view(candidate)
+                try:
+                    source_id = abs(int(candidate.get("source_community_id") or 0))
+                except (TypeError, ValueError):
+                    source_id = 0
+                view["source_context"] = source_context_by_id.get(source_id) or {}
+                public_batch.append(view)
+            request = (
+                "ПОРТРЕТ ЦА:\n" + profile_text
+                + "\n\nПУБЛИЧНЫЕ VK-ПРОФИЛИ И КОНТЕКСТ ИХ ИСТОЧНИКА:\n"
+                + json.dumps(public_batch, ensure_ascii=False, separators=(",", ":"), default=str)
+            )
+            batch_started = time.monotonic()
+            print(f"[VK_STAGE] owner={owner_id} stage=model_start batch={start//batch_size+1} count={len(batch)} prompt_chars={len(system_prompt)+len(request)}", flush=True)
             try:
-                source_id = abs(int(candidate.get("source_community_id") or 0))
-            except (TypeError, ValueError):
-                source_id = 0
-            view["source_context"] = source_context_by_id.get(source_id) or {}
-            public_batch.append(view)
-        request = (
-            "ПОРТРЕТ ЦА:\n" + profile_text
-            + "\n\nПУБЛИЧНЫЕ VK-ПРОФИЛИ И КОНТЕКСТ ИХ ИСТОЧНИКА:\n"
-            + json.dumps(public_batch, ensure_ascii=False, separators=(",", ":"), default=str)
-        )
-        batch_started = time.monotonic()
-        print(f"[VK_STAGE] owner={owner_id} stage=model_start batch={start//batch_size+1} count={len(batch)} prompt_chars={len(system_prompt)+len(request)}", flush=True)
-        try:
-            parsed = _extract_json_array(ask_openai_fn(system_prompt, request))
-        except Exception as exc:
-            print(f"[VK_STAGE] owner={owner_id} stage=model_failed error_type={type(exc).__name__} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
-            raise
-        print(f"[VK_STAGE] owner={owner_id} stage=model_done records={len(parsed)} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
-        if not parsed:
-            raise RuntimeError("VK: OpenAI не вернул корректные записи JSON; оценки не сохранены.")
+                parsed = _extract_json_array(ask_openai_fn(system_prompt, request))
+            except Exception as exc:
+                print(f"[VK_STAGE] owner={owner_id} stage=model_failed error_type={type(exc).__name__} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
+                raise
+            print(f"[VK_STAGE] owner={owner_id} stage=model_done records={len(parsed)} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
+            if not parsed:
+                raise RuntimeError("VK: OpenAI не вернул корректные записи JSON; оценки не сохранены.")
         by_id = {int(x["vk_user_id"]): x for x in parsed if str(x.get("vk_user_id") or "").isdigit()}
         payload = []
         for source in batch:
@@ -1983,6 +1999,8 @@ automation_need_signal=true означает, что из его реально�
             )
             if business_evidence:
                 segment_label = (
+                    "Подтверждён рабочий процесс, подходящий для проверки делегирования"
+                    if expanded else
                     "Основной сегмент: подтверждён сетевой бизнес"
                     if item.get("network_business_signal") is True
                     else "Дополнительный сегмент: подтверждена рабочая рутина"
@@ -4458,10 +4476,11 @@ def prepare_vk_invitation(
     candidate = candidates[0]
     scoped_owner = owner_id or assignment.get("owner_telegram_id")
     professional_proof = None
-    if assignment.get("daily_position") and network_only(scoped_owner):
+    if assignment.get("daily_position"):
         expanded = read_owner_policy(scoped_owner) is not None
-        professional_proof = (vk_delegation_proof if expanded else vk_network_proof)(candidate)
-        if not _vk_recent_activity(candidate)["active"] or not professional_proof:
+        if expanded or network_only(scoped_owner):
+            professional_proof = (vk_delegation_proof if expanded else vk_network_proof)(candidate)
+        if (expanded or network_only(scoped_owner)) and (not _vk_recent_activity(candidate)["active"] or not professional_proof):
             raise VKScoutError("Нет актуального публичного подтверждения профессиональной деятельности.")
     first_name = str(candidate.get("first_name") or "").strip()
     fit = str(assignment.get("fit_summary") or "").strip()

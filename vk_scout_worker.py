@@ -33,7 +33,7 @@ from vk_scout_oauth import (
 
 from neonia_control_budget import CONTROL_RUN_ID, cloud_vk_assessor
 from neonia_network_proof import network_only
-from neonia_delegation_policy import approved_for_owner
+from neonia_delegation_policy import PILOT_OWNER, approved_for_owner
 from vk_quality_daily import ensure_quality_vk_assignments
 
 from vk_scout import (
@@ -409,6 +409,12 @@ def _reserve_marketing_spend(payload):
 
 
 def _marketing_vk_analysis(owner_id, version, project_id=None):
+    # The recovery pilot has permission for the separately reserved control
+    # request. Keep ordinary scoring off for this owner/project.
+    if owner_id == PILOT_OWNER:
+        def require_control_search(system, prompt):
+            raise RuntimeError("Пилот VK доступен только через контрольный поиск с резервом.")
+        return require_control_search
     if version is None:
         return _ask_openai
     from marketing_budget import guarded_request
@@ -418,12 +424,6 @@ def _marketing_vk_analysis(owner_id, version, project_id=None):
                                os.getenv("AGENCY_MARKETING_PILOT_PROJECT"))
     if not project_id:
         raise RuntimeError("Проект пилота не подтверждён.")
-    # The recovery pilot has permission for the separately reserved control
-    # request. Keep ordinary scoring off for this owner/project.
-    if owner_id == 235805138 and project_id == "a7155944-3308-5ead-a160-152c6c74ff62":
-        def require_control_search(system, prompt):
-            raise RuntimeError("Пилот VK доступен только через контрольный поиск с резервом.")
-        return require_control_search
     return guarded_request(
         _reserve_marketing_spend, lambda system, prompt: _ask_openai(system, prompt, bounded=True),
         owner_id=owner_id, project_id=project_id, agent="neonia",
@@ -489,8 +489,11 @@ def _score_until_daily_five(
     if network_only(owner_id) and not budgeted_pilot:
         return {**prepared, "paid_search_blocked": True}, total_analyzed, best_score
 
-    ask_openai = (_marketing_vk_analysis(owner_id, passport_version, target_profile["marketing_project_id"])
-                  if target_profile.get("approved_marketing_core") else _marketing_vk_analysis(owner_id, passport_version))
+    expanded = approved_for_owner(owner_id, target_profile)
+    ask_openai = None
+    if not expanded:
+        ask_openai = (_marketing_vk_analysis(owner_id, passport_version, target_profile["marketing_project_id"])
+                      if target_profile.get("approved_marketing_core") else _marketing_vk_analysis(owner_id, passport_version))
 
     # score_vk_candidates excludes profiles already scored for this owner, so
     # every round advances through the fresh pool instead of repeating the same 30.
@@ -505,6 +508,7 @@ def _score_until_daily_five(
             reanalyze_exhausted=False,
             min_score=min_score,
             **({"batch_size": 10} if budgeted_pilot else {}),
+            **({"local_delegation": True} if expanded else {}),
         )
         analyzed_now = int(score_result.get("analyzed") or 0)
         total_analyzed += analyzed_now
@@ -559,15 +563,15 @@ def top_up_vk_owner_now(
     owner_id = int(owner_id)
     member_code = str(member_code or "").strip()
 
-    if control_search and (
-        not network_only(owner_id) or _env("NEONIA_VK_CONTROL_OWNER") != str(owner_id)
-    ):
+    if control_search and (owner_id != PILOT_OWNER or _env("NEONIA_VK_CONTROL_OWNER") != str(owner_id)):
         raise VKScoutError("Контрольный поиск доступен только владельцу пилота.")
 
     profiles = _load_target_profiles([owner_id])
     target_profile = profiles.get(owner_id)
     if not target_profile:
         raise VKScoutError("Не найден сохранённый живой портрет ЦА.")
+    if control_search and not approved_for_owner(owner_id, target_profile):
+        raise VKScoutError("Для контрольного запроса нужно утверждённое ядро по задаче №126.")
 
     sources = load_vk_sources(owner_id)
     if not sources:

@@ -137,3 +137,38 @@ def test_staging_preserves_active_core_and_history_and_requires_normal_approval(
     assert active["approved"]["version"] == 85
     with pytest.raises(ValueError, match="отдельный черновик"):
         stage_delegation_draft({**state, "summary": "Редакция владельца"}, POLICY_MARKER)
+
+
+def test_v85_vk_daily_scores_public_evidence_without_provider():
+    import vk_scout
+
+    now = datetime.now(timezone.utc)
+    candidate = {"vk_user_id": 7, "source_community_id": 25, "raw_profile": {
+        "last_seen": {"time": int(now.timestamp())},
+        "public_professional_posts": [evidence(TEXTS[1], now, "https://vk.com/wall7_3")],
+    }}
+    profile = {
+        "approved_marketing_core": POLICY_MARKER, "marketing_passport_version": 85,
+        "marketing_project_id": "owner-project", "segments": [
+            {"role": "client", "required_public_evidence": ["Рабочий процесс"], "exclusions": []},
+        ],
+    }
+    provider = Mock()
+    save = Mock()
+    with patch.multiple(
+        vk_scout, load_vk_sources=Mock(return_value=[{"community_id": 25}]),
+        _vk_owner_pages=Mock(return_value=[]), _owner_processed_vk_ids=Mock(return_value=set()),
+        _used_vk_ids=Mock(return_value=set()), _partner_vk_ids=Mock(return_value=set()),
+        enrich_vk_profiles=Mock(return_value=[]), save_vk_candidates=Mock(),
+        _sb_get=Mock(side_effect=[[candidate], []]), _sb_post=save,
+    ):
+        result = vk_scout.score_vk_candidates(
+            PILOT_OWNER, profile, ask_openai_fn=provider, local_delegation=True, limit=1,
+        )
+
+    assert result["passed_threshold"] == 1
+    score = save.call_args.args[1][0]
+    assert score["score"] == 50
+    assert score["target_profile_snapshot"]["marketing_passport_version"] == 85
+    assert score["target_profile_snapshot"]["marketing_segment_matched"]
+    provider.assert_not_called()
