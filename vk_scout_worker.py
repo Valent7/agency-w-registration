@@ -332,6 +332,16 @@ def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
                 json=payload,
                 timeout=120,
             )
+            if response.status_code == 429:
+                try:
+                    error = response.json().get("error", {})
+                except (ValueError, AttributeError):
+                    error = {}
+                code = str(error.get("code") or "").lower()
+                kind = str(error.get("type") or "").lower()
+                if {code, kind} & {"insufficient_quota", "billing_hard_limit_reached", "billing_not_active"}:
+                    _log("OpenAI: исчерпан баланс или квота; повтор запроса отменён")
+                    raise RuntimeError("OpenAI: недостаточно средств или исчерпана квота. Платный анализ остановлен.")
             if response.status_code in retryable:
                 last_error = RuntimeError(
                     f"OpenAI временно недоступен: HTTP {response.status_code}"
