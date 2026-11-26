@@ -1198,19 +1198,26 @@ def scan_vk_sources(
     include_author_posts: bool = False,
 ) -> dict[str, Any]:
     sources = load_vk_sources(owner_id)[:max(1, min(50, int(max_sources)))]
+    import time
+    started = time.monotonic()
+    print(f"[VK_STAGE] owner={owner_id} stage=scan_start sources={len(sources)} per_source={per_source}", flush=True)
     unique: dict[int, dict[str, Any]] = {}
     active_context_ids: set[int] = set()
     errors: list[str] = []
     for source in sources:
+        source_started = time.monotonic()
+        print(f"[VK_STAGE] owner={owner_id} stage=source_start source={source.get('community_id')}", flush=True)
         # Member-list refresh and active-comment discovery are deliberately
         # independent. A timeout in groups.getMembers must never prevent the
         # fallback that reads public discussion activity.
         member_error = None
         try:
             page = fetch_vk_members(source, count=per_source)
+            print(f"[VK_STAGE] owner={owner_id} stage=members_received count={len(page['members'])} elapsed_ms={int((time.monotonic()-source_started)*1000)}", flush=True)
             for item in page["members"]:
                 unique[int(item["vk_user_id"])] = item
         except Exception as exc:
+            print(f"[VK_STAGE] owner={owner_id} stage=members_failed error_type={type(exc).__name__}", flush=True)
             member_error = exc
             error_text = str(exc)
             errors.append(
@@ -1228,6 +1235,7 @@ def scan_vk_sources(
                     comment_limit=60,
                     max_people=min(100, max(40, int(per_source))),
                 )
+                print(f"[VK_STAGE] owner={owner_id} stage=active_authors_received count={len(active_page.get('members') or [])}", flush=True)
                 for item in active_page.get("members") or []:
                     uid = int(item.get("vk_user_id") or 0)
                     if uid <= 0:
@@ -1241,6 +1249,7 @@ def scan_vk_sources(
                     if new_raw.get("public_comment_samples"):
                         active_context_ids.add(uid)
             except Exception as active_exc:
+                print(f"[VK_STAGE] owner={owner_id} stage=active_authors_failed error_type={type(active_exc).__name__}", flush=True)
                 errors.append(
                     f"{source.get('community_name') or source.get('community_id')}: "
                     f"active-context: {active_exc}"
@@ -1319,7 +1328,9 @@ def scan_vk_sources(
             else:
                 continue
             exclusions[reason] = exclusions.get(reason, 0) + 1
+    print(f"[VK_STAGE] owner={owner_id} stage=walls_done read={author_walls_read} failed={author_walls_failed} exclusions={exclusions}", flush=True)
     saved = save_vk_candidates(unique.values())
+    print(f"[VK_STAGE] owner={owner_id} stage=scan_done unique={len(unique)} saved={saved} errors={len(errors)} elapsed_ms={int((time.monotonic()-started)*1000)}", flush=True)
     return {
         "sources_checked": len(sources),
         "candidates_found": len(unique),
@@ -1503,7 +1514,10 @@ def score_vk_candidates(
     if ask_openai_fn is None:
         return {"ok": False, "analyzed": 0, "message": "Нужен анализ Неонии (ask_openai_fn)."}
 
+    import time
+    started = time.monotonic()
     owner_id = int(owner_id)
+    print(f"[VK_STAGE] owner={owner_id} stage=score_start limit={limit} batch_size={batch_size}", flush=True)
     analysis_limit = max(1, min(100, int(limit)))
 
     # Pilot: admit plausible public professional signals to paid analysis,
@@ -1540,6 +1554,7 @@ def score_vk_candidates(
         if str(source.get("community_id") or "").lstrip("-").isdigit()
         and abs(int(source.get("community_id") or 0)) > 0
     }
+    print(f"[VK_STAGE] owner={owner_id} stage=score_sources count={len(owner_source_ids)}", flush=True)
     if not owner_source_ids:
         return {
             "ok": True,
@@ -1596,7 +1611,10 @@ def score_vk_candidates(
         if analyzed_time is not None and analyzed_time >= recheck_after:
             already_scored.add(uid)
 
+    print(f"[VK_STAGE] owner={owner_id} stage=score_history saved={len(scored_rows)} recent={len(already_scored)} unavailable={len(unavailable_ids)}", flush=True)
     rows: list[dict[str, Any]] = []
+    exclusions = {"invalid_id": 0, "recent_or_used_or_duplicate": 0, "inactive": 0, "preliminary_fit": 0}
+    examined = 0
 
     # Profiles just enriched with substantive public comments must be rescored
     # immediately even if an old sparse score already exists. Otherwise new
@@ -1660,13 +1678,20 @@ def score_vk_candidates(
         if not page:
             break
         for candidate in page:
+            examined += 1
             try:
                 uid = int(candidate.get("vk_user_id"))
             except (TypeError, ValueError):
+                exclusions["invalid_id"] += 1
                 continue
             if uid in already_scored or uid in unavailable_ids or uid in selected_ids:
+                exclusions["recent_or_used_or_duplicate"] += 1
                 continue
-            if not _vk_recent_activity(candidate)["active"] or not preliminary_network_fit(candidate):
+            if not _vk_recent_activity(candidate)["active"]:
+                exclusions["inactive"] += 1
+                continue
+            if not preliminary_network_fit(candidate):
+                exclusions["preliminary_fit"] += 1
                 continue
             rows.append(candidate)
             selected_ids.add(uid)
@@ -1679,6 +1704,7 @@ def score_vk_candidates(
     # Когда весь доступный пул уже пройден, переоцениваем САМЫЕ ДАВНО
     # анализировавшиеся профили. После изменения портрета/политики это позволяет
     # пройти всю старую базу по новым правилам, а не крутить одни и те же 30.
+    print(f"[VK_STAGE] owner={owner_id} stage=pool_filtered examined={examined} selected={len(rows)} exclusions={exclusions}", flush=True)
     reanalysis = False
     if not rows and reanalyze_exhausted:
         reanalysis = True
@@ -1835,6 +1861,7 @@ automation_need_signal=true означает, что из его реально�
         )
     if relaxed_pilot:
         print(f"[VK Scout] {owner_id}: eligible_for_analysis={len(rows)}; recently_scored={len(already_scored)}; unavailable={len(unavailable_ids)}", flush=True)
+    print(f"[VK_STAGE] owner={owner_id} stage=paid_pool_ready count={len(rows)} reused={before_reuse-len(rows)} reanalysis={reanalysis}", flush=True)
     analyzed = 0
     scores_this_cycle: list[int] = []
     batch_size = max(1, min(30, int(batch_size)))
@@ -1854,7 +1881,14 @@ automation_need_signal=true означает, что из его реально�
             + "\n\nПУБЛИЧНЫЕ VK-ПРОФИЛИ И КОНТЕКСТ ИХ ИСТОЧНИКА:\n"
             + json.dumps(public_batch, ensure_ascii=False, separators=(",", ":"), default=str)
         )
-        parsed = _extract_json_array(ask_openai_fn(system_prompt, request))
+        batch_started = time.monotonic()
+        print(f"[VK_STAGE] owner={owner_id} stage=model_start batch={start//batch_size+1} count={len(batch)} prompt_chars={len(system_prompt)+len(request)}", flush=True)
+        try:
+            parsed = _extract_json_array(ask_openai_fn(system_prompt, request))
+        except Exception as exc:
+            print(f"[VK_STAGE] owner={owner_id} stage=model_failed error_type={type(exc).__name__} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
+            raise
+        print(f"[VK_STAGE] owner={owner_id} stage=model_done records={len(parsed)} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
         if relaxed_pilot and not parsed:
             raise RuntimeError("VK analysis returned no valid JSON candidate records")
         by_id = {int(x["vk_user_id"]): x for x in parsed if str(x.get("vk_user_id") or "").isdigit()}
@@ -1963,10 +1997,17 @@ automation_need_signal=true означает, что из его реально�
                 "target_profile_snapshot": snapshot,
                 "analyzed_at": datetime.now(UTC).isoformat(),
             })
+        print(f"[VK_STAGE] owner={owner_id} stage=batch_validated records={len(payload)} missing={len(batch)-len(payload)} passed={sum(x['score'] >= min_score for x in payload)}", flush=True)
         if payload:
-            _sb_post("agency_vk_candidate_scores", payload, on_conflict="owner_telegram_id,vk_user_id")
+            try:
+                _sb_post("agency_vk_candidate_scores", payload, on_conflict="owner_telegram_id,vk_user_id")
+            except Exception as exc:
+                print(f"[VK_STAGE] owner={owner_id} stage=score_save_failed error_type={type(exc).__name__}", flush=True)
+                raise
             analyzed += len(payload)
+            print(f"[VK_STAGE] owner={owner_id} stage=score_saved count={len(payload)} total={analyzed}", flush=True)
 
+    print(f"[VK_STAGE] owner={owner_id} stage=score_done analyzed={analyzed} passed={sum(v >= min_score for v in scores_this_cycle)} elapsed_ms={int((time.monotonic()-started)*1000)}", flush=True)
     best = max(scores_this_cycle) if scores_this_cycle else None
     mode = "повторный анализ" if reanalysis else "новые профили"
     best_text = str(best) if best is not None else "—"
