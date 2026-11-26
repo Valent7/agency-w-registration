@@ -420,10 +420,8 @@ def _marketing_vk_analysis(owner_id, version, project_id=None):
 def _needs_more_candidates(prepared, target_profile, daily_limit):
     if not prepared.get("complete"):
         return True
-    return (
-        target_profile.get("marketing_passport_version") is not None
-        and int(prepared.get("network_count") or 0) < daily_limit
-    )
+    # A complete qualified daily set is sufficient; network priority is handled by ranking.
+    return False
 
 
 def _score_until_daily_five(
@@ -478,7 +476,7 @@ def _score_until_daily_five(
             priority_ids=(priority_ids if round_no == 1 else None),
             reanalyze_exhausted=budgeted_pilot and round_no == 1,
             min_score=min_score,
-            **({"batch_size": 3} if budgeted_pilot else {}),
+            **({"batch_size": 10} if budgeted_pilot else {}),
         )
         analyzed_now = int(score_result.get("analyzed") or 0)
         total_analyzed += analyzed_now
