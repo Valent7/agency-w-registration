@@ -1528,6 +1528,7 @@ def _topup_from_other_telegram_groups(
                 __import__(__name__),
                 authors,
                 max(1, needed - len(found)),
+                strict_network=network_only(owner_id),
             )
         except Exception as exc:
             print(
