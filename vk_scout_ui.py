@@ -1299,6 +1299,9 @@ def _render_today_vk_candidates(
         )
     )
 
+    previous_error = st.session_state.get(f"vk_top_up_error_{owner_id}")
+    if previous_error and today_count < 5:
+        st.warning("Последняя ошибка ручного добора: " + previous_error)
     result = st.session_state.pop(f"vk_top_up_result_{owner_id}", None)
     if result is not None:
         message = (
@@ -1343,28 +1346,34 @@ def _render_today_vk_candidates(
                         analysis_limit=30,
                         control_search=(os.getenv("NEONIA_VK_CONTROL_OWNER", "").strip() == str(owner_id)),
                     )
+                st.session_state.pop(f"vk_top_up_error_{owner_id}", None)
                 st.session_state[f"vk_top_up_result_{owner_id}"] = result
                 st.rerun()
             except Exception as exc:
-                error_text = str(exc or "")
-                lowered = error_text.casefold()
-                if (
-                    "openai временно недоступен" in lowered
-                    or "503" in lowered
-                    or "502" in lowered
-                    or "429" in lowered
-                ):
-                    st.warning(
-                        "OpenAI временно не ответил. Очередь VK сохранена — "
-                        "нажмите «Добрать кандидатов до 5» ещё раз."
-                    )
+                import logging
+                logging.getLogger(__name__).error("VK top-up failed owner=%s type=%s", owner_id, type(exc).__name__)
+                error_text = str(exc or "").casefold()
+                if any(marker in error_text for marker in ("insufficient_quota", "исчерпан", "недостаточно средств", "billing", "квота")):
+                    message = "OpenAI: баланс или квота исчерпаны. Анализ остановлен. Проверьте оплату и квоту; повторный запуск пока не нужен."
+                elif "429" in error_text:
+                    message = "Сервис ограничил частоту запросов (429). Анализ не завершён; дождитесь следующего штатного цикла."
+                elif any(marker in error_text for marker in ("502", "503", "timeout", "timed out", "временно недоступен")):
+                    message = "Внешний сервис временно недоступен или не ответил вовремя. Поиск не завершён."
+                elif any(marker in error_text for marker in ("токен", "oauth", "401", "403")):
+                    message = "Не удалось подтвердить доступ к внешнему сервису. Проверьте подключение VK и настройки API."
+                elif any(marker in error_text for marker in ("портрет ца", "маркетингов", "ядро")):
+                    message = "Не удалось получить утверждённые настройки целевой аудитории. Проверьте маркетинговое ядро."
+                elif "источник" in error_text:
+                    message = "Не удалось получить данные из VK-источников. Проверьте список подключённых сообществ."
                 else:
-                    st.error(f"Не удалось выполнить добор VK-кандидатов: {error_text}")
+                    message = "Не удалось завершить добор VK. Техническая ошибка: " + type(exc).__name__ + ". Обратитесь к администратору."
+                st.session_state[f"vk_top_up_error_{owner_id}"] = message
+                st.error(message)
 
     if not assignments:
         st.info(
-            "Сегодня качественных VK-кандидатов пока нет. Неония продолжает "
-            "проверять людей из Ваших настроенных VK-сообществ: до 1000 профилей на источник, с отбором по активности за 48 часов и портрету ЦА."
+            "Сегодня качественных VK-кандидатов пока нет. Завершение фонового поиска не подтверждено. Неония настроена "
+            "на проверку людей из Ваших настроенных VK-сообществ: до 1000 профилей на источник, с отбором по активности за 48 часов и портрету ЦА."
         )
         return
 
