@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import requests
 import streamlit as st
+from agency_runtime_config import setting as runtime_setting
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -56,9 +57,9 @@ def _agency_context() -> str:
 
 
 def _headers() -> dict[str, str]:
-    api_key = str(st.secrets.get("OPENAI_API_KEY") or "").strip()
+    api_key = str(runtime_setting("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY не найден в Streamlit Secrets.")
+        raise RuntimeError("OPENAI_API_KEY не найден в настройках сервера.")
     return {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -265,8 +266,8 @@ def run_competitor_research(competitor_name: str, website: str = "") -> dict[str
 
 
 def _storage_headers() -> dict[str, str]:
-    url = str(st.secrets.get("SUPABASE_URL") or "").strip()
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "").strip()
+    url = str(runtime_setting("SUPABASE_URL") or "").strip()
+    key = str(runtime_setting("SUPABASE_SECRET_KEY") or "").strip()
     if not url or not key:
         raise RuntimeError("Supabase не настроен для истории Разведчика.")
     # В Агентстве SUPABASE_SECRET_KEY используется как серверный apikey.
@@ -279,7 +280,7 @@ def _storage_headers() -> dict[str, str]:
 
 
 def save_report(owner_telegram_id: int, result: dict[str, Any]) -> tuple[bool, str]:
-    base_url = str(st.secrets.get("SUPABASE_URL") or "").rstrip("/")
+    base_url = str(runtime_setting("SUPABASE_URL") or "").rstrip("/")
     if not base_url:
         return False, "Supabase не настроен."
 
@@ -312,7 +313,7 @@ def save_report(owner_telegram_id: int, result: dict[str, Any]) -> tuple[bool, s
 
 
 def load_reports(owner_telegram_id: int, limit: int = 8) -> list[dict[str, Any]]:
-    base_url = str(st.secrets.get("SUPABASE_URL") or "").rstrip("/")
+    base_url = str(runtime_setting("SUPABASE_URL") or "").rstrip("/")
     if not base_url:
         return []
     try:
