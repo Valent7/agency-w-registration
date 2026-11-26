@@ -172,3 +172,30 @@ def test_v85_vk_daily_scores_public_evidence_without_provider():
     assert score["target_profile_snapshot"]["marketing_passport_version"] == 85
     assert score["target_profile_snapshot"]["marketing_segment_matched"]
     provider.assert_not_called()
+
+
+def test_public_group_reader_stops_before_fetching_old_senders():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    old = Mock(date=datetime.now(timezone.utc) - timedelta(hours=49), sender_id=8)
+    entity = SimpleNamespace(id=4, username="public_group")
+
+    async def dialogs(*args, **kwargs):
+        yield SimpleNamespace(entity=entity, is_group=True)
+
+    async def messages(*args, **kwargs):
+        yield old
+        raise AssertionError("Read beyond the activity boundary")
+
+    client = SimpleNamespace(
+        connect=AsyncMock(), disconnect=AsyncMock(),
+        is_user_authorized=AsyncMock(return_value=True),
+        get_me=AsyncMock(return_value=SimpleNamespace(id=1)),
+        iter_dialogs=dialogs, iter_messages=messages,
+    )
+    with patch.object(groups, "TelegramClient", return_value=client), patch.object(groups, "StringSession"):
+        assert asyncio.run(groups._read_active_group_authors("", 1, "", {"chat_id": 4}, set(), public_only=True)) == ([], 1)
+
+    old.get_sender.assert_not_called()

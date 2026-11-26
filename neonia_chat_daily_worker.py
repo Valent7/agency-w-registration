@@ -131,9 +131,17 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
         own_id = int(self_user.id)
         authors = {}
         scanned = 0
+        earliest_activity = datetime.now(UTC) - MAX_GROUP_ACTIVITY_AGE
 
         async for message in client.iter_messages(entity, limit=max(50, int(message_limit))):
             scanned += 1
+            raw_date = getattr(message, "date", None)
+            if isinstance(raw_date, datetime) and raw_date.tzinfo is None:
+                raw_date = raw_date.replace(tzinfo=UTC)
+            # Telethon supplies newest first. Stop at the activity boundary
+            # before making any sender requests for old public history.
+            if public_only and isinstance(raw_date, datetime) and raw_date < earliest_activity:
+                break
             sender_id = getattr(message, "sender_id", None)
             try:
                 uid = int(sender_id)
@@ -165,10 +173,7 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
             first_name = str(getattr(sender, "first_name", "") or "").strip()
             last_name = str(getattr(sender, "last_name", "") or "").strip()
             name = " ".join(x for x in (first_name, last_name) if x).strip() or "Без имени"
-            raw_date = getattr(message, "date", None)
             if isinstance(raw_date, datetime):
-                if raw_date.tzinfo is None:
-                    raw_date = raw_date.replace(tzinfo=UTC)
                 if not timedelta(0) <= datetime.now(UTC) - raw_date.astimezone(UTC) <= MAX_GROUP_ACTIVITY_AGE:
                     continue
                 local_date = raw_date.astimezone(BERLIN)
@@ -764,6 +769,8 @@ def process(owner_id,session_string,state,storage):
                     existing_ids.add(cid)
                 if len(cards) >= needed:
                     break
+            if expanded_version is not None and batch_scanned < message_limit and len(batch_authors) < author_target:
+                break
         except TelegramQualificationUnavailable:
             qualification_stopped = True
             break
