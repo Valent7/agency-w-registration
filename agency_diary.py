@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+from agency_runtime_config import setting as runtime_setting
 
 
 UTC = ZoneInfo("UTC")
@@ -77,8 +78,8 @@ class DiaryStorageError(RuntimeError):
 
 
 def _config() -> tuple[str, str]:
-    url = str(st.secrets.get("SUPABASE_URL") or "").rstrip("/")
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "")
+    url = str(runtime_setting("SUPABASE_URL") or "").rstrip("/")
+    key = str(runtime_setting("SUPABASE_SECRET_KEY") or "")
     if not url or not key:
         raise DiaryStorageError("Не найдены SUPABASE_URL или SUPABASE_SECRET_KEY.")
     return url, key
@@ -608,9 +609,9 @@ def _save_entry(
 
 
 def _transcribe_audio(audio_file: Any) -> str:
-    api_key = str(st.secrets.get("OPENAI_API_KEY") or "")
+    api_key = str(runtime_setting("OPENAI_API_KEY") or "")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY не найден в Streamlit Secrets.")
+        raise RuntimeError("OPENAI_API_KEY не найден в настройках сервера.")
 
     audio_bytes = audio_file.getvalue()
     if not audio_bytes:
