@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 
 import requests
 import streamlit as st
+from agency_runtime_config import setting as runtime_setting
 from cryptography.fernet import Fernet, InvalidToken
 from neola_partner_center import _is_agency_owner
 from instagram_manual_scout import (
@@ -19,7 +20,7 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 
 
 def _supabase_headers() -> dict:
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "").strip()
+    key = str(runtime_setting("SUPABASE_SECRET_KEY") or "").strip()
     return {
         "apikey": key,
         "Authorization": f"Bearer {key}",
@@ -28,8 +29,8 @@ def _supabase_headers() -> dict:
 
 
 def _load_radar_connection(owner_telegram_id: int) -> dict | None:
-    url = str(st.secrets.get("SUPABASE_URL") or "").strip().rstrip("/")
-    key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "").strip()
+    url = str(runtime_setting("SUPABASE_URL") or "").strip().rstrip("/")
+    key = str(runtime_setting("SUPABASE_SECRET_KEY") or "").strip()
     if not url or not key:
         return None
     try:
@@ -56,9 +57,9 @@ def _load_radar_connection(owner_telegram_id: int) -> dict | None:
 
 
 def _cipher() -> Fernet:
-    key = str(st.secrets.get("FERNET_KEY") or "").strip()
+    key = str(runtime_setting("FERNET_KEY") or "").strip()
     if not key:
-        raise RuntimeError("FERNET_KEY не найден в Streamlit Secrets.")
+        raise RuntimeError("FERNET_KEY не найден в настройках сервера.")
     return Fernet(key.encode("utf-8"))
 
 
@@ -86,7 +87,7 @@ def _radar_connect_state(owner_telegram_id: int, owner_name: str) -> str:
 
 def _radar_redirect_uri() -> str:
     return str(
-        st.secrets.get("FACEBOOK_RADAR_REDIRECT_URI")
+        runtime_setting("FACEBOOK_RADAR_REDIRECT_URI")
         or "https://agency-w.streamlit.app/"
     ).strip()
 
@@ -96,13 +97,13 @@ def _radar_connect_url(owner_telegram_id: int, owner_name: str) -> str:
     # server-to-server for the token exchange, so browser reputation warnings on
     # the Render hostname never interrupt the user's login.
     app_id = str(
-        st.secrets.get("FACEBOOK_APP_ID") or "1101869308929738"
+        runtime_setting("FACEBOOK_APP_ID") or "1101869308929738"
     ).strip()
     config_id = str(
-        st.secrets.get("FACEBOOK_CONFIG_ID") or "1017467271327083"
+        runtime_setting("FACEBOOK_CONFIG_ID") or "1017467271327083"
     ).strip()
     api_version = str(
-        st.secrets.get("FACEBOOK_API_VERSION") or "v23.0"
+        runtime_setting("FACEBOOK_API_VERSION") or "v23.0"
     ).strip()
     redirect_uri = _radar_redirect_uri()
     if not app_id or not config_id or not redirect_uri:
@@ -177,10 +178,10 @@ def _handle_facebook_radar_callback(owner_telegram_id: int) -> bool:
         return True
 
     base_url = str(
-        st.secrets.get("INSTAGRAM_OAUTH_SERVICE_URL") or ""
+        runtime_setting("INSTAGRAM_OAUTH_SERVICE_URL") or ""
     ).strip().rstrip("/")
     if not base_url:
-        st.error("INSTAGRAM_OAUTH_SERVICE_URL не найден в Streamlit Secrets.")
+        st.error("INSTAGRAM_OAUTH_SERVICE_URL не найден в настройках сервера.")
         return True
 
     try:
@@ -325,7 +326,7 @@ def _graph_business_profile(
     username: str,
 ) -> dict | None:
     api_version = str(
-        st.secrets.get("FACEBOOK_API_VERSION") or "v23.0"
+        runtime_setting("FACEBOOK_API_VERSION") or "v23.0"
     ).strip() or "v23.0"
     fields = (
         f"business_discovery.username({username})"
@@ -473,9 +474,9 @@ def _collect_recent_posts(
 def _openai_story_comments(posts: list[dict]) -> list[dict]:
     if not posts:
         return []
-    api_key = str(st.secrets.get("OPENAI_API_KEY") or "").strip()
+    api_key = str(runtime_setting("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY не найден в Streamlit Secrets.")
+        raise RuntimeError("OPENAI_API_KEY не найден в настройках сервера.")
 
     manifest = []
     for index, post in enumerate(posts, start=1):
@@ -554,7 +555,7 @@ def _openai_story_comments(posts: list[dict]) -> list[dict]:
         },
         json={
             "model": str(
-                st.secrets.get("INSTAGRAM_RADAR_OPENAI_MODEL")
+                runtime_setting("INSTAGRAM_RADAR_OPENAI_MODEL")
                 or "gpt-5-mini"
             ),
             "instructions": system_prompt,
