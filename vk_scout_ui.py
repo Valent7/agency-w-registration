@@ -736,6 +736,20 @@ def _vk_thread_label(thread: dict) -> str:
     return f"{name} · {status}"
 
 
+def _vk_recent_reply(value, *, now=None):
+    """Highlight a reply received within the last 48 hours; invalid dates are not recent."""
+    if not value:
+        return False
+    try:
+        received = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if received.tzinfo is None:
+            received = received.replace(tzinfo=timezone.utc)
+        current = now if now is not None else datetime.now(timezone.utc)
+        return timedelta(0) <= current - received <= timedelta(hours=48)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _render_vk_dialog_center(
     owner_id: int,
     ask_openai_fn=None,
