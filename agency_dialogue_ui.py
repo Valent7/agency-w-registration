@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 
 import streamlit as st
+from agency_runtime_config import setting as runtime_setting
 import requests
 
 from agency_dialogue_video import (
@@ -25,7 +26,7 @@ from agency_dialogue_video import (
 
 def _secret(*names: str) -> str:
     for name in names:
-        value = st.secrets.get(name)
+        value = runtime_setting(name)
         if value and str(value).strip():
             return str(value).strip()
     return ""
