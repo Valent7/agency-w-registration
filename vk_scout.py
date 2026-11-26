@@ -1497,6 +1497,8 @@ def _extract_json_array(answer: Any) -> list[dict[str, Any]]:
             parsed = json.loads(text[start:end + 1])
         except Exception:
             return []
+    if isinstance(parsed, dict):
+        parsed = parsed.get("candidates")
     return [x for x in parsed if isinstance(x, dict)] if isinstance(parsed, list) else []
 
 
@@ -1832,7 +1834,7 @@ def score_vk_candidates(
 automation_need_signal=true означает, что из его реальной деятельности видна
 повторяющаяся рутина, которую объективно можно делегировать цифровому сотруднику.
 
-Верни ТОЛЬКО JSON-массив:
+Верни JSON с записями для каждого входного профиля. Формулировки краткие, до одного предложения на поле. Пример массива записей:
 [{{"vk_user_id":123,"score":0,"fit_summary":"...","positive_signals":["..."],
 "weak_fit_signals":["..."],"network_business_signal":false,
 "ai_provider_or_expert":false,"automation_need_signal":false,
@@ -1889,8 +1891,8 @@ automation_need_signal=true означает, что из его реально�
             print(f"[VK_STAGE] owner={owner_id} stage=model_failed error_type={type(exc).__name__} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
             raise
         print(f"[VK_STAGE] owner={owner_id} stage=model_done records={len(parsed)} elapsed_ms={int((time.monotonic()-batch_started)*1000)}", flush=True)
-        if relaxed_pilot and not parsed:
-            raise RuntimeError("VK analysis returned no valid JSON candidate records")
+        if not parsed:
+            raise RuntimeError("VK: OpenAI не вернул корректные записи JSON; оценки не сохранены.")
         by_id = {int(x["vk_user_id"]): x for x in parsed if str(x.get("vk_user_id") or "").isdigit()}
         payload = []
         for source in batch:
