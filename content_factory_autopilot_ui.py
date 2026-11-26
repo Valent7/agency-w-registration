@@ -9,6 +9,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+from agency_runtime_config import setting as runtime_setting
 
 
 PLATFORMS = {"instagram": "Instagram / Reels", "vk": "ВКонтакте", "threads": "Threads"}
@@ -144,7 +145,7 @@ def _action_error(action, exc):
 
 def _server_video_secret():
     try:
-        return str(st.secrets.get("RUNWAYML_API_SECRET") or "").strip()
+        return str(runtime_setting("RUNWAYML_API_SECRET") or "").strip()
     except Exception:
         return ""
 
