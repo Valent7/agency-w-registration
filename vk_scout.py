@@ -1560,7 +1560,7 @@ def score_vk_candidates(
     # поэтому VK Scout мог навсегда застрять на 0/5, даже если в общем пуле
     # были сотни других кандидатов.
     passport_version = target_profile.get("marketing_passport_version") if isinstance(target_profile, dict) else None
-    score_filters = {"select": "vk_user_id,analyzed_at", "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc"}
+    score_filters = {"select": "vk_user_id,analyzed_at,target_profile_snapshot", "order": "analyzed_at.asc.nullsfirst,vk_user_id.asc"}
     if passport_version is not None:
         project_id = target_profile["marketing_project_id"]
         score_filters["target_profile_snapshot->>marketing_project_id"] = f"eq.{project_id}"
@@ -1763,7 +1763,31 @@ def score_vk_candidates(
 
     if network_only(owner_id):
         rows = [candidate for candidate in rows if preliminary_network_fit(candidate)]
-    profile_text = json.dumps(target_profile, ensure_ascii=False, indent=2) if isinstance(target_profile, dict) else str(target_profile or "")
+    # Reuse a paid score when the actual analysis evidence and target are unchanged.
+    # Presence and last-seen timestamps alone do not change professional fit.
+    profile_text = json.dumps(target_profile, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str) if isinstance(target_profile, dict) else str(target_profile or "")
+    saved_fingerprints = {}
+    for scored in scored_rows:
+        snapshot = scored.get("target_profile_snapshot")
+        if isinstance(snapshot, dict) and snapshot.get("analysis_fingerprint"):
+            saved_fingerprints[str(scored.get("vk_user_id"))] = snapshot["analysis_fingerprint"]
+
+    def analysis_fingerprint(candidate):
+        view = _candidate_public_view(candidate)
+        view.pop("online", None)
+        view.pop("last_seen", None)
+        try:
+            source_id = abs(int(candidate.get("source_community_id") or 0))
+        except (TypeError, ValueError):
+            source_id = 0
+        evidence = [profile_text, view, source_context_by_id.get(source_id) or {}, "vk-fit-v1"]
+        return hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+    fingerprints = {str(candidate["vk_user_id"]): analysis_fingerprint(candidate) for candidate in rows}
+    before_reuse = len(rows)
+    rows = [candidate for candidate in rows if saved_fingerprints.get(str(candidate["vk_user_id"])) != fingerprints[str(candidate["vk_user_id"])]]
+    if before_reuse != len(rows):
+        print(f"[VK Scout] {owner_id}: reused_unchanged_scores={before_reuse - len(rows)}; paid_candidates={len(rows)}", flush=True)
     system_prompt = f"""
 Ты — Неония, аналитик и селектор целевой аудитории Агентства W.
 Оценивай только по предоставленным публичным данным VK.
@@ -1828,7 +1852,7 @@ automation_need_signal=true означает, что из его реально�
         request = (
             "ПОРТРЕТ ЦА:\n" + profile_text
             + "\n\nПУБЛИЧНЫЕ VK-ПРОФИЛИ И КОНТЕКСТ ИХ ИСТОЧНИКА:\n"
-            + json.dumps(public_batch, ensure_ascii=False, indent=2)
+            + json.dumps(public_batch, ensure_ascii=False, separators=(",", ":"), default=str)
         )
         parsed = _extract_json_array(ask_openai_fn(system_prompt, request))
         if relaxed_pilot and not parsed:
@@ -1927,6 +1951,7 @@ automation_need_signal=true означает, что из его реально�
                     score = 0
                 else:
                     snapshot["marketing_segment_role"] = matching["role"]
+            snapshot["analysis_fingerprint"] = fingerprints[str(uid)]
             scores_this_cycle.append(score)
             payload.append({
                 "owner_telegram_id": owner_id,
