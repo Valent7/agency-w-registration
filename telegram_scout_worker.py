@@ -1534,6 +1534,7 @@ def _topup_from_other_telegram_groups(
                         seen_ids,
                         desired=max(60, (needed - len(found)) * 20),
                         message_limit=900,
+                        **({"public_only": True} if expanded_version is not None else {}),
                     ),
                     timeout=30,
                 )

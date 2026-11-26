@@ -100,7 +100,7 @@ def _daily_task_source(storage, owner_id, day):
 
 
 async def _read_active_group_authors(session_string, api_id, api_hash, chat,
-                                     excluded, desired=30, message_limit=800):
+                                     excluded, desired=30, message_limit=800, *, public_only=False):
     """Read recent HUMAN authors from the exact selected group.
 
     This is the primary path for large groups where Telegram may hide the full
@@ -123,6 +123,9 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
                 break
         if entity is None:
             raise RuntimeError("Selected Telegram group is inaccessible")
+
+        if public_only and not str(getattr(entity, "username", "") or "").strip():
+            return [], 0
 
         self_user = await client.get_me()
         own_id = int(self_user.id)
@@ -742,6 +745,7 @@ def process(owner_id,session_string,state,storage):
                     excluded | seen_author_ids,
                     desired=max(author_target,(needed-len(cards))*60),
                     message_limit=message_limit,
+                    **({"public_only": True} if expanded_version is not None else {}),
                 )
             )
             scanned += batch_scanned
