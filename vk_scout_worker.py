@@ -456,6 +456,7 @@ def _score_until_daily_five(
         **version_filter,
     )
     total_created += int(prepared.get("created") or 0)
+    _log(f"VK_STAGE owner={owner_id} stage=existing_assignments count={prepared.get('count', 0)} created={total_created} complete={bool(prepared.get('complete'))}")
     if not _needs_more_candidates(prepared, target_profile, daily_limit):
         return prepared, total_analyzed, best_score
 
@@ -468,6 +469,7 @@ def _score_until_daily_five(
     # score_vk_candidates excludes profiles already scored for this owner, so
     # every round advances through the fresh pool instead of repeating the same 30.
     for round_no in range(1, max(1, int(max_rounds)) + 1):
+        _log(f"VK_STAGE owner={owner_id} stage=round_start round={round_no}")
         score_result = score_vk_candidates(
             owner_id,
             target_profile,
@@ -512,6 +514,7 @@ def _score_until_daily_five(
         # No fresh rows left: score_vk_candidates switched to reanalysis.
         # Re-running the same pool would only spend money without finding new people.
         if analyzed_now <= 0 or str(score_result.get("mode") or "") == "повторный анализ":
+            _log(f"VK_STAGE owner={owner_id} stage=round_stop reason={'no_new_scores' if analyzed_now <= 0 else 'reanalysis_pass_finished'}")
             break
 
     return {**prepared, "passed_threshold": total_passed, "created": total_created}, total_analyzed, best_score
@@ -672,7 +675,10 @@ def run_once() -> dict[str, int]:
     сохранённому портрету ЦА, и только прошедшие порог попадают в дневную пятёрку.
     Первый контакт по-прежнему не отправляется автоматически.
     """
+    cycle_started = time.monotonic()
+    _log("VK_STAGE stage=cycle_start")
     members = _load_members()
+    _log(f"VK_STAGE stage=members_loaded count={len(members)}")
     member_ids: list[int] = []
     member_by_id: dict[int, dict[str, Any]] = {}
 
@@ -743,7 +749,9 @@ def run_once() -> dict[str, int]:
                 _log(f"VK Scout OAuth: {exc}")
                 scout_access_token = ""
 
+    _log(f"VK_STAGE stage=core_load_start owners={len(member_ids)}")
     target_profiles = _load_target_profiles(member_ids)
+    _log(f"VK_STAGE stage=core_load_done loaded={len(target_profiles)}")
 
     stats = {
         "members": len(member_ids),
@@ -762,8 +770,10 @@ def run_once() -> dict[str, int]:
         if owner_id not in confirmed_ids:
             continue
         stats["active"] += 1
+        _log(f"VK_STAGE owner={owner_id} stage=owner_start")
 
         if not scout_access_token:
+            _log(f"VK_STAGE owner={owner_id} stage=owner_skipped reason=vk_auth_unavailable")
             continue
 
         member = member_by_id[owner_id]
@@ -777,8 +787,10 @@ def run_once() -> dict[str, int]:
             continue
 
         if not sources:
+            _log(f"VK_STAGE owner={owner_id} stage=owner_skipped reason=no_sources")
             continue
         stats["source_owners"] += 1
+        _log(f"VK_STAGE owner={owner_id} stage=sources_loaded count={len(sources)}")
 
         target_profile = target_profiles.get(owner_id)
         if not target_profile:
@@ -920,6 +932,7 @@ def run_once() -> dict[str, int]:
             _log(f"{owner_id}: непредвиденная ошибка: {exc}")
             continue
 
+        _log(f"VK_STAGE owner={owner_id} stage=owner_done count={prepared.get('count', 0)} complete={bool(prepared.get('complete'))} analyzed={analyzed_total}")
         if prepared.get("complete"):
             stats["assignments_ready"] += 1
         elif target_profile.get("marketing_passport_version") is not None:
@@ -937,7 +950,7 @@ def run_once() -> dict[str, int]:
         )
 
     _log(
-        "цикл завершён | "
+        f"VK_STAGE stage=cycle_done elapsed_ms={int((time.monotonic()-cycle_started)*1000)} | цикл завершён | "
         + ", ".join(f"{key}={value}" for key, value in stats.items())
     )
     return stats
