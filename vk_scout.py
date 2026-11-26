@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 
+from neonia_delegation_policy import approved_for_owner, read_owner_policy, vk_delegation_proof
 from neonia_network_proof import NETWORK_TOPIC, network_only, vk_network_proof
 import requests
 
@@ -1166,7 +1167,7 @@ def save_vk_candidates(candidates: Iterable[dict[str, Any]]) -> int:
     return saved
 
 
-def _read_vk_professional_posts(user_id: int) -> list[dict[str, Any]]:
+def _read_vk_professional_posts(user_id: int, *, expanded: bool = False) -> list[dict[str, Any]]:
     response = _vk_api("wall.get", owner_id=user_id, count=12, filter="owner")
     now_ts = int(datetime.now(UTC).timestamp())
     evidence = []
@@ -1180,7 +1181,7 @@ def _read_vk_professional_posts(user_id: int) -> list[dict[str, Any]]:
         if (
             type(post_id) is int and post_id > 0
             and type(timestamp) is int and 0 <= now_ts - timestamp <= 30 * 86400
-            and NETWORK_TOPIC.search(text[:1200])
+            and (text if expanded else NETWORK_TOPIC.search(text[:1200]))
         ):
             evidence.append({
                 "text": text[:1200], "timestamp": timestamp,
@@ -1196,6 +1197,7 @@ def scan_vk_sources(
     max_sources: int = 10,
     include_active_context: bool = False,
     include_author_posts: bool = False,
+    expanded: bool = False,
 ) -> dict[str, Any]:
     sources = load_vk_sources(owner_id)[:max(1, min(50, int(max_sources)))]
     import time
@@ -1266,14 +1268,15 @@ def scan_vk_sources(
                 or "access token" in lowered
             ):
                 break
+    professional_proof = vk_delegation_proof if expanded else vk_network_proof
     author_walls_read = 0
     author_walls_failed = 0
-    if include_author_posts and network_only(owner_id):
+    if include_author_posts and (expanded or network_only(owner_id)):
         by_source: dict[int, list[dict[str, Any]]] = {}
         priority_ids: set[int] = set()
         for item in unique.values():
             raw = item.get("raw_profile") or {}
-            if raw.get("is_closed") and not raw.get("can_access_closed"):
+            if raw.get("is_closed") and (expanded or not raw.get("can_access_closed")):
                 continue
             topical = bool(NETWORK_TOPIC.search(
                 str(item.get("status_text") or "") + " " + str(item.get("activity") or "")
@@ -1281,6 +1284,8 @@ def scan_vk_sources(
                 isinstance(comment, dict) and NETWORK_TOPIC.search(str(comment.get("text") or ""))
                 for comment in raw.get("public_professional_comments") or []
             )
+            if expanded:
+                topical = bool(professional_proof(item)) or bool(item.get("status_text") and _vk_recent_activity(item)["active"])
             if not (_vk_recent_activity(item)["active"] or topical) or vk_excluded_profession(item):
                 continue
             if topical:
@@ -1304,7 +1309,7 @@ def scan_vk_sources(
         for item in selected[:20]:
             uid = int(item["vk_user_id"])
             try:
-                posts = _read_vk_professional_posts(uid)
+                posts = _read_vk_professional_posts(uid, **({"expanded": True} if expanded else {}))
             except (VKScoutError, requests.RequestException) as exc:
                 author_walls_failed += 1
                 message = str(exc)
@@ -1320,12 +1325,12 @@ def scan_vk_sources(
             author_walls_read += 1
             if posts:
                 item["raw_profile"] = {**(item.get("raw_profile") or {}), "public_professional_posts": posts}
-                if vk_network_proof(item):
+                if professional_proof(item):
                     active_context_ids.add(uid)
     exclusions = {}
-    if include_author_posts and network_only(owner_id):
+    if include_author_posts and (expanded or network_only(owner_id)):
         for item in unique.values():
-            if not vk_network_proof(item):
+            if not professional_proof(item):
                 reason = "Нет доказательств текущей профессии"
             elif not _vk_recent_activity(item)["active"]:
                 reason = "Активность VK за 48 часов не подтверждена"
@@ -1538,7 +1543,11 @@ def score_vk_candidates(
         and bool(target_profile.get("approved_marketing_core"))
     )
 
+    expanded = approved_for_owner(owner_id, target_profile)
+
     def preliminary_network_fit(candidate):
+        if expanded:
+            return not vk_excluded_profession(candidate) and bool(vk_delegation_proof(candidate))
         if network_only(owner_id):
             return not vk_excluded_profession(candidate) and bool(vk_network_proof(candidate))
         return True
@@ -1796,7 +1805,7 @@ def score_vk_candidates(
             # сам отбор — используем уже сохранённые публичные данные.
             pass
 
-    if network_only(owner_id):
+    if expanded or network_only(owner_id):
         rows = [candidate for candidate in rows if preliminary_network_fit(candidate)]
     # Reuse a paid score when the actual analysis evidence and target are unchanged.
     # Presence and last-seen timestamps alone do not change professional fit.
@@ -1859,6 +1868,8 @@ automation_need_signal=true означает, что из его реально�
 - не ставь true только по мотивационным цитатам, лайфстайлу или отсутствующим данным.
 """.strip()
 
+    if expanded:
+        system_prompt += "\nПрименяй критерий делегирования из утверждённого ядра. Сетевой бизнес не даёт приоритета. Не приписывай интерес или готовность платить."
     segments = target_profile["segments"] if passport_version is not None else []
     if segments:
         system_prompt += (
@@ -4448,9 +4459,10 @@ def prepare_vk_invitation(
     scoped_owner = owner_id or assignment.get("owner_telegram_id")
     professional_proof = None
     if assignment.get("daily_position") and network_only(scoped_owner):
-        professional_proof = vk_network_proof(candidate)
+        expanded = read_owner_policy(scoped_owner) is not None
+        professional_proof = (vk_delegation_proof if expanded else vk_network_proof)(candidate)
         if not _vk_recent_activity(candidate)["active"] or not professional_proof:
-            raise VKScoutError("Нет актуального публичного подтверждения работы в сетевом бизнесе.")
+            raise VKScoutError("Нет актуального публичного подтверждения профессиональной деятельности.")
     first_name = str(candidate.get("first_name") or "").strip()
     fit = str(assignment.get("fit_summary") or "").strip()
     known_contact = assignment.get("daily_position") is None or fit.startswith(KNOWN_CONTACT_LABEL)
@@ -5338,11 +5350,27 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
     ) if ids else []
     by_id = {int(x["vk_user_id"]): x for x in candidates if x.get("vk_user_id") is not None}
     result = []
+    policy = read_owner_policy(owner_id)
+    expanded = policy is not None
+    proof = vk_delegation_proof if expanded else vk_network_proof
+    versioned_ids = set()
+    if expanded:
+        scores = _sb_get("agency_vk_candidate_scores", {
+            "owner_telegram_id": f"eq.{int(owner_id)}",
+            "vk_user_id": "in.(" + ",".join(str(uid) for uid in ids) + ")",
+            "target_profile_snapshot->>marketing_passport_version": f"eq.{policy['marketing_passport_version']}",
+            "target_profile_snapshot->>marketing_project_id": f"eq.{policy['marketing_project_id']}",
+            "target_profile_snapshot->>marketing_segment_matched": "eq.true",
+            "select": "vk_user_id",
+        })
+        versioned_ids = {int(row["vk_user_id"]) for row in scores}
     for assignment in rows:
         uid = int(assignment["vk_user_id"])
         candidate = by_id.get(uid, {})
-        if network_only(owner_id) and (
-            not _vk_recent_activity(candidate)["active"] or not vk_network_proof(candidate)
+        if expanded and (uid not in versioned_ids or vk_excluded_profession(candidate)):
+            continue
+        if (expanded or network_only(owner_id)) and (
+            not _vk_recent_activity(candidate)["active"] or not proof(candidate)
         ):
             continue
         result.append({

@@ -26,6 +26,7 @@ from vk_scout import (
     load_vk_sources,
 )
 
+from neonia_delegation_policy import vk_delegation_proof
 from neonia_network_proof import network_only, vk_network_proof
 
 UTC = timezone.utc
@@ -99,6 +100,7 @@ def ensure_quality_vk_assignments(
     min_score: int = 50,
     passport_version: int | None = None,
     marketing_project_id: str | None = None,
+    expanded: bool = False,
 ) -> dict[str, Any]:
     """Keep up to five daily VK cards, all with Neonia score >= min_score."""
     owner_id = int(owner_id)
@@ -134,17 +136,20 @@ def ensure_quality_vk_assignments(
         ordered_ids.append(uid)
 
     candidates = _candidate_rows(ordered_ids)
-    strict_network = network_only(owner_id)
+    strict_network = network_only(owner_id) and not expanded
     qualified_ids = {
         uid
         for uid, candidate in candidates.items()
         if abs(_int(candidate.get("source_community_id"))) in source_ids
         and _vk_recent_activity(candidate)["active"]
         and (not strict_network or vk_network_proof(candidate))
+        and (not expanded or vk_delegation_proof(candidate))
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
 
     def _has_network_evidence(uid: int) -> bool:
+        if expanded:
+            return False
         candidate = candidates.get(uid) or {}
         score_row = score_by_id.get(uid) or {}
         if strict_network:
@@ -160,7 +165,7 @@ def ensure_quality_vk_assignments(
     # Normalize legacy scores to the current audience segments before ranking.
     for uid in ordered_ids:
         old_score = _int(score_by_id[uid].get("score"))
-        score_by_id[uid]["score"] = max(60, old_score) if _has_network_evidence(uid) else min(59, old_score)
+        score_by_id[uid]["score"] = old_score if expanded else (max(60, old_score) if _has_network_evidence(uid) else min(59, old_score))
 
     # Network marketers come first; freshness and score order candidates within each segment.
     def _activity_order(uid: int) -> tuple[int, int, int, int]:

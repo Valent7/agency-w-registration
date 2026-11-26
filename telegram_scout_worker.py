@@ -13,6 +13,7 @@ import requests
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 import neonia_chat_daily_worker
 from neonia_network_proof import network_only
+from neonia_delegation_policy import approved_for_owner
 from neonia_daily_source import owner_source, CANDIDATE_POLICY_VERSION
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
@@ -1508,7 +1509,8 @@ def _topup_from_other_telegram_groups(
     # Сначала более крупные/живые доступные группы. Неония проходит несколько
     # источников, но на каждый ставит тайм-аут, чтобы один чат не блокировал день.
     network_source = re.compile(r"сетев|\bmlm\b|\bмлм\b|прямые продажи|faberlic|amway|oriflame|herbalife|golden connect|solidar club|oneshop", re.I)
-    strict_network = network_only(owner_id)
+    expanded_version = state.get("delegation_core_version")
+    strict_network = network_only(owner_id) and expanded_version is None
     chats.sort(key=lambda item: (
         strict_network and not network_source.search(str(item.get("title") or item.get("name") or "")),
         -int(item.get("participants_count") or 0),
@@ -1542,7 +1544,8 @@ def _topup_from_other_telegram_groups(
                 __import__(__name__),
                 authors,
                 max(1, needed - len(found)),
-                strict_network=network_only(owner_id),
+                strict_network=strict_network,
+                **({"expanded_version": expanded_version} if expanded_version is not None else {}),
             )
         except neonia_chat_daily_worker.TelegramQualificationUnavailable:
             break
@@ -1585,8 +1588,10 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     if not approved_core and network_only(owner_id):
         return {"owner_id": owner_id, "status": "skip", "reason": "Утверждённое маркетинговое ядро для сетевого поиска недоступно"}
     state, _ = _workspace_state(owner_id)
+    expanded_version = target["marketing_passport_version"] if approved_for_owner(owner_id, target) else None
+    state = {**state, "delegation_core_version": expanded_version}
     if approved_core:
-        state = {**state, "passport": {"analysis": approved_core}}
+        state["passport"] = {"analysis": approved_core}
 
     # v7+ supports *both* selected groups and personal Telegram contacts.
     # Only route to group worker when that source was actually selected.
@@ -1598,15 +1603,18 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
         schema_version = 0
     group_fallback_reason = ""
     chat_mode = schema_version >= 7 and owner_source(state)[0] == "chats"
+    if expanded_version is not None and not chat_mode:
+        return {"owner_id": owner_id, "status": "skip", "count": 0,
+                "reason": "Для доказательной выдачи выберите публичную профессиональную группу Telegram."}
     if chat_mode:
-        if network_only(owner_id):
+        if network_only(owner_id) or expanded_version is not None:
             current = _current_batch_info(owner_id)
             current_ids = current.get("candidate_ids") or []
             saved_cards = {int(x["telegram_id"]): x for x in _normalize_candidate_list(state.get("candidates", []))}
             # Remove only unqualified recommendations from today's feed.
             # Do not delete candidate records, sent history, or dialogues.
             valid_ids = [cid for cid in current_ids if cid in saved_cards
-                         and neonia_chat_daily_worker._recommended_group_candidate(saved_cards[cid], strict_network=True)
+                         and neonia_chat_daily_worker._recommended_group_candidate(saved_cards[cid], strict_network=True, expanded_version=expanded_version)
                          and saved_cards[cid].get("ai_provider_or_expert") is not True]
             if valid_ids != current_ids:
                 _write_daily_batch(owner_id, valid_ids, [], replace_existing=True,
@@ -1699,7 +1707,7 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
                 "group_fallback_reason": group_fallback_reason,
             }
 
-        if network_only(owner_id):
+        if network_only(owner_id) or expanded_version is not None:
             return {"owner_id": owner_id, "status": "empty", "count": 0,
                     "missing": DAILY_TARGET, "reason": group_fallback_reason}
 

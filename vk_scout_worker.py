@@ -33,6 +33,7 @@ from vk_scout_oauth import (
 
 from neonia_control_budget import CONTROL_RUN_ID, cloud_vk_assessor
 from neonia_network_proof import network_only
+from neonia_delegation_policy import approved_for_owner
 from vk_quality_daily import ensure_quality_vk_assignments
 
 from vk_scout import (
@@ -457,6 +458,8 @@ def _score_until_daily_five(
         "passport_version": passport_version,
         "marketing_project_id": target_profile["marketing_project_id"],
     } if passport_version is not None else {}
+    if approved_for_owner(owner_id, target_profile):
+        version_filter["expanded"] = True
     total_analyzed = 0
     total_passed = 0
     total_created = 0
@@ -605,6 +608,7 @@ def top_up_vk_owner_now(
                 per_source=1000,
                 max_sources=min(10 if control_search else 5, len(sources)),
                 include_active_context=True,
+                **({"expanded": True} if approved_for_owner(owner_id, target_profile) else {}),
                 **({"include_author_posts": True} if control_search or (owner_id == 235805138 and target_profile.get("approved_marketing_core")) else {}),
             )
         except Exception as exc:
@@ -655,6 +659,8 @@ def top_up_vk_owner_now(
         first_created = int(prepared.get("created") or 0)
         version = target_profile.get("marketing_passport_version")
         version_filter = {"passport_version": version, "marketing_project_id": target_profile["marketing_project_id"]} if version is not None else {}
+        if approved_for_owner(owner_id, target_profile):
+            version_filter["expanded"] = True
         prepared = ensure_quality_vk_assignments(owner_id, member_code, limit=5, min_score=min_score, **version_filter)
         prepared["created"] = first_created + int(prepared.get("created") or 0)
         prepared["passed_threshold"] = int(scored.get("passed_threshold") or 0)
@@ -844,6 +850,7 @@ def run_once() -> dict[str, int]:
                         per_source=1000,
                         max_sources=min(5, len(sources)),
                         include_active_context=True,
+                        **({"expanded": True} if approved_for_owner(owner_id, target_profile) else {}),
                         **({"include_author_posts": True} if owner_id == 235805138 and target_profile.get("approved_marketing_core") else {}),
                     )
                     for scan_error in scan_result.get("errors") or []:

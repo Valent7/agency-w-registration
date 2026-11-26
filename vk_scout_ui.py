@@ -1506,12 +1506,14 @@ def _render_vk_candidate_details(
         score = int(item.get("score") or 0)
         from neonia_network_proof import vk_network_proof
 
-        proof = vk_network_proof(item)
+        from neonia_delegation_policy import vk_delegation_proof
+
+        proof = vk_delegation_proof(item) or vk_network_proof(item)
         if proof:
             from datetime import datetime, timezone
             day = datetime.fromtimestamp(proof["timestamp"], timezone.utc).strftime("%d.%m.%Y")
             st.text(f"{day} · {proof['text']}")
-            st.link_button("Публичное подтверждение работы в сетевом бизнесе", proof["url"])
+            st.link_button("Публичное подтверждение профессиональной деятельности", proof["url"])
         else:
             explanation = str(item.get("fit_summary") or "").strip()
             if explanation:

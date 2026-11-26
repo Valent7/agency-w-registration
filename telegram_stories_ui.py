@@ -27,6 +27,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.stories import GetAllStoriesRequest
 
+from neonia_delegation_policy import delegation_proof, read_owner_policy
 from neona_telegram_dialogs import initialize_dialog_after_story_reply
 from workspace_persistence import persist_workspace_if_changed
 
@@ -472,6 +473,7 @@ async def fetch_telegram_story_feed(
     limit: int = STORY_ANALYSIS_BATCH,
     excluded_story_keys: set[str] | None = None,
     excluded_author_ids: set[int] | None = None,
+    public_captions_only: bool = False,
 ) -> dict[str, Any]:
     """Берёт следующую партию НОВЫХ активных Stories из всей Telegram-ленты."""
     session_string = _load_session(int(owner_id))
@@ -584,13 +586,15 @@ async def fetch_telegram_story_feed(
             caption = str(
                 getattr(story, "caption", "") or ""
             ).strip()
-            (
-                preview_b64,
-                preview_mime,
-                media_kind,
-                video_frames,
-                audio_transcript,
-            ) = await _download_story_preview(client, story)
+            observed_date = _story_date(story)
+            if public_captions_only:
+                if not getattr(story, "public", False) or not caption or not observed_date:
+                    continue
+                preview_b64, preview_mime, media_kind, video_frames, audio_transcript = "", "", "", [], ""
+            else:
+                (
+                    preview_b64, preview_mime, media_kind, video_frames, audio_transcript,
+                ) = await _download_story_preview(client, story)
             username = str(
                 getattr(user, "username", "") or ""
             ).strip()
@@ -1153,6 +1157,28 @@ def _render_recent_story_reply_history(owner_id: int) -> None:
             st.divider()
 
 
+def _delegation_story_recommendations(stories):
+    from vk_scout import vk_excluded_profession
+
+    recommendations = []
+    for story in stories:
+        date = _parse_iso_datetime(story.get("date"))
+        if date is None:
+            continue
+        text = str(story.get("caption") or "")
+        proof = delegation_proof([{
+            "text": text, "timestamp": int(date.timestamp()), "url": story.get("story_url"),
+        }], max_age=timedelta(hours=48))
+        if not proof or vk_excluded_profession({}, text):
+            continue
+        recommendations.append({
+            **story, "reason": "В публичной подписи автор подтверждает роль и рабочий процесс. "
+            "Интерес к делегированию предстоит уточнить.",
+            "reply": "", "delegation_evidence_url": proof["url"],
+        })
+    return recommendations
+
+
 def prepare_telegram_stories_radar(
     owner_id: int,
     *,
@@ -1161,6 +1187,8 @@ def prepare_telegram_stories_radar(
     """Идёт по ленте партиями, пока не найдёт 5 новых авторов для ответа."""
     owner_id = int(owner_id)
     target = max(1, min(10, int(target or DAILY_STORY_TARGET)))
+    policy = read_owner_policy(owner_id)
+    expanded = policy is not None
 
     permanent_story_keys, cooldown_authors = (
         _story_rotation_exclusions(owner_id)
@@ -1181,6 +1209,7 @@ def prepare_telegram_stories_radar(
                 limit=STORY_ANALYSIS_BATCH,
                 excluded_story_keys=excluded_keys,
                 excluded_author_ids=cooldown_authors,
+                **({"public_captions_only": True} if expanded else {}),
             )
         )
         batch = list(feed.get("stories") or [])
@@ -1218,7 +1247,8 @@ def prepare_telegram_stories_radar(
         batches += 1
         scanned_stories.extend(batch)
 
-        batch_recommendations = _analyze_story_feed(batch)
+        batch_recommendations = (_delegation_story_recommendations(batch)
+                                 if expanded else _analyze_story_feed(batch))
         for item in batch_recommendations:
             if len(recommendations) >= target:
                 break
@@ -1268,6 +1298,7 @@ def prepare_telegram_stories_radar(
         "target": target,
         "complete": len(recommendations) >= target,
         "batches": batches,
+        "delegation_core_version": policy["marketing_passport_version"] if expanded else None,
     }
 
 
@@ -1391,7 +1422,10 @@ def render_telegram_stories_radar(owner_id: int) -> None:
             else:
                 st.caption("У автора нет публичного username — откройте его Story в ленте Telegram.")
 
-            st.markdown("**Ответ Неоны:**")
+            if result.get("delegation_core_version") is not None:
+                st.markdown("**Ваш ответ на Story:**")
+            else:
+                st.markdown("**Ответ Неоны:**")
             if reply_key not in st.session_state:
                 st.session_state[reply_key] = str(item.get("reply") or "")
             st.text_area(

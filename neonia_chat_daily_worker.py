@@ -24,6 +24,7 @@ MAX_GROUP_ACTIVITY_AGE = timedelta(hours=48)
 MIN_DAILY_AUDIENCE_FIT_SCORE = 50
 
 
+from neonia_delegation_policy import delegation_proof
 from neonia_network_proof import current_network_proof, network_only
 
 
@@ -230,10 +231,16 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
         await client.disconnect()
 
 
-def _recommended_group_candidate(candidate, *, strict_network=False):
+def _recommended_group_candidate(candidate, *, strict_network=False, expanded_version=None):
     if candidate.get("analysis_cost_mode") == "local_group_signal":
         return False  # Local signals are preliminary, not approved audience analysis.
-    if strict_network and not current_network_proof(candidate.get("professional_messages")):
+    if expanded_version is not None:
+        from vk_scout import vk_excluded_profession
+        proof = delegation_proof(candidate.get("professional_messages"))
+        if (candidate.get("delegation_core_version") != expanded_version or not proof
+                or vk_excluded_profession({}, candidate.get("public_info") or proof["text"])):
+            return False
+    elif strict_network and not current_network_proof(candidate.get("professional_messages")):
         return False
     """One quality gate for freshly generated and stored daily group leads.
 
@@ -280,7 +287,7 @@ class TelegramQualificationUnavailable(RuntimeError):
     """Stop paid qualification for the current owner run."""
 
 
-def _rank_active_group_authors(state, storage, authors, desired, *, strict_network=False):
+def _rank_active_group_authors(state, storage, authors, desired, *, strict_network=False, expanded_version=None):
     """Apply workability + target-audience analysis to active group authors."""
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
     if not passport or not authors:
@@ -291,7 +298,7 @@ def _rank_active_group_authors(state, storage, authors, desired, *, strict_netwo
     known_ids = storage._known_contact_ids(state)
     workable = []
     for source in authors:
-        if strict_network and not current_network_proof(source.get("professional_messages")):
+        if expanded_version is None and strict_network and not current_network_proof(source.get("professional_messages")):
             continue
         if not _eligible_group_author(source):
             continue
@@ -310,6 +317,23 @@ def _rank_active_group_authors(state, storage, authors, desired, *, strict_netwo
     # сообщений. Это повышает шанс быстро собрать качественную пятёрку, не
     # ослабляя порог ЦА и не увеличивая число случайных рекомендаций.
     workable.sort(key=lambda item: 0 if _local_business_signal(item) else 1)
+
+    if expanded_version is not None:
+        from vk_scout import vk_excluded_profession
+        qualified = {}
+        for source in workable:
+            proof = delegation_proof(source.get("professional_messages"))
+            if not proof or vk_excluded_profession({}, source.get("public_info") or proof["text"]):
+                continue
+            uid = int(source["telegram_id"])
+            qualified[uid] = {
+                **source, "business_relevant": True, "business_evidence": [proof["text"]],
+                "source_type": "telegram_chat", "score": MIN_DAILY_AUDIENCE_FIT_SCORE,
+                "delegation_core_version": expanded_version, "delegation_evidence_url": proof["url"],
+                "potential_interest": "не подтверждён", "recommendation": "Решает владелец",
+                "status": "Проанализирован",
+            }
+        return list(qualified.values())[:desired]
 
     ranked = []
     passport_analysis = passport.get("analysis") or passport.get("profile") or passport
@@ -521,14 +545,14 @@ def _persist_group_selection(storage, owner_id, mode, chat, candidates,
     return False
 
 
-def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
+def _write_daily_group_task(storage, owner_id, day, chat_id, candidates, *, expanded_version=None):
     """A daily batch must carry its group ID, not just 'sequential queue'."""
     task, current = _daily_task_source(storage,owner_id,day)
     signature=source_signature("chats",chat_id)
     if matches_daily_batch(current,"chats",chat_id) and len(
         _int_set(current.get("candidate_ids",[])))>=5:
         qualified = {int(c["telegram_id"]) for c in candidates
-                     if _recommended_group_candidate(c, strict_network=network_only(owner_id))}
+                     if _recommended_group_candidate(c, strict_network=network_only(owner_id), expanded_version=expanded_version)}
         if all(cid in qualified for cid in
                _int_set(current.get("candidate_ids",[]))):
             return True
@@ -556,9 +580,9 @@ def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
         return False
     # Rebuild from verified source cards, never carry stale legacy IDs forward.
     # Previously approved IDs remain available for the owner to handle.
-    selected_ids=list(confirmed) if matches_daily_batch(last,"chats",chat_id) else []
+    selected_ids=list(confirmed) if expanded_version is None and matches_daily_batch(last,"chats",chat_id) else []
     for card in candidates:
-        if not _recommended_group_candidate(card, strict_network=network_only(owner_id)):
+        if not _recommended_group_candidate(card, strict_network=network_only(owner_id), expanded_version=expanded_version):
             continue
         cid=int(card["telegram_id"])
         if cid not in selected_ids:
@@ -587,6 +611,8 @@ def _write_daily_group_task(storage, owner_id, day, chat_id, candidates):
 
 
 def process(owner_id,session_string,state,storage):
+    expanded_version = state.get("delegation_core_version")
+    policy_args = {"expanded_version": expanded_version} if expanded_version is not None else {}
     today=datetime.now(BERLIN).date()
     mode,chat_id=owner_source(state)
     if mode!="chats":
@@ -606,7 +632,7 @@ def process(owner_id,session_string,state,storage):
         saved_cards = [x for x in storage._normalize_candidate_list(state.get("candidates", []))
                        if int(x["telegram_id"]) in current_ids
                        and int(x.get("source_chat_id") or 0) == chat_id
-                       and _recommended_group_candidate(x, strict_network=network_only(owner_id))]
+                       and _recommended_group_candidate(x, strict_network=network_only(owner_id), expanded_version=expanded_version)]
         if len({int(x["telegram_id"]) for x in saved_cards}) >= 5:
             return {"owner_id":owner_id,"status":"ready","count":5,"source_chat_id":chat_id}
     if current.get("approved_ids") and not matches_daily_batch(
@@ -670,9 +696,9 @@ def process(owner_id,session_string,state,storage):
         saved=[x for x in storage._normalize_candidate_list(state.get("candidates",[]))
                if int(x["telegram_id"]) in cached
                and int(x.get("source_chat_id") or 0)==chat_id]
-        saved = [x for x in saved if _recommended_group_candidate(x, strict_network=network_only(owner_id))]
+        saved = [x for x in saved if _recommended_group_candidate(x, strict_network=network_only(owner_id), expanded_version=expanded_version)]
         if saved:
-            _write_daily_group_task(storage,owner_id,today,chat_id,saved)
+            _write_daily_group_task(storage,owner_id,today,chat_id,saved, **policy_args)
             if len(saved)>=5:
                 return {"owner_id":owner_id,"status":"prepared",
                         "count":len(saved),"source_chat_id":chat_id}
@@ -686,7 +712,7 @@ def process(owner_id,session_string,state,storage):
         existing_cards=[x for x in storage._normalize_candidate_list(state.get("candidates",[]))
                         if int(x["telegram_id"]) in have
                         and int(x.get("source_chat_id") or 0)==chat_id
-                        and _recommended_group_candidate(x, strict_network=network_only(owner_id))]
+                        and _recommended_group_candidate(x, strict_network=network_only(owner_id), expanded_version=expanded_version)]
     offset=int((state.get("chat_offsets") or {}).get(str(chat_id)) or 0)
     api_id,api_hash=storage._telegram_api_credentials()
     needed=max(1,5-len(existing_cards))
@@ -724,6 +750,7 @@ def process(owner_id,session_string,state,storage):
             batch_cards=_rank_active_group_authors(
                 state,storage,batch_authors,max(1,needed-len(cards)),
                 **({"strict_network": True} if network_only(owner_id) else {}),
+                **policy_args,
             )
             existing_ids={int(x["telegram_id"]) for x in cards}
             for item in batch_cards:
@@ -795,10 +822,10 @@ def process(owner_id,session_string,state,storage):
         return {"owner_id":owner_id,"status":"skip",
                 "reason":"workspace changed during selection"}
     combined=existing_cards+cards
-    if not _write_daily_group_task(storage,owner_id,today,chat_id,combined):
+    if not _write_daily_group_task(storage,owner_id,today,chat_id,combined, **policy_args):
         return {"owner_id":owner_id,"status":"skip","reason":"daily task update not confirmed"}
     qualified_count = len({int(x["telegram_id"]) for x in combined
-                           if _recommended_group_candidate(x, strict_network=network_only(owner_id))})
+                           if _recommended_group_candidate(x, strict_network=network_only(owner_id), expanded_version=expanded_version)})
     return {"owner_id":owner_id,
             "status": ("prepared" if qualified_count >= 5 else
                        "qualification_stopped" if qualification_stopped else "searching"),
