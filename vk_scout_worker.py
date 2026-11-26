@@ -355,6 +355,17 @@ def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
                     f"повтор {attempt}/{len(delays)}"
                 )
                 continue
+            if 400 <= response.status_code < 500:
+                try:
+                    err = response.json().get("error") or {}
+                except (ValueError, AttributeError):
+                    err = {}
+                code = str(err.get("code") or "unknown")
+                param = str(err.get("param") or "unknown")
+                # Only log known safe identifier characters, never raw response bodies.
+                code = code if code.replace("_", "").isalnum() else "unknown"
+                param = param if param.replace("_", "").replace(".", "").isalnum() else "unknown"
+                raise RuntimeError(f"OpenAI: HTTP {response.status_code}; code={code}; param={param}. Автоматический повтор отменён.")
             response.raise_for_status()
             result = response.json()
             usage = result.get("usage") or {}
@@ -428,10 +439,11 @@ def _marketing_vk_analysis(owner_id, version, project_id=None):
 
 
 def _needs_more_candidates(prepared, target_profile, daily_limit):
-    if not prepared.get("complete"):
-        return True
-    # A complete qualified daily set is sufficient; network priority is handled by ranking.
-    return False
+    if prepared.get("complete"):
+        return False
+    if (prepared.get("diagnostics") or {}).get("insert_errors"):
+        return False
+    return True
 
 
 def _score_until_daily_five(
@@ -466,6 +478,9 @@ def _score_until_daily_five(
         **version_filter,
     )
     total_created += int(prepared.get("created") or 0)
+    if (prepared.get("diagnostics") or {}).get("insert_errors") and not prepared.get("complete"):
+        _log(f"VK_STAGE owner={owner_id} stage=paid_search_stopped reason=assignment_insert_errors")
+        return prepared, total_analyzed, best_score
     _log(f"VK_STAGE owner={owner_id} stage=existing_assignments count={prepared.get('count', 0)} created={total_created} complete={bool(prepared.get('complete'))}")
     if not _needs_more_candidates(prepared, target_profile, daily_limit):
         return prepared, total_analyzed, best_score
