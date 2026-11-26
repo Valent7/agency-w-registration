@@ -3004,6 +3004,7 @@ async def sync_owner_once(
                 and stale_failed_id == last_id
                 and stale_failed_id > owner_fence_id
                 and stale_recovery_done != stale_failed_id
+                and "429" not in failed_error
                 and not last_reply_verified_for_recovery
                 and (
                     not last_reply_id_for_recovery
@@ -3062,6 +3063,7 @@ async def sync_owner_once(
                 and last_id > story_reply_id
                 and last_id > owner_fence_id
                 and story_recovery_done_id != last_id
+                and not (failed_id == last_id and "429" in failed_error)
                 and current_stage not in {
                     "contact_closed",
                     "opted_out",
@@ -3899,7 +3901,18 @@ async def sync_owner_once(
                     )
                     stats["errors"] += 1
 
-                    if current_attempt >= MAX_MESSAGE_PROCESSING_ATTEMPTS:
+                    api_response = getattr(exc, "response", None)
+                    api_quota_exhausted = False
+                    if api_response is not None and api_response.status_code == 429:
+                        try:
+                            api_error = api_response.json().get("error", {})
+                            api_quota_exhausted = bool(
+                                {str(api_error.get("code") or ""), str(api_error.get("type") or "")}
+                                & {"insufficient_quota", "billing_hard_limit_reached", "billing_not_active"}
+                            )
+                        except (ValueError, AttributeError, TypeError):
+                            pass
+                    if current_attempt >= MAX_MESSAGE_PROCESSING_ATTEMPTS or api_quota_exhausted:
                         # После 3 неудач прекращаем платный цикл. Человека не
                         # спамим автоматическими повторами; новый входящий текст
                         # снова запустит обычную обработку.
