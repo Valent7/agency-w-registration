@@ -352,7 +352,15 @@ def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
                 )
                 continue
             response.raise_for_status()
-            answer = _extract_response_text(response.json())
+            result = response.json()
+            usage = result.get("usage") or {}
+            details = usage.get("input_tokens_details") or {}
+            _log(f"API_USAGE agent=neonia channel=vk model={model} "
+                 f"input_tokens={usage.get('input_tokens', 0)} "
+                 f"cached_tokens={details.get('cached_tokens', 0)} "
+                 f"output_tokens={usage.get('output_tokens', 0)} "
+                 f"request_id={result.get('id', 'unknown')}")
+            answer = _extract_response_text(result)
             if not answer:
                 raise RuntimeError("OpenAI не вернул текст")
             return answer
