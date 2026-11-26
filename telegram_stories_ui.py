@@ -27,7 +27,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.stories import GetAllStoriesRequest
 
-from neonia_delegation_policy import delegation_proof, read_owner_policy
+from neonia_delegation_policy import PILOT_OWNER, delegation_proof, read_owner_policy
 from neona_telegram_dialogs import initialize_dialog_after_story_reply
 from workspace_persistence import persist_workspace_if_changed
 
@@ -1306,6 +1306,9 @@ def render_telegram_stories_radar(owner_id: int) -> None:
     owner_id = int(owner_id)
     state_key = f"telegram_stories_radar_{owner_id}"
     result = st.session_state.get(state_key)
+    if result is None and owner_id == PILOT_OWNER:
+        from neonia_pilot_daily import load_daily_stories
+        result = load_daily_stories(owner_id)
 
     st.markdown("### 🌿 Радар Stories Telegram")
     st.caption(
@@ -1365,7 +1368,7 @@ def render_telegram_stories_radar(owner_id: int) -> None:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Активных авторов", available_people)
         m2.metric("Повторов пропущено", skipped_repeats)
-        m3.metric("Новых просмотрено", len(stories))
+        m3.metric("Новых просмотрено", int(result.get("checked") or len(stories)))
         m4.metric("Сегодня", f"{len(recommendations)}/{target}")
         st.caption(
             "Радар дочитывает все страницы доступной Telegram-ленты. "

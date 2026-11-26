@@ -1612,12 +1612,14 @@ def _topup_from_other_telegram_groups(
     return found
 
 
-def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
+def process_owner_once(owner_id: int, session_string: str, *, require_delegation: bool = False) -> dict[str, Any]:
     owner_id = int(owner_id)
     # Keep the original contact/group route. An approved core supplies audience
     # context, not a switch that disables the entire search.
     from vk_scout_worker import _load_target_profiles
     target = _load_target_profiles([owner_id]).get(owner_id)
+    if require_delegation and not approved_for_owner(owner_id, target):
+        return {"owner_id": owner_id, "status": "skip", "reason": "Нет действующего утверждённого ядра №126."}
     approved_core = target.get("approved_marketing_core") if target else None
     if not approved_core and network_only(owner_id):
         return {"owner_id": owner_id, "status": "skip", "reason": "Утверждённое маркетинговое ядро для сетевого поиска недоступно"}

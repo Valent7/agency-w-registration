@@ -199,3 +199,11 @@ def test_public_group_reader_stops_before_fetching_old_senders():
         assert asyncio.run(groups._read_active_group_authors("", 1, "", {"chat_id": 4}, set(), public_only=True)) == ([], 1)
 
     old.get_sender.assert_not_called()
+
+
+def test_nominal_recruitment_can_be_supported_by_another_post_from_same_author():
+    now = datetime.now(timezone.utc)
+    announcement = evidence("В команду открыт набор сотрудников для работы с объявлениями.", now)
+    assert delegation_proof([announcement], now=now) is None
+    role = evidence("Я руководитель агентства недвижимости.", now, "https://t.me/public_business/41")
+    assert delegation_proof([announcement, role], now=now)["role_evidence_url"] == role["url"]

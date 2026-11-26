@@ -558,6 +558,7 @@ def top_up_vk_owner_now(
     min_score: int = 50,
     analysis_limit: int = 30,
     control_search: bool = False,
+    require_delegation: bool = False,
 ) -> dict[str, Any]:
     """Immediate manual top-up for one owner's VK daily five."""
     owner_id = int(owner_id)
@@ -570,7 +571,7 @@ def top_up_vk_owner_now(
     target_profile = profiles.get(owner_id)
     if not target_profile:
         raise VKScoutError("Не найден сохранённый живой портрет ЦА.")
-    if control_search and not approved_for_owner(owner_id, target_profile):
+    if (control_search or require_delegation) and not approved_for_owner(owner_id, target_profile):
         raise VKScoutError("Для контрольного запроса нужно утверждённое ядро по задаче №126.")
 
     sources = load_vk_sources(owner_id)
@@ -582,7 +583,7 @@ def top_up_vk_owner_now(
     fallback_access_token = service_access_token or legacy_access_token
 
     service_mode = _env("VK_SCOUT_SERVICE_MODE").casefold() in {"1", "true", "yes", "on"}
-    if service_mode and service_access_token:
+    if service_mode and service_access_token and not approved_for_owner(owner_id, target_profile):
         os.environ["VK_SCOUT_ACCESS_TOKEN"] = service_access_token
     else:
         try:

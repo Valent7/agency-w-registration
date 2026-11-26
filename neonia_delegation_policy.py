@@ -24,6 +24,11 @@ _PROCESS = re.compile(
     r"\b(?:партн[её]р\w*|клиент\w*|представител\w*|команд\w*|"
     r"сотрудник\w*|дистрибьютор\w*|новичк\w*)\b", re.I
 )
+_PROCESS_NOUN = re.compile(
+    r"\b(?:открыт\w*\s+набор|ид[её]т\s+набор|объявля\w+\s+набор)\b"
+    r"[^.!?;]{0,60}\b(?:сотрудник\w*|представител\w*|партн[её]р\w*|"
+    r"новичк\w*|команд\w*)\b", re.I
+)
 _RISK = re.compile(
     r"финансов\w+\s+пирамид\w*|\b(?:скам|scam|ponzi)\b|"
     r"гарантированн\w+\s+(?:доход\w*|прибыл\w*|доходност\w*)|"
@@ -60,7 +65,8 @@ def risk_signal(text):
 
 
 def delegation_hint(text):
-    return bool(_PROCESS.search(str(text or "")))
+    value = str(text or "")
+    return bool(_PROCESS.search(value) or _PROCESS_NOUN.search(value))
 
 
 
