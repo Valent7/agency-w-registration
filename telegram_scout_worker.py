@@ -800,7 +800,13 @@ def _ask_openai(system_prompt: str, user_message: str) -> str:
         timeout=180,
     )
     response.raise_for_status()
-    text = _extract_response_text(response.json())
+    result = response.json()
+    usage = result.get("usage") or {}
+    print(f"[Telegram Scout] API_USAGE agent=neonia channel=telegram model={model} "
+          f"input_tokens={usage.get('input_tokens', 0)} "
+          f"output_tokens={usage.get('output_tokens', 0)} "
+          f"request_id={result.get('id', 'unknown')}", flush=True)
+    text = _extract_response_text(result)
     if not text:
         raise RuntimeError("OpenAI не вернул текст")
     return text
@@ -1554,9 +1560,15 @@ def _topup_from_other_telegram_groups(
 
 def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     owner_id = int(owner_id)
-    if network_only(owner_id):
-        return {"owner_id": owner_id, "status": "skip", "reason": "pilot paid search blocked"}
     state, _ = _workspace_state(owner_id)
+    # Keep the original contact/group route. An approved core supplies audience
+    # context, not a switch that disables the entire search.
+    from vk_scout_worker import _load_target_profiles
+    target = _load_target_profiles([owner_id]).get(owner_id)
+    if target and target.get("approved_marketing_core"):
+        state = {**state, "passport": {"analysis": target["approved_marketing_core"]}}
+    elif network_only(owner_id):
+        return {"owner_id": owner_id, "status": "skip", "reason": "Утверждённое маркетинговое ядро для сетевого поиска недоступно"}
 
     # v7+ supports *both* selected groups and personal Telegram contacts.
     # Only route to group worker when that source was actually selected.
@@ -1861,6 +1873,11 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
                         f"[Telegram Scout] {owner_id}: OpenAI analysis failed: {exc}; using local fallback",
                         flush=True,
                     )
+                    response = getattr(exc, "response", None)
+                    if response is not None and response.status_code == 429:
+                        # Keep earlier successful batches and leave the failed
+                        # profiles available for a later run.
+                        break
                     batch_results.extend(_build_no_data_candidate(item) for item in informative)
 
             for item in batch_results:
