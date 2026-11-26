@@ -231,6 +231,8 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
 
 
 def _recommended_group_candidate(candidate, *, strict_network=False):
+    if candidate.get("analysis_cost_mode") == "local_group_signal":
+        return False  # Local signals are preliminary, not approved audience analysis.
     if strict_network and not current_network_proof(candidate.get("professional_messages")):
         return False
     """One quality gate for freshly generated and stored daily group leads.
@@ -314,7 +316,11 @@ def _rank_active_group_authors(state, storage, authors, desired, *, strict_netwo
         if informative:
             try:
                 batch_results.extend(storage._analyze_candidates(passport_analysis, informative))
-            except Exception:
+            except Exception as exc:
+                response = getattr(exc, "response", None)
+                if response is not None and response.status_code == 429:
+                    print("[Telegram Group Scout] API 429; qualified analysis stopped", flush=True)
+                    break
                 # Keep service useful if the AI analysis endpoint is temporarily down,
                 # but only for visible authors with an explicit local business signal.
                 for source in informative:
