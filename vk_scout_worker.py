@@ -574,7 +574,7 @@ def top_up_vk_owner_now(
         raise VKScoutError("Для контрольного запроса нужно утверждённое ядро по задаче №126.")
 
     sources = load_vk_sources(owner_id)
-    if not sources:
+    if not sources and not approved_for_owner(owner_id, target_profile):
         raise VKScoutError("Нет активных VK-источников.")
 
     service_access_token = _env("VK_SERVICE_TOKEN")
@@ -610,7 +610,7 @@ def top_up_vk_owner_now(
             scan_result = scan_vk_sources(
                 owner_id,
                 per_source=1000,
-                max_sources=min(10 if control_search or approved_for_owner(owner_id, target_profile) else 5, len(sources)),
+                max_sources=10 if approved_for_owner(owner_id, target_profile) else min(10 if control_search else 5, len(sources)),
                 include_active_context=True,
                 **({"expanded": True} if approved_for_owner(owner_id, target_profile) else {}),
                 **({"include_author_posts": True} if control_search or (owner_id == 235805138 and target_profile.get("approved_marketing_core")) else {}),
@@ -820,13 +820,13 @@ def run_once() -> dict[str, int]:
             _log(f"{owner_id}: не удалось прочитать источники VK: {exc}")
             continue
 
-        if not sources:
+        target_profile = target_profiles.get(owner_id)
+        if not sources and not approved_for_owner(owner_id, target_profile):
             _log(f"VK_STAGE owner={owner_id} stage=owner_skipped reason=no_sources")
             continue
         stats["source_owners"] += 1
         _log(f"VK_STAGE owner={owner_id} stage=sources_loaded count={len(sources)}")
 
-        target_profile = target_profiles.get(owner_id)
         if not target_profile:
             _log(f"{owner_id}: нет сохранённого живого портрета ЦА — VK-пятёрку не выдаю")
             continue
@@ -852,7 +852,7 @@ def run_once() -> dict[str, int]:
                     scan_result = scan_vk_sources(
                         owner_id,
                         per_source=1000,
-                        max_sources=min(5, len(sources)),
+                        max_sources=10 if approved_for_owner(owner_id, target_profile) else min(5, len(sources)),
                         include_active_context=True,
                         **({"expanded": True} if approved_for_owner(owner_id, target_profile) else {}),
                         **({"include_author_posts": True} if owner_id == 235805138 and target_profile.get("approved_marketing_core") else {}),

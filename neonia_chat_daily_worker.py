@@ -115,12 +115,18 @@ async def _read_active_group_authors(session_string, api_id, api_hash, chat,
             raise RuntimeError("Telegram session authorization expired")
         target = int(chat["chat_id"])
         entity = None
-        async for dialog in client.iter_dialogs(limit=500):
-            if not bool(getattr(dialog, "is_group", False)):
-                continue
-            if int(getattr(dialog.entity, "id", -1)) == target:
-                entity = dialog.entity
-                break
+        public_username = str(chat.get("public_username") or "")
+        if public_only and public_username:
+            entity = await client.get_entity(public_username)
+            if int(getattr(entity, "id", 0)) != target or not getattr(entity, "megagroup", False):
+                return [], 0
+        else:
+            async for dialog in client.iter_dialogs(limit=500):
+                if not bool(getattr(dialog, "is_group", False)):
+                    continue
+                if int(getattr(dialog.entity, "id", -1)) == target:
+                    entity = dialog.entity
+                    break
         if entity is None:
             raise RuntimeError("Selected Telegram group is inaccessible")
 

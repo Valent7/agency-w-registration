@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 from neonia_candidate_policy import BUSINESS_GATE_RULES, apply_business_gate
 
-from neonia_delegation_policy import approved_for_owner, read_owner_policy, vk_delegation_proof
+from neonia_delegation_policy import approved_for_owner, delegation_hint, read_owner_policy, vk_delegation_proof
 from neonia_network_proof import NETWORK_TOPIC, network_only, vk_network_proof
 import requests
 
@@ -944,6 +944,7 @@ def fetch_vk_active_commenters(
     post_limit: int = 12,
     comment_limit: int = 100,
     max_people: int = 250,
+    content_first: bool = False,
 ) -> dict[str, Any]:
     """Fallback source: active human authors from public community discussions.
 
@@ -964,6 +965,11 @@ def fetch_vk_active_commenters(
     comment_samples: dict[int, list[str]] = {}
     comment_activity_at: dict[int, int] = {}
     dated_comments: dict[int, list[dict]] = {}
+    if content_first:
+        now = int(datetime.now(UTC).timestamp())
+        posts = [post for post in posts if isinstance(post, dict)
+                 and type(post.get("date")) is int and 0 <= now - post["date"] <= 30 * 86400]
+        posts.sort(key=lambda post: (not delegation_hint(post.get("text")), -post["date"]))
     for post in posts:
         if not isinstance(post, dict):
             continue
@@ -973,12 +979,25 @@ def fetch_vk_active_commenters(
             continue
         if post_id <= 0:
             continue
+        if content_first and not post.get("copy_history"):
+            author = post.get("from_id")
+            text = str(post.get("text") or "").strip()
+            if type(author) is int and author > 0 and text:
+                dated_comments.setdefault(author, []).append({
+                    "text": text[:1200], "timestamp": post["date"],
+                    "url": f"https://vk.com/wall-{abs(cid)}_{post_id}",
+                })
+                comment_activity_at[author] = max(comment_activity_at.get(author, 0), post["date"])
+                if author not in seen and len(user_ids) < max_people:
+                    seen.add(author)
+                    user_ids.append(author)
         try:
             comments = _vk_api(
                 "wall.getComments",
                 owner_id=-abs(cid),
                 post_id=post_id,
                 count=max(1, min(100, int(comment_limit))),
+                **({"sort": "desc"} if content_first else {}),
                 extended=1,
                 fields=",".join(VK_PROFILE_FIELDS),
             )
@@ -988,7 +1007,7 @@ def fetch_vk_active_commenters(
 
         # extended=1 normally returns profile objects; prefer them because this
         # avoids an extra API request and keeps the data source explicitly public.
-        for row in comments.get("profiles") or []:
+        for row in (() if content_first else comments.get("profiles") or []):
             if not isinstance(row, dict):
                 continue
             try:
@@ -1015,6 +1034,8 @@ def fetch_vk_active_commenters(
                 comment_ts = int(row.get("date") or 0)
             except (TypeError, ValueError):
                 comment_ts = 0
+            if content_first and (not comment_ts or not 0 <= now - comment_ts <= 30 * 86400):
+                continue
             if comment_ts > comment_activity_at.get(uid, 0):
                 comment_activity_at[uid] = comment_ts
             comment_text = " ".join(str(row.get("text") or "").split()).strip()
@@ -1032,8 +1053,13 @@ def fetch_vk_active_commenters(
                 continue
             seen.add(uid)
             user_ids.append(uid)
-        if len(user_ids) >= max_people:
+        if len(user_ids) >= max_people and not content_first:
             break
+
+    if content_first:
+        prioritized = [uid for uid, records in dated_comments.items()
+                       if any(delegation_hint(record["text"]) for record in records)]
+        user_ids = list(dict.fromkeys(prioritized + user_ids))[:max_people]
 
     members: list[dict[str, Any]] = []
     if user_ids:
@@ -1190,6 +1216,75 @@ def _read_vk_professional_posts(user_id: int, *, expanded: bool = False) -> list
     return sorted(evidence, key=lambda entry: entry["timestamp"], reverse=True)[:8]
 
 
+def scan_vk_delegation_sources(owner_id, *, max_sources=10):
+    """Discover and qualify public authors before persisting owner-scoped sources."""
+    configured = load_vk_sources(owner_id)
+    # Preserve disabled sources, even if provider search returns them again.
+    stored = _sb_get("agency_vk_sources", {
+        "owner_telegram_id": f"eq.{int(owner_id)}", "select": "community_id",
+    })
+    existing = {int(row["community_id"]) for row in stored}
+    errors = []
+    discovered = []
+    try:
+        discovered = [
+            source for source in search_vk_communities(owner_id, queries=(
+                "ищем региональных представителей", "ищем бизнес партнёров",
+                "предприниматели деловые предложения", "обучение команды бизнес",
+            ), limit=12) if int(source["community_id"]) not in existing
+        ]
+    except (VKScoutError, requests.RequestException) as exc:
+        errors.append(f"Обнаружение источников: {type(exc).__name__}")
+    sources = discovered[:4] + configured[:max_sources]
+    candidates = {}
+    examined = set()
+    checked = 0
+    for source in sources:
+        cid = int(source["community_id"])
+        checked += 1
+        try:
+            rows = fetch_vk_active_commenters(
+                source, post_limit=12, comment_limit=40, max_people=100, content_first=True,
+            ).get("members") or []
+            examined.update(int(row["vk_user_id"]) for row in rows)
+            qualified = [
+                row for row in rows if row.get("can_write_private_message")
+                and _vk_recent_activity(row)["active"] and not vk_excluded_profession(row)
+                and not (row.get("raw_profile") or {}).get("is_closed")
+                and vk_delegation_proof(row)
+            ]
+            if qualified and cid not in existing:
+                upsert_vk_source(owner_id, cid, community_name=source.get("name") or "",
+                                 priority=40, note="Обнаружен по публичным деловым публикациям")
+                existing.add(cid)
+            for row in qualified:
+                candidates.setdefault(int(row["vk_user_id"]), row)
+        except (VKScoutError, requests.RequestException) as exc:
+            errors.append(f"VK источник {cid}: {type(exc).__name__}")
+    if candidates:
+        used = _used_vk_ids()
+        owned_sources = {int(row["community_id"]) for row in configured}
+        owned_sources.update(int(source["community_id"]) for source in discovered if int(source["community_id"]) in existing)
+        candidate_ids = list(candidates)
+        for start in range(0, len(candidate_ids), 100):
+            chunk = candidate_ids[start:start + 100]
+            known = _sb_get("agency_vk_candidates", {
+                "vk_user_id": "in.(" + ",".join(map(str, chunk)) + ")",
+                "select": "vk_user_id,source_community_id",
+            })
+            used.update(int(row["vk_user_id"]) for row in known
+                        if row.get("source_community_id") not in owned_sources)
+        candidates = {uid: row for uid, row in candidates.items() if uid not in used}
+    saved = save_vk_candidates(candidates.values()) if candidates else 0
+    return {
+        "sources_checked": checked, "sources_discovered": len(discovered),
+        "candidates_found": len(candidates), "candidates_saved": saved,
+        "active_context_ids": list(candidates), "author_walls_read": 0,
+        "scan_exclusions": {"Без подтверждённой роли, процесса или свежей активности": len(examined) - len(candidates)},
+        "errors": errors,
+    }
+
+
 def scan_vk_sources(
     owner_id: int,
     *,
@@ -1199,6 +1294,8 @@ def scan_vk_sources(
     include_author_posts: bool = False,
     expanded: bool = False,
 ) -> dict[str, Any]:
+    if expanded:
+        return scan_vk_delegation_sources(owner_id, max_sources=max_sources)
     sources = load_vk_sources(owner_id)[:max(1, min(50, int(max_sources)))]
     import time
     started = time.monotonic()

@@ -18,7 +18,7 @@ from neonia_daily_source import owner_source, CANDIDATE_POLICY_VERSION
 from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.functions.contacts import GetContactsRequest, GetStatusesRequest
+from telethon.tl.functions.contacts import GetContactsRequest, GetStatusesRequest, SearchRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (
     UserStatusEmpty,
@@ -1400,6 +1400,30 @@ async def _accessible_group_catalog(
         await client.disconnect()
 
 
+async def _discover_public_business_groups(session_string):
+    api_id, api_hash = _telegram_api_credentials()
+    client = TelegramClient(StringSession(session_string), api_id, api_hash, flood_sleep_threshold=0)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return []
+        groups = {}
+        for query in ("бизнес партнёры", "предприниматели деловые предложения", "представители бизнес"):
+            result = await client(SearchRequest(q=query, limit=12))
+            for entity in result.chats:
+                username = str(getattr(entity, "username", "") or "")
+                if not username or not getattr(entity, "megagroup", False):
+                    continue
+                groups.setdefault(entity.id, {
+                    "chat_id": entity.id, "title": entity.title,
+                    "public_username": username, "type": "Супергруппа",
+                    "participants_count": getattr(entity, "participants_count", 0),
+                })
+        return list(groups.values())[:8]
+    finally:
+        await client.disconnect()
+
+
 def _topup_from_other_telegram_groups(
     owner_id: int,
     session_string: str,
@@ -1515,6 +1539,15 @@ def _topup_from_other_telegram_groups(
         strict_network and not network_source.search(str(item.get("title") or item.get("name") or "")),
         -int(item.get("participants_count") or 0),
     ))
+    if expanded_version is not None:
+        try:
+            discovered = asyncio.run(asyncio.wait_for(_discover_public_business_groups(session_string), 30))
+        except Exception as exc:
+            print(f"[Telegram Scout] owner={owner_id} discovery_error={type(exc).__name__}", flush=True)
+            discovered = []
+        discovered = [item for item in discovered if item["chat_id"] != selected_chat_id]
+        ids = {item["chat_id"] for item in discovered}
+        chats = discovered + [item for item in chats if int(item.get("chat_id") or 0) not in ids]
     api_id, api_hash = _telegram_api_credentials()
     found: list[dict[str, Any]] = []
     found_ids: set[int] = set()

@@ -8,7 +8,7 @@ POLICY_VERSION = "delegation-126-v1"
 
 _DATE_WINDOW = timedelta(days=30)
 _PUBLIC_EVIDENCE = re.compile(
-    r"https://(?:vk\.com/wall(?:-\d+_\d+\?reply=\d+|[1-9]\d*_\d+)"
+    r"https://(?:vk\.com/wall(?:-\d+_\d+(?:\?reply=\d+)?|[1-9]\d*_\d+)"
     r"|t\.me/[A-Za-z0-9_]+/(?:s/)?[1-9]\d*)"
 )
 _OPERATOR = re.compile(
@@ -20,9 +20,9 @@ _OPERATOR = re.compile(
 _PROCESS = re.compile(
     r"\b(?:ищу|ищем|набираю|набираем|привлекаю|привлекаем|приглашаю|приглашаем|"
     r"подбираю|подбираем|обучаю|обучаем|сопровождаю|сопровождаем|"
-    r"адаптирую|адаптируем|наставляю|наставляем)\b[^.!?;]{0,60}"
+    r"адаптирую|адаптируем|наставляю|наставляем|развиваю|развиваем|работаю|работаем|веду|ведём|ведем|запускаю|запускаем)\b[^.!?;]{0,60}"
     r"\b(?:партн[её]р\w*|клиент\w*|представител\w*|команд\w*|"
-    r"сотрудник\w*|дистрибьютор\w*)\b", re.I
+    r"сотрудник\w*|дистрибьютор\w*|новичк\w*)\b", re.I
 )
 _RISK = re.compile(
     r"финансов\w+\s+пирамид\w*|\b(?:скам|scam|ponzi)\b|"
@@ -59,6 +59,11 @@ def risk_signal(text):
     return bool(_RISK.search(str(text or "")))
 
 
+def delegation_hint(text):
+    return bool(_PROCESS.search(str(text or "")))
+
+
+
 def delegation_proof(records, *, now=None, max_age=_DATE_WINDOW):
     """Require an attributable current role and an explicit operating process."""
     now = now or datetime.now(timezone.utc)
@@ -75,10 +80,18 @@ def delegation_proof(records, *, now=None, max_age=_DATE_WINDOW):
             available.append(record)
     if any(risk_signal(record.get("text")) for record in available):
         return None
-    for record in sorted(available, key=lambda item: int(item["timestamp"]), reverse=True):
+    ordered = sorted(available, key=lambda item: int(item["timestamp"]), reverse=True)
+    role = next((record for record in ordered
+                 if _OPERATOR.search(str(record.get("text") or ""))
+                 and not _NEGATED.search(str(record.get("text") or ""))), None)
+    if role is None:
+        return None
+    for record in ordered:
         text = str(record.get("text") or "")
-        if _OPERATOR.search(text) and _PROCESS.search(text) and not _NEGATED.search(text):
-            return record
+        if delegation_hint(text) and not _NEGATED.search(text):
+            if _OPERATOR.search(text):
+                return record
+            return {**record, "role_evidence_url": role["url"]}
     return None
 
 
