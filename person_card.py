@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+from agency_runtime_config import setting as runtime_setting
 
 
 _STAGE_LABELS = {
@@ -109,8 +110,8 @@ def _format_dt(value: Any) -> str:
 def _load_owner_dialog_states(owner_telegram_id: int) -> dict[int, dict[str, Any]]:
     """Читает уже существующие состояния диалогов Неоны одним запросом."""
     try:
-        url = str(st.secrets.get("SUPABASE_URL") or "").rstrip("/")
-        key = str(st.secrets.get("SUPABASE_SECRET_KEY") or "")
+        url = str(runtime_setting("SUPABASE_URL") or "").rstrip("/")
+        key = str(runtime_setting("SUPABASE_SECRET_KEY") or "")
         if not url or not key:
             return {}
 
