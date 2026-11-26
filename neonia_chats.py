@@ -1,4 +1,6 @@
+import os
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
 
 def render_neonia_chats():
@@ -6,9 +8,17 @@ def render_neonia_chats():
 
     st.markdown("### 🔎 Мои Telegram-чаты")
 
+    def setting_present(name: str) -> bool:
+        if os.environ.get(name, "").strip():
+            return True
+        try:
+            return bool(st.secrets.get(name, ""))
+        except (StreamlitSecretNotFoundError, FileNotFoundError, OSError):
+            return False
+
     telegram_ready = (
-        "TELEGRAM_API_ID" in st.secrets
-        and "TELEGRAM_API_HASH" in st.secrets
+        setting_present("TELEGRAM_API_ID")
+        and setting_present("TELEGRAM_API_HASH")
     )
 
     if not telegram_ready:
