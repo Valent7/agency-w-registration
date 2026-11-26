@@ -806,6 +806,8 @@ def _ask_openai(system_prompt: str, user_message: str) -> str:
           f"input_tokens={usage.get('input_tokens', 0)} "
           f"output_tokens={usage.get('output_tokens', 0)} "
           f"request_id={result.get('id', 'unknown')}", flush=True)
+    if result.get("status") not in {None, "completed"}:
+        raise RuntimeError("OpenAI не завершил оценку Telegram.")
     text = _extract_response_text(result)
     if not text:
         raise RuntimeError("OpenAI не вернул текст")
@@ -866,6 +868,8 @@ business_gate_reason — короткая причина решения.
         + json.dumps(contexts, ensure_ascii=False, default=str)
     )
     raw = _json_array_from_text(_ask_openai(system_prompt, request))
+    if not raw:
+        raise RuntimeError("OpenAI не вернул записи оценки Telegram в формате JSON.")
     source_by_id = {int(item["telegram_id"]): item for item in contexts}
     normalized: list[dict[str, Any]] = []
 
@@ -1503,21 +1507,17 @@ def _topup_from_other_telegram_groups(
 
     # Сначала более крупные/живые доступные группы. Неония проходит несколько
     # источников, но на каждый ставит тайм-аут, чтобы один чат не блокировал день.
-    if network_only(owner_id):
-        # A group title is only a source-selection signal, never candidate evidence.
-        # For a strict network owner, do not scan unrelated groups just because
-        # they are large. The explicitly selected primary group remains unchanged.
-        network_source = re.compile(r"сетев|\bmlm\b|\bмлм\b|прямые продажи|faberlic|amway|oriflame|herbalife|golden connect|solidar club|oneshop", re.I)
-        before = len(chats)
-        chats = [item for item in chats if network_source.search(str(item.get("title") or item.get("name") or ""))]
-        print(f"[Telegram Scout] owner={owner_id} stage=source_filter eligible={len(chats)} excluded={before-len(chats)}", flush=True)
-    chats.sort(
-        key=lambda item: -int(item.get("participants_count") or 0)
-    )
+    network_source = re.compile(r"сетев|\bmlm\b|\bмлм\b|прямые продажи|faberlic|amway|oriflame|herbalife|golden connect|solidar club|oneshop", re.I)
+    strict_network = network_only(owner_id)
+    chats.sort(key=lambda item: (
+        strict_network and not network_source.search(str(item.get("title") or item.get("name") or "")),
+        -int(item.get("participants_count") or 0),
+    ))
     api_id, api_hash = _telegram_api_credentials()
     found: list[dict[str, Any]] = []
     found_ids: set[int] = set()
 
+    seen_ids = set(excluded)
     for chat in chats[:20]:
         if len(found) >= needed:
             break
@@ -1529,13 +1529,14 @@ def _topup_from_other_telegram_groups(
                         api_id,
                         api_hash,
                         chat,
-                        excluded | found_ids,
+                        seen_ids,
                         desired=max(60, (needed - len(found)) * 20),
                         message_limit=900,
                     ),
                     timeout=30,
                 )
             )
+            seen_ids.update(int(author["telegram_id"]) for author in authors)
             ranked = neonia_chat_daily_worker._rank_active_group_authors(
                 state,
                 __import__(__name__),
@@ -1543,6 +1544,8 @@ def _topup_from_other_telegram_groups(
                 max(1, needed - len(found)),
                 strict_network=network_only(owner_id),
             )
+        except neonia_chat_daily_worker.TelegramQualificationUnavailable:
+            break
         except Exception as exc:
             print(
                 f"[Telegram Scout] owner={owner_id}: alternate group "
@@ -1574,15 +1577,16 @@ def _topup_from_other_telegram_groups(
 
 def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
     owner_id = int(owner_id)
-    state, _ = _workspace_state(owner_id)
     # Keep the original contact/group route. An approved core supplies audience
     # context, not a switch that disables the entire search.
     from vk_scout_worker import _load_target_profiles
     target = _load_target_profiles([owner_id]).get(owner_id)
-    if target and target.get("approved_marketing_core"):
-        state = {**state, "passport": {"analysis": target["approved_marketing_core"]}}
-    elif network_only(owner_id):
+    approved_core = target.get("approved_marketing_core") if target else None
+    if not approved_core and network_only(owner_id):
         return {"owner_id": owner_id, "status": "skip", "reason": "Утверждённое маркетинговое ядро для сетевого поиска недоступно"}
+    state, _ = _workspace_state(owner_id)
+    if approved_core:
+        state = {**state, "passport": {"analysis": approved_core}}
 
     # v7+ supports *both* selected groups and personal Telegram contacts.
     # Only route to group worker when that source was actually selected.
@@ -1618,7 +1622,9 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
             group_status == "skip"
             and "new chat takes effect tomorrow" in group_reason.lower()
         )
-        if group_status in {"ready"} and group_count >= DAILY_TARGET:
+        if group_status == "qualification_stopped":
+            return group_result
+        if group_status == "ready" and group_count >= DAILY_TARGET:
             return group_result
 
         # В режиме "группы" не вызываем GetContactsRequest до добора из групп:
@@ -1642,7 +1648,10 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
                 ),
             )
             if alternate:
-                _save_candidate_results_only(owner_id, alternate)
+                if not _save_candidate_results_only(owner_id, alternate):
+                    return {"owner_id": owner_id, "status": "storage_error",
+                            "count": len(current_ids), "missing": missing,
+                            "reason": "Не подтверждено сохранение карточек Telegram."}
                 merged_ids = list(current_ids)
                 for item in alternate:
                     cid = int(item["telegram_id"])
@@ -1689,6 +1698,10 @@ def process_owner_once(owner_id: int, session_string: str) -> dict[str, Any]:
                 "fallback_from_group": True,
                 "group_fallback_reason": group_fallback_reason,
             }
+
+        if network_only(owner_id):
+            return {"owner_id": owner_id, "status": "empty", "count": 0,
+                    "missing": DAILY_TARGET, "reason": group_fallback_reason}
 
     passport = state.get("passport") if isinstance(state.get("passport"), dict) else None
     if not passport:

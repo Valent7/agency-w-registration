@@ -24,6 +24,7 @@ class PilotSearchGuardTests(unittest.TestCase):
         score.assert_not_called()
 
     @patch.dict(os.environ, {"NEONIA_NETWORK_ONLY_OWNERS": "77"})
+    @patch("vk_scout_worker._load_target_profiles", new=lambda _: {})
     def test_telegram_worker_skips_only_strict_pilot(self):
         with patch.object(telegram_scout_worker, "_workspace_state",
                           side_effect=RuntimeError("Legacy path")) as workspace:

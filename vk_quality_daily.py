@@ -134,21 +134,20 @@ def ensure_quality_vk_assignments(
         ordered_ids.append(uid)
 
     candidates = _candidate_rows(ordered_ids)
-    core_pilot = (owner_id == 235805138 and passport_version is not None
-                  and marketing_project_id == "a7155944-3308-5ead-a160-152c6c74ff62")
+    strict_network = network_only(owner_id)
     qualified_ids = {
         uid
         for uid, candidate in candidates.items()
         if abs(_int(candidate.get("source_community_id"))) in source_ids
         and _vk_recent_activity(candidate)["active"]
-        and (core_pilot or not network_only(owner_id) or vk_network_proof(candidate))
+        and (not strict_network or vk_network_proof(candidate))
         and not vk_excluded_profession(candidate, str(score_by_id[uid].get("fit_summary") or ""))
     }
 
     def _has_network_evidence(uid: int) -> bool:
         candidate = candidates.get(uid) or {}
         score_row = score_by_id.get(uid) or {}
-        if network_only(owner_id) and not core_pilot:
+        if strict_network:
             return bool(vk_network_proof(candidate))
         if _deterministic_public_work_signals(candidate).get("network_business_signal"):
             return True
@@ -199,6 +198,14 @@ def ensure_quality_vk_assignments(
         uid = _int(row.get("vk_user_id"))
         if assignment_id <= 0:
             continue
+        if row.get("status") in {"released", "skipped", "blocked", "not_fit"}:
+            _sb_patch(
+                "agency_vk_assignments",
+                {"id": f"eq.{assignment_id}", "owner_telegram_id": f"eq.{owner_id}",
+                 "status": f"eq.{row['status']}"},
+                {"daily_position": None, "updated_at": now_iso},
+            )
+            continue
         if row.get("invited_at") or row.get("status") in {"invited", "dialogue", "meeting", "partner"}:
             # Keep contacted people and their dialogue status in history, but
             # never count them as fresh candidates in today's recommendation five.
@@ -243,7 +250,7 @@ def ensure_quality_vk_assignments(
             },
         )
 
-    active_today = load_today_vk_assignments(owner_id)
+    active_today = _today_raw(owner_id)
     active_ids = {_int(row.get("vk_user_id")) for row in active_today}
     used_positions = {
         _int(row.get("daily_position"))
@@ -302,9 +309,10 @@ def ensure_quality_vk_assignments(
         }
         try:
             rows = _sb_post("agency_vk_assignments", payload)
-        except Exception:
+        except Exception as exc:
+            print(f"[VK_STAGE] owner={owner_id} stage=assignment_insert_failed error_type={type(exc).__name__}", flush=True)
             insert_errors += 1
-            continue
+            break
         created_row = rows[0] if rows else payload
 
         # One VK person must never be assigned to two Agency W partners.

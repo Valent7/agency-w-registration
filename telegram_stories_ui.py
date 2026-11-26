@@ -1196,23 +1196,27 @@ def prepare_telegram_stories_radar(
         if not batch:
             break
 
-        batches += 1
-        scanned_stories.extend(batch)
-
+        fresh_batch = []
         for item in batch:
             try:
-                key = _story_key(
-                    int(item.get("telegram_id") or 0),
-                    int(item.get("story_id") or 0),
-                )
+                author_id = int(item.get("telegram_id") or 0)
+                story_id = int(item.get("story_id") or 0)
             except (TypeError, ValueError):
                 continue
+            if author_id <= 0 or story_id <= 0 or author_id in cooldown_authors:
+                continue
+            key = _story_key(author_id, story_id)
+            if key in permanent_story_keys or key in local_story_keys:
+                continue
             local_story_keys.add(key)
-            _append_story_rotation_event(
-                owner_id,
-                item,
-                "scanned",
-            )
+            fresh_batch.append(item)
+            _append_story_rotation_event(owner_id, item, "scanned")
+
+        if not fresh_batch:
+            break
+        batch = fresh_batch
+        batches += 1
+        scanned_stories.extend(batch)
 
         batch_recommendations = _analyze_story_feed(batch)
         for item in batch_recommendations:

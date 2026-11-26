@@ -298,17 +298,7 @@ def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
     payload = {
         "model": model,
         "instructions": str(system_prompt or ""),
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": str(user_message or ""),
-                    }
-                ],
-            }
-        ],
+        "input": user_message,
         "store": False,
     }
     headers = {
@@ -317,6 +307,7 @@ def _ask_openai(system_prompt: str, user_message: str, *, bounded=False) -> str:
     }
 
     if bounded:
+        payload["input"] = "Верни результат в формате JSON.\n\n" + user_message
         payload["max_output_tokens"] = 10000
         if model.startswith("gpt-5-mini"):
             payload["reasoning"] = {"effort": "low"}
@@ -456,6 +447,7 @@ def _score_until_daily_five(
     analysis_limit: int,
     max_rounds: int = 200,
     priority_ids: list[int] | None = None,
+    allow_paid: bool = True,
 ) -> tuple[dict[str, Any], int, int | None]:
     """Keep scoring fresh VK profiles until today's 5/5 is complete or pool is exhausted."""
     passport_version = target_profile.get("marketing_passport_version")
@@ -463,8 +455,6 @@ def _score_until_daily_five(
         "passport_version": passport_version,
         "marketing_project_id": target_profile["marketing_project_id"],
     } if passport_version is not None else {}
-    ask_openai = (_marketing_vk_analysis(owner_id, passport_version, target_profile["marketing_project_id"])
-                  if target_profile.get("approved_marketing_core") else _marketing_vk_analysis(owner_id, passport_version))
     total_analyzed = 0
     total_passed = 0
     total_created = 0
@@ -485,11 +475,17 @@ def _score_until_daily_five(
     if not _needs_more_candidates(prepared, target_profile, daily_limit):
         return prepared, total_analyzed, best_score
 
+    if not allow_paid:
+        return prepared, total_analyzed, best_score
+
     budgeted_pilot = (owner_id == 235805138 and bool(target_profile.get("approved_marketing_core"))
                       and target_profile.get("marketing_project_id") == "a7155944-3308-5ead-a160-152c6c74ff62"
                       and passport_version is not None)
     if network_only(owner_id) and not budgeted_pilot:
         return {**prepared, "paid_search_blocked": True}, total_analyzed, best_score
+
+    ask_openai = (_marketing_vk_analysis(owner_id, passport_version, target_profile["marketing_project_id"])
+                  if target_profile.get("approved_marketing_core") else _marketing_vk_analysis(owner_id, passport_version))
 
     # score_vk_candidates excludes profiles already scored for this owner, so
     # every round advances through the fresh pool instead of repeating the same 30.
@@ -499,9 +495,9 @@ def _score_until_daily_five(
             owner_id,
             target_profile,
             ask_openai_fn=ask_openai,
-            limit=analysis_limit,
+            limit=min(analysis_limit, 10) if budgeted_pilot else analysis_limit,
             priority_ids=(priority_ids if round_no == 1 else None),
-            reanalyze_exhausted=budgeted_pilot and round_no == 1,
+            reanalyze_exhausted=False,
             min_score=min_score,
             **({"batch_size": 10} if budgeted_pilot else {}),
         )
@@ -597,6 +593,7 @@ def top_up_vk_owner_now(
         min_score=max(0, min(100, int(min_score))),
         analysis_limit=max(5, min(100, int(analysis_limit))),
         max_rounds=200,
+        allow_paid=not control_search,
     )
     scan_result = {"candidates_found": 0}
     if _needs_more_candidates(prepared, target_profile, max(1, min(5, int(daily_limit)))):
@@ -635,7 +632,7 @@ def top_up_vk_owner_now(
             if best2 is not None:
                 best_score = best2 if best_score is None else max(best_score, best2)
     control_stats = {}
-    if control_search and not prepared.get("complete"):
+    if control_search and _needs_more_candidates(prepared, target_profile, daily_limit):
         reservations = _sb_get("neonia_vk_control_reservations", {
             "select": "run_id", "run_id": f"eq.{CONTROL_RUN_ID}", "limit": 1,
         })

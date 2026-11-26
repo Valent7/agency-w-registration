@@ -1522,8 +1522,7 @@ def score_vk_candidates(
     print(f"[VK_STAGE] owner={owner_id} stage=score_start limit={limit} batch_size={batch_size}", flush=True)
     analysis_limit = max(1, min(100, int(limit)))
 
-    # Pilot: admit plausible public professional signals to paid analysis,
-    # not only the exact final network-proof pattern. Final daily gate is unchanged.
+    # Identify the approved-core pilot for its additional diagnostics.
     relaxed_pilot = (
         owner_id == 235805138
         and isinstance(target_profile, dict)
@@ -1532,9 +1531,9 @@ def score_vk_candidates(
     )
 
     def preliminary_network_fit(candidate):
-        if relaxed_pilot:
-            return not vk_excluded_profession(candidate)
-        return not network_only(owner_id) or bool(vk_network_proof(candidate))
+        if network_only(owner_id):
+            return not vk_excluded_profession(candidate) and bool(vk_network_proof(candidate))
+        return True
 
     # Анализируем только людей из VK-источников именно этого владельца.
     # agency_vk_candidates — общий пул Агентства, поэтому без этого фильтра
@@ -1834,12 +1833,12 @@ def score_vk_candidates(
 automation_need_signal=true означает, что из его реальной деятельности видна
 повторяющаяся рутина, которую объективно можно делегировать цифровому сотруднику.
 
-Верни JSON с записями для каждого входного профиля. Формулировки краткие, до одного предложения на поле. Пример массива записей:
-[{{"vk_user_id":123,"score":0,"fit_summary":"...","positive_signals":["..."],
+Верни JSON с записями для каждого входного профиля. Формулировки краткие, до одного предложения на поле. Пример объекта с массивом записей:
+{{"candidates":[{{"vk_user_id":123,"score":0,"fit_summary":"...","positive_signals":["..."],
 "weak_fit_signals":["..."],"network_business_signal":false,
 "ai_provider_or_expert":false,"automation_need_signal":false,
 "business_relevant":false,"business_evidence":[],
-"business_gate_reason":"..."}}]
+"business_gate_reason":"..."}}]}}
 
 КРИТИЧНО ДЛЯ automation_need_signal:
 - true не означает, что человек уже интересуется ИИ;
@@ -5334,7 +5333,7 @@ def load_today_vk_assignments(owner_id: int) -> list[dict[str, Any]]:
     for assignment in rows:
         uid = int(assignment["vk_user_id"])
         candidate = by_id.get(uid, {})
-        if network_only(owner_id) and owner_id != 235805138 and (
+        if network_only(owner_id) and (
             not _vk_recent_activity(candidate)["active"] or not vk_network_proof(candidate)
         ):
             continue

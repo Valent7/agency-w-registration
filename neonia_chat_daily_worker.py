@@ -20,7 +20,7 @@ from neonia_daily_source import (
 
 BERLIN = ZoneInfo("Europe/Berlin")
 UTC = timezone.utc
-MAX_GROUP_ACTIVITY_AGE = timedelta(days=7)
+MAX_GROUP_ACTIVITY_AGE = timedelta(hours=48)
 MIN_DAILY_AUDIENCE_FIT_SCORE = 50
 
 
@@ -242,6 +242,8 @@ def _recommended_group_candidate(candidate, *, strict_network=False):
     """
     if not _eligible_group_author(candidate):
         return False
+    if candidate.get("ai_provider_or_expert") is True:
+        return False
     if candidate.get("business_relevant") is not True:
         return False
     evidence = candidate.get("business_evidence")
@@ -272,6 +274,10 @@ def _local_business_signal(context):
         "организ", "встреч", "сообщен", "заявк", "рассыл", "публикац", "соцсет",
     )
     return any(token in text for token in tokens)
+
+
+class TelegramQualificationUnavailable(RuntimeError):
+    """Stop paid qualification for the current owner run."""
 
 
 def _rank_active_group_authors(state, storage, authors, desired, *, strict_network=False):
@@ -318,9 +324,10 @@ def _rank_active_group_authors(state, storage, authors, desired, *, strict_netwo
                 batch_results.extend(storage._analyze_candidates(passport_analysis, informative))
             except Exception as exc:
                 response = getattr(exc, "response", None)
-                if response is not None and response.status_code == 429:
-                    print("[Telegram Group Scout] API 429; qualified analysis stopped", flush=True)
-                    break
+                if strict_network or (response is not None and response.status_code == 429):
+                    raise TelegramQualificationUnavailable(
+                        "Проверка ЦА остановлена после ошибки OpenAI."
+                    ) from exc
                 # Keep service useful if the AI analysis endpoint is temporarily down,
                 # but only for visible authors with an explicit local business signal.
                 for source in informative:
@@ -369,7 +376,7 @@ def _rank_active_group_authors(state, storage, authors, desired, *, strict_netwo
                 "last_seen_at": str(source.get("last_seen_at") or ""),
                 "activity_precision": "group_message_exact",
                 "telegram_activity_label": str(source.get("telegram_activity_label") or ""),
-                "actuality": "активен в выбранном чате за последние 7 дней",
+                "actuality": "активен в выбранном чате за последние 48 часов",
             }
             if not _recommended_group_candidate(merged, strict_network=strict_network):
                 continue
@@ -698,6 +705,7 @@ def process(owner_id,session_string,state,storage):
         (50000, 1500),
     )
     pass_author_counts=[]
+    qualification_stopped = False
     for pass_no,(message_limit,author_target) in enumerate(scan_passes, start=1):
         if len(cards) >= needed:
             break
@@ -725,6 +733,9 @@ def process(owner_id,session_string,state,storage):
                     existing_ids.add(cid)
                 if len(cards) >= needed:
                     break
+        except TelegramQualificationUnavailable:
+            qualification_stopped = True
+            break
         except Exception as exc:
             print(
                 f"[NeoniaChat] owner={owner_id} pass={pass_no} "
@@ -742,7 +753,7 @@ def process(owner_id,session_string,state,storage):
     # SECONDARY: keep the old participant-list path only as a fallback. It is
     # useful in small open groups, but never falls back to personal contacts.
     new_offset=offset
-    if len(cards)<needed:
+    if len(cards)<needed and not qualification_stopped:
         try:
             raw_members,new_offset,member_scanned,exhausted=asyncio.run(
                 _read_selected_members(
@@ -761,6 +772,10 @@ def process(owner_id,session_string,state,storage):
                 flush=True,
             )
 
+    if qualification_stopped and not cards and not existing_cards:
+        return {"owner_id": owner_id, "status": "qualification_stopped", "count": 0,
+                "missing": 5, "reason": "Проверка ЦА остановлена после ошибки OpenAI.",
+                "source_chat_id": chat_id}
     if not cards and not existing_cards:
         if scanned>0:
             _persist_group_selection(storage,owner_id,mode,chat,[],
@@ -769,7 +784,7 @@ def process(owner_id,session_string,state,storage):
                 "count":0,"missing":5,
                 "reason":(
                     "В доступных сообщениях выбранной группы не обнаружено "
-                    "активных авторов с доступным @username за последние 7 дней"
+                    "активных авторов с доступным @username за последние 48 часов"
                     if sum(pass_author_counts or [0]) == 0
                     else "Активные авторы найдены, но никто не прошёл проверку "
                          "доступности, деловой релевантности и оценки ЦА >=50"
@@ -785,10 +800,12 @@ def process(owner_id,session_string,state,storage):
     qualified_count = len({int(x["telegram_id"]) for x in combined
                            if _recommended_group_candidate(x, strict_network=network_only(owner_id))})
     return {"owner_id":owner_id,
-            "status":"prepared" if qualified_count>=5 else "searching",
+            "status": ("prepared" if qualified_count >= 5 else
+                       "qualification_stopped" if qualification_stopped else "searching"),
             "count":qualified_count,"missing":max(0,5-qualified_count),
             "complete":qualified_count>=5,
             "reason":"" if qualified_count>=5 else (
+                "Проверка ЦА остановлена после ошибки OpenAI." if qualification_stopped else
                 "Поиск продолжается автоматически до полной пятёрки 5/5. "
                 "Неподходящие кандидаты и AI-конкуренты не используются для заполнения."
             ),

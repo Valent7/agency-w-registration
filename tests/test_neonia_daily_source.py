@@ -112,6 +112,7 @@ class DummyStorage:
         return [{"updated_at":"v2"}]
 
 
+@patch("vk_scout_worker._load_target_profiles", new=lambda _: {})
 class PersonalContactRoutingTests(unittest.TestCase):
     def test_v7_contact_mode_reaches_contact_scan_instead_of_group_skip(self):
         state = {"schema_version":9,"daily_source_mode":"contacts",

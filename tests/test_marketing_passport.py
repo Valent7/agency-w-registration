@@ -79,11 +79,11 @@ class MarketingPassportTests(TestCase):
         with self.assertRaises(ValueError):
             _qualified_scores(101, 50, 2)
 
-    def test_five_secondary_candidates_do_not_end_the_pilot_search(self):
+    def test_complete_qualified_set_ends_search(self):
         from vk_scout_worker import _needs_more_candidates
 
         complete = {"complete": True, "network_count": 2}
-        self.assertTrue(_needs_more_candidates(complete, {"marketing_passport_version": 1}, 5))
+        self.assertFalse(_needs_more_candidates(complete, {"marketing_passport_version": 1}, 5))
         self.assertFalse(_needs_more_candidates({**complete, "network_count": 5},
                                                 {"marketing_passport_version": 1}, 5))
         self.assertFalse(_needs_more_candidates(complete, {}, 5))
