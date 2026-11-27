@@ -3,46 +3,16 @@ import threading
 from stagirite_night_control import worker_forever as stagirite_night_worker_forever
 
 from neona_dialog_policy_v3 import worker_forever as neona_worker_forever
-from vk_scout_worker import worker_forever as vk_scout_worker_forever
-
-try:
-    from telegram_scout_worker import worker_forever as telegram_scout_worker_forever
-except Exception as exc:
-    telegram_scout_worker_forever = None
-    print(f"Telegram Scout disabled at import: {exc}", flush=True)
-
-
-def _run_vk_scout():
-    try:
-        vk_scout_worker_forever()
-    except Exception as exc:
-        print(f"VK Scout stopped: {exc}", flush=True)
-
-
-def _run_telegram_scout():
-    if telegram_scout_worker_forever is None:
-        return
-    try:
-        telegram_scout_worker_forever(
-            int(os.getenv("TELEGRAM_SCOUT_INTERVAL_SECONDS", "3600"))
-        )
-    except Exception as exc:
-        print(f"Telegram Scout stopped: {exc}", flush=True)
-
 
 if __name__ == "__main__":
-    # Independent from Neona's dialogue loop and hourly Telegram Scout.
+    # Independent from Neona's dialogue loop.
     # UTC 21:00 -> 00:00 Moscow, followed by bounded night rechecks.
     threading.Thread(target=stagirite_night_worker_forever,
                      name="stagirite-night-watch",daemon=True).start()
-    threading.Thread(target=_run_vk_scout, name="vk-scout-worker", daemon=True).start()
-
-    if telegram_scout_worker_forever is not None:
-        threading.Thread(
-            target=_run_telegram_scout,
-            name="telegram-scout-worker",
-            daemon=True,
-        ).start()
+    # Legacy loops may charge each owner's OpenAI account on startup.
+    # The crisis pause persists across service restarts. The model-free v85
+    # pilot is run separately via neonia_pilot_daily.py.
+    print("NEONIA_SPEND_GUARD legacy VK and Telegram loops paused", flush=True)
 
     # Не возвращать частый опрос Telegram: он уже приводил к лишним запросам,
     # расходам и FloodWait. Даже если в окружении случайно осталось старое
