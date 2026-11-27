@@ -79,7 +79,19 @@ def render_audience_chat(store, prefix, ask_openai):
     progress_label = f"Отвечено: {answered} из {total} · Осталось: {total - answered} · Пройдено: {answered / total:.0%}"
     st.progress(answered / total, text=progress_label)
     st.caption("Микрофон: запись передаётся OpenAI для распознавания (платная операция API). Личные ответы не передаются другим агентам; им доступен только утверждённый портрет.")
-    if answered == total:
+    # Render only the selected section, not two long documents at once.
+    view_key = prefix + "_marketing_view"
+    if view_key not in st.session_state:
+        st.session_state[view_key] = "core" if answered == total else "interview"
+    left, right = st.columns(2)
+    if left.button("Маркетинговое ядро", key=prefix + "_nav_core", disabled=answered != total, use_container_width=True):
+        st.session_state[view_key] = "core"
+        st.session_state.pop(prefix + "_edit_index", None)
+    if right.button(f"Опросник — {answered}/{total}", key=prefix + "_nav_interview", use_container_width=True):
+        st.session_state[view_key] = "interview"
+        st.session_state.pop(prefix + "_edit_core", None)
+    core_view = answered == total and st.session_state[view_key] == "core"
+    if core_view:
         approved = chat.get("approved")
         draft = chat.get("summary")
         st.subheader("Маркетинговое ядро")
@@ -140,43 +152,48 @@ def render_audience_chat(store, prefix, ask_openai):
         st.caption("Изменения можно также надиктовать в поле чата ниже. Новая версия не заменяет действующую до утверждения.")
     edit_key = prefix + "_edit_index"
     editing = st.session_state.get(edit_key)
-    for index, answer in enumerate(answers):
-        with st.chat_message("assistant"):
-            st.markdown(f"**Вопрос №{index + 1} из {total}**")
-            st.write(QUESTIONS[index])
-        with st.chat_message("user"):
-            st.text(answer)
-            if st.button("✎ Редактировать", key=f"{prefix}_edit_{index}"):
-                st.session_state[edit_key] = index
-                st.rerun()
-            if editing == index:
-                with st.form(f"{prefix}_edit_form_{index}_{revision}"):
-                    replacement = st.text_area("Исправьте ответ", value=answer, max_chars=30000, height=160)
-                    save_edit = st.form_submit_button("Сохранить изменения")
-                    cancel_edit = st.form_submit_button("Отмена")
-                if cancel_edit:
-                    st.session_state.pop(edit_key, None)
+    if not core_view:
+        for index, answer in enumerate(answers):
+            with st.chat_message("assistant"):
+                st.markdown(f"**Вопрос №{index + 1} из {total}**")
+                st.write(QUESTIONS[index])
+            with st.chat_message("user"):
+                st.text(answer)
+                if st.button("✎ Редактировать", key=f"{prefix}_edit_{index}"):
+                    st.session_state[edit_key] = index
                     st.rerun()
-                if save_edit:
-                    try:
-                        updated = edit_answer(chat, index, replacement)
-                        store.save(revision, {**state, "audience_chat_v2": updated})
-                    except Exception:
-                        st.error("Изменение не сохранено. Проверьте ответ и повторите.")
-                    else:
+                if editing == index:
+                    with st.form(f"{prefix}_edit_form_{index}_{revision}"):
+                        replacement = st.text_area("Исправьте ответ", value=answer, max_chars=30000, height=160)
+                        save_edit = st.form_submit_button("Сохранить изменения")
+                        cancel_edit = st.form_submit_button("Отмена")
+                    if cancel_edit:
                         st.session_state.pop(edit_key, None)
                         st.rerun()
-                st.caption("Можно также надиктовать новый ответ через микрофон в поле чата ниже.")
-    if editing is not None and 0 <= editing < len(answers):
-        with st.chat_message("assistant"):
-            st.write(f"Редактирование ответа №{editing + 1}. Отправьте новый текст или голосовую запись, чтобы заменить только этот ответ.")
-    elif len(answers) < len(QUESTIONS):
-        with st.chat_message("assistant"):
-            st.markdown(f"**Вопрос №{answered + 1} из {total}**")
-            st.write(QUESTIONS[len(answers)])
+                    if save_edit:
+                        try:
+                            updated = edit_answer(chat, index, replacement)
+                            store.save(revision, {**state, "audience_chat_v2": updated})
+                        except Exception:
+                            st.error("Изменение не сохранено. Проверьте ответ и повторите.")
+                        else:
+                            st.session_state.pop(edit_key, None)
+                            st.rerun()
+                    st.caption("Можно также надиктовать новый ответ через микрофон в поле чата ниже.")
+        if editing is not None and 0 <= editing < len(answers):
+            with st.chat_message("assistant"):
+                st.write(f"Редактирование ответа №{editing + 1}. Отправьте новый текст или голосовую запись, чтобы заменить только этот ответ.")
+        elif len(answers) < len(QUESTIONS):
+            with st.chat_message("assistant"):
+                st.markdown(f"**Вопрос №{answered + 1} из {total}**")
+                st.write(QUESTIONS[len(answers)])
+        else:
+            st.success("Опросник завершён. Все ответы сохранены. Откройте раздел «Маркетинговое ядро».")
     else:
-        with st.chat_message("assistant"):
-            st.text(chat.get("summary") or "Распаковка завершена. Напишите «Сформировать портрет», чтобы получить проект маркетингового ядра.")
+        editing = None
+        st.text(chat.get("summary") or (chat.get("approved") or {}).get("summary") or "Распаковка завершена. Сформируйте маркетинговое ядро.")
+    if not core_view and answered == total and editing is None:
+        return
     st.progress(answered / total, text=progress_label)
     message = st.chat_input("Напишите ответ или нажмите микрофон", accept_audio=True, key=f"{prefix}_v2_{revision}")
     if not message:
@@ -202,6 +219,8 @@ def render_audience_chat(store, prefix, ask_openai):
         updated = edit_answer(chat, editing, response)
     elif len(answers) < len(QUESTIONS):
         updated["answers"] = [*answers, response]
+        if len(updated["answers"]) == total:
+            st.session_state[view_key] = "core"
     elif response.casefold().strip(" .!") == "утверждаю" and chat.get("summary"):
         try:
             updated = approve_marketing_draft(chat, revision)
