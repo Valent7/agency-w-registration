@@ -1,5 +1,6 @@
 """One scheduled, model-free Neonia cycle confined to the v85 pilot."""
 from datetime import datetime, timedelta, timezone
+import argparse
 import asyncio
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
@@ -74,27 +75,40 @@ def _run_daily_stories():
     return len(recommendations)
 
 
-def run_once():
-    from telegram_stories_ui import _load_session
+def _run_vk():
     from vk_scout_worker import _sb_get, top_up_vk_owner_now
 
-    policy = read_owner_policy(PILOT_OWNER)
-    if not policy or policy["marketing_passport_version"] != 85:
-        raise RuntimeError("No approved v85 for the pilot owner")
     matches = _sb_get("agency_members", {
         "telegram_id": f"eq.{PILOT_OWNER}", "select": "member_code", "limit": 2,
     })
     if len(matches) != 1 or not matches[0].get("member_code"):
         raise RuntimeError("Pilot membership cannot be verified")
-    return {
-        "vk": _channel(lambda: top_up_vk_owner_now(
-            PILOT_OWNER, matches[0]["member_code"], require_delegation=True,
-        )["count"]),
-        "telegram": _channel(lambda: telegram.process_owner_once(
-            PILOT_OWNER, _load_session(PILOT_OWNER), require_delegation=True,
-        ).get("count", 0)),
-        "stories": _channel(_run_daily_stories),
-    }
+    result = top_up_vk_owner_now(
+        PILOT_OWNER, matches[0]["member_code"], require_delegation=True,
+    )
+    return result["count"]
+
+
+def _run_telegram():
+    from telegram_stories_ui import _load_session
+
+    result = telegram.process_owner_once(
+        PILOT_OWNER, _load_session(PILOT_OWNER), require_delegation=True,
+    )
+    if result.get("status") in {"storage_error", "qualification_stopped", "skip"}:
+        return {"error": result["status"]}
+    return result.get("count", 0)
+
+
+CHANNELS = {"vk": _run_vk, "telegram": _run_telegram, "stories": _run_daily_stories}
+
+
+def run_once(channel="all"):
+    policy = read_owner_policy(PILOT_OWNER)
+    if not policy or policy["marketing_passport_version"] != 85:
+        raise RuntimeError("No approved v85 for the pilot owner")
+    actions = CHANNELS if channel == "all" else {channel: CHANNELS[channel]}
+    return {name: _channel(action) for name, action in actions.items()}
 
 
 def _channel(action):
@@ -105,7 +119,9 @@ def _channel(action):
 
 
 if __name__ == "__main__":
-    report = run_once()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--channel", choices=("all", *CHANNELS), default="all")
+    report = run_once(parser.parse_args().channel)
     print("NEONIA_V85_DAILY", report, flush=True)
     if any(isinstance(value, dict) for value in report.values()):
         raise SystemExit(1)
